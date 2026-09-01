@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1: Public npm distribution
+
+- Enabled public npm distribution for `@llblab/pi-state-flow`, including registry access and verified GitHub package metadata.
+- Clarified that compiled Skill knowledge is stored persistently under `contract.compiled_skills`, never as another top-level state field.
+
 ## 0.1.0
 
 - Added an opt-in State Flow runtime inspired by SKILL.state, with argument-free lifecycle commands, per-user-run specifications, active-branch persistence, and one materialized explicit state.

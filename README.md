@@ -103,16 +103,18 @@ Do not store raw source, logs, tool output, reasoning traces, or vague values su
 
 ### Skill compilation
 
-A successful `SKILL.md` read is treated as episode-level acquisition. Before terminal commit, the model compiles its future-relevant operational rules, applicability conditions, constraints, syntax, routing decisions, and failure conditions under the exact source path. The nested representation remains fully flexible:
+A successful `SKILL.md` read is treated as episode-level acquisition. Before terminal commit, the model compiles its future-relevant operational rules, applicability conditions, constraints, syntax, routing decisions, and failure conditions under the exact source path. This compilation lives inside persistent `contract` memory at `contract.compiled_skills`; `compiled_skills` never becomes a fourth top-level state field. The nested representation remains fully flexible:
 
 ```json
 {
-  "compiled_skills": {
-    "/exact/path/to/SKILL.md": {
-      "routing": "...",
-      "syntax": { "...": "..." },
-      "constraints": ["..."],
-      "reread_when": ["..."]
+  "contract": {
+    "compiled_skills": {
+      "/exact/path/to/SKILL.md": {
+        "routing": "...",
+        "syntax": { "...": "..." },
+        "constraints": ["..."],
+        "reread_when": ["..."]
+      }
     }
   }
 }
@@ -155,7 +157,7 @@ The normative protocol remains in the system prompt throughout a tool/retry chai
 
 ## Distribution
 
-Version `0.1.0` is packaged for local installation or a source/GitHub release. The npm manifest remains intentionally private, so registry publication is not part of this release topology. Compatibility is bounded to Pi `0.84.x` from `0.84.4` onward and Node.js `22.19.0` or newer.
+Version `0.1.1` is the first registry-ready package and supports public npm, local, and source/GitHub distribution. Compatibility is bounded to Pi `0.84.x` from `0.84.4` onward and Node.js `22.19.0` or newer.
 
 ## Validation
 
