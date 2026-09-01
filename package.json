@@ -1,16 +1,16 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
   "description": "State Flow terminal-handoff runtime for Pi, inspired by SKILL.state",
   "keywords": ["pi-package", "pi-extension", "state-management"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/llblab/state-flow.git"
+    "url": "git+https://github.com/llblab/pi-state-flow.git"
   },
-  "homepage": "https://github.com/llblab/state-flow",
+  "homepage": "https://github.com/llblab/pi-state-flow",
   "bugs": {
-    "url": "https://github.com/llblab/state-flow/issues"
+    "url": "https://github.com/llblab/pi-state-flow/issues"
   },
   "type": "module",
   "files": ["index.ts", "README.md", "CHANGELOG.md", "BACKLOG.md", "AGENTS.md"],

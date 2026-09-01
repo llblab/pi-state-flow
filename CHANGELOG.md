@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2: Repository identity hotfix
+
+- Aligned GitHub repository, package metadata, installation documentation, and release links under the canonical `llblab/pi-state-flow` identity.
+
 ## 0.1.1: Public npm distribution
 
 - Enabled public npm distribution for `@llblab/pi-state-flow`, including registry access and verified GitHub package metadata.
