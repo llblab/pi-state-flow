@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3: Trusted Publisher release automation
+
+- Added immutable-tag GitHub Actions automation that validates the package, publishes and verifies npm through Trusted Publisher with provenance, and creates the matching GitHub Release.
+
 ## 0.1.2: Repository identity hotfix
 
 - Aligned GitHub repository, package metadata, installation documentation, and release links under the canonical `llblab/pi-state-flow` identity.

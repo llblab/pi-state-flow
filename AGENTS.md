@@ -21,4 +21,5 @@
 - Do not claim strict boundedness for state, the current run trajectory, the turn specification, or the external full trace.
 - Remain extension-agnostic: do not import, name, special-case, or encode policy for any other extension or transport.
 - Register no model tools.
+- Keep `.github/workflows/release.yml` as the sole version-tag release owner: it validates immutable tag identity, publishes through npm Trusted Publisher with provenance, verifies the public package, and only then creates the GitHub Release. Keep package, lockfile, tag, and changelog versions aligned; never add a long-lived npm token fallback.
 - Run `npm run validate` after retained code changes.
