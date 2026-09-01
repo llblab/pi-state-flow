@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4: Release verification hotfix
+
+- Kept npm pack lifecycle output out of release inventory JSON so Trusted Publisher releases can complete public verification and GitHub Release creation.
+
 ## 0.1.3: Trusted Publisher release automation
 
 - Added immutable-tag GitHub Actions automation that validates the package, publishes and verifies npm through Trusted Publisher with provenance, and creates the matching GitHub Release.

@@ -157,7 +157,7 @@ The normative protocol remains in the system prompt throughout a tool/retry chai
 
 ## Distribution
 
-Version `0.1.3` supports public npm, local, and source/GitHub distribution from the canonical `llblab/pi-state-flow` repository. Version tags trigger `.github/workflows/release.yml`, which validates the exact tag, publishes through npm Trusted Publisher with provenance, verifies the public package, and then creates the matching GitHub Release.
+Version `0.1.4` supports public npm, local, and source/GitHub distribution from the canonical `llblab/pi-state-flow` repository. Version tags trigger `.github/workflows/release.yml`, which validates the exact tag, publishes through npm Trusted Publisher with provenance, verifies the public package, and then creates the matching GitHub Release.
 
 Configure the npm Trusted Publisher with owner `llblab`, repository `pi-state-flow`, workflow filename `release.yml`, and no environment. No long-lived npm token is used.
 

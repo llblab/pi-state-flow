@@ -117,7 +117,7 @@ jobs:
       - name: Install exact dependencies
         run: npm ci
       - name: Capture exact local package inventory
-        run: npm pack --dry-run --json > npm-local-pack.json
+        run: npm pack --dry-run --json --ignore-scripts > npm-local-pack.json
       - name: Resolve npm publication state
         id: npm-state
         env:
@@ -157,7 +157,7 @@ jobs:
           verified=false
           for attempt in $(seq 1 120); do
             if npm view "$PACKAGE_NAME@$VERSION" --json version gitHead pi --prefer-online > npm-published.json 2> npm-published.err &&
-               npm pack "$PACKAGE_NAME@$VERSION" --dry-run --json --prefer-online > npm-pack.json 2> npm-pack.err &&
+               npm pack "$PACKAGE_NAME@$VERSION" --dry-run --json --ignore-scripts --prefer-online > npm-pack.json 2> npm-pack.err &&
                node --input-type=module <<'NODE'
           import { readFileSync } from "node:fs";
           const unpackView = (raw) => Array.isArray(raw) ? raw[0] : raw;
