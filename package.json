@@ -1,0 +1,26 @@
+{
+  "name": "@llblab/pi-state-flow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "State Flow terminal-handoff runtime for Pi, inspired by SKILL.state",
+  "keywords": ["pi-package", "pi-extension", "state-management"],
+  "type": "module",
+  "files": ["index.ts", "README.md", "CHANGELOG.md", "BACKLOG.md", "AGENTS.md"],
+  "scripts": {
+    "check": "node --experimental-strip-types -e \"await import('./index.ts')\"",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "validate": "npm run typecheck && npm test && npm run check",
+    "prepack": "npm run validate"
+  },
+  "pi": { "extensions": ["./index.ts"] },
+  "engines": { "node": ">=22.19.0" },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.4",
+    "@earendil-works/pi-coding-agent": "^0.84.4"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  }
+}
