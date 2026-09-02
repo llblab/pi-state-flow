@@ -261,7 +261,11 @@ test("attributes Skill acquisition to finalized execution arguments", async () =
 	const executed = "/skills/executed/SKILL.md";
 	const input = { path: requested };
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
-	input.path = executed;
+	h.handlers.get("tool_execution_start")!({
+		toolCallId: "skill-1",
+		toolName: "read",
+		args: { path: executed },
+	}, h.ctx);
 	h.handlers.get("tool_execution_end")!({
 		toolCallId: "skill-1",
 		toolName: "read",
@@ -281,6 +285,28 @@ test("attributes Skill acquisition to finalized execution arguments", async () =
 	assert.deepEqual(rejected.message.content, []);
 	assert.match(h.entries.at(-1)!.data.validation.error, /\/skills\/executed\/SKILL\.md/);
 	assert.doesNotMatch(h.entries.at(-1)!.data.validation.error, /\/skills\/requested\/SKILL\.md/);
+});
+
+test("falls back to intercepted input when a successful execution omits args", async () => {
+	const h = harness();
+	await start(h);
+	const source = "/skills/fallback/SKILL.md";
+	h.handlers.get("tool_call")!({
+		toolCallId: "skill-1",
+		toolName: "read",
+		input: { path: source },
+	}, h.ctx);
+	h.handlers.get("tool_execution_end")!({
+		toolCallId: "skill-1",
+		toolName: "read",
+		result: {},
+		isError: false,
+	}, h.ctx);
+
+	const result = commitTerminal(h, {
+		compiled_skills: { [source]: { routing: "use intercepted input fallback" } },
+	}, {}, "Done");
+	assert.equal(result.message.content[0].text, "Done");
 });
 
 test("does not require compilation for a failed Skill read", async () => {

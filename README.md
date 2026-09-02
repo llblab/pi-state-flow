@@ -32,7 +32,6 @@ pi install git:github.com/llblab/pi-state-flow
 ## Usage
 
 ```text
-/reload
 /state-flow-start
 ```
 
@@ -89,6 +88,8 @@ The operation completed.
 This removes `working.move`, replaces `working.result`, preserves every other memory key, and stores `The operation completed.` as `response`. Materialized state cannot contain `null`, including inside arrays; represent semantic absence by omitting a key or using an explicit non-null domain value.
 
 State and patch size have no byte, growth, pressure, or project-schema limit. Patch history remains only in the Pi trace, not in model context.
+
+These three fields are the complete **materialized State Flow state**, but they are not the only state that can shape model behavior. A situational fourth, exogenous state lives outside the handoff: the current project, workspace, tools, processes, and runtime environment. It can change while work is in progress—including through the model's own tool effects—and later observations of those changes can alter subsequent behavior. State Flow neither snapshots nor rolls back this external state; `working` should retain only the decision-relevant facts needed to reconnect the next run to it.
 
 ## Terminal handoff quality
 

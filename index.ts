@@ -475,6 +475,12 @@ export default function stateFlowExtension(pi: ExtensionAPI): void {
 		pendingSkillReads.set(event.toolCallId, { toolName: event.toolName, args: event.input });
 	});
 
+	pi.on("tool_execution_start", (event) => {
+		const pending = pendingSkillReads.get(event.toolCallId);
+		if (!snapshot.enabled || !pending) return;
+		pendingSkillReads.set(event.toolCallId, { toolName: event.toolName, args: event.args });
+	});
+
 	pi.on("tool_execution_end", (event) => {
 		const pending = pendingSkillReads.get(event.toolCallId);
 		pendingSkillReads.delete(event.toolCallId);

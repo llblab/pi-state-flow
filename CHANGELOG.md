@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5: Skill attribution and state model clarification
+
+- Attribute successful Skill acquisition to finalized `tool_execution_start` arguments, with a tested compatibility fallback to the intercepted `tool_call` input.
+- Clarify that the three-field materialized handoff coexists with mutable exogenous project and runtime state that can also shape model behavior.
+- Remove the obsolete `/reload` step from the usage instructions.
+
 ## 0.1.4: Release verification hotfix
 
 - Kept npm pack lifecycle output out of release inventory JSON so Trusted Publisher releases can complete public verification and GitHub Release creation.
