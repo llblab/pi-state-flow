@@ -15,19 +15,43 @@ user request
 
 The current run keeps its user message, assistant tool calls, tool results, and persistent or current-run context-bearing custom messages from other Pi extensions model-visible. Only after the terminal handoff does the next run replace that trajectory with one materialized state. Pi's complete session trace remains inspectable.
 
-## Install
+## Installation
 
-From npm:
+Requirements: Pi `0.84.4–0.84.x` and Node.js `22.19.0` or newer.
+
+Install from npm:
 
 ```bash
 pi install npm:@llblab/pi-state-flow
 ```
 
-From git:
+Or install from GitHub:
 
 ```bash
 pi install git:github.com/llblab/pi-state-flow
 ```
+
+Pi packages execute with full user permissions; review the source before installing, as with any extension.
+
+## Quick start
+
+Start Pi, then start an episode and send your task:
+
+```text
+/state-flow-start
+```
+
+State Flow is opt-in: installation alone does not alter model context. Confirm the active episode with `/state-flow-status`, and use `/state-flow-stop` to disable it and erase its materialized episode state.
+
+For a one-off trial without installing the package:
+
+```bash
+pi -e npm:@llblab/pi-state-flow
+```
+
+## Architecture
+
+`index.ts` is only the package composition and public-export boundary. Independent runtime domains live under `lib/`: `json` owns lossless JSON and patches, `state` owns the materialized state shape, `episode` owns explicit start/stop and user-run boundaries, `snapshot` owns persistence migration, `session` owns active-branch snapshot discovery and bootstrap detection, `recovery` falls back to the newest valid active-branch checkpoint, `status` owns deterministic operator-facing status rendering, `context` owns trajectory projection, private-feedback filtering, and synthetic runtime-context construction, `skills` owns Skill acquisition rules and mutable lifecycle correlation, `terminal` owns the handoff protocol, `validation` owns bounded retry decisions, `transition` owns atomic staging and compare-and-swap commits, and `extension` coordinates these domains with Pi. Every domain has a same-named test under `tests/`; lifecycle scenarios are colocated with the domain whose contract they exercise, `tests/extension.test.ts` remains focused on composition, shared setup lives in `tests/harness.ts`, and cross-domain constraints live in `tests/invariants.test.ts`.
 
 ## Usage
 
@@ -45,7 +69,7 @@ The extension registers no model tools. Tool-bearing assistant responses use ord
 Complete user-facing answer
 ```
 
-At `message_end`, the runtime requires that private comment at the start of the single terminal text block, followed by exactly one blank line. It removes only the comment and separator and stages all three state fields. At `turn_end`, it reconciles `response` with Pi's finalized assistant message after all chained `message_end` handlers, concatenating any text blocks without inserting characters, then commits. If a later handler removes all answer text or adds a tool call after terminal validation, the same hidden regeneration chain runs. Arbitrary response Markdown remains outside the HTML comment, so its own content cannot terminate the private frame. Invalid terminal commits are regenerated through hidden feedback up to three times; repeated failure disables State Flow without clearing the retained snapshot. Tool-bearing turns do not reset that attempt count. Aborting a regeneration abandons its transient validation chain so the next user request starts cleanly from the last committed state.
+At `message_end`, the runtime requires that private comment at the start of the single terminal text block, followed by exactly one blank line. It removes only the comment and separator and stages all three state fields. At `turn_end`, it reconciles `response` with Pi's finalized assistant message after all chained `message_end` handlers, concatenating any text blocks without inserting characters, then commits. If a later handler removes all answer text or adds a tool call after terminal validation, the same hidden regeneration chain runs. Arbitrary response Markdown remains outside the HTML comment, so its own content cannot terminate the private frame. Invalid terminal commits are regenerated through hidden feedback up to three times. If all retries fail, State Flow remains enabled, preserves the last committed snapshot, abandons only the transient validation chain, and lets the next user request start cleanly from that state. Tool-bearing turns do not reset the attempt count. Aborting a regeneration has the same non-destructive behavior.
 
 Commands:
 
@@ -57,7 +81,7 @@ Commands:
 
 The compact Pi status renders an accent `state-flow` label followed by the dimmed committed iteration number, for example `state-flow #7`. `/state-flow-status` reports iteration metadata, then separates the complete pretty-formatted materialized state JSON with a blank line for operator analysis.
 
-`/state-flow-stop` clears the specification, materialized state, validation feedback, and committed-run counter. A later `/state-flow-start` always begins a fresh episode. State follows the active Pi session branch and is restored immediately after `/tree` navigation; entering a branch with no State Flow snapshot leaves the mode disabled there.
+`/state-flow-stop` clears the specification, materialized state, validation feedback, and committed-run counter. A later `/state-flow-start` always begins a fresh episode. State follows the active Pi session branch and is restored immediately after `/tree` navigation. If the newest checkpoint is malformed, restoration walks backward to the newest valid checkpoint instead of resetting an otherwise recoverable episode. Entering a branch with no State Flow snapshot leaves the mode disabled there.
 
 ## Materialized state
 
@@ -121,7 +145,7 @@ A successful `SKILL.md` read is treated as episode-level acquisition. Before ter
 }
 ```
 
-No `coverage`/`rules` schema is imposed. The model chooses the smallest structure that faithfully preserves the Skill's useful behavior. Raw Skill text is not copied. The runtime checks only that the exact successfully executed source path, taken from finalized tool-execution arguments, has a non-empty compilation and rejects a terminal commit when it is missing.
+No `coverage`/`rules` schema is imposed. The model chooses the smallest structure that faithfully preserves the Skill's useful behavior. Raw Skill text is not copied. The runtime checks only that the exact successfully executed source path has a non-empty compilation and rejects a terminal commit when it is missing. Attribution follows Pi's lifecycle order: it retains the mutable `tool_call` input reference so later interception rewrites resolve to the path actually executed, with `tool_execution_start` arguments as a compatibility fallback.
 
 A complete matching compilation is authoritative episode memory and replaces routine rereading. Rereading is justified only by an explicitly uncovered detail, an incomplete compilation, concrete source-change evidence, a contradiction or execution failure requiring reconciliation, or an explicit user request. The mere possibility that a source changed is not sufficient. A justified reread refreshes the compilation and removes obsolete rules.
 
@@ -155,14 +179,6 @@ The normative protocol remains in the system prompt throughout a tool/retry chai
 - The terminal envelope exists in ordinary assistant text until `message_end`; `message_update`, RPC, JSON, or other streaming consumers can observe it. Never place secrets in State Flow state.
 - This mode remains a poor fit for auditing or outputs that require complete historical trajectories across user requests.
 - Token, cache, latency, and success-rate advantages still require controlled Pi benchmarks.
-
-## Distribution
-
-Version `0.1.4` supports public npm, local, and source/GitHub distribution from the canonical `llblab/pi-state-flow` repository. Version tags trigger `.github/workflows/release.yml`, which validates the exact tag, publishes through npm Trusted Publisher with provenance, verifies the public package, and then creates the matching GitHub Release.
-
-Configure the npm Trusted Publisher with owner `llblab`, repository `pi-state-flow`, workflow filename `release.yml`, and no environment. No long-lived npm token is used.
-
-Compatibility is bounded to Pi `0.84.x` from `0.84.4` onward and Node.js `22.19.0` or newer.
 
 ## Validation
 

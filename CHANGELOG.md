@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0: Modular runtime hardening
+
+- Add a task-first README quick start with explicit compatibility, opt-in behavior, one-off trial instructions, and Pi package security guidance.
+- Tighten the normative runtime protocol and enforce a regression-tested character budget; omit absent validation feedback from synthetic runtime context instead of serializing a redundant `null`.
+- Redistribute lifecycle coverage from the former monolithic extension suite into the corresponding mirrored domain suites, leaving `extension.test.ts` focused on composition and using one shared test harness.
+- Split the runtime into independent `json`, `state`, `episode`, `snapshot`, `session`, `recovery`, `status`, `context`, `skills`, `terminal`, `validation`, `transition`, and `extension` modules under `lib/`; isolate explicit episode transitions, active-branch selection and recovery, status rendering, bounded retry decisions, atomic state staging, and compare-and-swap commits; mirror each domain under `tests/`, enforce an acyclic dependency graph with cross-domain invariant tests, and reduce `index.ts` to composition and public exports.
+- Register lifecycle commands in the canonical start, status, stop order.
+- Centralize synthetic runtime-context construction and private validation-message filtering in the independently tested context domain, keeping user-controlled specifications out of system-prompt composition.
+- Keep State Flow enabled and preserve the last committed state when terminal-validation retries are exhausted; only the transient retry chain is abandoned so the next user request can continue reliably.
+- Track Skill reads through an independently tested lifecycle correlator in Pi's actual `tool_execution_start` → `tool_call` event order while retaining the mutable intercepted input reference, so later argument rewrites are attributed to the executed path.
+- Discard mismatched lifecycle records defensively so a stale or reused tool-call id cannot produce false Skill acquisition.
+- Bound restored iteration and validation-attempt counters before incrementing them, reject exhausted live iteration counters explicitly, and cover both safe-integer boundaries so malformed branch metadata cannot corrupt retry accounting or status output.
+- Reject restored non-JSON state values such as non-finite numbers before they can break hashing or silently materialize as `null`.
+- Fall back past malformed newer checkpoints to the newest valid active-branch snapshot, while still failing closed on cyclic or hostile snapshot objects when no valid checkpoint remains.
+- Reject malformed three-field state shapes rather than reinterpreting them as legacy working memory, and contain failures while enumerating hostile branch entries.
+- Make canonical serialization and exported patch validation reject lossy or cyclic non-JSON inputs explicitly instead of returning invalid results or silently rewriting values.
+
 ## 0.1.5: Skill attribution and state model clarification
 
 - Attribute successful Skill acquisition to finalized `tool_execution_start` arguments, with a tested compatibility fallback to the intercepted `tool_call` input.

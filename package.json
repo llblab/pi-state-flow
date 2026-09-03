@@ -1,9 +1,13 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "private": false,
   "description": "State Flow terminal-handoff runtime for Pi, inspired by SKILL.state",
-  "keywords": ["pi-package", "pi-extension", "state-management"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "state-management"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/llblab/pi-state-flow.git"
@@ -13,17 +17,33 @@
     "url": "https://github.com/llblab/pi-state-flow/issues"
   },
   "type": "module",
-  "files": ["index.ts", "README.md", "CHANGELOG.md", "BACKLOG.md", "AGENTS.md"],
+  "files": [
+    "index.ts",
+    "lib",
+    "README.md",
+    "CHANGELOG.md",
+    "BACKLOG.md",
+    "AGENTS.md"
+  ],
   "scripts": {
     "check": "node --experimental-strip-types -e \"await import('./index.ts')\"",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm run typecheck && npm test && npm run check",
     "prepack": "npm run validate"
   },
-  "pi": { "extensions": ["./index.ts"] },
-  "publishConfig": { "access": "public" },
-  "engines": { "node": ">=22.19.0" },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/llblab/pi-state-flow/main/banner.jpg"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "^0.84.4",
     "@earendil-works/pi-coding-agent": "^0.84.4"
