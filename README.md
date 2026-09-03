@@ -35,26 +35,6 @@ pi install git:github.com/llblab/pi-state-flow
 
 Pi packages execute with full user permissions; review the source before installing, as with any extension.
 
-## Quick start
-
-Start Pi, then start an episode and send your task:
-
-```text
-/state-flow-start
-```
-
-State Flow is opt-in: installation alone does not alter model context. Confirm the active episode with `/state-flow-status`, and use `/state-flow-stop` to disable it and erase its materialized episode state.
-
-For a one-off trial without installing the package:
-
-```bash
-pi -e npm:@llblab/pi-state-flow
-```
-
-## Architecture
-
-`index.ts` is only the package composition and public-export boundary. Independent runtime domains live under `lib/`: `json` owns lossless JSON and patches, `state` owns the materialized state shape, `episode` owns explicit start/stop and user-run boundaries, `snapshot` owns persistence migration, `session` owns active-branch snapshot discovery and bootstrap detection, `recovery` falls back to the newest valid active-branch checkpoint, `status` owns deterministic operator-facing status rendering, `context` owns trajectory projection, private-feedback filtering, and synthetic runtime-context construction, `skills` owns Skill acquisition rules and mutable lifecycle correlation, `terminal` owns the handoff protocol, `validation` owns bounded retry decisions, `transition` owns atomic staging and compare-and-swap commits, and `extension` coordinates these domains with Pi. Every domain has a same-named test under `tests/`; lifecycle scenarios are colocated with the domain whose contract they exercise, `tests/extension.test.ts` remains focused on composition, shared setup lives in `tests/harness.ts`, and cross-domain constraints live in `tests/invariants.test.ts`.
-
 ## Usage
 
 ```text
@@ -181,6 +161,10 @@ The normative protocol remains in the system prompt throughout a tool/retry chai
 - The terminal envelope exists in ordinary assistant text until `message_end`; `message_update`, RPC, JSON, or other streaming consumers can observe it. Never place secrets in State Flow state.
 - This mode remains a poor fit for auditing or outputs that require complete historical trajectories across user requests.
 - Token, cache, latency, and success-rate advantages still require controlled Pi benchmarks.
+
+## Architecture
+
+`index.ts` is only the package composition and public-export boundary. Independent runtime domains live under `lib/`: `json` owns lossless JSON and patches, `state` owns the materialized state shape, `episode` owns explicit start/stop and user-run boundaries, `snapshot` owns persistence migration, `session` owns active-branch snapshot discovery and bootstrap detection, `recovery` falls back to the newest valid active-branch checkpoint, `status` owns deterministic operator-facing status rendering, `context` owns trajectory projection, private-feedback filtering, and synthetic runtime-context construction, `skills` owns Skill acquisition rules and mutable lifecycle correlation, `terminal` owns the handoff protocol, `validation` owns bounded retry decisions, `transition` owns atomic staging and compare-and-swap commits, and `extension` coordinates these domains with Pi. Every domain has a same-named test under `tests/`; lifecycle scenarios are colocated with the domain whose contract they exercise, `tests/extension.test.ts` remains focused on composition, shared setup lives in `tests/harness.ts`, and cross-domain constraints live in `tests/invariants.test.ts`.
 
 ## Validation
 

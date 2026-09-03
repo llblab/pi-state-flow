@@ -1,6 +1,6 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": false,
   "description": "State Flow terminal-handoff runtime for Pi, inspired by SKILL.state",
   "keywords": [

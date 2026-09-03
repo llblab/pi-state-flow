@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2: README structure hotfix
+
+- Separate installation from usage, remove the redundant quick-start section, and move architecture details after the user-facing documentation.
+
 ## 0.2.1: README banner hotfix
 
 - Add the project banner to the README.
