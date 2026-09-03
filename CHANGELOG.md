@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1: README banner hotfix
+
+- Add the project banner to the README.
+
 ## 0.2.0: Modular runtime hardening
 
 - Add a task-first README quick start with explicit compatibility, opt-in behavior, one-off trial instructions, and Pi package security guidance.

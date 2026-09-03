@@ -2,6 +2,8 @@
 
 > Inspired by [SKILL.state](https://arxiv.org/html/2608.26263v2)
 
+![pi-state-flow banner](https://raw.githubusercontent.com/llblab/pi-state-flow/main/banner.jpg)
+
 An opt-in Pi extension for explicit, validated state handoffs between complete agent runs.
 
 State Flow preserves Pi's native tool loop inside each user request:
