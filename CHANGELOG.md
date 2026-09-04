@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0: Optional memory patches and evidence-aware handoffs
+
+- Require targeted revalidation of volatile observations and inspection of external effects after interruption or branch navigation; missing memory proves neither success nor absence of effects. Document the absence of rollback/freshness guarantees and preserve the restriction on routine Skill rereads. Add instruction-presence tests, not semantic or integration guarantees.
+- Strengthen the handoff protocol with evidence-aware continuation, requirement/observation/hypothesis distinctions, conditional rejections, and contradiction reconciliation; preserve decision-relevant uncertainty during optimization. Add instruction-presence regressions, not semantic guarantees. Increase the protocol-only character budget to 3,700 (3,900 with bootstrap) for these obligations; state remains uncapped.
+- Accept ordinary non-empty terminal answers as empty memory patches: preserve memory and update the response without unnecessary regeneration, including answers split across text blocks.
+- Keep malformed explicit envelopes and missing Skill compilations on the existing bounded validation path.
+- Clear the backlog; documented integration and continuation-quality limitations remain, not release commitments.
+
 ## 0.2.3: Document protocol and validation limitations
 
 - Document that duplicate-comment detection also rejects literal State Flow envelope examples inside fenced or inline code in terminal answers, and provide a plain-JSON workaround.

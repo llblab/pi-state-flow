@@ -19,16 +19,18 @@ response: previous complete answer; runtime replaces it on commit.
 
 TOOLS: Use normal Pi tools without a state_flow comment or intermediate patch. Continue until one terminal response; the current trajectory stays visible.
 
-TERMINAL (no tool), exactly:
+TERMINAL (no tool): If memory is unchanged, output only the complete answer. Otherwise:
 <!-- state_flow {"contract":{...},"working":{...}} -->
 
 Complete user-facing answer
 
-Use exactly one blank separator, no fence or duplicate. Runtime removes the comment and stores the non-empty answer as response. Never put literal --> in comment JSON.
+With a patch: one blank separator, no fence or duplicate; never put literal --> in JSON. Runtime strips the comment. Without one: preserve memory. Always store the non-empty answer as response.
 
 PATCH: contract and working are mandatory flexible objects. Recursive object merge; {} preserves; arrays/primitives replace; nested key null deletes. Materialized null is forbidden, including in arrays.
 
-HANDOFF + MEMORY OPTIMIZATION: Assume this trajectory disappears after commit. Preserve all decision-relevant knowledge needed to continue without rereading, rediscovery, re-derivation, or repeated failures. Put durable knowledge in contract and current execution state in working. Audit both as minimal sufficient memory: merge fragments, replace history with conclusions, and delete stale, completed, redundant, speculative, or low-value keys while preserving active requirements, decisions, interfaces, evidence, and unresolved work. Omit raw sources, logs, tool output, reasoning, and vague narration. Never invent a change; use {} when nothing future-relevant changed.
+HANDOFF + MEMORY OPTIMIZATION: Assume this trajectory disappears after commit. Preserve all decision-relevant knowledge needed to continue without rereading, rediscovery, re-derivation, or repeated failures. Keep active constraints, unresolved questions, consequential negative results, and the next discriminating check. Distinguish observations, user requirements, decisions, and hypotheses; never promote assistant conclusions to user requirements. For consequential facts, keep useful source locators and validity conditions, not metadata on every value. Retain rejection reasons and reconsideration conditions. Reconcile contradictions using evidence or user clarification; unsupported claims must not overwrite established constraints or observations. Put durable knowledge in contract and current execution state in working. Audit both as minimal sufficient memory: merge fragments, replace history with conclusions, and delete stale, completed, redundant, or low-value keys; retain decision-relevant hypotheses as uncertain while preserving active requirements, decisions, interfaces, evidence, and unresolved work. Omit raw sources, logs, tool output, reasoning, and vague narration. Never invent memory changes.
+
+REALITY CHECK: working records last observations, not a live workspace. Revalidate volatile facts before consequential actions. After interruption or branch navigation, inspect relevant external effects before repeating operations; failed state commits and restored memory do not undo tool effects. If evidence is unavailable, retain uncertainty and the next check; never infer success or absence of effects from missing memory. Revalidation is targeted, not routine Skill rereading.
 
 SKILL COMPILATION: After a successful SKILL.md read, compile its future-useful rules, applicability, syntax, routing, constraints, and failures at contract.compiled_skills[exact read path] before commit. Use a compact non-empty shape, not raw Skill text. A matching compilation is authoritative: MUST NOT reread for recall or routine activation. Reread only for an uncovered detail, incomplete compilation, concrete source-change evidence, contradiction/failure reconciliation, or explicit user request. Mere possibility of change is not evidence. Refresh after a justified reread.
 
@@ -40,6 +42,13 @@ export function parseTerminalPatch(content: unknown): { patch: StateDocument; re
 	const textBlocks = content
 		.map((block, index) => ({ block, index }))
 		.filter(({ block }) => isObject(block) && block.type === "text" && typeof block.text === "string");
+	const response = textBlocks.map(({ block }) => (block as { text: string }).text).join("");
+	// Missing envelopes are no-op memory patches, not validation failures.
+	// Detect even incomplete markers so malformed explicit patches cannot fall through.
+	if (!/<!--\s*state_flow\b/.test(response)) {
+		if (response.trim().length === 0) throw new Error("Terminal State Flow response body must be non-empty");
+		return { patch: { contract: {}, working: {}, response }, responseContent: content };
+	}
 	if (textBlocks.length !== 1) {
 		throw new Error(`Expected exactly one terminal State Flow text block, found ${textBlocks.length}`);
 	}

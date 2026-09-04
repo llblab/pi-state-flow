@@ -80,7 +80,7 @@ test("accepts unchanged contract and working memory when the run produced no dur
 	assert.match(started.systemPrompt, /MUST NOT reread for recall or routine activation/);
 	assert.match(started.systemPrompt, /Mere possibility of change is not evidence/);
 	assert.match(started.systemPrompt, /MEMORY OPTIMIZATION/);
-	assert.match(started.systemPrompt, /Never invent a change; use \{\} when nothing future-relevant changed/);
+	assert.match(started.systemPrompt, /Never invent memory changes/);
 	const result = h.handlers.get("message_end")!({
 		message: {
 			role: "assistant",

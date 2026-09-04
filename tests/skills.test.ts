@@ -112,6 +112,22 @@ test("attributes Skill acquisition to mutable tool input in Pi event order", asy
 	assert.match(h.entries.at(-1)!.data.validation.error, /\/skills\/executed\/SKILL\.md/);
 	assert.doesNotMatch(h.entries.at(-1)!.data.validation.error, /\/skills\/requested\/SKILL\.md/);
 });
+test("ordinary answers cannot bypass missing Skill compilations", async () => {
+	const h = harness();
+	await start(h);
+	const path = "/skills/plain/SKILL.md";
+	h.handlers.get("tool_execution_start")!({ toolCallId: "plain", toolName: "read", args: { path } }, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: "plain", toolName: "read", isError: false }, h.ctx);
+	const rejected = h.handlers.get("message_end")!({
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }] },
+	}, h.ctx);
+	assert.deepEqual(rejected.message.content, []);
+	assert.match(h.entries.at(-1)!.data.validation.error, /missing: \/skills\/plain\/SKILL\.md/);
+	assert.equal(h.entries.at(-1)!.data.step, 0);
+	commitTerminal(h, { compiled_skills: { [path]: { rule: "compiled" } } }, {});
+	assert.equal(h.entries.at(-1)!.data.step, 1);
+});
+
 test("retains compatibility with execution-start updates after interception", async () => {
 	const h = harness();
 	await start(h);

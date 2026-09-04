@@ -11,7 +11,7 @@ State Flow preserves Pi's native tool loop inside each user request:
 ```text
 user request
   → model → tool → model → tool → model
-  → one terminal patch
+  → one terminal answer (memory patch when needed)
   → committed state + displayed response
 ```
 
@@ -43,7 +43,7 @@ Pi packages execute with full user permissions; review the source before install
 
 In a fresh session, the next prompt starts the first stateful run. Each later non-retry user prompt becomes the current turn-stable specification while committed state remains intact. When enabled inside an existing session, the first complete run retains the active pre-Flow context and must migrate every future-relevant fact into its terminal handoff.
 
-The extension registers no model tools. Tool-bearing assistant responses use ordinary Pi tools and contain no State Flow patch. A terminal assistant response contains one transcript-private memory-patch comment, one separating blank line, and the user-facing answer exactly once. Transcript-private means removed from the finalized message and later model context, not confidential during streaming:
+The extension registers no model tools. Tool-bearing assistant responses use ordinary Pi tools and contain no State Flow patch. When memory changes, a terminal assistant response contains one transcript-private memory-patch comment, one separating blank line, and the user-facing answer exactly once. When memory is unchanged, an ordinary non-empty answer is sufficient: the runtime treats the missing comment as an empty memory patch, preserving `contract` and `working` while replacing `response`. Transcript-private means removed from the finalized message and later model context, not confidential during streaming:
 
 ```html
 <!-- state_flow {"contract":{...},"working":{...}} -->
@@ -51,7 +51,7 @@ The extension registers no model tools. Tool-bearing assistant responses use ord
 Complete user-facing answer
 ```
 
-At `message_end`, the runtime requires that private comment at the start of the single terminal text block, followed by exactly one blank line. It removes only the comment and separator and stages all three state fields. At `turn_end`, it reconciles `response` with Pi's finalized assistant message after all chained `message_end` handlers, concatenating any text blocks without inserting characters, then commits. If a later handler removes all answer text or adds a tool call after terminal validation, the same hidden regeneration chain runs. Arbitrary response Markdown remains outside the HTML comment, so its own content cannot terminate the private frame. Invalid terminal commits are regenerated through hidden feedback up to three times. If all retries fail, State Flow remains enabled, preserves the last committed snapshot, abandons only the transient validation chain, and lets the next user request start cleanly from that state. Tool-bearing turns do not reset the attempt count. Aborting a regeneration has the same non-destructive behavior.
+At `message_end`, an explicit private comment must start the single terminal text block and be followed by exactly one blank line. Without a State Flow comment marker, ordinary text blocks are concatenated without inserted characters and preserved unchanged; no regeneration is triggered merely because the comment is absent. Malformed, incomplete, or embedded State Flow comment markers still fail explicit-envelope validation rather than silently becoming no-op patches. It removes only the comment and separator and stages all three state fields. At `turn_end`, it reconciles `response` with Pi's finalized assistant message after all chained `message_end` handlers, concatenating any text blocks without inserting characters, then commits. If a later handler removes all answer text or adds a tool call after terminal validation, the same hidden regeneration chain runs. Arbitrary response Markdown remains outside the HTML comment, so its own content cannot terminate the private frame. Invalid terminal commits are regenerated through hidden feedback up to three times. If all retries fail, State Flow remains enabled, preserves the last committed snapshot, abandons only the transient validation chain, and lets the next user request start cleanly from that state. Tool-bearing turns do not reset the attempt count. Aborting a regeneration has the same non-destructive behavior.
 
 Commands:
 
@@ -97,14 +97,28 @@ State and patch size have no byte, growth, pressure, or project-schema limit. Pa
 
 These three fields are the complete **materialized State Flow state**, but they are not the only state that can shape model behavior. A situational fourth, exogenous state lives outside the handoff: the current project, workspace, tools, processes, and runtime environment. It can change while work is in progress—including through the model's own tool effects—and later observations of those changes can alter subsequent behavior. State Flow neither snapshots nor rolls back this external state; `working` should retain only the decision-relevant facts needed to reconnect the next run to it.
 
+### Reconnecting to external state
+
+Treat `working` as the last observation, not a live workspace. Before consequential actions, revalidate the volatile facts that action depends on: for example, the current revision and dirty files before editing, or the remote publication status before retrying a release. This is targeted inspection, not a requirement to reread stable knowledge or compiled Skills routinely.
+
+After an interruption or session-branch navigation, inspect relevant external effects before repeating operations. A failed terminal commit does not undo file edits, running processes, or remote requests; restoring older memory does not restore the workspace. Missing memory is evidence of neither success nor absence of effects. If the effect cannot be verified, retain that uncertainty and the next discriminating check instead of blindly retrying or claiming completion.
+
+These are protocol obligations, not runtime freshness checks, rollback, or exactly-once execution guarantees. No action ledger or new evidence-retrieval tool is introduced.
+
 ## Terminal handoff quality
 
-The terminal patch is a required handoff, not a progress phrase or transcript summary. The next run may see only this state plus its new user prompt. A fresh model should be able to continue without rereading, rediscovering, re-deriving decisions, or repeating failed approaches.
+The terminal answer commits a handoff, not a progress phrase or transcript summary. A memory patch is required when future-relevant memory changes; omitting it is only shorthand for preserving existing memory, not a way to infer new memory from prose. The next run may see only this state plus its new user prompt. A fresh model should be able to continue without rereading, rediscovering, re-deriving decisions, or repeating failed approaches.
 
 Useful handoffs capture:
 
 - Stable requirements, constraints, decisions, rejected approaches, and compiled operational rules in `contract`.
 - Verified facts, changed artifacts, validation evidence, failures, unresolved work, current domain state, and exact continuation in `working`.
+
+Before compressing, preserve active constraints, unresolved questions, consequential negative results, and the next check that would distinguish competing explanations. Keep observations, user requirements, assistant decisions, and hypotheses distinguishable; an assistant conclusion is not a user requirement. Retain decision-relevant hypotheses as uncertain rather than deleting them merely because they are unverified.
+
+For consequential facts, include a compact source locator and validity condition when useful (for example, a test command and the revision it checked), not mandatory metadata on every value. Record why an approach was rejected and what would justify reconsidering it. When new information conflicts with an established constraint or observation, reconcile it using evidence or user clarification; neither an unsupported new claim nor fallible old memory wins automatically. If unresolved, preserve the conflict and the next discriminating check.
+
+These are model obligations, not semantic validation gates. Protocol tests check that the instructions remain present; only continuation evaluations can establish whether a fresh agent makes the next correct decision.
 
 Do not store raw source, logs, tool output, reasoning traces, or vague values such as `"continue work"` and `"in progress"`.
 
@@ -131,9 +145,9 @@ No `coverage`/`rules` schema is imposed. The model chooses the smallest structur
 
 A complete matching compilation is authoritative episode memory and replaces routine rereading. Rereading is justified only by an explicitly uncovered detail, an incomplete compilation, concrete source-change evidence, a contradiction or execution failure requiring reconciliation, or an explicit user request. The mere possibility that a source changed is not sufficient. A justified reread refreshes the compilation and removes obsolete rules.
 
-State is a minimal sufficient memory, not an append-only diary. At every handoff the model audits the complete state and may reorganize inefficient structure, merge fragments, replace verbose history with current conclusions, and delete stale, completed, redundant, speculative, or low-value keys with `null`. Active requirements, decisions, interfaces, verified evidence, and unresolved work must survive optimization.
+State is a minimal sufficient memory, not an append-only diary. At every handoff the model audits the complete state and may reorganize inefficient structure, merge fragments, replace verbose history with current conclusions, and delete stale, completed, redundant, or low-value keys with `null`. Active requirements, decisions, interfaces, verified evidence, and unresolved work must survive optimization.
 
-The model must not invent bookkeeping merely to change `contract` or `working`. When a run creates no future-relevant information and existing memory is already efficient, both objects remain empty while `response` still contains the actual answer. Structurally invalid handoffs are regenerated through hidden validation feedback; retry diagnostics are not user-facing output.
+The model must not invent bookkeeping merely to change `contract` or `working`. When a run creates no future-relevant information and existing memory is already efficient, both patch objects may remain empty, or the comment may be omitted entirely, while `response` still contains the actual answer. Successful Skill reads still require their compilations in materialized memory even when the comment is omitted. Bootstrap migration remains a model obligation: a plain answer cannot migrate pre-Flow context automatically. Structurally invalid handoffs are regenerated through hidden validation feedback; retry diagnostics are not user-facing output.
 
 ## Context lifecycle
 

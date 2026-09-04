@@ -29,13 +29,13 @@ test("keeps validation attempt accounting across tool-bearing retry turns", asyn
 	const h = harness();
 	await start(h);
 	h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "missing handoff" }] },
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow invalid -->" }] },
 	}, h.ctx);
 	assert.equal(h.entries.at(-1)!.data.validation.attempt, 1);
 	h.handlers.get("message_end")!({ message: toolAssistant("read-during-retry") }, h.ctx);
 	assert.equal(h.entries.at(-1)!.data.validation.attempt, 1);
 	h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "still missing" }] },
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow still-invalid -->" }] },
 	}, h.ctx);
 	assert.equal(h.entries.at(-1)!.data.validation.attempt, 2);
 });
@@ -60,7 +60,7 @@ test("regenerates when a later handler removes the finalized response", async ()
 		message: {
 			role: "assistant",
 			stopReason: "stop",
-			content: [{ type: "text", text: `${terminalComment({}, {})}\n\nRecovered response` }],
+			content: [{ type: "text", text: "Recovered response" }],
 		},
 	}, h.ctx);
 	h.handlers.get("turn_end")!({ message: recovered.message }, h.ctx);
@@ -75,7 +75,7 @@ test("regenerates invalid terminal responses without automatically disabling aft
 	const committed = structuredClone(h.entries.at(-1)!.data.state);
 	for (let attempt = 0; attempt < 4; attempt++) {
 		const rejected = h.handlers.get("message_end")!({
-			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "missing handoff" }] },
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow invalid -->" }] },
 		}, h.ctx);
 		assert.deepEqual(rejected.message.content, []);
 		h.handlers.get("turn_end")!({}, h.ctx);

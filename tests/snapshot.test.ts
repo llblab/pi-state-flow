@@ -66,7 +66,7 @@ test("sanitizes malformed snapshot counters and validation feedback on restore",
 	assert.match(h.notifications.at(-1)!, /iteration #0;[\s\S]*validation attempts 0/);
 
 	h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "invalid" }] },
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow invalid -->" }] },
 	}, h.ctx);
 	assert.equal(h.entries.at(-1)!.data.validation.attempt, 1);
 });
@@ -90,7 +90,7 @@ test("bounds restored counters before later increments", async () => {
 	await malformed.commands.get("state-flow-status")!.handler("", malformed.ctx);
 	assert.match(malformed.notifications.at(-1)!, /iteration #0;[\s\S]*validation attempts 0/);
 	malformed.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "invalid" }] },
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow invalid -->" }] },
 	}, malformed.ctx);
 	assert.equal(malformed.entries.at(-1)!.data.validation.attempt, 1);
 

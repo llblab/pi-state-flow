@@ -53,7 +53,7 @@ test("abandons an interrupted validation retry before the next user run", async 
 	const h = harness();
 	await start(h, "Old request");
 	h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "missing handoff" }] },
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow invalid -->" }] },
 	}, h.ctx);
 	assert.equal(h.sentMessages.length, 1);
 	assert.equal(h.entries.at(-1)!.data.validation.attempt, 1);

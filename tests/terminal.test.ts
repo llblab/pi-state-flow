@@ -2,10 +2,71 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	parseTerminalEnvelopeText,
+	parseTerminalPatch,
 	stateFlowProtocol,
 	terminalRegenerationInstruction,
 } from "../lib/terminal.ts";
 import { commitTerminal, harness, start, terminalComment, toolAssistant, user } from "./harness.ts";
+
+test("ordinary answers preserve content and synthesize only an empty memory patch", () => {
+	const content = [
+		{ type: "text", text: "  First\n", signature: "kept" },
+		{ type: "thinking", thinking: "private" },
+		{ type: "text", text: "\nSecond <!-- ordinary comment -->  \n" },
+	];
+	const parsed = parseTerminalPatch(content);
+	assert.deepEqual(parsed.patch, {
+		contract: {}, working: {}, response: "  First\n\nSecond <!-- ordinary comment -->  \n",
+	});
+	assert.strictEqual(parsed.responseContent, content);
+	for (const blocks of [[], [{ type: "thinking", thinking: "only" }], [{ type: "text", text: " \n" }]]) {
+		assert.throws(() => parseTerminalPatch(blocks), /must be non-empty/);
+	}
+});
+
+test("malformed explicit markers never fall back to ordinary answers", () => {
+	for (const text of [
+		"<!-- state_flow", "<!-- state_flow invalid -->\n\nDone",
+		" <!-- state_flow {} -->\n\nDone", "Example: <!-- state_flow {} -->",
+		"<!--\tstate_flow {} -->\n\nDone",
+	]) {
+		assert.throws(() => parseTerminalPatch([{ type: "text", text }]));
+	}
+	assert.throws(() => parseTerminalPatch([
+		{ type: "text", text: "<!-- state_" }, { type: "text", text: "flow {} -->\n\nDone" },
+	]), /exactly one/);
+});
+
+test("ordinary terminal answers commit once without retries and rotate the next request", async () => {
+	const h = harness();
+	await start(h);
+	commitTerminal(h, { durable: true }, { next: "check" });
+	h.handlers.get("before_agent_start")!({ prompt: "Thanks", systemPrompt: "base" }, h.ctx);
+	const result = h.handlers.get("message_end")!({
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "You're welcome." }] },
+	}, h.ctx);
+	assert.equal(h.entries.at(-1)!.data.step, 1);
+	h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
+	h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
+	assert.deepEqual(h.entries.at(-1)!.data.state, {
+		contract: { durable: true }, working: { next: "check" }, response: "You're welcome.",
+	});
+	assert.equal(h.entries.at(-1)!.data.step, 2);
+	assert.equal(h.sentMessages.length, 0);
+	h.handlers.get("before_agent_start")!({ prompt: "Continue", systemPrompt: "base" }, h.ctx);
+	assert.equal(h.entries.at(-1)!.data.specification, "Continue");
+});
+
+test("ordinary tool-bearing prose is not treated as a terminal commit", async () => {
+	const h = harness();
+	await start(h);
+	const message: any = toolAssistant("read-plain");
+	message.content.unshift({ type: "text", text: "Checking now" });
+	assert.equal(h.handlers.get("message_end")!({ message }, h.ctx), undefined);
+	h.handlers.get("turn_end")!({ message }, h.ctx);
+	assert.equal(h.entries.at(-1)!.data.step, 0);
+	assert.equal(h.sentMessages.length, 0);
+});
 
 test("parses the terminal handoff independently from the extension runtime", () => {
 	assert.deepEqual(
@@ -18,10 +79,37 @@ test("keeps a compact protocol independent from user-controlled specifications",
 	const protocol = stateFlowProtocol(false);
 	assert.match(protocol, /AUTHORITY:/);
 	assert.doesNotMatch(protocol, /BOOTSTRAP RUN/);
-	assert.ok(protocol.length <= 2_600, `protocol exceeded 2,600 characters: ${protocol.length}`);
+	assert.ok(protocol.length <= 3_700, `protocol exceeded 3,700 characters: ${protocol.length}`);
 	const bootstrapProtocol = stateFlowProtocol(true);
 	assert.match(bootstrapProtocol, /BOOTSTRAP RUN/);
-	assert.ok(bootstrapProtocol.length <= 2_800, `bootstrap protocol exceeded 2,800 characters: ${bootstrapProtocol.length}`);
+	assert.ok(bootstrapProtocol.length <= 3_900, `bootstrap protocol exceeded 3,900 characters: ${bootstrapProtocol.length}`);
+});
+
+test("requires continuation evidence and reconciliation without imposing memory metadata", () => {
+	for (const bootstrap of [false, true]) {
+		const protocol = stateFlowProtocol(bootstrap);
+		assert.match(protocol, /active constraints, unresolved questions, consequential negative results, and the next discriminating check/);
+		assert.match(protocol, /Distinguish observations, user requirements, decisions, and hypotheses/);
+		assert.match(protocol, /never promote assistant conclusions to user requirements/);
+		assert.match(protocol, /source locators and validity conditions, not metadata on every value/);
+		assert.match(protocol, /rejection reasons and reconsideration conditions/);
+		assert.match(protocol, /Reconcile contradictions using evidence or user clarification/);
+		assert.match(protocol, /unsupported claims must not overwrite established constraints or observations/);
+		assert.match(protocol, /retain decision-relevant hypotheses as uncertain/);
+	}
+});
+
+test("requires targeted reality checks without claiming rollback or routine Skill rereads", () => {
+	for (const bootstrap of [false, true]) {
+		const protocol = stateFlowProtocol(bootstrap);
+		assert.match(protocol, /working records last observations, not a live workspace/);
+		assert.match(protocol, /Revalidate volatile facts before consequential actions/);
+		assert.match(protocol, /After interruption or branch navigation, inspect relevant external effects before repeating operations/);
+		assert.match(protocol, /failed state commits and restored memory do not undo tool effects/);
+		assert.match(protocol, /If evidence is unavailable, retain uncertainty and the next check/);
+		assert.match(protocol, /never infer success or absence of effects from missing memory/);
+		assert.match(protocol, /Revalidation is targeted, not routine Skill rereading/);
+	}
 });
 
 test("builds a bounded retry instruction without owning retry state", () => {
