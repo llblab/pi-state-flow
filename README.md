@@ -156,6 +156,7 @@ The normative protocol remains in the system prompt throughout a tool/retry chai
 
 - State commits exactly once per successful complete agent run, at terminal `message_end`/`turn_end`.
 - Tool-bearing responses do not require or commit patches and retain ordinary Pi tool behavior, including multiple sequential calls. The runtime removes an accidental leading terminal envelope only when its JSON, fields, separator, and non-empty response are all structurally valid; malformed or quoted examples remain untouched.
+- Terminal answers cannot contain another complete State Flow comment, even inside a fenced code block or inline code: duplicate detection scans the entire answer body, not Markdown structure. When explaining the protocol while State Flow is enabled, describe the fields or show plain JSON without the HTML comment delimiters. The literal envelope examples in this README are documentation, not valid content to copy into a terminal answer body.
 - A failed tool remains in the current run trajectory for ordinary model reconciliation before terminal commit.
 - If a run never reaches a valid terminal handoff, its external tool effects may exist while persistent State Flow state remains at the previous commit.
 - The terminal envelope exists in ordinary assistant text until `message_end`; `message_update`, RPC, JSON, or other streaming consumers can observe it. Never place secrets in State Flow state.
@@ -172,6 +173,8 @@ The normative protocol remains in the system prompt throughout a tool/retry chai
 npm install
 npm run validate
 ```
+
+Validation covers TypeScript checking, automated tests, and an extension import smoke check. Lifecycle tests use a mock Pi event harness; they do not establish behavior under the real Pi scheduler, queued prompts, abort/compaction interactions, or combinations of extensions. Those scenarios still need integration checks. Structural patch validation also cannot prove that a handoff preserved every important requirement or compiled a Skill faithfully.
 
 ## Project status
 

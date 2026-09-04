@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3: Document protocol and validation limitations
+
+- Document that duplicate-comment detection also rejects literal State Flow envelope examples inside fenced or inline code in terminal answers, and provide a plain-JSON workaround.
+- Clarify that mock lifecycle tests are not real Pi scheduler integration checks and that structural validation cannot guarantee semantic memory retention.
+- No runtime behavior changes.
+
 ## 0.2.2: README structure hotfix
 
 - Separate installation from usage, remove the redundant quick-start section, and move architecture details after the user-facing documentation.
