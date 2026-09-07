@@ -1,4 +1,14 @@
-import { isObject, type JsonObject } from "./json.ts";
+import { readFileSync } from "node:fs";
+import {
+	hashArtifactSource,
+	isArtifactHash,
+	type ArtifactMetadata,
+	type ArtifactRegistry,
+} from "./artifact.ts";
+import { canonicalJson, isObject, type JsonObject, type JsonValue } from "./json.ts";
+import type { MaterializedState } from "./state.ts";
+
+export const SKILL_ARTIFACT_COMPILER = "skill-artifact-v1";
 
 function hasContent(value: unknown): boolean {
 	if (typeof value === "string") return value.trim().length > 0;
@@ -7,9 +17,70 @@ function hasContent(value: unknown): boolean {
 	return value !== undefined && value !== null;
 }
 
-export function hasCompiledSkill(contract: JsonObject, source: string): boolean {
-	if (!isObject(contract.compiled_skills)) return false;
-	return hasContent(contract.compiled_skills[source]);
+export function hasCompiledSkillArtifact(
+	artifacts: ArtifactRegistry,
+	source: string,
+	expectedHash?: string,
+): boolean {
+	const metadata = artifacts[source];
+	return isObject(metadata)
+		&& metadata.kind === "skill"
+		&& metadata.compiler === SKILL_ARTIFACT_COMPILER
+		&& (expectedHash === undefined || metadata.hash === expectedHash)
+		&& isObject(metadata.compilation)
+		&& hasContent(metadata.compilation);
+}
+
+export type SkillSourceHasher = (source: string) => string;
+
+export function hashSkillSource(source: string): string {
+	return hashArtifactSource(readFileSync(source));
+}
+
+function legacyCompilation(value: JsonValue): JsonObject | undefined {
+	if (!hasContent(value)) return undefined;
+	return isObject(value) ? structuredClone(value) : { value: structuredClone(value) };
+}
+
+/** Move the retired contract store into source-addressed Skill artifacts. */
+export function migrateLegacySkillCompilations(
+	state: MaterializedState,
+	hasher: SkillSourceHasher = hashSkillSource,
+): MaterializedState {
+	if (!isObject(state.contract.compiled_skills)) return structuredClone(state);
+	const legacy = state.contract.compiled_skills;
+	const next = structuredClone(state);
+	delete next.contract.compiled_skills;
+	for (const [source, value] of Object.entries(legacy)) {
+		const compilation = legacyCompilation(value);
+		if (!compilation) continue;
+		let hash: string;
+		let verified = true;
+		try {
+			hash = hasher(source);
+			if (!isArtifactHash(hash)) throw new Error("invalid source hash");
+		} catch {
+			// Preserve useful legacy behavior while ensuring a later observable source
+			// identity normally invalidates this explicitly unverified fallback.
+			hash = hashArtifactSource(canonicalJson({ source, compilation }));
+			verified = false;
+		}
+		const metadata: ArtifactMetadata = {
+			description: `Compiled operational guidance for the Skill at ${source}`,
+			hash,
+			compiler: SKILL_ARTIFACT_COMPILER,
+			kind: "skill",
+			compilation,
+			...(verified ? {} : { source_hash_verified: false }),
+		};
+		Object.defineProperty(next.artifacts, source, {
+			value: metadata,
+			enumerable: true,
+			configurable: true,
+			writable: true,
+		});
+	}
+	return next;
 }
 
 export function skillPathFromRead(toolName: unknown, args: unknown): string | undefined {
@@ -17,15 +88,26 @@ export function skillPathFromRead(toolName: unknown, args: unknown): string | un
 	return /(^|[\\/])SKILL\.md$/.test(args.path) ? args.path : undefined;
 }
 
+export interface SuccessfulSkillRead {
+	path: string;
+	hash?: string;
+	error?: string;
+}
+
 interface PendingRead {
 	toolName: string;
 	args: unknown;
 }
 
-/** Correlates Pi's mutable tool lifecycle without exposing runtime event objects. */
+/** Correlates Pi's mutable tool lifecycle and captures trusted source identity. */
 export class SkillReadTracker {
-	readonly successful = new Set<string>();
+	readonly successful = new Map<string, SuccessfulSkillRead>();
 	readonly #pending = new Map<string, PendingRead>();
+	readonly hashSource: SkillSourceHasher;
+
+	constructor(hashSource: SkillSourceHasher = hashSkillSource) {
+		this.hashSource = hashSource;
+	}
 
 	clear(): void {
 		this.successful.clear();
@@ -45,7 +127,17 @@ export class SkillReadTracker {
 		this.#pending.delete(toolCallId);
 		if (isError || !pending || toolName !== pending.toolName) return;
 		const source = skillPathFromRead(pending.toolName, pending.args);
-		if (source) this.successful.add(source);
+		if (!source) return;
+		try {
+			const hash = this.hashSource(source);
+			if (!isArtifactHash(hash)) throw new Error("hasher returned a non-canonical SHA-256 identity");
+			this.successful.set(source, { path: source, hash });
+		} catch (error) {
+			this.successful.set(source, {
+				path: source,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	#record(toolCallId: string, toolName: string, args: unknown): void {

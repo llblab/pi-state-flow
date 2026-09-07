@@ -1,0 +1,42 @@
+# Temporal acceptance
+
+The numbering below follows the twenty required tests in the temporal design correction. This is a maintained property-to-test map, not a second backlog or a substitute for running tests. Paths and quoted test names refer to a source checkout; tests are not shipped in the npm runtime package.
+
+## Required properties and witnesses
+
+1. **Zero patches:** `tests/temporal.test.ts` — “zero patches preserve the initial materialization without fabricating a past” compares current state with the checkpoint and rejects invented prior history.
+2. **One patch:** `tests/temporal.test.ts` — “one patch shifts current to history and reads return detached materializations” checks new current state and the preceding checkpoint state.
+3. **Seven patches:** `tests/temporal.test.ts` — “seven patches and repeated eighth-patch folding preserve every hot state exactly” compares every effective/scoped offset with retained snapshots at seven transitions.
+4. **Eighth-patch folding:** The same test explicitly checks checkpoint advancement through T1, its absorbed value, and the retained T2–T8 tail, alongside every hot offset.
+5. **Repeated folding:** The same test repeats through forty transitions. `tests/git.test.ts` — “temporal Git writer preserves all hot states through sparse folding and cold revision reads” exercises persisted representation too.
+6. **Sparse scopes share one target:** `tests/temporal.test.ts` — “sparse scope patches use effective boundaries, not each scope's mutation count” reproduces the T181–T184 example.
+7. **CWD indexing is not local-patch indexing:** That sparse test explicitly asserts both CWD offsets 1 and 2 equal C′. `tests/extension.test.ts` — “read_state lazily projects all hot offsets and scopes at one boundary without publication or Git calls” checks all 32 offset/scope combinations.
+8. **Shared multi-scope identity:** `tests/transition.test.ts` — “publishes one exact multi-scope replay cohort without explanatory windows or current-state DTOs” verifies one identity across changed scope records and exact replay.
+9. **Unchanged scopes stay stable:** The sparse temporal example checks global state at a boundary where only CWD/session change; “true no-ops do not enter history while response-only changes do” also checks that an unchanged session receives no new patch.
+10. **Historical deletion overlay:** `tests/temporal.test.ts` — “mixed sparse changes and deletion overlays match an independent snapshot oracle through compaction” explicitly checks session → CWD → global fallback and retained historical values.
+11. **Barrier shifts current to offset 1:** `tests/integration.test.ts` — “real Pi patch_state barriers rematerialize every scope before the next inference” observes the predecessor immediately after a barrier.
+12. **Next inference sees new current state:** The same real-Pi test inspects actual model-input projections after session, CWD, and global barriers. “real Pi reads prior scoped state lazily after a barrier and rejects offset eight without a transition” adds model-tool access to the predecessor.
+13. **No automatic old full-state duplication:** `tests/context.test.ts` — “projects only the latest seven compact accepted transitions” rejects full-state records in transition context. The real-Pi barrier test requires exactly one current runtime projection per inference. Explicitly requested history remains ordinary tool-result trajectory, not eager snapshot injection.
+14. **Terminal changes are transitions:** `tests/terminal.test.ts` — “ordinary terminal answers commit once without retries and rotate the next request” and “reconciles response state with the finalized message after later handlers” verify accepted response persistence and replay.
+15. **True terminal no-op creates no fake history:** `tests/terminal.test.ts` — “identical finalized terminal state completes the runtime lifecycle without fake semantic history” checks unchanged semantic lineage/tails/step. Runtime lifecycle metadata may still change; omitting a memory patch is not a no-op when response changes.
+16. **Offset eight is outside hot history:** `tests/temporal.test.ts` — “hot range and unproven pre-migration history are explicit read boundaries”; the real-Pi history-reader test also exercises native tool rejection without a transition.
+17. **Cold Git history remains recoverable:** `tests/git.test.ts` — “temporal Git writer preserves all hot states through sparse folding and cold revision reads” loads older committed states without moving the worktree.
+18. **Tree/resume select the correct lineage:** `tests/integration.test.ts` — “real Pi preserves branch-local state through compaction, tree navigation, stop, and restart” and “real Pi old tree branch stop and resume preserve selected semantics without rewinding shared files”.
+19. **Stop changes config, not semantic history:** `tests/git.test.ts` — “session config/meta publish atomically with temporal files and config-only stop creates no semantic step”; `tests/runtime.test.ts` verifies old-branch stop without semantic writes and failed-restore stop/resume.
+20. **Lossless current-state migration:** `tests/migration.test.ts` — “migration anchors exact current materializations and never replays explanatory journals”; `tests/git.test.ts` — “migrates all three current snapshots in one isolated commit without losing semantic or cold history”; runtime tests cover revision-linked migration with malformed explanatory history.
+
+## Additional preservation boundaries
+
+- `tests/durable.test.ts`, `tests/git.test.ts`, and `tests/migration.test.ts` cover owned regular files, raw-byte rollback, prepared-output receipts, stale/omitted-scope CAS, linked-worktree publication exclusion, unrelated staging, and exact-commit push retry.
+- `tests/recovery.test.ts` and `tests/runtime.test.ts` distinguish invalid immutable targets from transient publication failures, preserve checkpoint provenance, and prevent invalid-only recovery from becoming permission to replace runtime.
+- `tests/context.test.ts` and `tests/extension.test.ts` prohibit process queries during ordinary context/history reads. `tests/transition.test.ts` rejects stale staging even when semantic values coincide across different causal boundaries.
+- `tests/status.test.ts` distinguishes selected temporal history depth from retained per-scope tails and unavailable materialization from an empty state.
+- `tests/storage.test.ts` covers Git absence, exact file-cohort references, file CAS/rollback and shared writer exclusion. `tests/runtime.test.ts` and the native Pi Git-absent lifecycle test cover file-pointer restart, immediate barriers, finalized response, config-only stop, and unavailable-reference provenance. File-only mode supplies current/hot state; Git-dependent cold and arbitrary branch recovery require Git and the original committed objects.
+- File-to-Git tests in `tests/storage.test.ts`, `tests/runtime.test.ts` and the native Pi lifecycle cover full-cohort adoption over unborn/stale HEAD, exact inherited bytes, unchanged semantic step/hot history, rollback, staging preservation and subsequent configured-remote publication. `tests/git.test.ts` rejects omitted uncommitted streams; working-tree equality alone cannot prove a Git commit contains the selected state.
+- `tests/config.test.ts` covers optional agent configuration, path precedence/expansion, invalid input, load-time caching and read-only behavior. Session tests and native Pi distinguish configured new-session auto-start from branch-local resume/tree/stop. The global default is manual; CWD materialization alone no longer grants automatic activation.
+
+## Validation and limits
+
+Run `npm run validate` in the source checkout. Run context/DAG validation and `npm pack --dry-run --ignore-scripts` for documentation, dependency direction, and package inventory after an applicable full validation.
+
+Real-Pi tests use the actual Pi SDK and native tool loop with a deterministic faux model and temporary Git repositories. They do not prove that an unconstrained model always follows the memory protocol, nor do they migrate production Knowledge or publish the real repository. Complete native trace remains available; normal model projection retains only the required active context. Cooperative locking and conflict preservation are not kernel-atomic multi-file transactions against nonparticipating writers. Test counts do not establish exhaustive equivalence with every removed predecessor assertion.

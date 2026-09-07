@@ -1,8 +1,8 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
-  "description": "State Flow terminal-handoff runtime for Pi, inspired by SKILL.state",
+  "description": "Incremental scoped state/context compiler for Pi, inspired by SKILL.state",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -20,6 +20,7 @@
   "files": [
     "index.ts",
     "lib",
+    "docs",
     "README.md",
     "CHANGELOG.md",
     "BACKLOG.md",
@@ -46,6 +47,7 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "^0.84.4",
+    "@earendil-works/pi-ai": "^0.84.4",
     "@earendil-works/pi-coding-agent": "^0.84.4"
   },
   "devDependencies": {

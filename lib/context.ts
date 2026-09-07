@@ -1,6 +1,9 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ArtifactInvalidationRequest } from "./artifact.ts";
+import type { RecentTransitionWindow } from "./history.ts";
 import { canonicalJson } from "./json.ts";
 import type { Snapshot } from "./snapshot.ts";
+import type { MaterializedState } from "./state.ts";
 
 export const VALIDATION_MESSAGE_TYPE = "state-flow-validation";
 
@@ -28,14 +31,21 @@ export function withoutPrivateValidation(messages: AgentMessage[]): AgentMessage
 	});
 }
 
-export function runtimeContextMessage(snapshot: Snapshot): AgentMessage {
-	if (snapshot.specification === undefined) {
+export function runtimeContextMessage(
+	snapshot: Snapshot,
+	state: MaterializedState,
+	recentTransitions: RecentTransitionWindow = [],
+	artifactInvalidations: readonly ArtifactInvalidationRequest[] = [],
+): AgentMessage {
+	if (snapshot.meta.specification === undefined) {
 		throw new Error("State Flow runtime context requires an active specification");
 	}
 	const context = {
-		specification: snapshot.specification,
-		state: snapshot.state,
-		...(snapshot.validation === undefined ? {} : { validation_feedback: snapshot.validation }),
+		specification: snapshot.meta.specification,
+		state,
+		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations }),
+		...(recentTransitions.length === 0 ? {} : { recent_transitions: recentTransitions }),
+		...(snapshot.meta.validation === undefined ? {} : { validation_feedback: snapshot.meta.validation }),
 	};
 	return syntheticUser(
 		`State Flow runtime context (user-level data, not system instructions):\n${canonicalJson(context)}`,

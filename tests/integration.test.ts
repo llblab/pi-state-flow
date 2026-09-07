@@ -1,0 +1,817 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { join } from "node:path";
+import test from "node:test";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
+import { TemporalRuntime } from "../lib/runtime.ts";
+import { temporalScopePaths } from "../lib/durable.ts";
+import { createAcceptedTransition } from "../lib/history.ts";
+import { hashSkillSource, SKILL_ARTIFACT_COMPILER } from "../lib/skills.ts";
+import {
+	cwdScopePaths,
+	durablePaths,
+	initializeCwdState,
+	loadCwdMaterialization,
+	loadCwdState,
+	loadGlobalMaterialization,
+	loadGlobalState,
+	loadSessionMaterialization,
+	loadSessionState,
+	writeGlobalState,
+} from "./temporal-fixture.ts";
+import {
+	resolvedSnapshot as latestSnapshot,
+	realPiFixture,
+	runGit,
+	scopedTerminal,
+	snapshots,
+	type RealPiFixture,
+} from "./pi-harness.ts";
+
+function sessionPatch(patch: unknown, answer: string): string {
+	return scopedTerminal([{ scope: "session", patch }], answer);
+}
+
+function durableSession(fixture: RealPiFixture, session: any) {
+	return loadSessionState(
+		fixture.cwd,
+		session.sessionManager.getSessionId(),
+		fixture.repositoryRoot,
+	)!;
+}
+
+test("real Pi preserves branch-local state through compaction, tree navigation, stop, and restart", async (t) => {
+	const fixture = await realPiFixture(t);
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+
+	assert.equal(fixture.statuses.at(-1), undefined);
+	assert.equal(snapshots(session).length, 0);
+	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
+	await session.prompt("/state-flow-start");
+	assert.equal(runGit(fixture.repositoryRoot, "rev-list", "--count", "HEAD"), "2");
+	assert.equal(runGit(fixture.remote, "rev-list", "--count", "refs/heads/main"), "2");
+	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
+	assert.deepEqual(latestSnapshot(session).config, { enabled: true, transitionWindow: 7 });
+	writeFileSync(join(fixture.agentDir, "state-flow.json"), JSON.stringify({ autoStart: true }));
+	const nextSession = await fixture.createSession("new");
+	assert.equal(latestSnapshot(nextSession).config.enabled, true);
+	assert.equal(nextSession.getActiveToolNames().includes("patch_state"), true);
+	assert.equal(latestSnapshot(nextSession).meta.step, 0);
+	nextSession.dispose();
+
+	fixture.faux.setResponses([fauxAssistantMessage(sessionPatch({
+		contract: { constraint: "preserve branch causality" },
+		working: { nextCheck: "inspect active branch" },
+	}, "Base branch saved."))]);
+	await session.prompt("Create the base checkpoint");
+	const base = snapshots(session).at(-1)!;
+	assert.equal(latestSnapshot(session, base.data).meta.step, 1);
+
+	fixture.faux.setResponses([fauxAssistantMessage("Compacted State Flow integration history.")]);
+	const compacted = await session.compact("Keep the State Flow checkpoint");
+	assert.match(compacted.summary, /Compacted State Flow integration history/);
+	assert.equal(session.sessionManager.getBranch().some((entry) => entry.type === "compaction"), true);
+
+	fixture.faux.setResponses([fauxAssistantMessage(sessionPatch({
+		working: { branch: "future", nextCheck: "return to base" },
+	}, "Future branch saved."))]);
+	await session.prompt("Advance the future branch");
+	await session.prompt("/state-flow-stop");
+	const stopped = snapshots(session).at(-1)!;
+	assert.equal(latestSnapshot(session, stopped.data).config.enabled, false);
+	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
+	assert.equal(latestSnapshot(session, stopped.data).meta.step, 2);
+	assert.equal(Object.hasOwn(stopped.data, "state"), false);
+	assert.equal(durableSession(fixture, session).working.branch, "future");
+
+	await session.navigateTree(base.id, { summarize: false });
+	assert.equal(latestSnapshot(session).config.enabled, true);
+	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
+	assert.equal(latestSnapshot(session).meta.step, 1);
+
+	await session.navigateTree(stopped.id, { summarize: false });
+	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
+	assert.equal(durableSession(fixture, session).contract.constraint, "preserve branch causality");
+	assert.equal(durableSession(fixture, session).working.branch, "future");
+
+	const sessionFile = session.sessionFile!;
+	session.dispose();
+	const restarted = await fixture.createSession("resume", SessionManager.open(sessionFile, fixture.sessionDir));
+	t.after(() => restarted.dispose());
+	assert.equal(latestSnapshot(restarted).config.enabled, false);
+	assert.equal(restarted.getActiveToolNames().includes("patch_state"), false);
+	assert.equal(latestSnapshot(restarted).meta.step, 2);
+	assert.equal(durableSession(fixture, restarted).working.nextCheck, "return to base");
+});
+
+test("real Pi can restart an early disabled marker as a new origin while preserving shared streams and later branch history", async (t) => {
+	const fixture = await realPiFixture(t);
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+	await session.prompt("/state-flow-stop");
+	const marker = snapshots(session).at(-1)!;
+	assert.deepEqual(marker.data, { disabled: true });
+	await session.prompt("/state-flow-start");
+	fixture.faux.setResponses([fauxAssistantMessage(scopedTerminal([
+		{ scope: "global", patch: { working: { sharedGlobal: "keep" } } },
+		{ scope: "cwd", patch: { working: { sharedCwd: "keep" } } },
+		{ scope: "session", patch: { working: { laterPrivate: "keep in cold history" } } },
+	], "Later branch"))]);
+	await session.prompt("Save later branch");
+	const later = snapshots(session).at(-1)!;
+	const shared = ["global", "cwd"].flatMap((scope) => {
+		const pair = temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), scope as "global" | "cwd", fixture.repositoryRoot);
+		return [pair.checkpoint, pair.patches].map((path) => ({ path, bytes: readFileSync(path) }));
+	});
+	await session.navigateTree(marker.id, { summarize: false });
+	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
+	await session.prompt("/state-flow-start");
+	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
+	assert.equal(latestSnapshot(session).meta.step, 0);
+	assert.deepEqual(fixture.readState(session, 0, "session"), { artifacts: {}, contract: {}, working: {}, response: "" });
+	assert.equal(fixture.readState(session).working.sharedGlobal, "keep");
+	assert.equal(fixture.readState(session).working.sharedCwd, "keep");
+	assert.throws(() => fixture.readState(session, 1), /predates the proven temporal origin/);
+	for (const { path, bytes } of shared) assert.deepEqual(readFileSync(path), bytes);
+	await session.navigateTree(later.id, { summarize: false });
+	assert.equal(fixture.readState(session).working.laterPrivate, "keep in cold history");
+});
+
+test("real Pi isolates same-CWD sessions and retains seven patches per scope", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const first = await fixture.createSession("new");
+	t.after(() => first.dispose());
+	await first.prompt("/state-flow-start");
+	const firstId = first.sessionManager.getSessionId();
+	fixture.faux.setResponses(Array.from({ length: 9 }, (_, index) => fauxAssistantMessage(scopedTerminal([
+		{ scope: "global", patch: { working: { globalIndex: index } } },
+		{ scope: "cwd", patch: { working: { cwdIndex: index } } },
+		{ scope: "session", patch: { working: { owner: "first", sessionIndex: index } } },
+	], `Iteration ${index}.`))));
+	for (let index = 0; index < 9; index++) await first.prompt(`Iteration ${index}`);
+
+	const sharedPaths = ["checkpoint.json", "patches.jsonl", ...["checkpoint.json", "patches.jsonl"].map((name) => join(cwdScopePaths(fixture.cwd, fixture.repositoryRoot).directory, name))];
+	const sharedBefore = sharedPaths.map((path) => readFileSync(path.startsWith("/") ? path : join(fixture.repositoryRoot, path)));
+	const second = await fixture.createSession("new");
+	t.after(() => second.dispose());
+	assert.deepEqual(sharedPaths.map((path) => readFileSync(path.startsWith("/") ? path : join(fixture.repositoryRoot, path))), sharedBefore);
+	assert.throws(() => fixture.readState(second, 1), /predates the proven temporal origin/);
+	const secondId = second.sessionManager.getSessionId();
+	assert.notEqual(firstId, secondId);
+	assert.equal(loadSessionState(fixture.cwd, firstId, fixture.repositoryRoot)!.working.owner, "first");
+	assert.deepEqual(loadSessionState(fixture.cwd, secondId, fixture.repositoryRoot), {
+		artifacts: {}, contract: {}, working: {}, response: "",
+	});
+	for (const [scope, materialization] of [
+		["global", loadGlobalMaterialization(fixture.repositoryRoot)],
+		["cwd", loadCwdMaterialization(fixture.cwd, fixture.repositoryRoot)],
+		["session", loadSessionMaterialization(fixture.cwd, firstId, fixture.repositoryRoot)],
+	] as const) {
+		assert.equal(materialization!.recentTransitions.length, 7);
+		assert.ok(materialization!.recentTransitions.every(({ transitions }) =>
+			transitions.length === 1 && transitions[0]!.scope === scope));
+	}
+	for (const { data } of snapshots(first)) {
+		assert.deepEqual(Object.keys(data), ["revision"]);
+		assert.match((data as { revision: string }).revision, /^[0-9a-f]{40}$/);
+	}
+});
+
+test("real Pi validation retry and abort preserve exactly one accepted semantic transition", async (t) => {
+	const fixture = await realPiFixture(t, { tokensPerSecond: 2_000 });
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+	await session.prompt("/state-flow-start");
+
+	fixture.faux.setResponses([
+		fauxAssistantMessage("<!-- state_flow invalid -->"),
+		fauxAssistantMessage(sessionPatch({ working: { accepted: "after-retry" } }, "Recovered.")),
+	]);
+	await session.prompt("Exercise terminal retry");
+	assert.equal(fixture.faux.state.callCount, 2);
+	assert.equal(latestSnapshot(session).meta.step, 1);
+	assert.equal(durableSession(fixture, session).working.accepted, "after-retry");
+	assert.equal(session.getLastAssistantText(), "Recovered.");
+
+	const beforeAbort = latestSnapshot(session).meta.step;
+	let aborted = false;
+	const unsubscribe = session.subscribe((event) => {
+		if (!aborted && event.type === "message_update") {
+			aborted = true;
+			session.agent.abort();
+		}
+	});
+	fixture.faux.setResponses([fauxAssistantMessage("This response must not commit. ".repeat(500))]);
+	await session.prompt("Abort this run");
+	unsubscribe();
+	assert.equal(aborted, true);
+	assert.equal(latestSnapshot(session).meta.step, beforeAbort);
+	assert.equal(durableSession(fixture, session).working.accepted, "after-retry");
+
+	fixture.faux.setResponses([
+		fauxAssistantMessage(scopedTerminal([{ scope: "session", patch: { meta: { step: 999 } } }], "Forbidden.")),
+		fauxAssistantMessage("Runtime fields stayed protected."),
+	]);
+	await session.prompt("Try and recover from a runtime-owned patch");
+	assert.equal(fixture.faux.state.callCount, 5);
+	assert.equal(latestSnapshot(session).config.enabled, true);
+	assert.equal(latestSnapshot(session).meta.step, beforeAbort + 1);
+	assert.equal(durableSession(fixture, session).working.accepted, "after-retry");
+});
+
+test("real Pi patch_state barriers rematerialize every scope before the next inference", async (t) => {
+	const fixture = await realPiFixture(t);
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+	await session.prompt("/state-flow-start");
+
+	function runtime(context: any): any {
+		const projections = context.messages
+			.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+			.map((block: any) => block.text)
+			.filter((text: unknown) => typeof text === "string" && text.startsWith("State Flow runtime context"));
+		assert.equal(projections.length, 1, "each inference receives exactly one current State Flow projection");
+		return JSON.parse(projections[0].slice(projections[0].indexOf("\n") + 1));
+	}
+
+	fixture.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", {
+			scope: "session",
+			patch: { working: { sessionCheckpoint: "verified" } },
+		}), { stopReason: "toolUse" }),
+		(context) => {
+			assert.equal(runtime(context).state.working.sessionCheckpoint, "verified");
+			assert.equal(fixture.readState(session, 1).working.sessionCheckpoint, undefined);
+			assert.equal(fixture.readState(session, 0, "session").working.sessionCheckpoint, "verified");
+			return fauxAssistantMessage(fauxToolCall("patch_state", {
+				scope: "cwd",
+				patch: { contract: { projectDecision: "retained" } },
+			}), { stopReason: "toolUse" });
+		},
+		(context) => {
+			const state = runtime(context).state;
+			assert.equal(state.working.sessionCheckpoint, "verified");
+			assert.equal(state.contract.projectDecision, "retained");
+			return fauxAssistantMessage(fauxToolCall("patch_state", {
+				scope: "global",
+				patch: { contract: { sharedDecision: "retained" } },
+			}), { stopReason: "toolUse" });
+		},
+		(context) => {
+			const state = runtime(context).state;
+			assert.equal(state.working.sessionCheckpoint, "verified");
+			assert.equal(state.contract.projectDecision, "retained");
+			assert.equal(state.contract.sharedDecision, "retained");
+			return fauxAssistantMessage("Barrier run complete.");
+		},
+	]);
+	await session.prompt("Materialize several established checkpoints");
+	assert.equal(fixture.faux.state.callCount, 4);
+	assert.equal(latestSnapshot(session).meta.step, 4);
+	assert.equal(durableSession(fixture, session).working.sessionCheckpoint, "verified");
+	assert.equal(durableSession(fixture, session).response, "Barrier run complete.");
+	assert.equal(fixture.readState(session, 1).response, "");
+	assert.throws(() => fixture.readState(session, 8), /0 to 7/);
+	assert.equal(loadCwdState(fixture.cwd, fixture.repositoryRoot)!.contract.projectDecision, "retained");
+	assert.equal(loadGlobalState(fixture.repositoryRoot)!.contract.sharedDecision, "retained");
+	assert.deepEqual(
+		snapshots(session).map(({ data }) => latestSnapshot(session, data).meta.step).filter((step, index, all) => index === 0 || step !== all[index - 1]),
+		[0, 1, 2, 3, 4],
+	);
+	const beforeNoop = loadSessionMaterialization(fixture.cwd, session.sessionManager.getSessionId(), fixture.repositoryRoot);
+	fixture.faux.setResponses([fauxAssistantMessage("Barrier run complete.")]);
+	await session.prompt("Confirm the same complete state");
+	assert.equal(latestSnapshot(session).meta.step, 4);
+	assert.deepEqual(loadSessionMaterialization(fixture.cwd, session.sessionManager.getSessionId(), fixture.repositoryRoot), beforeNoop);
+});
+
+test("real Pi reads prior scoped state lazily after a barrier and rejects offset eight without a transition", async (t) => {
+	const fixture = await realPiFixture(t);
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+	await session.prompt("/state-flow-start");
+	assert.equal(session.getActiveToolNames().includes("read_state"), true);
+	fixture.faux.setResponses([fauxAssistantMessage(sessionPatch({ working: { version: "old" } }, "Baseline."))]);
+	await session.prompt("Save the baseline");
+	let beforeReads: string;
+	let checkpointCount: number;
+	function projection(context: any) {
+		const messages = context.messages.filter((message: any) => message.content?.[0]?.text?.startsWith("State Flow runtime context"));
+		assert.equal(messages.length, 1);
+		const text = messages[0].content[0].text;
+		return JSON.parse(text.slice(text.indexOf("\n") + 1));
+	}
+	fixture.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { scope: "session", patch: { working: { version: "new" } } }), { stopReason: "toolUse" }),
+		(context) => {
+			assert.equal(projection(context).state.working.version, "new");
+			beforeReads = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
+			checkpointCount = snapshots(session).length;
+			return fauxAssistantMessage(fauxToolCall("read_state", { offset: 1, scope: "session" }, { id: "history-read" }), { stopReason: "toolUse" });
+		},
+		(context) => {
+			const result = context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === "history-read") as any;
+			assert.equal(result.isError, false);
+			const historical = JSON.parse(result.content[0].text);
+			assert.equal(historical.offset, 1);
+			assert.equal(historical.scope, "session");
+			assert.equal(historical.state.working.version, "old");
+			assert.equal(historical.state.response, "Baseline.");
+			assert.equal(projection(context).state.working.version, "new");
+			assert.equal(runGit(fixture.repositoryRoot, "rev-parse", "HEAD"), beforeReads);
+			assert.equal(snapshots(session).length, checkpointCount);
+			assert.equal(latestSnapshot(session).meta.step, 2);
+			return fauxAssistantMessage(fauxToolCall("read_state", { offset: 8 }, { id: "unavailable-read" }), { stopReason: "toolUse" });
+		},
+		(context) => {
+			const result = context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === "unavailable-read") as any;
+			assert.equal(result.isError, true);
+			assert.equal(runGit(fixture.repositoryRoot, "rev-parse", "HEAD"), beforeReads);
+			assert.equal(snapshots(session).length, checkpointCount);
+			return fauxAssistantMessage("History checked.");
+		},
+	]);
+	await session.prompt("Advance state, then inspect its predecessor");
+	assert.equal(latestSnapshot(session).meta.step, 3, "only baseline, barrier and terminal response advance history");
+	assert.equal(fixture.readState(session).working.version, "new");
+	assert.equal(fixture.readState(session, 1).response, "Baseline.");
+	fixture.faux.setResponses([(context) => {
+		assert.equal(context.messages.some((message: any) => message.role === "toolResult" && message.toolCallId === "history-read"), false);
+		return fauxAssistantMessage("Next run.");
+	}]);
+	await session.prompt("Begin a separate run without replaying old tool context");
+	const retained = session.sessionManager.getEntries().find((entry) => entry.type === "message"
+		&& entry.message.role === "toolResult" && entry.message.toolCallId === "history-read");
+	assert.ok(retained?.type === "message" && retained.message.role === "toolResult");
+	const content = retained.message.content[0];
+	assert.ok(content?.type === "text");
+	assert.equal(JSON.parse(content.text).state.working.version, "old", "full native trace survives model-context projection");
+	const beforeStatus = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
+	await session.prompt("/state-flow-status");
+	assert.match(fixture.notifications.at(-1)!, /Hot history: offsets 0\.\.4; maximum depth 7/);
+	assert.match(fixture.notifications.at(-1)!, /Retained patch tails: global 0; CWD 0; session 4/);
+	assert.equal(runGit(fixture.repositoryRoot, "rev-parse", "HEAD"), beforeStatus);
+});
+
+test("real Pi executes only patch_state when a response also proposes a sibling tool", async (t) => {
+	const fixture = await realPiFixture(t);
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+	await session.prompt("/state-flow-start");
+	fixture.faux.setResponses([
+		fauxAssistantMessage([
+			fauxToolCall("read", { path: join(fixture.cwd, "must-not-run.md") }, { id: "blocked-read" }),
+			fauxToolCall("read_state", { offset: 0 }, { id: "blocked-history" }),
+			fauxToolCall("patch_state", {
+				scope: "session",
+				patch: { working: { barrier: "accepted" } },
+			}, { id: "accepted-patch" }),
+		], { stopReason: "toolUse" }),
+		(context) => {
+			const results = context.messages.filter((message: any) => message.role === "toolResult") as any[];
+			assert.equal(results.length, 3);
+			assert.equal(results[0].toolCallId, "blocked-read");
+			assert.equal(results[0].isError, true);
+			assert.match(results[0].content[0].text, /patch_state barrier/);
+			assert.equal(results[1].toolCallId, "blocked-history");
+			assert.equal(results[1].isError, true);
+			assert.match(results[1].content[0].text, /patch_state barrier/);
+			assert.equal(results[2].toolCallId, "accepted-patch");
+			assert.equal(results[2].isError, false);
+			assert.match(results[2].content[0].text, /State materialized at session scope/);
+			return fauxAssistantMessage("Barrier enforced.");
+		},
+	]);
+	await session.prompt("Patch and then reconsider any other action");
+	assert.equal(latestSnapshot(session).meta.step, 2);
+	assert.equal(durableSession(fixture, session).working.barrier, "accepted");
+	assert.equal(durableSession(fixture, session).response, "Barrier enforced.");
+});
+
+test("real Pi reconciles unrelated Knowledge history and contains a simultaneous durable writer", async (t) => {
+	const fixture = await realPiFixture(t);
+	const first = await fixture.createSession();
+	const second = await fixture.createSession();
+	t.after(() => first.dispose());
+	t.after(() => second.dispose());
+	await first.prompt("/state-flow-start");
+	await second.prompt("/state-flow-start");
+
+	writeFileSync(join(fixture.repositoryRoot, "independent.md"), "Independent Knowledge history.\n");
+	runGit(fixture.repositoryRoot, "add", "independent.md");
+	runGit(fixture.repositoryRoot, "commit", "-m", "knowledge: independent advance");
+	const knowledgeCommit = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
+
+	fixture.faux.setResponses([fauxAssistantMessage(scopedTerminal([{
+		scope: "cwd",
+		patch: { working: { writer: "first" } },
+	}], "First writer committed."))]);
+	await first.prompt("Commit after independent Knowledge history");
+	const firstCommit = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
+	assert.equal(runGit(fixture.repositoryRoot, "merge-base", firstCommit, knowledgeCommit), knowledgeCommit);
+	assert.equal(loadCwdState(fixture.cwd, fixture.repositoryRoot)!.working.writer, "first");
+
+	const conflicting = fauxAssistantMessage(scopedTerminal([{
+		scope: "cwd",
+		patch: { working: { writer: "second" } },
+	}], "Second writer attempted."));
+	fixture.faux.setResponses([conflicting, conflicting, conflicting, conflicting]);
+	await second.prompt("Attempt a simultaneous durable transition");
+	assert.equal(latestSnapshot(second).meta.step, 0);
+	assert.equal(latestSnapshot(second).config.enabled, true);
+	assert.equal(loadCwdState(fixture.cwd, fixture.repositoryRoot)!.working.writer, "first");
+	assert.equal(loadCwdMaterialization(fixture.cwd, fixture.repositoryRoot)!.recentTransitions.length, 1);
+	assert.match(fixture.notifications.at(-1)!, /last committed state was preserved.*changed concurrently/i);
+});
+
+test("real Pi retries a persisted pending push after restart without duplicating the transition", async (t) => {
+	const fixture = await realPiFixture(t);
+	const session = await fixture.createSession();
+	await session.prompt("/state-flow-start");
+	const missingRemote = join(fixture.root, "missing.git");
+	runGit(fixture.repositoryRoot, "remote", "set-url", "origin", missingRemote);
+	fixture.faux.setResponses([fauxAssistantMessage(scopedTerminal([{
+		scope: "cwd",
+		patch: { working: { publication: "accepted-locally" } },
+	}], "Committed locally."))]);
+	await session.prompt("Persist a durable transition");
+	const accepted = latestSnapshot(session);
+	const pendingCommit = accepted.meta.pendingPublication?.commit;
+	assert.ok(pendingCommit);
+	assert.equal(accepted.meta.step, 1);
+	assert.equal(runGit(fixture.repositoryRoot, "rev-parse", "HEAD"), pendingCommit);
+	const sessionFile = session.sessionFile!;
+	const countBeforeRestart = runGit(fixture.repositoryRoot, "rev-list", "--count", "HEAD");
+	session.dispose();
+
+	runGit(fixture.repositoryRoot, "remote", "set-url", "origin", fixture.remote);
+	const restarted = await fixture.createSession("resume", SessionManager.open(sessionFile, fixture.sessionDir));
+	t.after(() => restarted.dispose());
+	assert.equal(latestSnapshot(restarted).meta.pendingPublication, undefined);
+	assert.equal(latestSnapshot(restarted).meta.step, 1);
+	assert.equal(runGit(fixture.remote, "rev-parse", "refs/heads/main"), pendingCommit);
+	assert.equal(runGit(fixture.repositoryRoot, "rev-list", "--count", "HEAD"), countBeforeRestart);
+	assert.equal(loadCwdState(fixture.cwd, fixture.repositoryRoot)!.working.publication, "accepted-locally");
+});
+
+test("real Pi incrementally acquires only invalidated global Markdown and attaches trusted freshness", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const unchangedPath = join(fixture.agentDir, "knowledge", "unchanged.md");
+	const changedPath = join(fixture.agentDir, "knowledge", "changed.md");
+	writeFileSync(unchangedPath, "Unchanged routing guidance.\n");
+	writeFileSync(changedPath, "Original routing guidance.\n");
+	initializeCwdState(fixture.cwd, fixture.repositoryRoot);
+	const metadata = (path: string, description: string) => ({
+		description,
+		hash: hashArtifactSource(readFileSync(path)),
+		compiler: ORDINARY_ARTIFACT_COMPILER,
+		compiled_at: "2026-01-01T00:00:00.000Z",
+	});
+	writeGlobalState({
+		artifacts: {
+			[unchangedPath]: metadata(unchangedPath, "Stable unchanged guidance"),
+			[changedPath]: metadata(changedPath, "Original changed guidance"),
+		},
+		contract: {}, working: {}, response: "",
+	}, fixture.repositoryRoot);
+	const globalPaths = durablePaths(fixture.repositoryRoot);
+	const cwdPaths = cwdScopePaths(fixture.cwd, fixture.repositoryRoot);
+	runGit(
+		fixture.repositoryRoot,
+		"add",
+		globalPaths.globalState,
+		globalPaths.globalPatches,
+		cwdPaths.state,
+		cwdPaths.patches,
+	);
+	runGit(fixture.repositoryRoot, "commit", "-m", "state-flow: seed artifact registry");
+	runGit(fixture.repositoryRoot, "push", "origin", "main");
+
+	const runtime = (context: any) => {
+		const text = context.messages
+			.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+			.map((block: any) => block.text)
+			.find((text: unknown) => typeof text === "string" && text.startsWith("State Flow runtime context"));
+		assert.ok(text);
+		return JSON.parse(text.slice(text.indexOf("\n") + 1));
+	};
+
+	let beforeCalls = fixture.faux.state.callCount;
+	fixture.faux.setResponses([(context) => {
+		assert.equal(runtime(context).artifact_invalidations, undefined);
+		return fauxAssistantMessage("Fresh artifacts reused without source acquisition.");
+	}]);
+	const unchangedSession = await fixture.createSession("new");
+	await unchangedSession.prompt("Use the materialized artifact index");
+	assert.equal(fixture.faux.state.callCount - beforeCalls, 1);
+	unchangedSession.dispose();
+
+	writeFileSync(changedPath, "Changed routing guidance.\n");
+	beforeCalls = fixture.faux.state.callCount;
+	fixture.faux.setResponses([
+		(context) => {
+			assert.deepEqual(runtime(context).artifact_invalidations, [{
+				path: changedPath,
+				hash: hashArtifactSource("Changed routing guidance.\n"),
+				reason: "source-changed",
+			}]);
+			return fauxAssistantMessage(fauxToolCall("read", { path: changedPath }), { stopReason: "toolUse" });
+		},
+		fauxAssistantMessage(scopedTerminal([{
+			scope: "global",
+			patch: { artifacts: { [changedPath]: { description: "Updated routing guidance" } } },
+		}], "Changed artifact recompiled.")),
+	]);
+	const changedSession = await fixture.createSession("new");
+	await changedSession.prompt("Refresh invalidated artifacts");
+	assert.equal(fixture.faux.state.callCount - beforeCalls, 2);
+	changedSession.dispose();
+	const afterSourceChange = loadGlobalState(fixture.repositoryRoot)!;
+	assert.deepEqual(afterSourceChange.artifacts[unchangedPath], metadata(unchangedPath, "Stable unchanged guidance"));
+	assert.deepEqual(afterSourceChange.artifacts[changedPath], {
+		description: "Updated routing guidance",
+		hash: hashArtifactSource("Changed routing guidance.\n"),
+		compiler: ORDINARY_ARTIFACT_COMPILER,
+	});
+
+	const compilerStale = structuredClone(afterSourceChange);
+	compilerStale.artifacts[unchangedPath]!.compiler = "artifact-v0";
+	const compilerRuntime = new TemporalRuntime(fixture.cwd, changedSession.sessionManager.getSessionId(), fixture.repositoryRoot);
+	const compilerSnapshot = compilerRuntime.restore(latestSnapshot(changedSession).meta.durableBase!);
+	const compilerStates = compilerRuntime.states();
+	const compilerNext = { ...compilerStates, global: compilerStale };
+	compilerSnapshot.meta.step += 1;
+	compilerRuntime.publish(compilerSnapshot, true, createAcceptedTransition(compilerStates, compilerNext));
+	beforeCalls = fixture.faux.state.callCount;
+	fixture.faux.setResponses([
+		(context) => {
+			assert.deepEqual(runtime(context).artifact_invalidations, [{
+				path: unchangedPath,
+				hash: hashArtifactSource("Unchanged routing guidance.\n"),
+				reason: "compiler-changed",
+			}]);
+			return fauxAssistantMessage(fauxToolCall("read", { path: unchangedPath }), { stopReason: "toolUse" });
+		},
+		fauxAssistantMessage(scopedTerminal([{
+			scope: "global",
+			patch: { artifacts: { [unchangedPath]: { description: "Recompiled unchanged guidance" } } },
+		}], "Compiler-stale artifact recompiled.")),
+	]);
+	const compilerSession = await fixture.createSession("new");
+	t.after(() => compilerSession.dispose());
+	await compilerSession.prompt("Apply the current artifact compiler");
+	assert.equal(fixture.faux.state.callCount - beforeCalls, 2);
+	const afterCompilerChange = loadGlobalState(fixture.repositoryRoot)!;
+	assert.equal(afterCompilerChange.artifacts[unchangedPath]!.compiler, ORDINARY_ARTIFACT_COMPILER);
+	assert.equal(afterCompilerChange.artifacts[unchangedPath]!.hash, hashArtifactSource("Unchanged routing guidance.\n"));
+	assert.deepEqual(afterCompilerChange.artifacts[changedPath], afterSourceChange.artifacts[changedPath]);
+
+	// Removal is a deterministic runtime observation and needs no source-body read or model-authored compiler output.
+	rmSync(changedPath);
+	beforeCalls = fixture.faux.state.callCount;
+	fixture.faux.setResponses([(context) => {
+		assert.equal(runtime(context).artifact_invalidations, undefined);
+		return fauxAssistantMessage("Removed artifact no longer projected.");
+	}]);
+	const removalSession = await fixture.createSession("new");
+	t.after(() => removalSession.dispose());
+	await removalSession.prompt("Continue without the deleted source");
+	assert.equal(fixture.faux.state.callCount - beforeCalls, 1);
+	assert.equal(loadGlobalState(fixture.repositoryRoot)!.artifacts[changedPath], undefined);
+});
+
+test("a fresh real Pi agent continues from compact state and a runtime-compiled Skill artifact", async (t) => {
+	const fixture = await realPiFixture(t);
+	const skill = join(fixture.cwd, "skills", "continuation", "SKILL.md");
+	mkdirSync(join(fixture.cwd, "skills", "continuation"), { recursive: true });
+	writeFileSync(skill, "# Continuation\n\nPreserve the next discriminating check.\n", { flag: "wx" });
+	const session = await fixture.createSession();
+	await session.prompt("/state-flow-start");
+	fixture.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("read", { path: skill }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", {
+			scope: "cwd",
+			patch: {
+				artifacts: {
+					[skill]: {
+						description: "Continuation rules for evidence-preserving handoffs",
+						kind: "skill",
+						compilation: {
+							routing: "Use for resumed continuation checks",
+							constraints: ["Preserve the next discriminating check"],
+						},
+					},
+				},
+			},
+		}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(scopedTerminal([{
+			scope: "session",
+			patch: {
+				contract: {
+					activeConstraint: "never discard unresolved evidence",
+					rejectedApproach: { name: "guessing", reconsiderWhen: "new evidence exists" },
+				},
+				working: {
+					unresolved: "whether the resumed source changed",
+					nextCheck: "compare the retained source hash",
+				},
+			},
+		}], "Skill compiled.")),
+	]);
+	await session.prompt("OLD-CONVERSATION-MARKER acquire the continuation Skill");
+	const compiled = loadCwdState(fixture.cwd, fixture.repositoryRoot)!.artifacts[skill];
+	assert.equal(compiled.hash, hashSkillSource(skill));
+	assert.equal(compiled.compiler, SKILL_ARTIFACT_COMPILER);
+	assert.equal(compiled.compilation?.routing, "Use for resumed continuation checks");
+	const sessionFile = session.sessionFile!;
+	session.dispose();
+
+	let observedContext = "";
+	fixture.faux.setResponses([(context) => {
+		observedContext = JSON.stringify(context.messages);
+		return fauxAssistantMessage("Continuation context verified.");
+	}]);
+	const restarted = await fixture.createSession("resume", SessionManager.open(sessionFile, fixture.sessionDir));
+	t.after(() => restarted.dispose());
+	await restarted.prompt("Continue from retained state");
+	assert.match(observedContext, /never discard unresolved evidence/);
+	assert.match(observedContext, /guessing/);
+	assert.match(observedContext, /whether the resumed source changed/);
+	assert.match(observedContext, /compare the retained source hash/);
+	assert.match(observedContext, new RegExp(compiled.hash));
+	assert.doesNotMatch(observedContext, /OLD-CONVERSATION-MARKER/);
+});
+
+test("real Pi old tree branch stop and resume preserve selected semantics without rewinding shared files", async (t) => {
+	const fixture = await realPiFixture(t);
+	const session = await fixture.createSession();
+	await session.prompt("/state-flow-start");
+	const owned = runGit(fixture.repositoryRoot, "ls-tree", "-r", "--name-only", "HEAD").split("\n");
+	assert.equal(owned.length, 8);
+	assert.equal(owned.filter((path) => path.endsWith("checkpoint.json")).length, 3);
+	assert.equal(owned.filter((path) => path.endsWith("patches.jsonl")).length, 3);
+	assert.equal(owned.some((path) => path.endsWith("state.json")), false);
+	fixture.faux.setResponses([fauxAssistantMessage(scopedTerminal([
+		{ scope: "global", patch: { working: { branch: "old" } } },
+		{ scope: "session", patch: { working: { selected: "old" } } },
+	], "Old answer"))]);
+	await session.prompt("Old state");
+	const old = snapshots(session).at(-1)!;
+	fixture.faux.setResponses([fauxAssistantMessage(scopedTerminal([
+		{ scope: "global", patch: { working: { branch: "new" } } },
+		{ scope: "session", patch: { working: { selected: "new" } } },
+	], "New answer"))]);
+	await session.prompt("New state");
+	const before = owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("meta.json"))
+		.map((path) => readFileSync(join(fixture.repositoryRoot, path)));
+	await session.navigateTree(old.id, { summarize: false });
+	assert.equal(fixture.readState(session).working.selected, "old");
+	await session.prompt("/state-flow-stop");
+	const stopped = latestSnapshot(session);
+	assert.equal(stopped.meta.step, 1);
+	const after = owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("meta.json"))
+		.map((path) => readFileSync(join(fixture.repositoryRoot, path)));
+	assert.deepEqual(after, before);
+	const file = session.sessionFile!;
+	session.dispose();
+	const resumed = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
+	t.after(() => resumed.dispose());
+	assert.equal(latestSnapshot(resumed).config.enabled, false);
+	assert.equal(latestSnapshot(resumed).meta.pendingPublication, undefined);
+	assert.equal(fixture.readState(resumed).working.selected, "old");
+	assert.equal(fixture.readState(resumed).working.branch, "old");
+	assert.equal(fixture.readState(resumed, 1).response, "");
+	assert.deepEqual(owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("meta.json"))
+		.map((path) => readFileSync(join(fixture.repositoryRoot, path))), before);
+});
+
+test("real Pi persists without Git, resumes its file cohort and adopts Git without a semantic step", async (t) => {
+	const fixture = await realPiFixture(t, { initializeRepository: false });
+	const spawn = childProcess.spawnSync;
+	let probes = 0;
+	childProcess.spawnSync = ((command: string, args: string[]) => {
+		assert.equal(command, "git");
+		assert.deepEqual(args, ["--version"], "no repository operation is permitted without Git");
+		probes++;
+		return { status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT" }) };
+	}) as unknown as typeof spawn;
+	syncBuiltinESMExports();
+	t.after(() => { childProcess.spawnSync = spawn; syncBuiltinESMExports(); });
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
+	await session.prompt("/state-flow-start");
+	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
+	const current = (context: any) => {
+		const texts = context.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+			.map((block: any) => block.text).filter((text: unknown) => typeof text === "string" && text.startsWith("State Flow runtime context"));
+		assert.equal(texts.length, 1);
+		return JSON.parse(texts[0].slice(texts[0].indexOf("\n") + 1)).state;
+	};
+	fixture.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { scope: "cwd", patch: { working: { fileCwd: "visible" } } }), { stopReason: "toolUse" }),
+		(context) => {
+			assert.equal(current(context).working.fileCwd, "visible");
+			assert.equal(fixture.readState(session, 1, "cwd").working.fileCwd, undefined);
+			return fauxAssistantMessage(fauxToolCall("patch_state", { scope: "session", patch: { working: { fileSession: "visible" } } }), { stopReason: "toolUse" });
+		},
+		(context) => {
+			assert.equal(current(context).working.fileSession, "visible");
+			return fauxAssistantMessage("File-only final answer.");
+		},
+	]);
+	await session.prompt("Persist without Git");
+	assert.equal(latestSnapshot(session).meta.step, 3);
+	assert.match(latestSnapshot(session).meta.durableBase!, /^file:[0-9a-f]{64}$/);
+	assert.equal(latestSnapshot(session).meta.pendingPublication, undefined);
+	assert.equal(fixture.readState(session).response, "File-only final answer.");
+	assert.equal(fixture.readState(session, 1).response, "");
+	const beforeReads = probes;
+	fixture.readState(session, 2, "cwd");
+	assert.equal(probes, beforeReads);
+	const before = [0, 1, 2, 3].map((offset) => fixture.readState(session, offset));
+	await session.prompt("/state-flow-stop");
+	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.equal(latestSnapshot(session).meta.step, 3);
+	assert.equal(existsSync(join(fixture.repositoryRoot, ".git")), false);
+	const file = session.sessionFile!;
+	session.dispose();
+	const resumed = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
+	t.after(() => resumed.dispose());
+	assert.equal(resumed.getActiveToolNames().includes("patch_state"), false);
+	assert.equal(latestSnapshot(resumed).meta.pendingPublication, undefined);
+	assert.deepEqual([0, 1, 2, 3].map((offset) => fixture.readState(resumed, offset)), before);
+	assert.equal(fixture.notifications.some((message) => /push.*pending|could not initialize/i.test(message)), false);
+	childProcess.spawnSync = spawn;
+	syncBuiltinESMExports();
+	const identity = { GIT_AUTHOR_NAME: "State Flow Tests", GIT_AUTHOR_EMAIL: "state-flow@example.invalid", GIT_COMMITTER_NAME: "State Flow Tests", GIT_COMMITTER_EMAIL: "state-flow@example.invalid" };
+	const previous = Object.fromEntries(Object.keys(identity).map((key) => [key, process.env[key]]));
+	Object.assign(process.env, identity);
+	t.after(() => { for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+	await resumed.prompt("/state-flow-start");
+	assert.equal(resumed.getActiveToolNames().includes("patch_state"), true);
+	const adopted = latestSnapshot(resumed);
+	assert.match(adopted.meta.durableBase!, /^[0-9a-f]{40}$/);
+	assert.equal(adopted.meta.step, 3);
+	assert.equal(adopted.meta.pendingPublication, undefined);
+	assert.equal(runGit(fixture.repositoryRoot, "rev-list", "--count", "HEAD"), "1");
+	assert.deepEqual([0, 1, 2, 3].map((offset) => fixture.readState(resumed, offset)), before);
+	const cold = new TemporalRuntime(fixture.cwd, resumed.sessionManager.getSessionId(), fixture.repositoryRoot);
+	cold.restore(adopted.meta.durableBase!);
+	assert.deepEqual([0, 1, 2, 3].map((offset) => cold.read(offset)), before);
+	// The operator connects a remote; subsequent semantic publication uses it normally.
+	childProcess.execFileSync("git", ["init", "--bare", fixture.remote], { stdio: "ignore" });
+	runGit(fixture.repositoryRoot, "remote", "add", "origin", fixture.remote);
+	fixture.faux.setResponses([fauxAssistantMessage("Git-backed answer.")]);
+	await resumed.prompt("Continue after adoption");
+	assert.equal(latestSnapshot(resumed).meta.step, 4);
+	await resumed.prompt("/state-flow-status");
+	assert.match(fixture.notifications.at(-1)!, /Publication: idle/);
+	assert.equal(fixture.readState(resumed).response, "Git-backed answer.");
+	assert.equal(runGit(fixture.remote, "rev-parse", "refs/heads/" + runGit(fixture.repositoryRoot, "branch", "--show-current")), latestSnapshot(resumed).meta.durableBase);
+});
+
+test("real Pi auto-start follows agent configuration without overriding resumed branch mode", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const path = process.env.PATH;
+	process.env.PATH = fixture.root;
+	t.after(() => { process.env.PATH = path; });
+	const session = await fixture.createSession("startup");
+	t.after(() => session.dispose());
+	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
+	assert.equal(latestSnapshot(session).meta.step, 0);
+	assert.equal(existsSync(join(fixture.repositoryRoot, ".git")), false);
+	fixture.faux.setResponses([fauxAssistantMessage("Automatically persisted.")]);
+	await session.prompt("Use automatic mode");
+	await session.prompt("/state-flow-stop");
+	const file = session.sessionFile!;
+	session.dispose();
+	const stopped = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
+	t.after(() => stopped.dispose());
+	assert.equal(stopped.getActiveToolNames().includes("patch_state"), false);
+	assert.equal(fixture.readState(stopped).response, "Automatically persisted.");
+	const next = await fixture.createSession("new");
+	assert.equal(next.getActiveToolNames().includes("patch_state"), true);
+	assert.equal(fixture.readState(next).response, "");
+	fixture.faux.setResponses([fauxAssistantMessage("Second automatic session.")]);
+	await next.prompt("Persist the second session");
+	const enabledFile = next.sessionFile!;
+	assert.equal(existsSync(enabledFile), true);
+	next.dispose();
+	writeFileSync(join(fixture.agentDir, "state-flow.json"), JSON.stringify({ autoStart: false }));
+	const manual = await fixture.createSession("new");
+	t.after(() => manual.dispose());
+	assert.equal(manual.getActiveToolNames().includes("patch_state"), false);
+	assert.equal(snapshots(manual).length, 0);
+	const enabled = await fixture.createSession("resume", SessionManager.open(enabledFile, fixture.sessionDir));
+	t.after(() => enabled.dispose());
+	assert.equal(enabled.getActiveToolNames().includes("patch_state"), true);
+	assert.equal(latestSnapshot(enabled).config.enabled, true);
+	assert.deepEqual(JSON.parse(readFileSync(join(fixture.agentDir, "state-flow.json"), "utf8")), { autoStart: false });
+});

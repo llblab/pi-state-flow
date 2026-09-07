@@ -47,3 +47,9 @@ export function hasPriorConversation(branch: readonly BranchEntry[]): boolean {
 	}
 	return false;
 }
+
+/** Auto-start eligibility is session identity/lifecycle, not the presence of CWD materialization. */
+export function isNewSession(reason: unknown, branch: readonly BranchEntry[]): boolean {
+	if (reason === "new") return true;
+	return reason === "startup" && !hasPriorConversation(branch);
+}

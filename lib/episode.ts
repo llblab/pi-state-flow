@@ -1,29 +1,41 @@
-import { emptyState } from "./state.ts";
-import type { Snapshot } from "./snapshot.ts";
+import { emptySnapshot, type Snapshot } from "./snapshot.ts";
 
 export function startEpisode(bootstrap: boolean): Snapshot {
-	return { enabled: true, state: emptyState(), step: 0, bootstrap };
+	const snapshot = emptySnapshot(true);
+	if (bootstrap) snapshot.meta.bootstrap = true;
+	return snapshot;
 }
 
-export function stopEpisode(): Snapshot {
-	return { enabled: false, state: emptyState(), step: 0 };
+/** Re-enable a branch checkpoint without discarding its runtime config or provenance. */
+export function resumeEpisode(snapshot: Snapshot, bootstrap: boolean): Snapshot {
+	const next = structuredClone(snapshot);
+	next.config.enabled = true;
+	if (bootstrap) next.meta.bootstrap = true;
+	return next;
 }
 
-/** Apply one user-run boundary while preserving the materialized state. */
+/** Disable only this branch; durable defaults and session history remain intact. */
+export function stopEpisode(snapshot: Snapshot): Snapshot {
+	const next = structuredClone(snapshot);
+	next.config.enabled = false;
+	return next;
+}
+
+/** Apply one user-run boundary while preserving checkpoint-owned runtime state. */
 export function prepareRun(snapshot: Snapshot, prompt: string, isRetry: boolean): boolean {
-	if (snapshot.specification === undefined) {
-		snapshot.specification = prompt;
+	if (snapshot.meta.specification === undefined) {
+		snapshot.meta.specification = prompt;
 		return true;
 	}
 	if (isRetry) return false;
-	snapshot.specification = prompt;
-	snapshot.validation = undefined;
+	snapshot.meta.specification = prompt;
+	snapshot.meta.validation = undefined;
 	return true;
 }
 
 /** Clear only transient validation metadata; never disable or reset the episode. */
 export function abandonValidation(snapshot: Snapshot): boolean {
-	if (snapshot.validation === undefined) return false;
-	snapshot.validation = undefined;
+	if (snapshot.meta.validation === undefined) return false;
+	snapshot.meta.validation = undefined;
 	return true;
 }

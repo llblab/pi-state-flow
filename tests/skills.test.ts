@@ -1,7 +1,41 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
-import { hasCompiledSkill, SkillReadTracker, skillPathFromRead } from "../lib/skills.ts";
-import { commitTerminal, harness, start, terminalComment, toolAssistant, user } from "./harness.ts";
+import { hashArtifactSource } from "../lib/artifact.ts";
+import { loadCwdState } from "./temporal-fixture.ts";
+import {
+	hasCompiledSkillArtifact,
+	hashSkillSource,
+	SKILL_ARTIFACT_COMPILER,
+	SkillReadTracker,
+	skillPathFromRead,
+} from "../lib/skills.ts";
+import { commitTerminal, harness, start, terminalComment } from "./harness.ts";
+
+const skillRoot = mkdtempSync(join(tmpdir(), "pi-state-flow-skills-"));
+
+function skillFile(name: string, body = `# ${name}\n\nOperational rules.`): string {
+	const source = join(skillRoot, name, "SKILL.md");
+	mkdirSync(dirname(source), { recursive: true });
+	writeFileSync(source, body);
+	return source;
+}
+
+function compilerOutput(rule = "Use the compiled route for current episode operations") {
+	return {
+		description: "Operational guidance for a test Skill",
+		kind: "skill",
+		compilation: { routing: rule, constraints: ["Do not reread solely for routine activation"] },
+	};
+}
+
+function recordRead(h: ReturnType<typeof harness>, source: string, id = "skill-1"): void {
+	const input = { path: source };
+	h.handlers.get("tool_call")!({ toolCallId: id, toolName: "read", input }, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: id, toolName: "read", result: {}, isError: false }, h.ctx);
+}
 
 test("recognizes only exact Skill reads", () => {
 	assert.equal(skillPathFromRead("read", { path: "/skills/demo/SKILL.md" }), "/skills/demo/SKILL.md");
@@ -9,44 +43,58 @@ test("recognizes only exact Skill reads", () => {
 	assert.equal(skillPathFromRead("read", { path: "/skills/demo/README.md" }), undefined);
 });
 
-test("requires non-empty source-addressed compilations", () => {
+test("requires source-identified non-empty Skill artifact compilations", () => {
 	const source = "/skills/demo/SKILL.md";
-	assert.equal(hasCompiledSkill({ compiled_skills: { [source]: { route: "demo" } } }, source), true);
-	assert.equal(hasCompiledSkill({ compiled_skills: { [source]: {} } }, source), false);
+	const hash = hashArtifactSource("demo");
+	assert.equal(hasCompiledSkillArtifact({
+		[source]: {
+			...compilerOutput(), hash, compiler: SKILL_ARTIFACT_COMPILER,
+		},
+	}, source, hash), true);
+	assert.equal(hasCompiledSkillArtifact({
+		[source]: {
+			description: "empty", hash, compiler: SKILL_ARTIFACT_COMPILER, kind: "skill", compilation: {},
+		},
+	}, source, hash), false);
 });
 
-test("tracks the mutable executed Skill path across Pi lifecycle order", () => {
-	const tracker = new SkillReadTracker();
+test("tracks the mutable executed Skill path and trusted hash across Pi lifecycle order", () => {
+	const tracker = new SkillReadTracker((source) => hashArtifactSource(`body:${source}`));
 	const input = { path: "/skills/requested/SKILL.md" };
 	tracker.recordStart("call-1", "read", { ...input });
 	tracker.recordCall("call-1", "read", input);
 	input.path = "/skills/executed/SKILL.md";
 	tracker.recordEnd("call-1", "read", false);
-	assert.deepEqual([...tracker.successful], ["/skills/executed/SKILL.md"]);
+	assert.deepEqual([...tracker.successful.values()], [{
+		path: "/skills/executed/SKILL.md",
+		hash: hashArtifactSource("body:/skills/executed/SKILL.md"),
+	}]);
+});
+
+test("retains a successful read as a validation failure when source hashing fails", () => {
+	const tracker = new SkillReadTracker(() => { throw new Error("source disappeared"); });
+	tracker.recordCall("failed-hash", "read", { path: "/skills/vanished/SKILL.md" });
+	tracker.recordEnd("failed-hash", "read", false);
+	assert.deepEqual([...tracker.successful.values()], [{
+		path: "/skills/vanished/SKILL.md", error: "source disappeared",
+	}]);
 });
 
 test("discards stale, failed, and mismatched lifecycle records", () => {
-	const tracker = new SkillReadTracker();
+	const tracker = new SkillReadTracker(() => hashArtifactSource("body"));
 	tracker.recordStart("reused", "read", { path: "/skills/stale/SKILL.md" });
 	tracker.recordCall("reused", "bash", { command: "true" });
 	tracker.recordEnd("reused", "read", false);
 	tracker.recordCall("failed", "read", { path: "/skills/failed/SKILL.md" });
 	tracker.recordEnd("failed", "read", true);
-	assert.deepEqual([...tracker.successful], []);
+	assert.deepEqual([...tracker.successful.values()], []);
 });
 
-test("requires every successful Skill read to compile source-identified contract rules", async () => {
+test("requires every successful Skill read to compile a local source-addressed artifact", async () => {
 	const h = harness();
 	await start(h);
-	const source = "/skills/example/SKILL.md";
-	const input = { path: source };
-	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
-	h.handlers.get("tool_execution_end")!({
-		toolCallId: "skill-1",
-		toolName: "read",
-		result: {},
-		isError: false,
-	}, h.ctx);
+	const source = skillFile("required");
+	recordRead(h, source);
 
 	const rejected = h.handlers.get("message_end")!({
 		message: {
@@ -56,187 +104,146 @@ test("requires every successful Skill read to compile source-identified contract
 		},
 	}, h.ctx);
 	assert.deepEqual(rejected.message.content, []);
-	assert.match(h.entries.at(-1)!.data.validation.error, /Every successfully read Skill must have a non-empty compilation/);
-	assert.match(h.entries.at(-1)!.data.validation.error, /\/skills\/example\/SKILL\.md/);
+	assert.match(h.resolveSnapshot().meta.validation!.error, /CWD artifact compiler output/);
+	assert.ok(h.resolveSnapshot().meta.validation!.error.includes(source));
 
-	const compiled = {
-		compiled_skills: {
-			[source]: {
-				routing: "Use the compiled route for current episode operations",
-				constraints: ["Do not reread solely for routine activation"],
-			},
-		},
-	};
 	const accepted = h.handlers.get("message_end")!({
 		message: {
 			role: "assistant",
 			stopReason: "stop",
-			content: [{ type: "text", text: `${terminalComment(compiled, {})}\n\nDone` }],
+			content: [{ type: "text", text: `${terminalComment({}, {}, { [source]: compilerOutput() })}\n\nDone` }],
 		},
 	}, h.ctx);
 	assert.equal(accepted.message.content[0].text, "Done");
 	h.handlers.get("turn_end")!({ message: accepted.message }, h.ctx);
-	assert.deepEqual(h.entries.at(-1)!.data.state.contract, compiled);
+	const artifact = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source];
+	assert.deepEqual(artifact, {
+		...compilerOutput(),
+		hash: hashSkillSource(source),
+		compiler: SKILL_ARTIFACT_COMPILER,
+	});
+	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 });
+
 test("attributes Skill acquisition to mutable tool input in Pi event order", async () => {
 	const h = harness();
 	await start(h);
-	const requested = "/skills/requested/SKILL.md";
-	const executed = "/skills/executed/SKILL.md";
+	const requested = skillFile("requested");
+	const executed = skillFile("executed");
 	const input = { path: requested };
-	h.handlers.get("tool_execution_start")!({
-		toolCallId: "skill-1",
-		toolName: "read",
-		args: { path: requested },
-	}, h.ctx);
+	h.handlers.get("tool_execution_start")!({ toolCallId: "skill-1", toolName: "read", args: { path: requested } }, h.ctx);
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
-	// A later tool_call handler may rewrite the same input before execution.
 	input.path = executed;
-	h.handlers.get("tool_execution_end")!({
-		toolCallId: "skill-1",
-		toolName: "read",
-		result: {},
-		isError: false,
-	}, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: "skill-1", toolName: "read", result: {}, isError: false }, h.ctx);
 	const rejected = h.handlers.get("message_end")!({
 		message: {
-			role: "assistant",
-			stopReason: "stop",
-			content: [{
-				type: "text",
-				text: `${terminalComment({ compiled_skills: { [requested]: { routing: "wrong source" } } }, {})}\n\nDone`,
-			}],
+			role: "assistant", stopReason: "stop",
+			content: [{ type: "text", text: `${terminalComment({}, {}, { [requested]: compilerOutput("wrong") })}\n\nDone` }],
 		},
 	}, h.ctx);
 	assert.deepEqual(rejected.message.content, []);
-	assert.match(h.entries.at(-1)!.data.validation.error, /\/skills\/executed\/SKILL\.md/);
-	assert.doesNotMatch(h.entries.at(-1)!.data.validation.error, /\/skills\/requested\/SKILL\.md/);
+	assert.ok(h.resolveSnapshot().meta.validation!.error.includes(executed));
+	assert.equal(h.resolveSnapshot().meta.validation!.error.includes(requested), false);
 });
-test("ordinary answers cannot bypass missing Skill compilations", async () => {
+
+test("ordinary answers cannot bypass missing Skill artifacts", async () => {
 	const h = harness();
 	await start(h);
-	const path = "/skills/plain/SKILL.md";
-	h.handlers.get("tool_execution_start")!({ toolCallId: "plain", toolName: "read", args: { path } }, h.ctx);
+	const source = skillFile("plain");
+	h.handlers.get("tool_execution_start")!({ toolCallId: "plain", toolName: "read", args: { path: source } }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "plain", toolName: "read", isError: false }, h.ctx);
 	const rejected = h.handlers.get("message_end")!({
 		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }] },
 	}, h.ctx);
 	assert.deepEqual(rejected.message.content, []);
-	assert.match(h.entries.at(-1)!.data.validation.error, /missing: \/skills\/plain\/SKILL\.md/);
-	assert.equal(h.entries.at(-1)!.data.step, 0);
-	commitTerminal(h, { compiled_skills: { [path]: { rule: "compiled" } } }, {});
-	assert.equal(h.entries.at(-1)!.data.step, 1);
+	assert.ok(h.resolveSnapshot().meta.validation!.error.includes(source));
+	assert.equal(h.resolveSnapshot().meta.step, 0);
+	commitTerminal(h, {}, {}, "Done", { [source]: compilerOutput() });
+	assert.equal(h.resolveSnapshot().meta.step, 1);
 });
 
 test("retains compatibility with execution-start updates after interception", async () => {
 	const h = harness();
 	await start(h);
-	const requested = "/skills/requested/SKILL.md";
-	const executed = "/skills/executed/SKILL.md";
+	const requested = skillFile("compat-requested");
+	const executed = skillFile("compat-executed");
 	const input = { path: requested };
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
-	h.handlers.get("tool_execution_start")!({
-		toolCallId: "skill-1",
-		toolName: "read",
-		args: { path: executed },
-	}, h.ctx);
-	h.handlers.get("tool_execution_end")!({
-		toolCallId: "skill-1",
-		toolName: "read",
-		result: {},
-		isError: false,
-	}, h.ctx);
+	h.handlers.get("tool_execution_start")!({ toolCallId: "skill-1", toolName: "read", args: { path: executed } }, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: "skill-1", toolName: "read", result: {}, isError: false }, h.ctx);
 	const rejected = h.handlers.get("message_end")!({
 		message: {
-			role: "assistant",
-			stopReason: "stop",
-			content: [{
-				type: "text",
-				text: `${terminalComment({ compiled_skills: { [requested]: { routing: "wrong source" } } }, {})}\n\nDone`,
-			}],
+			role: "assistant", stopReason: "stop",
+			content: [{ type: "text", text: `${terminalComment({}, {}, { [requested]: compilerOutput("wrong") })}\n\nDone` }],
 		},
 	}, h.ctx);
 	assert.deepEqual(rejected.message.content, []);
-	assert.match(h.entries.at(-1)!.data.validation.error, /\/skills\/executed\/SKILL\.md/);
-	assert.doesNotMatch(h.entries.at(-1)!.data.validation.error, /\/skills\/requested\/SKILL\.md/);
+	assert.ok(h.resolveSnapshot().meta.validation!.error.includes(executed));
+	assert.equal(h.resolveSnapshot().meta.validation!.error.includes(requested), false);
 });
-test("does not attribute a stale read when lifecycle names disagree", async () => {
+
+test("does not attribute stale reads when lifecycle ids are reused for other tools", async () => {
 	const h = harness();
 	await start(h);
-	h.handlers.get("tool_execution_start")!({
-		toolCallId: "reused-id",
-		toolName: "read",
-		args: { path: "/skills/stale/SKILL.md" },
-	}, h.ctx);
-	h.handlers.get("tool_call")!({
-		toolCallId: "reused-id",
-		toolName: "bash",
-		input: { command: "true" },
-	}, h.ctx);
-	h.handlers.get("tool_execution_end")!({
-		toolCallId: "reused-id",
-		toolName: "bash",
-		result: {},
-		isError: false,
-	}, h.ctx);
+	const stale = skillFile("stale");
+	h.handlers.get("tool_execution_start")!({ toolCallId: "reused-id", toolName: "read", args: { path: stale } }, h.ctx);
+	h.handlers.get("tool_call")!({ toolCallId: "reused-id", toolName: "bash", input: { command: "true" } }, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: "reused-id", toolName: "bash", result: {}, isError: false }, h.ctx);
 	const result = commitTerminal(h, {}, {}, "No Skill acquired.");
 	assert.equal(result.message.content[0].text, "No Skill acquired.");
 });
-test("discards a stale read when an execution start reuses its id for another tool", async () => {
-	const h = harness();
-	await start(h);
-	h.handlers.get("tool_execution_start")!({
-		toolCallId: "reused-id",
-		toolName: "read",
-		args: { path: "/skills/stale/SKILL.md" },
-	}, h.ctx);
-	h.handlers.get("tool_execution_start")!({
-		toolCallId: "reused-id",
-		toolName: "bash",
-		args: { command: "true" },
-	}, h.ctx);
-	// Even a malformed trailing event for the old read must not revive it.
-	h.handlers.get("tool_execution_end")!({
-		toolCallId: "reused-id",
-		toolName: "read",
-		result: {},
-		isError: false,
-	}, h.ctx);
-	const result = commitTerminal(h, {}, {}, "No Skill acquired.");
-	assert.equal(result.message.content[0].text, "No Skill acquired.");
-});
+
 test("falls back to intercepted input when a successful execution omits args", async () => {
 	const h = harness();
 	await start(h);
-	const source = "/skills/fallback/SKILL.md";
-	h.handlers.get("tool_call")!({
-		toolCallId: "skill-1",
-		toolName: "read",
-		input: { path: source },
-	}, h.ctx);
-	h.handlers.get("tool_execution_end")!({
-		toolCallId: "skill-1",
-		toolName: "read",
-		result: {},
-		isError: false,
-	}, h.ctx);
-
-	const result = commitTerminal(h, {
-		compiled_skills: { [source]: { routing: "use intercepted input fallback" } },
-	}, {}, "Done");
+	const source = skillFile("fallback");
+	recordRead(h, source);
+	const result = commitTerminal(h, {}, {}, "Done", { [source]: compilerOutput("use intercepted input fallback") });
 	assert.equal(result.message.content[0].text, "Done");
 });
+
 test("does not require compilation for a failed Skill read", async () => {
 	const h = harness();
 	await start(h);
-	const input = { path: "/skills/example/SKILL.md" };
+	const source = skillFile("failed");
+	const input = { path: source };
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
-	h.handlers.get("tool_execution_end")!({
-		toolCallId: "skill-1",
-		toolName: "read",
-		result: {},
-		isError: true,
-	}, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: "skill-1", toolName: "read", result: {}, isError: true }, h.ctx);
 	const result = commitTerminal(h, {}, {}, "Read failed.");
 	assert.equal(result.message.content[0].text, "Read failed.");
+});
+
+test("a reread refreshes the runtime-owned source hash and replaces stale compilation metadata", async () => {
+	const h = harness();
+	await start(h);
+	const source = skillFile("changed", "first");
+	recordRead(h, source, "first");
+	commitTerminal(h, {}, {}, "First", { [source]: { ...compilerOutput("first"), obsolete: true } });
+	const firstHash = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source].hash;
+
+	writeFileSync(source, "second");
+	h.handlers.get("before_agent_start")!({ prompt: "Refresh", systemPrompt: "base" }, h.ctx);
+	recordRead(h, source, "second");
+	commitTerminal(h, {}, {}, "Second", { [source]: compilerOutput("second") });
+	const refreshed = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source];
+	assert.notEqual(refreshed.hash, firstHash);
+	assert.equal(refreshed.hash, hashSkillSource(source));
+	assert.equal(Object.hasOwn(refreshed, "obsolete"), false);
+	assert.equal(refreshed.compilation?.routing, "second");
+});
+
+test("rejects model attempts to forge runtime-owned Skill freshness fields", async () => {
+	const h = harness();
+	await start(h);
+	const source = skillFile("forged");
+	recordRead(h, source);
+	const forged = { ...compilerOutput(), hash: hashArtifactSource("forged") };
+	const rejected = h.handlers.get("message_end")!({
+		message: {
+			role: "assistant", stopReason: "stop",
+			content: [{ type: "text", text: `${terminalComment({}, {}, { [source]: forged })}\n\nDone` }],
+		},
+	}, h.ctx);
+	assert.deepEqual(rejected.message.content, []);
+	assert.match(h.resolveSnapshot().meta.validation!.error, /cannot set runtime-owned hash or compiler/);
 });
