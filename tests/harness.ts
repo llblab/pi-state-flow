@@ -7,6 +7,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadStateFlowConfig } from "../lib/config.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 import type { MaterializedState, StateScope } from "../lib/state.ts";
+import { sessionStorageKey } from "../lib/durable.ts";
 
 export type Handler = (...args: any[]) => any;
 
@@ -20,6 +21,8 @@ export interface HarnessOptions {
 	useConfiguredDirectory?: boolean;
 	initializeRepository?: boolean;
 	sessionId?: string;
+	sessionFile?: string;
+	sessionTimestamp?: string;
 }
 
 export function harness(options: HarnessOptions = {}) {
@@ -54,6 +57,10 @@ export function harness(options: HarnessOptions = {}) {
 		sessionManager: {
 			getBranch: () => entries,
 			getSessionId: () => options.sessionId ?? "harness-session",
+			getSessionFile: () => options.sessionFile,
+			getHeader: () => options.sessionTimestamp === undefined ? null : {
+				type: "session", version: 3, id: options.sessionId ?? "harness-session", timestamp: options.sessionTimestamp, cwd: options.cwd ?? "/tmp",
+			},
 		},
 	};
 	const fixtureRoot = options.repositoryRoot ?? mkdtempSync(join(tmpdir(), "state-flow-harness-"));
@@ -93,7 +100,8 @@ export function harness(options: HarnessOptions = {}) {
 		ctx,
 		repositoryRoot,
 		agentDir,
-		resolveSnapshot: (data: unknown = entries.at(-1)?.data) => resolveCheckpoint(data, ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot),
+		resolveSnapshot: (data: unknown = entries.at(-1)?.data) => resolveCheckpoint(data, ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot,
+			sessionStorageKey(options.sessionFile, ctx.sessionManager.getSessionId(), options.sessionTimestamp)),
 		readState: (offset?: number, scope?: StateScope) => accessor.read(offset, scope),
 		get registeredTools() { return tools.size; },
 		get activeTools() { return [...activeTools]; },

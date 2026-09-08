@@ -71,8 +71,9 @@ test("normalizes artifact replacements and runtime freshness after finalized-res
 	for (const { scope, patch } of cohort!.transitions) assert.deepEqual(applyPatch(before[scope], patch as JsonObject), state[scope]);
 	const accepted = advanceTemporalState(view, cohort!.transitions, cohort!.id);
 	for (const scope of ["global", "cwd", "session"] as const) {
-		const bytes = serializeScopeStream(accepted.scopes[scope], scope);
-		accepted.scopes[scope] = parseScopeStream(bytes.checkpoint, bytes.patches, scope)!;
+		const identity = scope === "cwd" ? "/project" : undefined;
+		const bytes = serializeScopeStream(accepted.scopes[scope], scope, identity);
+		accepted.scopes[scope] = parseScopeStream(bytes.checkpoint, bytes.patches, scope, identity)!;
 		assert.deepEqual(readTemporalState(accepted, 0, scope), state[scope]);
 		assert.deepEqual(readTemporalState(accepted, 1, scope), before[scope]);
 		assert.equal(accepted.scopes[scope].patches[0]!.transition.id, cohort!.id);

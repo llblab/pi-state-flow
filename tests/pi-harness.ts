@@ -14,10 +14,11 @@ import {
 import { fauxProvider, type FauxProviderHandle } from "@earendil-works/pi-ai";
 import stateFlowExtension from "../index.ts";
 import type { MaterializedState, StateScope } from "../lib/state.ts";
+import { sessionStorageKey } from "../lib/durable.ts";
 import type { PiCheckpoint, Snapshot } from "../lib/snapshot.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 
-const checkpointRoots = new WeakMap<AgentSession, string>();
+const checkpointStores = new WeakMap<AgentSession, { root: string; sessionKey: string }>();
 import { SNAPSHOT_ENTRY_TYPE } from "../lib/session.ts";
 
 function git(repository: string, ...args: string[]): string {
@@ -114,7 +115,10 @@ export async function realPiFixture(t: TestContext, options: { tokensPerSecond?:
 				theme: { fg: (_color: string, text: string) => text },
 			} as any,
 		});
-		checkpointRoots.set(session, repositoryRoot);
+		checkpointStores.set(session, {
+			root: repositoryRoot,
+			sessionKey: sessionStorageKey(session.sessionManager.getSessionFile(), session.sessionManager.getSessionId(), session.sessionManager.getHeader()?.timestamp),
+		});
 		return session;
 	}
 
@@ -134,6 +138,10 @@ export async function realPiFixture(t: TestContext, options: { tokensPerSecond?:
 	};
 }
 
+export function nativeSessionKey(session: AgentSession): string {
+	return sessionStorageKey(session.sessionManager.getSessionFile(), session.sessionManager.getSessionId(), session.sessionManager.getHeader()?.timestamp);
+}
+
 export function snapshots(session: AgentSession): Array<{ id: string; data: PiCheckpoint }> {
 	return session.sessionManager.getBranch()
 		.filter((entry): entry is any => entry.type === "custom" && entry.customType === SNAPSHOT_ENTRY_TYPE)
@@ -141,9 +149,9 @@ export function snapshots(session: AgentSession): Array<{ id: string; data: PiCh
 }
 
 export function resolvedSnapshot(session: AgentSession, data: unknown = snapshots(session).at(-1)?.data): Snapshot {
-	const root = checkpointRoots.get(session);
-	if (!root) throw new Error("Missing test checkpoint repository");
-	return resolveCheckpoint(data, session.sessionManager.getCwd(), session.sessionManager.getSessionId(), root);
+	const store = checkpointStores.get(session);
+	if (!store) throw new Error("Missing test checkpoint repository");
+	return resolveCheckpoint(data, session.sessionManager.getCwd(), session.sessionManager.getSessionId(), store.root, store.sessionKey);
 }
 
 export function scopedTerminal(transitions: unknown[], answer: string): string {

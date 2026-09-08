@@ -54,6 +54,7 @@ export {
 	parseScopeStream,
 	serializeScopeStream,
 	sessionScopeKey,
+	sessionStorageKey,
 	sessionRuntimePaths,
 	temporalScopePaths,
 	temporalStateFileUpdates,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -26,6 +26,7 @@ import {
 import {
 	resolvedSnapshot as latestSnapshot,
 	realPiFixture,
+	nativeSessionKey,
 	runGit,
 	scopedTerminal,
 	snapshots,
@@ -41,6 +42,7 @@ function durableSession(fixture: RealPiFixture, session: any) {
 		fixture.cwd,
 		session.sessionManager.getSessionId(),
 		fixture.repositoryRoot,
+		nativeSessionKey(session),
 	)!;
 }
 
@@ -53,6 +55,10 @@ test("real Pi preserves branch-local state through compaction, tree navigation, 
 	assert.equal(snapshots(session).length, 0);
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
 	await session.prompt("/state-flow-start");
+	const key = nativeSessionKey(session);
+	assert.equal(key, basename(session.sessionManager.getSessionFile()!, ".jsonl"));
+	assert.equal(temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "session", fixture.repositoryRoot, key).directory,
+		join(fixture.repositoryRoot, `--${fixture.cwd.slice(1).replaceAll("/", "-")}--`, key));
 	assert.equal(runGit(fixture.repositoryRoot, "rev-list", "--count", "HEAD"), "2");
 	assert.equal(runGit(fixture.remote, "rev-list", "--count", "refs/heads/main"), "2");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
@@ -149,6 +155,7 @@ test("real Pi isolates same-CWD sessions and retains seven patches per scope", a
 	t.after(() => first.dispose());
 	await first.prompt("/state-flow-start");
 	const firstId = first.sessionManager.getSessionId();
+	const firstKey = nativeSessionKey(first);
 	fixture.faux.setResponses(Array.from({ length: 9 }, (_, index) => fauxAssistantMessage(scopedTerminal([
 		{ scope: "global", patch: { working: { globalIndex: index } } },
 		{ scope: "cwd", patch: { working: { cwdIndex: index } } },
@@ -163,15 +170,16 @@ test("real Pi isolates same-CWD sessions and retains seven patches per scope", a
 	assert.deepEqual(sharedPaths.map((path) => readFileSync(path.startsWith("/") ? path : join(fixture.repositoryRoot, path))), sharedBefore);
 	assert.throws(() => fixture.readState(second, 1), /predates the proven temporal origin/);
 	const secondId = second.sessionManager.getSessionId();
+	const secondKey = nativeSessionKey(second);
 	assert.notEqual(firstId, secondId);
-	assert.equal(loadSessionState(fixture.cwd, firstId, fixture.repositoryRoot)!.working.owner, "first");
-	assert.deepEqual(loadSessionState(fixture.cwd, secondId, fixture.repositoryRoot), {
+	assert.equal(loadSessionState(fixture.cwd, firstId, fixture.repositoryRoot, firstKey)!.working.owner, "first");
+	assert.deepEqual(loadSessionState(fixture.cwd, secondId, fixture.repositoryRoot, secondKey), {
 		artifacts: {}, contract: {}, working: {}, response: "",
 	});
 	for (const [scope, materialization] of [
 		["global", loadGlobalMaterialization(fixture.repositoryRoot)],
 		["cwd", loadCwdMaterialization(fixture.cwd, fixture.repositoryRoot)],
-		["session", loadSessionMaterialization(fixture.cwd, firstId, fixture.repositoryRoot)],
+		["session", loadSessionMaterialization(fixture.cwd, firstId, fixture.repositoryRoot, firstKey)],
 	] as const) {
 		assert.equal(materialization!.recentTransitions.length, 7);
 		assert.ok(materialization!.recentTransitions.every(({ transitions }) =>
@@ -284,11 +292,11 @@ test("real Pi patch_state barriers rematerialize every scope before the next inf
 		snapshots(session).map(({ data }) => latestSnapshot(session, data).meta.step).filter((step, index, all) => index === 0 || step !== all[index - 1]),
 		[0, 1, 2, 3, 4],
 	);
-	const beforeNoop = loadSessionMaterialization(fixture.cwd, session.sessionManager.getSessionId(), fixture.repositoryRoot);
+	const beforeNoop = loadSessionMaterialization(fixture.cwd, session.sessionManager.getSessionId(), fixture.repositoryRoot, nativeSessionKey(session));
 	fixture.faux.setResponses([fauxAssistantMessage("Barrier run complete.")]);
 	await session.prompt("Confirm the same complete state");
 	assert.equal(latestSnapshot(session).meta.step, 4);
-	assert.deepEqual(loadSessionMaterialization(fixture.cwd, session.sessionManager.getSessionId(), fixture.repositoryRoot), beforeNoop);
+	assert.deepEqual(loadSessionMaterialization(fixture.cwd, session.sessionManager.getSessionId(), fixture.repositoryRoot, nativeSessionKey(session)), beforeNoop);
 });
 
 test("real Pi reads prior scoped state lazily after a barrier and rejects offset eight without a transition", async (t) => {
@@ -542,7 +550,7 @@ test("real Pi incrementally acquires only invalidated global Markdown and attach
 
 	const compilerStale = structuredClone(afterSourceChange);
 	compilerStale.artifacts[unchangedPath]!.compiler = "artifact-v0";
-	const compilerRuntime = new TemporalRuntime(fixture.cwd, changedSession.sessionManager.getSessionId(), fixture.repositoryRoot);
+	const compilerRuntime = new TemporalRuntime(fixture.cwd, changedSession.sessionManager.getSessionId(), fixture.repositoryRoot, nativeSessionKey(changedSession));
 	const compilerSnapshot = compilerRuntime.restore(latestSnapshot(changedSession).meta.durableBase!);
 	const compilerStates = compilerRuntime.states();
 	const compilerNext = { ...compilerStates, global: compilerStale };
@@ -708,6 +716,9 @@ test("real Pi persists without Git, resumes its file cohort and adopts Git witho
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
 	await session.prompt("/state-flow-start");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
+	const fileKey = nativeSessionKey(session);
+	assert.equal(existsSync(temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "session", fixture.repositoryRoot, fileKey).directory), true);
+	assert.doesNotMatch(fileKey, /-[a-f0-9]{64}$/);
 	const current = (context: any) => {
 		const texts = context.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
 			.map((block: any) => block.text).filter((text: unknown) => typeof text === "string" && text.startsWith("State Flow runtime context"));
@@ -762,7 +773,7 @@ test("real Pi persists without Git, resumes its file cohort and adopts Git witho
 	assert.equal(adopted.meta.pendingPublication, undefined);
 	assert.equal(runGit(fixture.repositoryRoot, "rev-list", "--count", "HEAD"), "1");
 	assert.deepEqual([0, 1, 2, 3].map((offset) => fixture.readState(resumed, offset)), before);
-	const cold = new TemporalRuntime(fixture.cwd, resumed.sessionManager.getSessionId(), fixture.repositoryRoot);
+	const cold = new TemporalRuntime(fixture.cwd, resumed.sessionManager.getSessionId(), fixture.repositoryRoot, nativeSessionKey(resumed));
 	cold.restore(adopted.meta.durableBase!);
 	assert.deepEqual([0, 1, 2, 3].map((offset) => cold.read(offset)), before);
 	// The operator connects a remote; subsequent semantic publication uses it normally.
@@ -775,6 +786,20 @@ test("real Pi persists without Git, resumes its file cohort and adopts Git witho
 	assert.match(fixture.notifications.at(-1)!, /Publication: idle/);
 	assert.equal(fixture.readState(resumed).response, "Git-backed answer.");
 	assert.equal(runGit(fixture.remote, "rev-parse", "refs/heads/" + runGit(fixture.repositoryRoot, "branch", "--show-current")), latestSnapshot(resumed).meta.durableBase);
+});
+
+test("real Pi derives an in-memory session directory from the native header timestamp and UUID", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const manager = SessionManager.inMemory(fixture.cwd);
+	const session = await fixture.createSession("new", manager);
+	t.after(() => session.dispose());
+	assert.equal(manager.getSessionFile(), undefined);
+	const header = manager.getHeader()!;
+	const key = `${header.timestamp.replace(/[:.]/g, "-")}_${manager.getSessionId()}`;
+	assert.equal(nativeSessionKey(session), key);
+	const directory = temporalScopePaths(fixture.cwd, manager.getSessionId(), "session", fixture.repositoryRoot, key).directory;
+	assert.equal(existsSync(join(directory, "checkpoint.json")), true);
+	assert.equal(JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")).identity.sessionId, manager.getSessionId());
 });
 
 test("real Pi auto-start follows agent configuration without overriding resumed branch mode", async (t) => {

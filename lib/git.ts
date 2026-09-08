@@ -1,18 +1,22 @@
 // Domain: durable Git revision reads, compare-and-swap publication, and exact-commit push retry.
 import { createHash } from "node:crypto";
-import { closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
 	assertOwnedFileUpdates,
 	captureOwnedFileBases,
+	captureLegacyTemporalFileBases,
 	captureTemporalFileBases,
 	cwdScopePaths,
+	legacySessionRuntimePaths,
+	legacyTemporalScopePaths,
 	durablePaths,
 	isStateFlowOwnedPath,
 	parseScopeStream,
 	parseStateSource,
+	serializeScopeStream,
 	restoreDurableFileBases,
 	temporalScopePaths,
 	sessionScopePaths,
@@ -172,37 +176,57 @@ export interface TemporalRevisionLoad {
 	base: TemporalGitBase;
 	scopes: Record<StateScope, ScopeStream | undefined>;
 	runtime?: { document: SessionRuntime; revision: string };
+	/** True only when this revision directly selected pre-0.4 hashed paths. */
+	legacyLayout?: true;
 }
 
-export function captureTemporalGitBase(cwd: string, sessionId: string, repositoryRoot: string): TemporalGitBase {
-	return withPublicationLock(repositoryRoot, (root) => captureTemporalBaseUnderLock(cwd, sessionId, root));
+export function captureTemporalGitBase(cwd: string, sessionId: string, repositoryRoot: string, sessionKey = sessionId): TemporalGitBase {
+	return withPublicationLock(repositoryRoot, (root) => captureTemporalBaseUnderLock(cwd, sessionId, root, sessionKey));
 }
 
-function captureTemporalBaseUnderLock(cwd: string, sessionId: string, root: string): TemporalGitBase {
-	return { head: currentHead(root), files: captureTemporalFileBases(cwd, sessionId, root) };
+function captureTemporalBaseUnderLock(cwd: string, sessionId: string, root: string, sessionKey = sessionId): TemporalGitBase {
+	return { head: currentHead(root), files: captureTemporalFileBases(cwd, sessionId, root, sessionKey) };
 }
 
-/** Cold scope-stream reconstruction; callers restore lineage from the matching runtime revision. */
-export function loadTemporalRevision(cwd: string, sessionId: string, repositoryRoot: string, revision: string): TemporalRevisionLoad {
+function revisionScopeFiles(root: string, revision: string, cwd: string, sessionId: string, sessionKey: string, scope: StateScope) {
+	const read = (paths: ReturnType<typeof temporalScopePaths>) => ({
+		paths,
+		checkpoint: revisionFile(root, revision, paths.checkpoint),
+		patches: revisionFile(root, revision, paths.patches),
+		legacy: revisionFile(root, revision, resolve(paths.directory, "state.json")),
+	});
+	const canonical = read(temporalScopePaths(cwd, sessionId, scope, root, sessionKey));
+	if (scope === "global" || [canonical.checkpoint, canonical.patches, canonical.legacy].some(({ identity }) => identity !== "missing")) return { ...canonical, legacyLayout: false };
+	return { ...read(legacyTemporalScopePaths(cwd, sessionId, scope, root)), legacyLayout: true };
+}
+
+/** Cold scope-stream reconstruction; pre-0.4 hashed paths remain read-only revision input. */
+export function loadTemporalRevision(cwd: string, sessionId: string, repositoryRoot: string, revision: string, sessionKey = sessionId): TemporalRevisionLoad {
 	const root = assertRepositoryRoot(repositoryRoot);
 	assertReadableRevision(root, revision);
 	const files: DurableFileBase[] = [];
 	const scopes = {} as Record<StateScope, ScopeStream | undefined>;
+	let legacyLayout = false;
 	for (const scope of ["global", "cwd", "session"] as const) {
-		const paths = temporalScopePaths(cwd, sessionId, scope, root);
-		const checkpoint = revisionFile(root, revision, paths.checkpoint);
-		const patches = revisionFile(root, revision, paths.patches);
-		const legacy = revisionFile(root, revision, resolve(paths.directory, "state.json"));
-		if (legacy.identity !== "missing") throw new Error("Historical legacy storage requires explicit migration interpretation");
-		files.push(checkpoint, patches, legacy);
-		scopes[scope] = parseScopeStream(checkpoint.content, patches.content, scope);
+		const selected = revisionScopeFiles(root, revision, cwd, sessionId, sessionKey, scope);
+		if (selected.legacy.identity !== "missing") throw new Error("Historical legacy storage requires explicit migration interpretation");
+		legacyLayout ||= selected.legacyLayout;
+		files.push(selected.checkpoint, selected.patches, selected.legacy);
+		scopes[scope] = parseScopeStream(selected.checkpoint.content, selected.patches.content, scope,
+			scope === "cwd" && !selected.legacyLayout ? cwd : undefined);
 	}
-	const runtimePaths = sessionRuntimePaths(cwd, sessionId, root);
-	const config = revisionFile(root, revision, runtimePaths.config);
-	const meta = revisionFile(root, revision, runtimePaths.meta);
+	const readRuntime = (paths: ReturnType<typeof sessionRuntimePaths>) => ({
+		paths, config: revisionFile(root, revision, paths.config), meta: revisionFile(root, revision, paths.meta),
+	});
+	let selectedRuntime = { ...readRuntime(sessionRuntimePaths(cwd, sessionId, root, sessionKey)), legacyLayout: false };
+	if (selectedRuntime.config.identity === "missing" && selectedRuntime.meta.identity === "missing") {
+		selectedRuntime = { ...readRuntime(legacySessionRuntimePaths(cwd, sessionId, root)), legacyLayout: true };
+	}
+	legacyLayout ||= selectedRuntime.legacyLayout;
+	const { paths: runtimePaths, config, meta } = selectedRuntime;
 	files.push(config, meta);
 	const document = parseSessionRuntime(config.content, meta.content, cwd, sessionId);
-	if (document === undefined) return { base: { head: revision, files }, scopes };
+	if (document === undefined) return { base: { head: revision, files }, scopes, ...(legacyLayout ? { legacyLayout: true as const } : {}) };
 	const owner = git(root, ["log", "-1", "--format=%H", revision, "--",
 		relativeOwnedPath(runtimePaths.config, root), relativeOwnedPath(runtimePaths.meta, root),
 	]).stdout.trim();
@@ -213,30 +237,158 @@ export function loadTemporalRevision(cwd: string, sessionId: string, repositoryR
 		if (git(root, ["merge-base", "--is-ancestor", temporalRevision, revision], { allowFailure: true }).status !== 0) {
 			throw new Error("Temporal revision must be an ancestor of its runtime owner");
 		}
-		const selected = loadTemporalRevision(cwd, sessionId, root, temporalRevision);
+		const selected = loadTemporalRevision(cwd, sessionId, root, temporalRevision, sessionKey);
 		Object.assign(scopes, selected.scopes);
 	}
 	if (scopes.global === undefined || scopes.cwd === undefined || scopes.session === undefined) {
 		throw new Error("Session runtime has incomplete temporal scope storage");
 	}
 	validateTemporalState({ lineage: document.meta.lineage, scopes: { global: scopes.global, cwd: scopes.cwd, session: scopes.session } });
-	return { base: { head: revision, files }, scopes, runtime: { document, revision: owner } };
+	return { base: { head: revision, files }, scopes, runtime: { document, revision: owner }, ...(legacyLayout ? { legacyLayout: true as const } : {}) };
 }
 
 /** Legacy state.json is already current; explanatory journals are irrelevant to semantic recovery. */
-export function loadLegacyStatesAtRevision(cwd: string, sessionId: string, repositoryRoot: string, revision: string): Record<StateScope, MaterializedState | undefined> {
+export function loadLegacyStatesAtRevision(cwd: string, sessionId: string, repositoryRoot: string, revision: string, sessionKey = sessionId): Record<StateScope, MaterializedState | undefined> {
 	const root = assertRepositoryRoot(repositoryRoot);
 	assertReadableRevision(root, revision);
-	const paths = {
+	const canonical = {
 		global: durablePaths(root).globalState,
 		cwd: cwdScopePaths(cwd, root).state,
-		session: sessionScopePaths(cwd, sessionId, root).state,
+		session: sessionScopePaths(cwd, sessionId, root, sessionKey).state,
 	};
 	const states = {} as Record<StateScope, MaterializedState | undefined>;
 	for (const scope of ["global", "cwd", "session"] as const) {
-		states[scope] = parseStateSource(revisionFile(root, revision, paths[scope]).content, paths[scope]);
+		let path = canonical[scope];
+		let source = revisionFile(root, revision, path).content;
+		if (source === undefined && scope !== "global") {
+			path = resolve(legacyTemporalScopePaths(cwd, sessionId, scope, root).directory, "state.json");
+			source = revisionFile(root, revision, path).content;
+		}
+		states[scope] = parseStateSource(source, path);
 	}
 	return states;
+}
+
+/** Move a current-head draft CWD pair before a new native-named session is initialized. */
+export function migrateHashedCwdAtHead(cwd: string, repositoryRoot: string): void {
+	withPublicationLock(repositoryRoot, (root) => {
+		const head = currentHead(root);
+		if (!head) return;
+		const old = legacyTemporalScopePaths(cwd, "unused", "cwd", root);
+		const target = temporalScopePaths(cwd, "unused", "cwd", root);
+		const paths = [old.checkpoint, old.patches, resolve(old.directory, "state.json"), target.checkpoint, target.patches, resolve(target.directory, "state.json")];
+		const captured = captureOwnedFileBases(paths, root);
+		const byPath = new Map(captured.map((file) => [file.path, file]));
+		const oldCheckpoint = byPath.get(old.checkpoint)!;
+		const oldPatches = byPath.get(old.patches)!;
+		const oldState = byPath.get(resolve(old.directory, "state.json"))!;
+		const targetFiles = [byPath.get(target.checkpoint)!, byPath.get(target.patches)!, byPath.get(resolve(target.directory, "state.json"))!];
+		if (targetFiles[2]!.identity !== "missing") return; // Canonical current-state format migrates in the next owner.
+		if (targetFiles[0]!.identity !== "missing" || targetFiles[1]!.identity !== "missing") {
+			parseScopeStream(targetFiles[0]!.content, targetFiles[1]!.content, "cwd", cwd);
+			return;
+		}
+		if (oldCheckpoint.identity === "missing" && oldPatches.identity === "missing" && oldState.identity === "missing") return;
+		if (oldState.identity !== "missing") throw new Error("Hashed current-state storage requires explicit format migration before path migration");
+		const oldStream = parseScopeStream(oldCheckpoint.content, oldPatches.content, "cwd")!;
+		for (const file of [oldCheckpoint, oldPatches]) {
+			if (revisionFile(root, head, file.path).identity !== file.identity) throw new Error(`Hashed CWD source is not anchored at current HEAD: ${file.path}`);
+		}
+		const source = serializeScopeStream(oldStream, "cwd", cwd);
+		const updates = [
+			{ path: target.checkpoint, content: source.checkpoint }, { path: target.patches, content: source.patches },
+			{ path: old.checkpoint }, { path: old.patches },
+		];
+		try {
+			publishOwnedCohort(root, updates, captured, head, [], "migrate");
+		} catch (error) {
+			try { rmdirSync(target.directory); } catch { /* Preserve nonempty or concurrently used directories. */ }
+			throw error;
+		}
+		try { rmdirSync(old.directory); } catch { /* Draft sessions may remain under this directory. */ }
+	});
+}
+
+/** Move only the selected current-head draft layout; older branch layouts remain cold read input. */
+export function migrateHashedLayoutAtHead(
+	cwd: string,
+	sessionId: string,
+	repositoryRoot: string,
+	revision: string,
+	sessionKey: string,
+): (ReturnType<typeof publishOwnedCohort> & { base: TemporalGitBase; view: TemporalState }) | undefined {
+	return withPublicationLock(repositoryRoot, (root) => {
+		if (currentHead(root) !== revision) return undefined;
+		const selected = loadTemporalRevision(cwd, sessionId, root, revision, sessionKey);
+		if (!selected.legacyLayout || !selected.runtime || !selected.scopes.global || !selected.scopes.cwd || !selected.scopes.session) return undefined;
+		const view = { lineage: selected.runtime.document.meta.lineage, scopes: {
+			global: selected.scopes.global, cwd: selected.scopes.cwd, session: selected.scopes.session,
+		} };
+		validateTemporalState(view);
+		const canonical = captureTemporalBaseUnderLock(cwd, sessionId, root, sessionKey);
+		const legacyLive = captureLegacyTemporalFileBases(cwd, sessionId, root);
+		const bases = new Map([...canonical.files, ...legacyLive].map((file) => [file.path, file]));
+		const selectedFiles = new Map(selected.base.files.map((file) => [file.path, file]));
+		const updates: OwnedFileUpdate[] = [];
+		const cleanupDirectories = new Set<string>();
+		const targetDirectories = new Set<string>();
+		const removeEmptyDirectories = (directories: ReadonlySet<string>): void => {
+			for (const directory of [...directories].sort((left, right) => right.length - left.length)) {
+				try { rmdirSync(directory); } catch { /* Preserve nonempty or concurrently used directories. */ }
+			}
+		};
+		const move = (sourcePath: string, targetPath: string, content?: string): void => {
+			const source = selectedFiles.get(sourcePath);
+			if (!source || source.identity === "missing" || source.content === undefined) throw new Error(`Hashed-layout migration source is unavailable: ${sourcePath}`);
+			if (bases.get(sourcePath)?.identity !== source.identity) throw new Error(`Hashed-layout source changed after selected revision: ${sourcePath}`);
+			if (bases.get(targetPath)?.identity !== "missing") throw new Error(`Canonical State Flow path already exists during hashed-layout migration: ${targetPath}`);
+			updates.push({ path: targetPath, content: content ?? source.content }, { path: sourcePath });
+			cleanupDirectories.add(dirname(sourcePath));
+			targetDirectories.add(dirname(targetPath));
+		};
+		for (const scope of ["cwd", "session"] as const) {
+			const old = legacyTemporalScopePaths(cwd, sessionId, scope, root);
+			const target = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
+			if (selectedFiles.get(old.checkpoint)?.identity !== "missing") {
+				if (scope === "cwd") {
+					const stream = parseScopeStream(selectedFiles.get(old.checkpoint)!.content, selectedFiles.get(old.patches)!.content, "cwd")!;
+					const source = serializeScopeStream(stream, "cwd", cwd);
+					move(old.checkpoint, target.checkpoint, source.checkpoint);
+					move(old.patches, target.patches, source.patches);
+				} else {
+					move(old.checkpoint, target.checkpoint);
+					move(old.patches, target.patches);
+				}
+			}
+		}
+		const oldRuntime = legacySessionRuntimePaths(cwd, sessionId, root);
+		const targetRuntime = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
+		const migratedRuntime = structuredClone(selected.runtime.document);
+		migratedRuntime.meta.temporalRevision = "self";
+		const runtimeSource = serializeSessionRuntime(migratedRuntime, cwd, sessionId);
+		if (selectedFiles.get(oldRuntime.config)?.identity !== "missing") {
+			move(oldRuntime.config, targetRuntime.config, runtimeSource.config);
+			move(oldRuntime.meta, targetRuntime.meta, runtimeSource.meta);
+		} else {
+			for (const [path, content] of [[targetRuntime.config, runtimeSource.config], [targetRuntime.meta, runtimeSource.meta]] as const) {
+				const source = selectedFiles.get(path);
+				if (!source || source.identity === "missing" || source.content === undefined) throw new Error(`Layout migration runtime is unavailable: ${path}`);
+				if (bases.get(path)?.identity !== source.identity) throw new Error(`Layout migration runtime changed after selected revision: ${path}`);
+				if (source.content !== content) updates.push({ path, content });
+			}
+		}
+		if (updates.length === 0) return undefined;
+		let publication: ReturnType<typeof publishOwnedCohort>;
+		try {
+			publication = publishOwnedCohort(root, updates, [...bases.values()], revision, [], "migrate");
+		} catch (error) {
+			removeEmptyDirectories(targetDirectories);
+			throw error;
+		}
+		const nextFiles = temporalFileReceipts(canonical, updates);
+		removeEmptyDirectories(cleanupDirectories);
+		return { ...publication, base: { head: publication.commit ?? revision, files: nextFiles }, view };
+	});
 }
 
 function relativeOwnedPath(path: string, repositoryRoot: string): string {
@@ -316,12 +468,13 @@ export function migrateLegacyStorageToGit(
 	cwd: string,
 	sessionId: string,
 	repositoryRoot: string,
+	sessionKey = sessionId,
 ): StorageMigrationPublication {
-	return withPublicationLock(repositoryRoot, (root) => migrateLegacyStorageUnderLock(cwd, sessionId, root));
+	return withPublicationLock(repositoryRoot, (root) => migrateLegacyStorageUnderLock(cwd, sessionId, root, sessionKey));
 }
 
-function migrateLegacyStorageUnderLock(cwd: string, sessionId: string, root: string): StorageMigrationPublication {
-	const plan = planLegacyStorageMigration(cwd, sessionId, root);
+function migrateLegacyStorageUnderLock(cwd: string, sessionId: string, root: string, sessionKey = sessionId): StorageMigrationPublication {
+	const plan = planLegacyStorageMigration(cwd, sessionId, root, undefined, sessionKey);
 	if (plan.updates.length === 0) return { scopes: [] };
 	const current = captureOwnedFileBases(plan.bases.map(({ path }) => path), root);
 	if (current.some((base, index) => base.identity !== plan.bases[index]!.identity)) {
@@ -358,23 +511,23 @@ function publishOwnedCohort(
 }
 
 /** Explicit current-file adoption, not reconstruction or invention of pre-Git history. */
-export function adoptFileStateToGit(cwd: string, sessionId: string, repositoryRoot: string, revision: string, snapshot: Snapshot) {
-	const selected = loadTemporalFileRevision(cwd, sessionId, repositoryRoot, revision);
+export function adoptFileStateToGit(cwd: string, sessionId: string, repositoryRoot: string, revision: string, snapshot: Snapshot, sessionKey = sessionId) {
+	const selected = loadTemporalFileRevision(cwd, sessionId, repositoryRoot, revision, sessionKey);
 	if (snapshot.meta.step !== selected.runtime.meta.step) throw new Error("Git adoption must preserve the semantic step");
 	const runtime = createSessionRuntime(snapshot, cwd, sessionId, selected.view.lineage);
 	runtime.meta.temporalRevision = "self";
 	const sources = serializeSessionRuntime(runtime, cwd, sessionId);
 	initializeGitRepository(repositoryRoot);
 	return withPublicationLock(repositoryRoot, (root) => {
-		const current = captureTemporalBaseUnderLock(cwd, sessionId, root);
+		const current = captureTemporalBaseUnderLock(cwd, sessionId, root, sessionKey);
 		assertTemporalFileBase(selected.base, current);
-		const paths = sessionRuntimePaths(cwd, sessionId, root);
+		const paths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
 		// Preserve exact valid scope bytes; only runtime provenance changes representation.
 		const updates = current.files.filter(({ path }) => path.endsWith("checkpoint.json") || path.endsWith("patches.jsonl"))
 			.map(({ path, content }) => ({ path, content: content! }));
 		updates.push({ path: paths.config, content: sources.config }, { path: paths.meta, content: sources.meta });
 		const existing = current.head && updates.every(({ path, content }) => revisionFile(root, current.head!, path).content === content)
-			? loadTemporalRevision(cwd, sessionId, root, current.head) : undefined;
+			? loadTemporalRevision(cwd, sessionId, root, current.head, sessionKey) : undefined;
 		if (existing && (!existing.runtime || hashJson({ lineage: existing.runtime.document.meta.lineage, scopes: existing.scopes }) !== hashJson(selected.view))) {
 			throw new Error("Existing Git runtime does not anchor the selected file cohort");
 		}
@@ -387,12 +540,12 @@ export function adoptFileStateToGit(cwd: string, sessionId: string, repositoryRo
 
 /** Working-tree equality alone cannot prove that a new commit contains the selected cohort. */
 function includeUncommittedCohort(cwd: string, sessionId: string, root: string, current: TemporalGitBase,
-	updates: OwnedFileUpdate[], changedScopes: StateScope[], scopes: readonly StateScope[], runtime: boolean): void {
+	updates: OwnedFileUpdate[], changedScopes: StateScope[], scopes: readonly StateScope[], runtime: boolean, sessionKey = sessionId): void {
 	const targets = new Map(updates.map((update) => [update.path, update]));
 	const desired = (paths: string[]) => paths.map((path) => targets.get(path) ?? { path, content: current.files.find((file) => file.path === path)!.content });
 	const absentFromHead = (files: OwnedFileUpdate[]) => files.some(({ path, content }) => current.head === undefined || revisionFile(root, current.head, path).content !== content);
 	for (const scope of ["global", "cwd", "session"] as const) {
-		const paths = temporalScopePaths(cwd, sessionId, scope, root);
+		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		const pair = desired([paths.checkpoint, paths.patches]);
 		if (!absentFromHead(pair)) continue;
 		if (!scopes.includes(scope)) throw new Error(`Temporal scope update omitted an uncommitted stream: ${scope}`);
@@ -400,7 +553,7 @@ function includeUncommittedCohort(cwd: string, sessionId: string, root: string, 
 		if (!changedScopes.includes(scope)) changedScopes.push(scope);
 	}
 	if (runtime) {
-		const paths = sessionRuntimePaths(cwd, sessionId, root);
+		const paths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
 		const pair = desired([paths.config, paths.meta]);
 		if (absentFromHead(pair)) for (const update of pair) targets.set(update.path, update);
 	}
@@ -416,23 +569,24 @@ export function publishTemporalStateToGit(
 	base: TemporalGitBase,
 	repositoryRoot: string,
 	runtime?: SessionRuntime,
+	sessionKey = sessionId,
 ): { base: TemporalGitBase; commit?: string; push?: GitPushResult } {
 	return withPublicationLock(repositoryRoot, (root) => {
-		const current = captureTemporalBaseUnderLock(cwd, sessionId, root);
+		const current = captureTemporalBaseUnderLock(cwd, sessionId, root, sessionKey);
 		assertTemporalFileBase(base, current);
 		if (runtime?.meta.publication === "files") throw new Error("Git publication requires explicit Git provenance");
-		const runtimePaths = sessionRuntimePaths(cwd, sessionId, root);
+		const runtimePaths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
 		const previousRuntime = parseSessionRuntime(current.files.find(({ path }) => path === runtimePaths.config)?.content,
 			current.files.find(({ path }) => path === runtimePaths.meta)?.content, cwd, sessionId);
 		if (previousRuntime?.meta.publication === "files") throw new Error("File-only storage requires explicit full-cohort Git adoption");
 		const runtimeOnly = runtime?.meta.temporalRevision !== undefined && runtime.meta.temporalRevision !== "self";
 		if (runtimeOnly) {
 			if (scopes.length !== 0) throw new Error("Runtime-only publication cannot write semantic scopes");
-			const selected = loadTemporalRevision(cwd, sessionId, root, runtime!.meta.temporalRevision!);
+			const selected = loadTemporalRevision(cwd, sessionId, root, runtime!.meta.temporalRevision!, sessionKey);
 			if (hashJson(selected.scopes) !== hashJson(view.scopes)) throw new Error("Runtime temporal reference does not match selected streams");
 		}
-		const { updates, changedScopes } = planTemporalPublication(cwd, sessionId, view, scopes, current, root, runtime, runtimeOnly);
-		if (!runtimeOnly) includeUncommittedCohort(cwd, sessionId, root, current, updates, changedScopes, scopes, runtime !== undefined);
+		const { updates, changedScopes } = planTemporalPublication(cwd, sessionId, view, scopes, current, root, runtime, runtimeOnly, sessionKey);
+		if (!runtimeOnly) includeUncommittedCohort(cwd, sessionId, root, current, updates, changedScopes, scopes, runtime !== undefined, sessionKey);
 		if (updates.length === 0) return { base: current };
 		const publication = publishOwnedCohort(root, updates, current.files, current.head, changedScopes, "persist");
 		const nextFiles = temporalFileReceipts(current, updates);

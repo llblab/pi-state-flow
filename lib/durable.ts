@@ -17,8 +17,9 @@ import { canonicalJson, containsNull, isJsonValue } from "./json.ts";
 import { validateScopeStream, validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
 import { isMaterializedState, type MaterializedState, type StateScope } from "./state.ts";
 
-const MAX_SCOPE_SLUG_LENGTH = 80;
-const SCOPE_KEY_PATTERN = /^[A-Za-z0-9._-]{1,80}-[a-f0-9]{64}$/;
+const LEGACY_MAX_SCOPE_SLUG_LENGTH = 80;
+const LEGACY_SCOPE_KEY_PATTERN = /^[A-Za-z0-9._-]{1,80}-[a-f0-9]{64}$/;
+const SESSION_KEY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const STATE_FILE = "state.json";
 const CHECKPOINT_FILE = "checkpoint.json";
 const PATCHES_FILE = "patches.jsonl";
@@ -29,10 +30,16 @@ export interface ScopeStreamSources {
 	patches: string;
 }
 
-export function serializeScopeStream(stream: ScopeStream, scope: StateScope): ScopeStreamSources {
+/** CWD storage requires its canonical owner; legacy ownerless sources are read-only. */
+export function serializeScopeStream(stream: ScopeStream, scope: StateScope, cwdIdentity?: string): ScopeStreamSources {
 	validateScopeStream(stream, scope);
+	if (scope === "cwd" && cwdIdentity === undefined) throw new Error("State Flow CWD scope serialization requires its canonical identity");
+	if (scope !== "cwd" && cwdIdentity !== undefined) throw new Error("Only State Flow CWD scope serialization accepts a CWD identity");
+	const checkpoint = scope === "cwd"
+		? { ...stream.checkpoint, owner: { cwd: resolve(cwdIdentity!) } }
+		: stream.checkpoint;
 	return {
-		checkpoint: `${canonicalJson(stream.checkpoint)}\n`,
+		checkpoint: `${canonicalJson(checkpoint)}\n`,
 		patches: stream.patches.map((record) => `${canonicalJson(record)}\n`).join(""),
 	};
 }
@@ -42,6 +49,7 @@ export function parseScopeStream(
 	checkpointSource: string | undefined,
 	patchesSource: string | undefined,
 	scope: StateScope,
+	expectedCwd?: string,
 ): ScopeStream | undefined {
 	if (checkpointSource === undefined && patchesSource === undefined) return undefined;
 	if (checkpointSource === undefined || patchesSource === undefined) {
@@ -52,6 +60,17 @@ export function parseScopeStream(
 		checkpoint = JSON.parse(checkpointSource);
 	} catch {
 		throw new Error(`State Flow ${scope} checkpoint contains invalid JSON`);
+	}
+	if (checkpoint !== null && typeof checkpoint === "object" && !Array.isArray(checkpoint) && Object.hasOwn(checkpoint, "owner")) {
+		const { owner, ...semantic } = checkpoint as Record<string, unknown>;
+		if (scope !== "cwd" || owner === null || typeof owner !== "object" || Array.isArray(owner)
+			|| Object.keys(owner).join(",") !== "cwd" || typeof (owner as { cwd?: unknown }).cwd !== "string") {
+			throw new Error("Invalid State Flow CWD scope identity");
+		}
+		if (expectedCwd !== undefined && (owner as { cwd: string }).cwd !== resolve(expectedCwd)) throw new Error("State Flow CWD scope identity mismatch");
+		checkpoint = semantic;
+	} else if (scope === "cwd" && expectedCwd !== undefined) {
+		throw new Error("State Flow CWD scope identity is missing");
 	}
 	const patches: unknown[] = [];
 	for (const [index, line] of patchesSource.split(/\r?\n/).entries()) {
@@ -73,34 +92,34 @@ export interface TemporalScopePaths {
 	patches: string;
 }
 
-export function temporalScopePaths(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string): TemporalScopePaths {
+export function temporalScopePaths(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string, sessionKey = sessionId): TemporalScopePaths {
 	const directory = scope === "global" ? resolve(repositoryRoot)
 		: scope === "cwd" ? cwdScopePaths(cwd, repositoryRoot).directory
-			: scope === "session" ? sessionScopePaths(cwd, sessionId, repositoryRoot).directory
+			: scope === "session" ? sessionScopePaths(cwd, sessionId, repositoryRoot, sessionKey).directory
 				: undefined;
 	if (directory === undefined) throw new Error("Unknown temporal scope");
 	return { directory, checkpoint: join(directory, CHECKPOINT_FILE), patches: join(directory, PATCHES_FILE) };
 }
 
-export function sessionRuntimePaths(cwd: string, sessionId: string, repositoryRoot: string): { config: string; meta: string } {
-	const directory = sessionScopePaths(cwd, sessionId, repositoryRoot).directory;
+export function sessionRuntimePaths(cwd: string, sessionId: string, repositoryRoot: string, sessionKey = sessionId): { config: string; meta: string } {
+	const directory = sessionScopePaths(cwd, sessionId, repositoryRoot, sessionKey).directory;
 	return { config: join(directory, "config.json"), meta: join(directory, "meta.json") };
 }
 
 /** A temporal reader never treats a legacy current snapshot as an anchored checkpoint. */
-export function loadScopeStream(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string): ScopeStream | undefined {
-	const paths = temporalScopePaths(cwd, sessionId, scope, repositoryRoot);
+export function loadScopeStream(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string, sessionKey = sessionId): ScopeStream | undefined {
+	const paths = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
 	if (readRegularBytes(join(paths.directory, STATE_FILE), repositoryRoot) !== undefined) {
 		throw new Error(`Legacy State Flow storage requires explicit migration: ${paths.directory}`);
 	}
-	return parseScopeStream(readRegularFile(paths.checkpoint, repositoryRoot), readRegularFile(paths.patches, repositoryRoot), scope);
+	return parseScopeStream(readRegularFile(paths.checkpoint, repositoryRoot), readRegularFile(paths.patches, repositoryRoot), scope, scope === "cwd" ? cwd : undefined);
 }
 
 /** Include legacy names in the CAS basis solely to prevent format races during cutover. */
-export function captureTemporalFileBases(cwd: string, sessionId: string, repositoryRoot: string): DurableFileBase[] {
+export function captureTemporalFileBases(cwd: string, sessionId: string, repositoryRoot: string, sessionKey = sessionId): DurableFileBase[] {
 	const paths = (["global", "cwd", "session"] as const).flatMap((scope) => {
-		const pair = temporalScopePaths(cwd, sessionId, scope, repositoryRoot);
-		const runtime = scope === "session" ? sessionRuntimePaths(cwd, sessionId, repositoryRoot) : undefined;
+		const pair = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
+		const runtime = scope === "session" ? sessionRuntimePaths(cwd, sessionId, repositoryRoot, sessionKey) : undefined;
 		return [pair.checkpoint, pair.patches, join(pair.directory, STATE_FILE), ...(runtime === undefined ? [] : [runtime.config, runtime.meta])];
 	});
 	return captureOwnedFileBases(paths, repositoryRoot);
@@ -113,17 +132,18 @@ export function temporalStateFileUpdates(
 	view: TemporalState,
 	scopes: readonly StateScope[],
 	repositoryRoot: string,
+	sessionKey = sessionId,
 ): OwnedFileUpdate[] {
 	validateTemporalState(view);
 	const seen = new Set<StateScope>();
 	return scopes.flatMap((scope) => {
 		if (seen.has(scope)) throw new Error(`Duplicate temporal scope update: ${scope}`);
 		seen.add(scope);
-		const paths = temporalScopePaths(cwd, sessionId, scope, repositoryRoot);
+		const paths = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
 		if (readRegularBytes(join(paths.directory, STATE_FILE), repositoryRoot) !== undefined) {
 			throw new Error(`Legacy State Flow storage requires explicit migration: ${paths.directory}`);
 		}
-		const sources = serializeScopeStream(view.scopes[scope], scope);
+		const sources = serializeScopeStream(view.scopes[scope], scope, scope === "cwd" ? cwd : undefined);
 		return [{ path: paths.checkpoint, content: sources.checkpoint }, { path: paths.patches, content: sources.patches }];
 	});
 }
@@ -163,28 +183,43 @@ export function durablePaths(repositoryRoot = getDurableRepositoryRoot()): Durab
 	};
 }
 
-function readableScopeKey(identity: string, readable: string): string {
+function legacyReadableScopeKey(identity: string, readable: string): string {
 	if (identity.length === 0) throw new Error("State Flow scope identity must be non-empty");
-	const slug = readable
-		.replace(/[^A-Za-z0-9._-]/g, "_")
-		.slice(0, MAX_SCOPE_SLUG_LENGTH) || "scope";
-	const digest = createHash("sha256").update(identity).digest("hex");
-	return `${slug}-${digest}`;
+	const slug = readable.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, LEGACY_MAX_SCOPE_SLUG_LENGTH) || "scope";
+	return `${slug}-${createHash("sha256").update(identity).digest("hex")}`;
 }
 
-/** Follow Pi's readable CWD convention and append the full canonical-path hash. */
+/** Match Pi's native project-session directory convention exactly. */
 export function cwdScopeKey(cwd: string): string {
 	const canonical = resolve(cwd);
-	const piStyle = `--${canonical.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-	return readableScopeKey(canonical, piStyle);
+	return `--${canonical.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
-/** Pi's immutable session ID is the canonical identity for one durable session layer. */
-export function sessionScopeKey(sessionId: string): string {
-	if (sessionId.trim().length === 0 || sessionId !== sessionId.trim()) {
-		throw new Error("State Flow session identity must be a non-empty trimmed string");
+/** One safe directory segment, normally the native Pi session filename stem. */
+export function sessionScopeKey(key: string): string {
+	if (!SESSION_KEY_PATTERN.test(key)) throw new Error("State Flow session storage key must be one Pi-safe path segment");
+	return key;
+}
+
+/** Prefer the actual native file stem; reproduce it from the immutable header when in-memory. */
+export function sessionStorageKey(sessionFile: string | undefined, sessionId: string, timestamp?: string): string {
+	if (sessionFile !== undefined) {
+		const name = basename(sessionFile);
+		if (!name.endsWith(".jsonl")) throw new Error("State Flow session file must use Pi's .jsonl format");
+		return sessionScopeKey(name.slice(0, -".jsonl".length));
 	}
-	return readableScopeKey(sessionId, sessionId);
+	if (timestamp !== undefined) return sessionScopeKey(`${timestamp.replace(/[:.]/g, "-")}_${sessionId}`);
+	return sessionScopeKey(sessionId);
+}
+
+/** Read-only migration input for the untagged hashed-layout draft. */
+export function legacyCwdScopeKey(cwd: string): string {
+	const canonical = resolve(cwd);
+	return legacyReadableScopeKey(canonical, `--${canonical.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
+}
+
+export function legacySessionScopeKey(sessionId: string): string {
+	return legacyReadableScopeKey(sessionScopeKey(sessionId), sessionId);
 }
 
 export function cwdScopePaths(cwd: string, repositoryRoot = getDurableRepositoryRoot()): ScopePaths {
@@ -196,8 +231,9 @@ export function sessionScopePaths(
 	cwd: string,
 	sessionId: string,
 	repositoryRoot = getDurableRepositoryRoot(),
+	sessionKey = sessionId,
 ): ScopePaths {
-	const directory = join(cwdScopePaths(cwd, repositoryRoot).directory, sessionScopeKey(sessionId));
+	const directory = join(cwdScopePaths(cwd, repositoryRoot).directory, sessionScopeKey(sessionKey));
 	return { directory, state: join(directory, STATE_FILE), patches: join(directory, PATCHES_FILE) };
 }
 
@@ -209,12 +245,34 @@ export function cwdPatchesPath(cwd: string, repositoryRoot = getDurableRepositor
 	return cwdScopePaths(cwd, repositoryRoot).patches;
 }
 
-export function sessionStatePath(cwd: string, sessionId: string, repositoryRoot = getDurableRepositoryRoot()): string {
-	return sessionScopePaths(cwd, sessionId, repositoryRoot).state;
+/** Historical paths from the pre-0.4 hashed-layout draft; never selected for new writes. */
+export function legacyTemporalScopePaths(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string): TemporalScopePaths {
+	const root = resolve(repositoryRoot);
+	const cwdDirectory = join(root, legacyCwdScopeKey(cwd));
+	const directory = scope === "global" ? root : scope === "cwd" ? cwdDirectory : join(cwdDirectory, legacySessionScopeKey(sessionId));
+	return { directory, checkpoint: join(directory, CHECKPOINT_FILE), patches: join(directory, PATCHES_FILE) };
 }
 
-export function sessionPatchesPath(cwd: string, sessionId: string, repositoryRoot = getDurableRepositoryRoot()): string {
-	return sessionScopePaths(cwd, sessionId, repositoryRoot).patches;
+export function legacySessionRuntimePaths(cwd: string, sessionId: string, repositoryRoot: string): { config: string; meta: string } {
+	const directory = legacyTemporalScopePaths(cwd, sessionId, "session", repositoryRoot).directory;
+	return { config: join(directory, "config.json"), meta: join(directory, "meta.json") };
+}
+
+export function captureLegacyTemporalFileBases(cwd: string, sessionId: string, repositoryRoot: string): DurableFileBase[] {
+	const paths = (["global", "cwd", "session"] as const).flatMap((scope) => {
+		const pair = legacyTemporalScopePaths(cwd, sessionId, scope, repositoryRoot);
+		const runtime = scope === "session" ? legacySessionRuntimePaths(cwd, sessionId, repositoryRoot) : undefined;
+		return [pair.checkpoint, pair.patches, join(pair.directory, STATE_FILE), ...(runtime === undefined ? [] : [runtime.config, runtime.meta])];
+	});
+	return captureOwnedFileBases(paths, repositoryRoot);
+}
+
+export function sessionStatePath(cwd: string, sessionId: string, repositoryRoot = getDurableRepositoryRoot(), sessionKey = sessionId): string {
+	return sessionScopePaths(cwd, sessionId, repositoryRoot, sessionKey).state;
+}
+
+export function sessionPatchesPath(cwd: string, sessionId: string, repositoryRoot = getDurableRepositoryRoot(), sessionKey = sessionId): string {
+	return sessionScopePaths(cwd, sessionId, repositoryRoot, sessionKey).patches;
 }
 
 /** Exact semantic file shapes, including legacy snapshots only during the storage cutover. */
@@ -224,12 +282,16 @@ export function isStateFlowOwnedPath(candidate: string, repositoryRoot = getDura
 	const global = durablePaths(root);
 	if (absolute === global.globalState || absolute === global.globalPatches || absolute === join(root, CHECKPOINT_FILE)) return true;
 	const segments = relative(root, absolute).split(sep);
+	const cwdKey = (value: string) => (value.startsWith("--") && value.endsWith("--")) || LEGACY_SCOPE_KEY_PATTERN.test(value);
+	const sessionKey = (value: string) => {
+		try { return sessionScopeKey(value) === value; } catch { return false; }
+	};
 	if (segments.length === 2) {
-		return SCOPE_KEY_PATTERN.test(segments[0]!) && (segments[1] === STATE_FILE || segments[1] === CHECKPOINT_FILE || segments[1] === PATCHES_FILE);
+		return cwdKey(segments[0]!) && (segments[1] === STATE_FILE || segments[1] === CHECKPOINT_FILE || segments[1] === PATCHES_FILE);
 	}
 	if (segments.length === 3) {
-		return SCOPE_KEY_PATTERN.test(segments[0]!)
-			&& SCOPE_KEY_PATTERN.test(segments[1]!)
+		return cwdKey(segments[0]!)
+			&& (sessionKey(segments[1]!) || LEGACY_SCOPE_KEY_PATTERN.test(segments[1]!))
 			&& (segments[2] === STATE_FILE || segments[2] === CHECKPOINT_FILE || segments[2] === PATCHES_FILE
 				|| segments[2] === "config.json" || segments[2] === "meta.json");
 	}

@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
 	captureTemporalFileBases, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath,
-	loadScopeStream, parseScopeStream, serializeScopeStream, sessionScopeKey,
+	loadScopeStream, parseScopeStream, serializeScopeStream, sessionScopeKey, sessionStorageKey,
 	temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates, parseStateSource,
 } from "../lib/durable.ts";
 import { emptyState, type StateScope } from "../lib/state.ts";
@@ -34,19 +34,25 @@ test("default durable root follows Pi agent-dir resolution without Knowledge cou
 	}
 });
 
-test("canonical scope hierarchy uses collision-safe CWD/session keys at the dedicated store root", () => {
+test("canonical scope hierarchy mirrors Pi project and session names without redundant hashes", () => {
 	assert.equal(getDurableRepositoryRoot("./agent-root"), resolve("./agent-root", "state-flow"));
 	const root = resolve("./knowledge");
 	const cwd = resolve("./project");
-	assert.match(cwdScopeKey(cwd), /^[A-Za-z0-9._-]+-[a-f0-9]{64}$/);
-	assert.notEqual(cwdScopeKey(join(root, "a-b", "c")), cwdScopeKey(join(root, "a", "b-c")));
-	assert.equal(sessionScopeKey("session-1"), sessionScopeKey("session-1"));
+	assert.equal(cwdScopeKey("/home/llb/Repos/deos"), "--home-llb-Repos-deos--");
+	assert.equal(cwdScopeKey(cwd), `--${cwd.slice(1).replaceAll("/", "-")}--`);
+	assert.equal(sessionStorageKey("/sessions/--home-llb-Repos-deos--/2026-09-07T20-01-08-993Z_01a07d75-d380-72ad-84f6-e83040c93368.jsonl", "ignored"),
+		"2026-09-07T20-01-08-993Z_01a07d75-d380-72ad-84f6-e83040c93368");
+	assert.equal(sessionStorageKey(undefined, "session-1", "2026-09-07T20:01:08.993Z"), "2026-09-07T20-01-08-993Z_session-1");
+	assert.equal(sessionStorageKey(undefined, "session-1"), "session-1");
+	assert.throws(() => sessionStorageKey("/sessions/not-jsonl", "session-1"), /.jsonl format/);
+	assert.equal(sessionScopeKey("session-1"), "session-1");
 	assert.notEqual(sessionScopeKey("session-1"), sessionScopeKey("session-2"));
-	assert.throws(() => sessionScopeKey(""), /non-empty trimmed/);
-	assert.throws(() => sessionScopeKey(" session-1"), /non-empty trimmed/);
+	for (const invalid of ["", " session-1", "session 1", "session%1", "session-", "session.", ".", "..", ".git", "nested/session", "nested\\session", "\n", "\0"]) {
+		assert.throws(() => sessionScopeKey(invalid), /path segment/);
+	}
 	for (const scope of ["global", "cwd", "session"] as const) {
-		const paths = temporalScopePaths(cwd, "session", scope, root);
-		const directory = scope === "global" ? root : scope === "cwd" ? join(root, cwdScopeKey(cwd)) : join(root, cwdScopeKey(cwd), sessionScopeKey("session"));
+		const paths = temporalScopePaths(cwd, "session-id", scope, root, "timestamp_session-id");
+		const directory = scope === "global" ? root : scope === "cwd" ? join(root, cwdScopeKey(cwd)) : join(root, cwdScopeKey(cwd), "timestamp_session-id");
 		assert.deepEqual(paths, { directory, checkpoint: join(directory, "checkpoint.json"), patches: join(directory, "patches.jsonl") });
 		for (const path of [paths.checkpoint, paths.patches, join(directory, "state.json")]) assert.equal(isStateFlowOwnedPath(path, root), true);
 		for (const name of ["config.json", "meta.json"]) assert.equal(isStateFlowOwnedPath(join(directory, name), root), scope === "session");
@@ -54,8 +60,20 @@ test("canonical scope hierarchy uses collision-safe CWD/session keys at the dedi
 	for (const path of ["notes.md", ".state-flow/global.json", "scopes/state.json", "arbitrary/state.json", "../state.json"]) {
 		assert.equal(isStateFlowOwnedPath(join(root, path), root), false, path);
 	}
-	const session = temporalScopePaths(cwd, "session", "session", root);
+	const session = temporalScopePaths(cwd, "session-id", "session", root, "timestamp_session-id");
 	assert.equal(isStateFlowOwnedPath(join(session.directory, "nested", "checkpoint.json"), root), false);
+	assert.equal(isStateFlowOwnedPath(join(root, cwdScopeKey(cwd), ".git", "config.json"), root), false);
+});
+
+test("readable CWD paths retain collision provenance inside the checkpoint envelope", () => {
+	const stream = temporalFixture().scopes.cwd;
+	const owned = serializeScopeStream(stream, "cwd", "/a-b/c");
+	assert.deepEqual(parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a-b/c"), stream);
+	assert.throws(() => parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a/b-c"), /identity mismatch/);
+	assert.throws(() => serializeScopeStream(stream, "cwd"), /requires its canonical identity/);
+	const unowned = { checkpoint: `${JSON.stringify(stream.checkpoint)}\n`, patches: stream.patches.map((record) => `${JSON.stringify(record)}\n`).join("") };
+	assert.throws(() => parseScopeStream(unowned.checkpoint, unowned.patches, "cwd", "/a-b/c"), /identity is missing/);
+	assert.throws(() => parseScopeStream(owned.checkpoint.replace('"cwd":"/a-b/c"', '"project":"/a-b/c"'), owned.patches, "cwd", "/a-b/c"), /scope identity/);
 });
 
 test("legacy interpretation reads only a validated current snapshot and returns defensive state", () => {
@@ -122,6 +140,7 @@ test("canonical reads and file preparation reject symlinks and clean prepared si
 
 test("temporal codec round-trips zero, seven, and repeatedly folded sparse tails at every hot boundary", () => {
 	let view = temporalFixture();
+	const cwd = "/codec/project";
 	for (let index = 0; index <= 30; index++) {
 		if (index > 0) {
 			const changes: RecentScopePatch[] = [{ scope: "session", patch: { response: `answer ${index}` } }];
@@ -131,10 +150,11 @@ test("temporal codec round-trips zero, seven, and repeatedly folded sparse tails
 		}
 		const restored = structuredClone(view);
 		for (const scope of ["global", "cwd", "session"] as const) {
-			const sources = serializeScopeStream(view.scopes[scope], scope);
-			restored.scopes[scope] = parseScopeStream(sources.checkpoint, sources.patches, scope)!;
+			const identity = scope === "cwd" ? cwd : undefined;
+			const sources = serializeScopeStream(view.scopes[scope], scope, identity);
+			restored.scopes[scope] = parseScopeStream(sources.checkpoint, sources.patches, scope, identity)!;
 			assert.deepEqual(restored.scopes[scope], view.scopes[scope]);
-			assert.deepEqual(serializeScopeStream(restored.scopes[scope], scope), sources);
+			assert.deepEqual(serializeScopeStream(restored.scopes[scope], scope, identity), sources);
 			assert.equal(sources.patches.trim().split("\n").filter(Boolean).length, view.scopes[scope].patches.length);
 		}
 		for (let offset = 0; offset < view.lineage.length; offset++) {

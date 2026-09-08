@@ -20,6 +20,7 @@ import { getKnowledgeRoot, GlobalMarkdownDiscovery } from "./discovery.ts";
 import {
 	cwdScopeKey,
 	sessionScopeKey,
+	sessionStorageKey,
 } from "./durable.ts";
 import { projectRecentTransitionsWithLimit } from "./history.ts";
 import { pushGitCommit } from "./git.ts";
@@ -56,6 +57,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	const artifactReads = new ArtifactReadTracker();
 	const globalMarkdown = new GlobalMarkdownDiscovery(options.knowledgeRoot ?? getKnowledgeRoot(options.agentDir));
 	let artifactInvalidations: ArtifactInvalidationRequest[] = [];
+
+	function sessionIdentity(ctx: ExtensionContext): { id: string; key: string } {
+		const id = ctx.sessionManager.getSessionId();
+		return { id, key: sessionStorageKey(ctx.sessionManager.getSessionFile(), id, ctx.sessionManager.getHeader()?.timestamp) };
+	}
 
 	options.onRuntime?.({ read: (offset, scope) => {
 		if (!runtime) throw new Error("State Flow temporal runtime is unavailable");
@@ -233,10 +239,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			}
 		}
 
+		const session = sessionIdentity(ctx);
 		return {
 			repositoryRoot,
 			cwdScopeKey: cwdScopeKey(cwd),
-			sessionScopeKey: sessionScopeKey(ctx.sessionManager.getSessionId()),
+			sessionScopeKey: sessionScopeKey(session.key),
 			scopeStates: diagnosticStates,
 			recent: diagnosticRecent,
 			...(view === undefined ? {} : { temporal: {
@@ -255,7 +262,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	function restoreActiveBranch(ctx: ExtensionContext, sessionStartReason?: unknown): void {
 		clearRunTransient();
 		activeContext = ctx;
-		runtime = new TemporalRuntime(ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot);
+		const session = sessionIdentity(ctx);
+		runtime = new TemporalRuntime(ctx.cwd, session.id, repositoryRoot, session.key);
 		installScopeStates();
 		pendingPublication = undefined;
 		branchHasSnapshot = false;
@@ -264,7 +272,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			const branch = ctx.sessionManager.getBranch();
 			const discovery = discoverSnapshotData(branch);
 			const recovery = recoverSnapshot(discovery.candidates, (revision, legacy) =>
-				inspectSnapshotRevision(ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot, revision, legacy).snapshot);
+				inspectSnapshotRevision(ctx.cwd, session.id, repositoryRoot, revision, legacy, session.key).snapshot);
 			branchStartsWithoutRuntime = recovery.disabledMarker === true
 				|| (discovery.candidates.length === 0 && discovery.errors.length === 0);
 			const skipped = discovery.errors.length + recovery.skipped.length;
@@ -274,7 +282,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			} else if (discovery.candidates.length > 0) {
 				snapshot = recovery.snapshot;
 				if (branchHasSnapshot && snapshot.meta.durableBase) {
-					snapshot = runtime.restore(snapshot.meta.durableBase, snapshot);
+					const selectedRevision = snapshot.meta.durableBase;
+					snapshot = runtime.restore(selectedRevision, snapshot);
+					if (snapshot.meta.durableBase !== selectedRevision) persist();
 				} else if (branchHasSnapshot && snapshot.config.enabled) {
 					const publication = runtime.initialize(snapshot, true);
 					if (publication) recordPublication(publication, ctx);
@@ -424,7 +434,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				}
 				const branch = ctx.sessionManager.getBranch();
 				activeContext = ctx;
-				runtime ??= new TemporalRuntime(ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot);
+				const session = sessionIdentity(ctx);
+				runtime ??= new TemporalRuntime(ctx.cwd, session.id, repositoryRoot, session.key);
 				if (branchStartsWithoutRuntime) runtime.prepare();
 				const bootstrap = (!branchHasSnapshot || !snapshot.config.enabled)
 					&& hasPriorConversation(branch);
@@ -479,7 +490,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			let selected = runtime;
 			let current = snapshot;
 			if (!selected?.view && snapshot.meta.durableBase) {
-				selected = new TemporalRuntime(ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot);
+				const session = sessionIdentity(ctx);
+				selected = new TemporalRuntime(ctx.cwd, session.id, repositoryRoot, session.key);
 				current = selected.restore(snapshot.meta.durableBase, snapshot);
 			}
 			const stopped = stopEpisode(current);

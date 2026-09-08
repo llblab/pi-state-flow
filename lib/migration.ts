@@ -29,7 +29,7 @@ export function hasCwdMaterialization(cwd: string, repositoryRoot: string): bool
 	], root);
 	if (checkpoint!.content !== undefined) {
 		if (legacy!.content !== undefined) throw new Error(`Ambiguous State Flow storage has both current and checkpoint snapshots: ${directory}`);
-		return parseScopeStream(checkpoint!.content, patches!.content, "cwd") !== undefined;
+		return parseScopeStream(checkpoint!.content, patches!.content, "cwd", cwd) !== undefined;
 	}
 	if (legacy!.content !== undefined) return parseStateSource(legacy!.content, legacy!.path) !== undefined;
 	if (patches!.content !== undefined) throw new Error(`State Flow tail has no provable snapshot: ${directory}`);
@@ -42,12 +42,13 @@ export function planLegacyStorageMigration(
 	sessionId: string,
 	repositoryRoot: string,
 	origin: string = randomUUID(),
+	sessionKey = sessionId,
 ): LegacyStorageMigration {
 	const root = resolve(repositoryRoot);
 	const directories: Record<StateScope, string> = {
 		global: root,
 		cwd: cwdScopePaths(cwd, root).directory,
-		session: sessionScopePaths(cwd, sessionId, root).directory,
+		session: sessionScopePaths(cwd, sessionId, root, sessionKey).directory,
 	};
 	const paths = Object.values(directories).flatMap((directory) => [
 		join(directory, "state.json"), join(directory, "checkpoint.json"), join(directory, "patches.jsonl"),
@@ -63,7 +64,7 @@ export function planLegacyStorageMigration(
 		const patches = byPath.get(join(directory, "patches.jsonl"))!;
 		if (checkpoint.content !== undefined) {
 			if (legacy.content !== undefined) throw new Error(`Ambiguous State Flow storage has both current and checkpoint snapshots: ${directory}`);
-			parseScopeStream(checkpoint.content, patches.content, scope);
+			parseScopeStream(checkpoint.content, patches.content, scope, scope === "cwd" ? cwd : undefined);
 			continue;
 		}
 		if (legacy.content === undefined) {
@@ -75,7 +76,7 @@ export function planLegacyStorageMigration(
 			checkpoint: { through: { id: origin, position: 0, parent: null }, state },
 			patches: [],
 		};
-		const source = serializeScopeStream(stream, scope);
+		const source = serializeScopeStream(stream, scope, scope === "cwd" ? cwd : undefined);
 		scopes.push(scope);
 		updates.push(
 			{ path: checkpoint.path, content: source.checkpoint },

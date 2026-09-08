@@ -5,7 +5,7 @@ import test from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getDurableRepositoryRoot } from "../lib/durable.ts";
+import { cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStorageKey, temporalScopePaths } from "../lib/durable.ts";
 import { getKnowledgeRoot } from "../lib/discovery.ts";
 import { hashArtifactSource } from "../lib/artifact.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
@@ -76,6 +76,39 @@ test("fresh explicit start is local-only; ordinary startup/status and old pointe
 	assert.equal(existsSync(missingRoot), false);
 	assert.deepEqual(old.entries, [checkpoint]);
 	assert.match(old.notifications.at(-1)!, /original Git history/);
+});
+
+test("live storage paths mirror Pi CWD and session file names without appended hashes", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-native-path-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const cwd = "/home/llb/Repos/deos";
+	const sessionId = "01a07d75-d380-72ad-84f6-e83040c93368";
+	const sessionFile = `/home/llb/.pi/agent/sessions/--home-llb-Repos-deos--/2026-09-07T20-01-08-993Z_${sessionId}.jsonl`;
+	const h = harness({ repositoryRoot: root, cwd, sessionId, sessionFile });
+	await start(h);
+	const key = sessionStorageKey(sessionFile, sessionId);
+	const expectedCwd = join(root, "--home-llb-Repos-deos--");
+	const expectedSession = join(expectedCwd, key);
+	assert.equal(cwdScopeKey(cwd), "--home-llb-Repos-deos--");
+	assert.equal(temporalScopePaths(cwd, sessionId, "cwd", root, key).directory, expectedCwd);
+	assert.equal(temporalScopePaths(cwd, sessionId, "session", root, key).directory, expectedSession);
+	assert.equal(existsSync(join(expectedSession, "checkpoint.json")), true);
+	assert.equal(existsSync(join(expectedSession, "patches.jsonl")), true);
+	assert.deepEqual(JSON.parse(readFileSync(join(expectedCwd, "checkpoint.json"), "utf8")).owner, { cwd });
+	const runtime = sessionRuntimePaths(cwd, sessionId, root, key);
+	assert.equal(JSON.parse(readFileSync(runtime.meta, "utf8")).identity.sessionId, sessionId);
+	assert.equal(JSON.parse(readFileSync(runtime.meta, "utf8")).identity.cwd, cwd);
+	assert.equal(execFileSync("git", ["-C", root, "ls-files"], { encoding: "utf8" }).includes("-" + "a".repeat(64)), false);
+	await h.commands.get("state-flow-status").handler("", h.ctx);
+	assert.match(h.notifications.at(-1)!, new RegExp(`Scope keys: CWD --home-llb-Repos-deos--; session ${key}`));
+	const head = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" });
+	const metaBytes = readFileSync(runtime.meta);
+	const foreign = harness({ repositoryRoot: root, cwd, sessionId: "foreign-session", sessionFile, initializeRepository: false });
+	await start(foreign);
+	assert.equal(foreign.activeTools.includes("patch_state"), false);
+	assert.match(foreign.notifications.at(-1)!, /scope identity mismatch/);
+	assert.deepEqual(readFileSync(runtime.meta), metaBytes);
+	assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }), head);
 });
 
 test("registers patch_state plus read-only read_state and exposes the lifecycle commands", () => {

@@ -73,21 +73,21 @@ export function assertTemporalFileBase(expected: TemporalFileBase, current: Temp
 /** One shared publication plan for Git and files; neither backend invents semantic changes. */
 export function planTemporalPublication(
 	cwd: string, sessionId: string, view: TemporalState, scopes: readonly StateScope[],
-	current: TemporalFileBase, root: string, runtime?: SessionRuntime, runtimeOnly = false,
+	current: TemporalFileBase, root: string, runtime?: SessionRuntime, runtimeOnly = false, sessionKey = sessionId,
 ): { updates: OwnedFileUpdate[]; changedScopes: StateScope[] } {
-	const candidates = temporalStateFileUpdates(cwd, sessionId, view, scopes, root);
+	const candidates = temporalStateFileUpdates(cwd, sessionId, view, scopes, root, sessionKey);
 	const files = new Map(current.files.map((file) => [file.path, file]));
 	if (runtimeOnly && scopes.length !== 0) throw new Error("Runtime-only publication cannot write semantic scopes");
 	const changedScopes: StateScope[] = [];
 	for (const scope of SCOPES) {
-		const paths = temporalScopePaths(cwd, sessionId, scope, root);
+		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		if (files.get(resolve(paths.directory, "state.json"))!.identity !== "missing") throw new Error("Legacy State Flow storage requires explicit migration");
-		const previous = parseScopeStream(files.get(paths.checkpoint)!.content, files.get(paths.patches)!.content, scope);
+		const previous = parseScopeStream(files.get(paths.checkpoint)!.content, files.get(paths.patches)!.content, scope, scope === "cwd" ? cwd : undefined);
 		if (runtimeOnly || (previous !== undefined && hashJson(previous) === hashJson(view.scopes[scope]))) continue;
 		if (!scopes.includes(scope)) throw new Error(`Temporal scope update omitted a changed stream: ${scope}`);
 		changedScopes.push(scope);
 	}
-	const runtimePaths = sessionRuntimePaths(cwd, sessionId, root);
+	const runtimePaths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
 	const previousRuntime = parseSessionRuntime(files.get(runtimePaths.config)!.content, files.get(runtimePaths.meta)!.content, cwd, sessionId);
 	if (previousRuntime !== undefined && changedScopes.length > 0 && runtime === undefined) throw new Error("Temporal semantic publication requires its session runtime cohort");
 	const runtimeUpdates: OwnedFileUpdate[] = [];
@@ -99,7 +99,7 @@ export function planTemporalPublication(
 		}
 	}
 	const changedPaths = new Set(changedScopes.flatMap((scope) => {
-		const paths = temporalScopePaths(cwd, sessionId, scope, root);
+		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		return [paths.checkpoint, paths.patches];
 	}));
 	return { updates: [...candidates.filter(({ path }) => changedPaths.has(path)), ...runtimeUpdates], changedScopes };
@@ -122,17 +122,17 @@ function fileRevision(base: TemporalFileBase, root: string): FileRevision {
 	return `file:${hashJson({ root: resolve(root), files: base.files.map(({ path, identity }) => [relative(root, path), identity]) })}`;
 }
 
-function decodeFileCohort(cwd: string, sessionId: string, root: string, base: TemporalFileBase) {
+function decodeFileCohort(cwd: string, sessionId: string, root: string, base: TemporalFileBase, sessionKey = sessionId) {
 	const files = new Map(base.files.map((file) => [file.path, file.content]));
 	const scopes = {} as TemporalState["scopes"];
 	for (const scope of SCOPES) {
-		const paths = temporalScopePaths(cwd, sessionId, scope, root);
+		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		if (files.get(resolve(paths.directory, "state.json")) !== undefined) throw new Error("Legacy State Flow storage requires explicit migration");
-		const stream = parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope);
+		const stream = parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope, scope === "cwd" ? cwd : undefined);
 		if (!stream) throw new Error("Incomplete file-only temporal scope cohort");
 		scopes[scope] = stream;
 	}
-	const paths = sessionRuntimePaths(cwd, sessionId, root);
+	const paths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
 	const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.meta), cwd, sessionId);
 	if (!runtime || runtime.meta.publication !== "files") throw new Error("File-only recovery requires file publication provenance, not a Git self reference");
 	const view = { scopes, lineage: runtime.meta.lineage };
@@ -140,32 +140,32 @@ function decodeFileCohort(cwd: string, sessionId: string, root: string, base: Te
 	return { runtime, view };
 }
 
-export function captureTemporalFileBase(cwd: string, sessionId: string, root: string): TemporalFileBase {
-	return withStoragePublicationLock(root, (locked) => ({ files: captureTemporalFileBases(cwd, sessionId, locked) }));
+export function captureTemporalFileBase(cwd: string, sessionId: string, root: string, sessionKey = sessionId): TemporalFileBase {
+	return withStoragePublicationLock(root, (locked) => ({ files: captureTemporalFileBases(cwd, sessionId, locked, sessionKey) }));
 }
 
 /** Current-only reference: exact bytes, complete identities and lineage, no aliases or history store. */
-export function loadTemporalFileRevision(cwd: string, sessionId: string, root: string, revision: string) {
+export function loadTemporalFileRevision(cwd: string, sessionId: string, root: string, revision: string, sessionKey = sessionId) {
 	if (!isFileRevision(revision)) throw new Error("File recovery requires an exact file revision");
 	return withStoragePublicationLock(root, (locked) => {
-		const base = { files: captureTemporalFileBases(cwd, sessionId, locked) };
+		const base = { files: captureTemporalFileBases(cwd, sessionId, locked, sessionKey) };
 		if (fileRevision(base, locked) !== revision) throw new RevisionUnavailableError(`State Flow file revision is unavailable: ${revision}`);
-		return { base, revision, ...decodeFileCohort(cwd, sessionId, locked, base) };
+		return { base, revision, ...decodeFileCohort(cwd, sessionId, locked, base, sessionKey) };
 	});
 }
 
 /** Publish a validated full runtime/scoped cohort; no Git commands, success receipts, or pending pushes. */
 export function publishTemporalStateToFiles(
 	cwd: string, sessionId: string, view: TemporalState, scopes: readonly StateScope[],
-	base: TemporalFileBase, root: string, runtime: SessionRuntime,
+	base: TemporalFileBase, root: string, runtime: SessionRuntime, sessionKey = sessionId,
 ): { base: TemporalFileBase; revision: FileRevision; changed: boolean } {
 	return withStoragePublicationLock(root, (locked) => {
 		if (runtime.meta.publication !== "files") throw new Error("File publication requires explicit file provenance");
-		const current = { files: captureTemporalFileBases(cwd, sessionId, locked) };
+		const current = { files: captureTemporalFileBases(cwd, sessionId, locked, sessionKey) };
 		assertTemporalFileBase(base, current);
-		const { updates } = planTemporalPublication(cwd, sessionId, view, scopes, current, locked, runtime);
+		const { updates } = planTemporalPublication(cwd, sessionId, view, scopes, current, locked, runtime, false, sessionKey);
 		const next = { files: temporalFileReceipts(current, updates) };
-		decodeFileCohort(cwd, sessionId, locked, next);
+		decodeFileCohort(cwd, sessionId, locked, next, sessionKey);
 		const revision = fileRevision(next, locked);
 		publishFileUpdates(current.files, updates, locked);
 		return { base: next, revision, changed: updates.length > 0 };
@@ -188,9 +188,9 @@ function publishFileUpdates(bases: readonly DurableFileBase[], updates: readonly
 }
 
 /** In-store format conversion only; no Git history or cross-repository import. */
-export function migrateLegacyStorageToFiles(cwd: string, sessionId: string, root: string): void {
+export function migrateLegacyStorageToFiles(cwd: string, sessionId: string, root: string, sessionKey = sessionId): void {
 	withStoragePublicationLock(root, (locked) => {
-		const plan = planLegacyStorageMigration(cwd, sessionId, locked);
+		const plan = planLegacyStorageMigration(cwd, sessionId, locked, undefined, sessionKey);
 		if (plan.updates.length) publishFileUpdates(plan.bases, plan.updates, locked);
 	});
 }
