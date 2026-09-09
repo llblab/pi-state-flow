@@ -14,7 +14,7 @@ import {
 import { fauxProvider, type FauxProviderHandle } from "@earendil-works/pi-ai";
 import stateFlowExtension from "../index.ts";
 import type { MaterializedState, StateScope } from "../lib/state.ts";
-import { sessionStorageKey } from "../lib/durable.ts";
+import { resolveSessionAddress } from "../lib/durable.ts";
 import type { PiCheckpoint, Snapshot } from "../lib/snapshot.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 
@@ -38,9 +38,15 @@ export interface RealPiFixture {
 	statuses: Array<string | undefined>;
 	readState(session: AgentSession, offset?: number, scope?: StateScope): MaterializedState;
 	createSession(reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSession>;
+	createSessionAt(cwd: string, reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSession>;
 }
 
-export async function realPiFixture(t: TestContext, options: { tokensPerSecond?: number; initializeRepository?: boolean; autoStart?: boolean } = {}): Promise<RealPiFixture> {
+export async function realPiFixture(t: TestContext, options: {
+	tokensPerSecond?: number;
+	initializeRepository?: boolean;
+	autoStart?: boolean;
+	remotePublication?: "off" | "turn-end" | "transition";
+} = {}): Promise<RealPiFixture> {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-real-pi-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const repositoryRoot = join(root, "knowledge");
@@ -49,7 +55,12 @@ export async function realPiFixture(t: TestContext, options: { tokensPerSecond?:
 	const agentDir = join(root, "agent");
 	const sessionDir = join(root, "sessions");
 	for (const path of [repositoryRoot, cwd, agentDir, join(agentDir, "knowledge"), sessionDir]) mkdirSync(path, { recursive: true });
-	if (options.autoStart !== undefined) writeFileSync(join(agentDir, "state-flow.json"), JSON.stringify({ autoStart: options.autoStart }));
+	if (options.autoStart !== undefined || options.remotePublication !== undefined) {
+		writeFileSync(join(agentDir, "state-flow.json"), JSON.stringify({
+			...(options.autoStart === undefined ? {} : { autoStart: options.autoStart }),
+			...(options.remotePublication === undefined ? {} : { remotePublication: options.remotePublication }),
+		}));
+	}
 	if (options.initializeRepository !== false) {
 		execFileSync("git", ["init", "-b", "main", repositoryRoot], { stdio: "ignore" });
 		git(repositoryRoot, "config", "user.name", "State Flow Integration Tests");
@@ -70,16 +81,18 @@ export async function realPiFixture(t: TestContext, options: { tokensPerSecond?:
 	const statuses: Array<string | undefined> = [];
 	const accessors = new Map<string, { read(offset?: number, scope?: StateScope): MaterializedState }>();
 
-	async function createSession(
+	async function createSessionAt(
+		sessionCwd: string,
 		reason: "startup" | "new" | "resume" = "startup",
-		manager = SessionManager.create(cwd, sessionDir),
+		manager = SessionManager.create(sessionCwd, sessionDir),
 	): Promise<AgentSession> {
+		mkdirSync(sessionCwd, { recursive: true });
 		const settingsManager = SettingsManager.inMemory({
 			compaction: { enabled: false, keepRecentTokens: 1 },
 			retry: { enabled: false },
 		});
 		const resourceLoader = new DefaultResourceLoader({
-			cwd,
+			cwd: sessionCwd,
 			agentDir,
 			settingsManager,
 			noExtensions: true,
@@ -97,7 +110,7 @@ export async function realPiFixture(t: TestContext, options: { tokensPerSecond?:
 			throw new Error(`Could not load State Flow integration extension: ${JSON.stringify(resourceLoader.getExtensions().errors)}`);
 		}
 		const { session } = await createAgentSession({
-			cwd,
+			cwd: sessionCwd,
 			agentDir,
 			model: faux.getModel(),
 			modelRuntime,
@@ -117,9 +130,13 @@ export async function realPiFixture(t: TestContext, options: { tokensPerSecond?:
 		});
 		checkpointStores.set(session, {
 			root: repositoryRoot,
-			sessionKey: sessionStorageKey(session.sessionManager.getSessionFile(), session.sessionManager.getSessionId(), session.sessionManager.getHeader()?.timestamp),
+			sessionKey: resolveSessionAddress(session.sessionManager.getSessionFile(), session.sessionManager.getSessionId(), session.sessionManager.getHeader()?.timestamp).key,
 		});
 		return session;
+	}
+
+	function createSession(reason: "startup" | "new" | "resume" = "startup", manager?: SessionManager): Promise<AgentSession> {
+		return createSessionAt(cwd, reason, manager ?? SessionManager.create(cwd, sessionDir));
 	}
 
 	return {
@@ -134,12 +151,13 @@ export async function realPiFixture(t: TestContext, options: { tokensPerSecond?:
 		notifications,
 		statuses,
 		createSession,
+		createSessionAt,
 		readState: (session, offset, scope) => accessors.get(session.sessionManager.getSessionId())!.read(offset, scope),
 	};
 }
 
 export function nativeSessionKey(session: AgentSession): string {
-	return sessionStorageKey(session.sessionManager.getSessionFile(), session.sessionManager.getSessionId(), session.sessionManager.getHeader()?.timestamp);
+	return resolveSessionAddress(session.sessionManager.getSessionFile(), session.sessionManager.getSessionId(), session.sessionManager.getHeader()?.timestamp).key;
 }
 
 export function snapshots(session: AgentSession): Array<{ id: string; data: PiCheckpoint }> {

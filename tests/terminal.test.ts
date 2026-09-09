@@ -99,10 +99,17 @@ test("keeps a compact protocol independent from user-controlled specifications",
 	assert.match(protocol, /only identical complete semantic state is a no-op/);
 	assert.doesNotMatch(protocol, /each Git-backed global, cwd, and session journal/);
 	assert.doesNotMatch(protocol, /BOOTSTRAP RUN/);
-	assert.ok(protocol.length <= 6_100, `protocol exceeded 6,100 characters: ${protocol.length}`);
+	assert.ok(protocol.length <= 6_400, `protocol exceeded 6,400 characters: ${protocol.length}`);
 	const bootstrapProtocol = stateFlowProtocol(true);
 	assert.match(bootstrapProtocol, /BOOTSTRAP RUN/);
-	assert.ok(bootstrapProtocol.length <= 6_300, `bootstrap protocol exceeded 6,300 characters: ${bootstrapProtocol.length}`);
+	assert.ok(bootstrapProtocol.length <= 6_600, `bootstrap protocol exceeded 6,600 characters: ${bootstrapProtocol.length}`);
+});
+
+test("projects State Flow as the always-enabled memory owner without changing authority", () => {
+	const protocol = stateFlowProtocol(false);
+	assert.match(protocol, /State Flow owns durable memory while enabled/);
+	assert.match(protocol, /Global is always available for established cross-project\/user\/environment knowledge/);
+	assert.match(protocol, /Never retain secrets, raw history, speculation/);
 });
 
 test("defines patch_state as an immediate barrier followed by terminal reconciliation", () => {

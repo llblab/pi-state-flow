@@ -38,6 +38,30 @@ export function canonicalJson(value: JsonValue | unknown): string {
 	return JSON.stringify(orderValue(value));
 }
 
+export function sameJson(left: JsonValue | unknown, right: JsonValue | unknown): boolean {
+	if (left === right) {
+		if (!isJsonValue(left)) throw new Error("Values must be finite, acyclic JSON data");
+		return true;
+	}
+	if (!isJsonValue(left) || !isJsonValue(right)) throw new Error("Values must be finite, acyclic JSON data");
+	return equalJsonValues(left, right);
+}
+
+function equalJsonValues(left: JsonValue, right: JsonValue): boolean {
+	if (left === right) return true;
+	if (Array.isArray(left) || Array.isArray(right)) {
+		return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+			&& left.every((value, index) => equalJsonValues(value, right[index]!));
+	}
+	if (isObject(left) || isObject(right)) {
+		if (!isObject(left) || !isObject(right)) return false;
+		const keys = Object.keys(left);
+		return keys.length === Object.keys(right).length
+			&& keys.every((key) => Object.hasOwn(right, key) && equalJsonValues(left[key]!, right[key]!));
+	}
+	return false;
+}
+
 export function hashJson(value: JsonValue | unknown): string {
 	return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }

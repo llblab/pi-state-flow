@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -16,14 +17,20 @@ import { discoverSnapshotData, hasPriorConversation, isNewSession, SNAPSHOT_ENTR
 import { compactStatus, detailedStatus, STATUS_KEY, type PendingPublicationDiagnostic, type StatusDiagnostics } from "./status.ts";
 import { abandonValidation, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
 import { recoverSnapshot } from "./recovery.ts";
+import type { RehydrationPhase } from "./rehydration.ts";
+import { resolveRemotePublicationPolicy, serializeRemotePublicationPolicyDocument } from "./publication.ts";
+import { coalescePublicationTarget, createPublicationQueue, type PublicationQueueState } from "./publication.ts";
+import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePath, removePublicationQueue, savePublicationQueue } from "./publication.ts";
+import { runPublicationWorker } from "./publication.ts";
 import { getKnowledgeRoot, GlobalMarkdownDiscovery } from "./discovery.ts";
 import {
 	cwdScopeKey,
+	resolveSessionAddress,
 	sessionScopeKey,
-	sessionStorageKey,
+	type SessionAddress,
 } from "./durable.ts";
 import { projectRecentTransitionsWithLimit } from "./history.ts";
-import { pushGitCommit } from "./git.ts";
+import { isGitCommitAncestor, pushGitCommit, resolveGitPushDestination } from "./git.ts";
 import {
 	ORDINARY_ARTIFACT_COMPILER,
 	planArtifactInvalidation,
@@ -52,15 +59,21 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	let runtime: TemporalRuntime | undefined;
 	let activeContext: ExtensionContext | undefined;
 	let pendingPublication: PendingPublicationDiagnostic | undefined;
+	let rehydrationPhase: RehydrationPhase | undefined;
+	let turnPublicationTarget: string | undefined;
+	const activePublicationWorkers = new Set<string>();
 	const repositoryRoot = resolve(options.repositoryRoot ?? config.directory);
 	const skillReads = new SkillReadTracker();
 	const artifactReads = new ArtifactReadTracker();
 	const globalMarkdown = new GlobalMarkdownDiscovery(options.knowledgeRoot ?? getKnowledgeRoot(options.agentDir));
 	let artifactInvalidations: ArtifactInvalidationRequest[] = [];
 
-	function sessionIdentity(ctx: ExtensionContext): { id: string; key: string } {
-		const id = ctx.sessionManager.getSessionId();
-		return { id, key: sessionStorageKey(ctx.sessionManager.getSessionFile(), id, ctx.sessionManager.getHeader()?.timestamp) };
+	function sessionAddress(ctx: ExtensionContext): SessionAddress {
+		return resolveSessionAddress(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getSessionId(), ctx.sessionManager.getHeader()?.timestamp);
+	}
+
+	function createRuntime(ctx: ExtensionContext): TemporalRuntime {
+		return new TemporalRuntime(ctx.cwd, sessionAddress(ctx), repositoryRoot);
 	}
 
 	options.onRuntime?.({ read: (offset, scope) => {
@@ -69,7 +82,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	} });
 
 	function persist(): void {
-		const publication = runtime?.view ? runtime.publish(snapshot) : undefined;
+		const mode = snapshot.meta.remotePublication?.mode ?? "transition";
+		const publication = runtime?.view ? runtime.publish(snapshot, false, undefined, { pushRemote: mode === "transition" }) : undefined;
+		if (publication?.commit && mode === "turn-end") turnPublicationTarget = publication.commit;
 		if (publication && activeContext) recordPublication(publication, activeContext);
 		const checkpoint = persistableSnapshot(snapshot);
 		if ("disabled" in checkpoint && !branchStartsWithoutRuntime) {
@@ -182,7 +197,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		const acquiredArtifactPaths = new Set(artifactReads.successful.keys());
 		const committed = commitScopedTransition(snapshot, scopeStates, stage, (accepted, nextSnapshot) => {
 			if (!runtime?.view) throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
-			const publication = runtime.publish(nextSnapshot, accepted !== undefined, accepted);
+			const mode = nextSnapshot.meta.remotePublication?.mode ?? "transition";
+			const publication = runtime.publish(nextSnapshot, accepted !== undefined, accepted, { pushRemote: mode === "transition" });
+			if (publication?.commit && mode === "turn-end") turnPublicationTarget = publication.commit;
 			if (publication) recordPublication(publication, ctx);
 		}, runtime!.causalBasis(), { finalizeRun });
 		if (!committed) return false;
@@ -193,6 +210,70 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		artifactReads.clear();
 		persist();
 		return true;
+	}
+
+	function enqueueTurnPublication(): void {
+		const target = turnPublicationTarget;
+		turnPublicationTarget = undefined;
+		if (!target) return;
+		const destination = resolveGitPushDestination(repositoryRoot);
+		if (!destination) return;
+		const path = publicationQueuePath(destination);
+		const previous = loadPublicationQueue(path);
+		const next = previous
+			? coalescePublicationTarget(previous, destination, target, (ancestor, descendant) => isGitCommitAncestor(repositoryRoot, ancestor, descendant))
+			: createPublicationQueue(destination, target);
+		savePublicationQueue(path, next, previous);
+	}
+
+	function launchPublicationWorker(): void {
+		let destination: ReturnType<typeof resolveGitPushDestination>;
+		try {
+			destination = resolveGitPushDestination(repositoryRoot);
+		} catch (error) {
+			if (error instanceof Error && /ENOENT/.test(error.message)) return;
+			throw error;
+		}
+		if (!destination) return;
+		const path = publicationQueuePath(destination);
+		if (activePublicationWorkers.has(path)) return;
+		let queued: PublicationQueueState | undefined;
+		let lease: ReturnType<typeof acquirePublicationWorkerLease>;
+		try {
+			queued = loadPublicationQueue(path);
+			if (!queued) return;
+			lease = acquirePublicationWorkerLease(path);
+		} catch {
+			return;
+		}
+		if (!lease) return;
+		activePublicationWorkers.add(path);
+		void runPublicationWorker(
+			queued,
+			({ target }) => new Promise<void>((resolve, reject) => {
+				execFile("git", ["-C", repositoryRoot, "push", destination.remote, `${target}:${destination.ref}`], {
+					env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
+				}, (error) => error ? reject(error) : resolve());
+			}),
+			() => loadPublicationQueue(path) ?? queued,
+			(ancestor, descendant) => isGitCommitAncestor(repositoryRoot, ancestor, descendant),
+		).then((result) => {
+			const current = loadPublicationQueue(path);
+			if (!current) return;
+			if (result.next === undefined) {
+				if (current.target === result.attempted.target) removePublicationQueue(path, current);
+				return;
+			}
+			if (current.target === result.attempted.target || result.next.target === current.target) {
+				savePublicationQueue(path, result.next, current);
+			}
+		}).catch(() => {
+			// Queue/CAS truth remains durable; status and a later activation expose retry.
+		}).finally(() => {
+			activePublicationWorkers.delete(path);
+			lease.release();
+			if (loadPublicationQueue(path)?.status === "pending") launchPublicationWorker();
+		});
 	}
 
 	function retryPendingPush(ctx: ExtensionContext): void {
@@ -208,6 +289,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			setPendingPublication({ commit: result.commit, error: result.error ?? "unknown push failure" });
 			persist();
 		}
+	}
+
+	function currentRehydrationPhase(): RehydrationPhase | undefined {
+		return rehydrationPhase;
 	}
 
 	function statusDiagnostics(ctx: ExtensionContext): StatusDiagnostics {
@@ -239,7 +324,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			}
 		}
 
-		const session = sessionIdentity(ctx);
+		const session = sessionAddress(ctx);
+		let publicationQueue: PublicationQueueState | undefined;
+		let publicationQueueError: string | undefined;
+		try {
+			const destination = resolveGitPushDestination(repositoryRoot);
+			publicationQueue = destination ? loadPublicationQueue(publicationQueuePath(destination)) : undefined;
+		} catch (error) {
+			publicationQueue = undefined;
+			publicationQueueError = error instanceof Error ? error.message : String(error);
+		}
 		return {
 			repositoryRoot,
 			cwdScopeKey: cwdScopeKey(cwd),
@@ -256,14 +350,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			...(durableStateError === undefined ? {} : { durableStateError }),
 			...(pendingPublication === undefined ? {} : { pendingPublication }),
 			retryQueued,
+			...(publicationQueue === undefined ? {} : { publicationQueue }),
+			...(publicationQueueError === undefined ? {} : { publicationQueueError }),
 		};
 	}
 
 	function restoreActiveBranch(ctx: ExtensionContext, sessionStartReason?: unknown): void {
 		clearRunTransient();
 		activeContext = ctx;
-		const session = sessionIdentity(ctx);
-		runtime = new TemporalRuntime(ctx.cwd, session.id, repositoryRoot, session.key);
+		const session = sessionAddress(ctx);
+		runtime = new TemporalRuntime(ctx.cwd, session, repositoryRoot);
 		installScopeStates();
 		pendingPublication = undefined;
 		branchHasSnapshot = false;
@@ -293,6 +389,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				installScopeStates();
 			} else if (config.autoStart && isNewSession(sessionStartReason, branch)) {
 				snapshot = startEpisode(hasPriorConversation(branch));
+				snapshot.meta.remotePublication = serializeRemotePublicationPolicyDocument(
+					resolveRemotePublicationPolicy(config.remotePublication, { legacyRuntime: false }),
+				);
 				runtime.prepare();
 				const initialization = runtime.initialize(snapshot, true);
 				if (initialization) recordPublication(initialization, ctx);
@@ -316,6 +415,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				config: { ...snapshot.config, enabled: false },
 				meta: { ...snapshot.meta, validation: failure.meta.validation },
 			};
+		}
+		if (branchHasSnapshot && snapshot.meta.remotePublication === undefined) {
+			snapshot.meta.remotePublication = serializeRemotePublicationPolicyDocument(
+				resolveRemotePublicationPolicy(undefined, { legacyRuntime: true }),
+			);
+		}
+		if (snapshot.config.enabled && snapshot.meta.remotePublication === undefined) {
+			snapshot.meta.remotePublication = serializeRemotePublicationPolicyDocument(
+				resolveRemotePublicationPolicy(undefined, { legacyRuntime: true }),
+			);
 		}
 		pendingPublication = snapshot.meta.pendingPublication === undefined
 			? undefined
@@ -406,9 +515,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
 			if (signal?.aborted) throw new Error("State Flow patch was aborted before materialization");
+			const transition = { scope: params.scope as StateScope, patch: params.patch as ScopePatch };
 			const stage = stageScopedPatch(
 				scopeStates,
-				{ scope: params.scope as StateScope, patch: params.patch as ScopePatch },
+				transition,
 				skillReads.successful.values(),
 				runtime!.causalBasis(),
 				artifactReads.successful.values(),
@@ -417,7 +527,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			updateUi(ctx);
 			const publication = pendingPublication === undefined ? "" : "; durable publication pending";
 			return {
-				content: [{ type: "text", text: `State materialized at ${params.scope} scope${publication}.` }],
+				content: [{ type: "text", text: `\nState materialized at ${params.scope} scope${publication}.` }],
 				details: { scope: params.scope, step: snapshot.meta.step },
 			};
 		},
@@ -434,8 +544,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				}
 				const branch = ctx.sessionManager.getBranch();
 				activeContext = ctx;
-				const session = sessionIdentity(ctx);
-				runtime ??= new TemporalRuntime(ctx.cwd, session.id, repositoryRoot, session.key);
+				runtime ??= createRuntime(ctx);
 				if (branchStartsWithoutRuntime) runtime.prepare();
 				const bootstrap = (!branchHasSnapshot || !snapshot.config.enabled)
 					&& hasPriorConversation(branch);
@@ -444,9 +553,15 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					setPendingPublication(snapshot.meta.pendingPublication);
 					branchHasSnapshot = true;
 				}
-				snapshot = branchHasSnapshot
+				const existingBranch = branchHasSnapshot;
+				snapshot = existingBranch
 					? resumeEpisode(snapshot, bootstrap)
 					: startEpisode(bootstrap);
+				if (snapshot.meta.remotePublication === undefined) {
+					snapshot.meta.remotePublication = serializeRemotePublicationPolicyDocument(
+						resolveRemotePublicationPolicy(existingBranch ? undefined : config.remotePublication, { legacyRuntime: existingBranch }),
+					);
+				}
 				branchHasSnapshot = true;
 				const publication = runtime.view
 					? runtime.promote(snapshot) ?? runtime.publish(snapshot)
@@ -490,8 +605,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			let selected = runtime;
 			let current = snapshot;
 			if (!selected?.view && snapshot.meta.durableBase) {
-				const session = sessionIdentity(ctx);
-				selected = new TemporalRuntime(ctx.cwd, session.id, repositoryRoot, session.key);
+				selected = createRuntime(ctx);
 				current = selected.restore(snapshot.meta.durableBase, snapshot);
 			}
 			const stopped = stopEpisode(current);
@@ -517,6 +631,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			artifactReads.clear();
 		}
 		const rotatesRun = snapshot.meta.specification !== undefined && !retryQueued;
+		if (rotatesRun) rehydrationPhase = "step";
 		if (prepareRun(snapshot, event.prompt, retryQueued)) {
 			if (rotatesRun) runAnchorTimestamp = undefined;
 			persist();
@@ -533,9 +648,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			snapshot.config.transitionWindow,
 			runtime?.recent() ?? [],
 		);
+		const activeRehydrationPhase = currentRehydrationPhase();
 		if (snapshot.meta.bootstrap) {
 			const messages = withoutPrivateValidation(event.messages as AgentMessage[]);
-			return { messages: [runtimeContextMessage(snapshot, effectiveState, recentTransitions, artifactInvalidations), ...messages] };
+			return { messages: [runtimeContextMessage(snapshot, effectiveState, recentTransitions, artifactInvalidations, activeRehydrationPhase), ...messages] };
 		}
 		const trajectory = currentRunTrajectory(
 			event.messages as AgentMessage[],
@@ -545,7 +661,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		runAnchorTimestamp = trajectory.anchorTimestamp;
 		return {
 			messages: [
-				runtimeContextMessage(snapshot, effectiveState, recentTransitions, artifactInvalidations),
+				runtimeContextMessage(snapshot, effectiveState, recentTransitions, artifactInvalidations, activeRehydrationPhase),
 				...trajectory.messages,
 			],
 		};
@@ -629,6 +745,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		try {
 			stagedFinal.nextStates.session.response = finalizedAssistantResponse(event.message);
 			commitStage(stagedFinal, ctx, true);
+			enqueueTurnPublication();
+			if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 		} catch (error) {
 			queueTerminalRegeneration(error instanceof Error ? error.message : String(error), ctx);
 		}
@@ -638,12 +756,15 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	pi.on("agent_settled", (_event, ctx) => {
 		if (snapshot.config.enabled && retryQueued) abandonRun(ctx);
+		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 	});
 
 	pi.on("session_start", (event, ctx) => {
+		rehydrationPhase = event.reason === "resume" ? "resume-bootstrap" : "new-bootstrap";
 		restoreActiveBranch(ctx, event.reason);
 		refreshArtifactInvalidations(ctx);
 		retryPendingPush(ctx);
+		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 		updateUi(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {

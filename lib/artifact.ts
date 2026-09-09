@@ -14,6 +14,7 @@ export type ArtifactMetadata = JsonObject & {
 	compiled_at?: string;
 	compilation?: JsonObject;
 	kind?: string;
+	tags?: string[];
 };
 
 /** Artifact source paths are the canonical registry keys. */
@@ -57,6 +58,7 @@ export type ArtifactCompilerOutput = JsonObject & {
 	compiled_at?: string;
 	compilation?: JsonObject;
 	kind?: string;
+	tags?: string[];
 };
 
 export interface ArtifactCompilationUpdate {
@@ -97,6 +99,11 @@ export function validateArtifactMetadata(value: unknown, path = "<unknown>"): as
 		&& (typeof value.kind !== "string" || value.kind.trim().length === 0)) {
 		throw new Error(`Artifact metadata at ${path} kind must be a non-empty string`);
 	}
+	if (Object.hasOwn(value, "tags") && (!Array.isArray(value.tags)
+		|| value.tags.some((tag) => typeof tag !== "string" || tag.trim().length === 0 || tag !== tag.trim())
+		|| new Set(value.tags).size !== value.tags.length)) {
+		throw new Error(`Artifact metadata at ${path} tags must be unique non-empty trimmed strings`);
+	}
 }
 
 export function isArtifactMetadata(value: unknown): value is ArtifactMetadata {
@@ -114,6 +121,27 @@ export function validateArtifactRegistry(value: unknown): asserts value is Artif
 		if (path.trim().length === 0) throw new Error("Artifact path keys must be non-empty");
 		validateArtifactMetadata(metadata, path);
 	}
+}
+
+export function selectArtifactsByTags(
+	registry: ArtifactRegistry,
+	tags: readonly string[],
+	match: "all" | "any" = "all",
+): string[] {
+	validateArtifactRegistry(registry);
+	if (tags.length === 0 || tags.some((tag) => typeof tag !== "string" || tag.trim().length === 0 || tag !== tag.trim())) {
+		throw new Error("Artifact tag query requires one or more non-empty trimmed strings");
+	}
+	const requested = new Set(tags);
+	return Object.entries(registry)
+		.filter(([, metadata]) => {
+			const available = new Set(metadata.tags ?? []);
+			return match === "all"
+				? [...requested].every((tag) => available.has(tag))
+				: [...requested].some((tag) => available.has(tag));
+		})
+		.map(([path]) => path)
+		.sort();
 }
 
 export function isArtifactRegistry(value: unknown): value is ArtifactRegistry {

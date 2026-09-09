@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyPatch, canonicalJson, validatePatch } from "../index.ts";
+import { sameJson } from "../lib/json.ts";
 
 test("recursively merges patches and applies null deletion", () => {
 	const state = { inventory: { a: "item", b: "other" }, attempts: ["x"] };
@@ -35,9 +36,16 @@ test("canonical JSON rejects values that JSON.stringify would lose or rewrite", 
 	assert.throws(() => canonicalJson(cyclic), /finite, acyclic JSON data/);
 });
 
-test("orders state keys deterministically", () => {
+test("orders state keys deterministically and compares semantic JSON without hashing", () => {
 	assert.equal(
 		canonicalJson({ z: 1, hot: "h", stable: "s", a: 2 }),
 		'{"a":2,"hot":"h","stable":"s","z":1}',
 	);
+	assert.equal(sameJson({ z: 1, nested: { b: 2, a: 1 } }, { nested: { a: 1, b: 2 }, z: 1 }), true);
+	assert.equal(sameJson({ nested: [1, 2] }, { nested: [2, 1] }), false);
+	assert.equal(sameJson({ value: 0 }, { value: -0 }), true);
+	assert.throws(() => sameJson({ value: Number.NaN }, { value: Number.NaN }), /finite, acyclic/);
+	const cyclic: any = {};
+	cyclic.self = cyclic;
+	assert.throws(() => sameJson(cyclic, cyclic), /finite, acyclic/);
 });

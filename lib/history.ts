@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { hashJson, isJsonValue, isObject, validatePatch, type JsonObject } from "./json.ts";
+import { isJsonValue, isObject, sameJson, validatePatch, type JsonObject } from "./json.ts";
 import type { ScopePatch, ScopedStates, StateScope } from "./state.ts";
 
 export const RECENT_TRANSITION_LIMIT = 7;
@@ -32,7 +32,7 @@ function replayPatch(before: JsonObject, after: JsonObject): JsonObject {
 			entries.push([key, null]);
 			continue;
 		}
-		if (Object.hasOwn(before, key) && hashJson(before[key]) === hashJson(after[key])) continue;
+		if (Object.hasOwn(before, key) && sameJson(before[key], after[key])) continue;
 		const previous = before[key];
 		const next = after[key]!;
 		entries.push([key, isObject(previous) && isObject(next) ? replayPatch(previous, next) : structuredClone(next)]);

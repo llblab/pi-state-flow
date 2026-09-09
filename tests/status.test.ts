@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { resolveGitPushDestination } from "../lib/git.ts";
+import { publicationQueuePath } from "../lib/publication.ts";
 import { compactStatus, detailedStatus, STATUS_KEY, type StatusDiagnostics } from "../lib/status.ts";
 import { emptyState } from "../lib/state.ts";
 import { harness, start } from "./harness.ts";
@@ -48,6 +50,8 @@ test("distinguishes branch, durable scopes, session state, and the effective ove
 	assert.match(output, /Scope keys: CWD --tmp-project--hash; session session-hash/);
 	assert.match(output, /Session files: config\.json owns behavior; meta\.json owns lineage and provenance/);
 	assert.match(output, /Runtime metadata: step #7; active revision abcdef1234567890/);
+	assert.match(output, /Remote publication policy: legacy-transition/);
+	assert.match(output, /Remote queue: idle/);
 	assert.match(output, /Temporal head: "origin"; branch-local position 7/);
 	assert.match(output, /Hot history: offsets 0\.\.0; maximum depth 7/);
 	assert.match(output, /Retained patch tails: global 1; CWD 2; session 0/);
@@ -59,6 +63,41 @@ test("distinguishes branch, durable scopes, session state, and the effective ove
 	assert.match(output, /"shared": true/);
 	assert.match(output, /"project": true/);
 	assert.match(output, /"response": "Done"/);
+});
+
+test("summarizes memory ownership, scopes, and promotion recovery without requiring an external schema", () => {
+	const output = detailedStatus(snapshot, diagnostics({
+		scopeStates: {
+			global: { ...emptyState(), working: { durableCandidate: "retained", memory_promotions: {
+				preference: { status: "failed", owner: "knowledge", pointer: "MEMORY.md#preference", error: "write rejected" },
+				accepted: { status: "accepted", owner: "knowledge", pointer: "MEMORY.md#accepted", revision: "abc123" },
+			} } },
+			cwd: emptyState(),
+			session: sessionState,
+		},
+	}));
+	assert.match(output, /Memory: owner state-flow; global retention enabled; global fallback active/);
+	assert.match(output, /Memory-bearing scopes: global true; CWD false; session false/);
+	assert.match(output, /Promotion status: pending 0; accepted 1; failed 1; unknown 0; invalid 0/);
+	assert.match(output, /preference — failed; owner knowledge; pointer MEMORY\.md#preference; error write rejected/);
+	assert.match(output, /accepted — accepted; owner knowledge; pointer MEMORY\.md#accepted; revision abc123/);
+});
+
+test("reports malformed durable queue state as unavailable rather than idle", () => {
+	const output = detailedStatus(snapshot, diagnostics({ publicationQueueError: "Invalid publication queue JSON" }));
+	assert.match(output, /Remote queue: unavailable; error Invalid publication queue JSON/);
+	assert.doesNotMatch(output, /Remote queue: idle/);
+});
+
+test("reports durable remote queue target, confirmation, attempts, and bounded failure", () => {
+	const output = detailedStatus(snapshot, diagnostics({
+		publicationQueue: {
+			version: 1,
+			destination: { gitCommonDir: "/repo/.git", remote: "origin", ref: "refs/heads/main" },
+			target: "a".repeat(40), confirmed: "b".repeat(40), status: "failed", attempt: 2, error: "offline",
+		},
+	}));
+	assert.match(output, /Remote queue: failed; target a{12}; confirmed b{12}; attempt 2; error offline/);
 });
 
 test("reports inspectable stale reasons and pending publication/retry state", () => {
@@ -86,6 +125,17 @@ test("does not report an unknown freshness result as zero stale artifacts", () =
 	}));
 	assert.match(output, /stale unknown/);
 	assert.match(output, /Artifact freshness unavailable: knowledge root unavailable/);
+});
+
+test("status command exposes malformed queue persistence without starting a worker", async () => {
+	const h = harness();
+	await start(h);
+	const destination = resolveGitPushDestination(h.repositoryRoot)!;
+	const path = publicationQueuePath(destination);
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, "{broken\n");
+	await h.commands.get("state-flow-status").handler("", h.ctx);
+	assert.match(h.notifications.at(-1)!, /Remote queue: unavailable; error Invalid publication queue JSON/);
 });
 
 test("unavailable temporal state is not represented as empty materialization or zero history", async () => {

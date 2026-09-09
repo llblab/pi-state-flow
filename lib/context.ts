@@ -3,6 +3,7 @@ import type { ArtifactInvalidationRequest } from "./artifact.ts";
 import type { RecentTransitionWindow } from "./history.ts";
 import { canonicalJson } from "./json.ts";
 import type { Snapshot } from "./snapshot.ts";
+import type { RehydrationPhase } from "./rehydration.ts";
 import type { MaterializedState } from "./state.ts";
 
 export const VALIDATION_MESSAGE_TYPE = "state-flow-validation";
@@ -36,6 +37,7 @@ export function runtimeContextMessage(
 	state: MaterializedState,
 	recentTransitions: RecentTransitionWindow = [],
 	artifactInvalidations: readonly ArtifactInvalidationRequest[] = [],
+	rehydrationPhase?: RehydrationPhase,
 ): AgentMessage {
 	if (snapshot.meta.specification === undefined) {
 		throw new Error("State Flow runtime context requires an active specification");
@@ -43,6 +45,7 @@ export function runtimeContextMessage(
 	const context = {
 		specification: snapshot.meta.specification,
 		state,
+		...(rehydrationPhase === undefined ? {} : { knowledge_rehydration: { phase: rehydrationPhase } }),
 		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations }),
 		...(recentTransitions.length === 0 ? {} : { recent_transitions: recentTransitions }),
 		...(snapshot.meta.validation === undefined ? {} : { validation_feedback: snapshot.meta.validation }),

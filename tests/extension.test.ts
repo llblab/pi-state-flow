@@ -9,7 +9,7 @@ import { cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStor
 import { getKnowledgeRoot } from "../lib/discovery.ts";
 import { hashArtifactSource } from "../lib/artifact.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
-import { commitTerminal, harness, start, terminalComment, toolAssistant, user } from "./harness.ts";
+import { commitTerminal, harness, scopedTerminalComment, start, terminalComment, toolAssistant, user } from "./harness.ts";
 
 test("fresh explicit start is local-only; ordinary startup/status and old pointers never create storage", async (t) => {
 	const agentDir = mkdtempSync(join(tmpdir(), "state-flow-fresh-"));
@@ -199,6 +199,17 @@ test("lets ordinary tool-bearing responses run without comments or intermediate 
 	assert.equal(h.resolveSnapshot().meta.step, 0);
 });
 
+test("global memory is always available while State Flow is enabled", async () => {
+	const h = harness();
+	const started = await start(h, "Durable preference");
+	assert.match(started.systemPrompt, /State Flow owns durable memory while enabled/);
+	const accepted = await h.tools.get("patch_state")!.execute(
+		"global-memory", { scope: "global", patch: { working: { preference: "compact" } } }, undefined, undefined, h.ctx,
+	);
+	assert.equal(accepted.content[0].text, "\nState materialized at global scope.");
+	assert.equal(h.readState(0, "global").working.preference, "compact");
+});
+
 test("patch_state materializes session state before the next inference and terminal reconciliation remains required", async () => {
 	const h = harness();
 	await start(h, "Long-running task");
@@ -210,7 +221,7 @@ test("patch_state materializes session state before the next inference and termi
 		undefined,
 		h.ctx,
 	);
-	assert.equal(result.content[0].text, "State materialized at session scope.");
+	assert.equal(result.content[0].text, "\nState materialized at session scope.");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");

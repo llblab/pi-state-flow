@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.5.0: Durable memory, compiled routing, and local-first publication
+
+- Decoupled immediate local Git acceptance from optional remote replication with persisted `off`/`turn-end`/legacy `transition` policy, a symlink-safe CAS queue, descendant-only coalescing, asynchronous non-interactive workers, restart recovery, concurrency-safe confirmation, and truthful status diagnostics.
+- Made State Flow the unconditional durable-memory owner while enabled, with global semantic memory always available at the narrowest correct scope; external promotion pointers remain optional semantic handoff records rather than runtime ownership configuration.
+- Added extensible compiled artifact metadata, validated tags, deterministic candidate routing, and bounded visible source rehydration without persisting source bodies or treating routing as read authorization.
+- Added read-only native-session discovery, exact State Flow provenance checks, deterministic continuation ranking, and bootstrap planning while keeping automatic default resume deferred until Pi exposes a pre-session resolver hook.
+- Unified Pi's session UUID and native storage key as one runtime address, centralized extension runtime construction, and skipped obsolete hashed-path probing once canonical CWD materialization is proven.
+- Replaced transient semantic-equality SHA-256 calculations with validated structural JSON comparison while retaining cryptographic hashes for durable identity, freshness, integrity, CAS, and fingerprints.
+- Restored the empty-line boundary between the `patch_state` tool call and its materialization result in Pi and Telegram transcript rendering.
+- Bundled the optional `state-flow-memory` Skill for explicit bounded audits, scope narrowing, contradiction cleanup, and evidence-gated external handoff without background maintenance.
 
 ## 0.4.0: Temporal state and independent durable storage
 

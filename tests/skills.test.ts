@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { loadSkillsFromDir } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js";
 import { hashArtifactSource } from "../lib/artifact.ts";
 import { loadCwdState } from "./temporal-fixture.ts";
 import {
@@ -12,7 +13,7 @@ import {
 	SkillReadTracker,
 	skillPathFromRead,
 } from "../lib/skills.ts";
-import { commitTerminal, harness, start, terminalComment } from "./harness.ts";
+import { commitTerminal, harness, scopedTerminalComment, start, terminalComment } from "./harness.ts";
 
 const skillRoot = mkdtempSync(join(tmpdir(), "pi-state-flow-skills-"));
 
@@ -36,6 +37,45 @@ function recordRead(h: ReturnType<typeof harness>, source: string, id = "skill-1
 	h.handlers.get("tool_call")!({ toolCallId: id, toolName: "read", input }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: id, toolName: "read", result: {}, isError: false }, h.ctx);
 }
+
+test("discovers the packaged optional memory-curation Skill without diagnostics", () => {
+	const root = join(import.meta.dirname, "..", "skills");
+	const result = loadSkillsFromDir({ dir: root, source: "package:pi-state-flow" });
+	assert.deepEqual(result.diagnostics, []);
+	assert.equal(result.skills.length, 1);
+	assert.equal(result.skills[0].name, "state-flow-memory");
+	assert.match(result.skills[0].description, /explicit memory curation.*not for routine turns/);
+	const body = readFileSync(result.skills[0].filePath, "utf8");
+	assert.match(body, /Never delete the only accepted copy/);
+	assert.match(body, /Stop after one bounded reconciliation cohort/);
+});
+
+test("memory curation can narrow an established value without retaining two authoritative scopes", async () => {
+	const h = harness();
+	await start(h);
+	const retain = h.handlers.get("message_end")!({
+		message: {
+			role: "assistant", stopReason: "stop",
+			content: [{ type: "text", text: `${scopedTerminalComment([
+				{ scope: "global", patch: { contract: { projectRule: "project-only" } } },
+			])}\n\nRetained for review.` }],
+		},
+	}, h.ctx);
+	h.handlers.get("turn_end")!({ message: retain.message }, h.ctx);
+	const narrowed = h.handlers.get("message_end")!({
+		message: {
+			role: "assistant", stopReason: "stop",
+			content: [{ type: "text", text: `${scopedTerminalComment([
+				{ scope: "global", patch: { contract: { projectRule: null } } },
+				{ scope: "cwd", patch: { contract: { projectRule: "project-only" } } },
+			])}\n\nNarrowed to this project.` }],
+		},
+	}, h.ctx);
+	h.handlers.get("turn_end")!({ message: narrowed.message }, h.ctx);
+	assert.equal(h.readState(0, "global").contract.projectRule, undefined);
+	assert.equal(h.readState(0, "cwd").contract.projectRule, "project-only");
+	assert.equal(h.readState().contract.projectRule, "project-only");
+});
 
 test("recognizes only exact Skill reads", () => {
 	assert.equal(skillPathFromRead("read", { path: "/skills/demo/SKILL.md" }), "/skills/demo/SKILL.md");

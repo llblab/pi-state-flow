@@ -8,6 +8,8 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
+import { resolveGitPushDestination } from "../lib/git.ts";
+import { loadPublicationQueue, publicationQueuePath } from "../lib/publication.ts";
 import { temporalScopePaths } from "../lib/durable.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { hashSkillSource, SKILL_ARTIFACT_COMPILER } from "../lib/skills.ts";
@@ -512,6 +514,7 @@ test("real Pi incrementally acquires only invalidated global Markdown and attach
 
 	let beforeCalls = fixture.faux.state.callCount;
 	fixture.faux.setResponses([(context) => {
+		assert.equal(runtime(context).knowledge_rehydration.phase, "new-bootstrap");
 		assert.equal(runtime(context).artifact_invalidations, undefined);
 		return fauxAssistantMessage("Fresh artifacts reused without source acquisition.");
 	}]);
@@ -524,6 +527,8 @@ test("real Pi incrementally acquires only invalidated global Markdown and attach
 	beforeCalls = fixture.faux.state.callCount;
 	fixture.faux.setResponses([
 		(context) => {
+			assert.equal(runtime(context).knowledge_rehydration.phase, "new-bootstrap");
+			assert.doesNotMatch(JSON.stringify(context.messages), /Changed routing guidance\./);
 			assert.deepEqual(runtime(context).artifact_invalidations, [{
 				path: changedPath,
 				hash: hashArtifactSource("Changed routing guidance.\n"),
@@ -598,7 +603,7 @@ test("a fresh real Pi agent continues from compact state and a runtime-compiled 
 	const fixture = await realPiFixture(t);
 	const skill = join(fixture.cwd, "skills", "continuation", "SKILL.md");
 	mkdirSync(join(fixture.cwd, "skills", "continuation"), { recursive: true });
-	writeFileSync(skill, "# Continuation\n\nPreserve the next discriminating check.\n", { flag: "wx" });
+	writeFileSync(skill, "# Continuation\n\nPreserve the next discriminating check.\n\nSOURCE-BODY-ONLY-MARKER\n", { flag: "wx" });
 	const session = await fixture.createSession();
 	await session.prompt("/state-flow-start");
 	fixture.faux.setResponses([
@@ -652,7 +657,10 @@ test("a fresh real Pi agent continues from compact state and a runtime-compiled 
 	assert.match(observedContext, /guessing/);
 	assert.match(observedContext, /whether the resumed source changed/);
 	assert.match(observedContext, /compare the retained source hash/);
+	assert.match(observedContext, /Continuation rules for evidence-preserving handoffs/);
+	assert.match(observedContext, /Use for resumed continuation checks/);
 	assert.match(observedContext, new RegExp(compiled.hash));
+	assert.doesNotMatch(observedContext, /SOURCE-BODY-ONLY-MARKER/);
 	assert.doesNotMatch(observedContext, /OLD-CONVERSATION-MARKER/);
 });
 
@@ -800,6 +808,185 @@ test("real Pi derives an in-memory session directory from the native header time
 	const directory = temporalScopePaths(fixture.cwd, manager.getSessionId(), "session", fixture.repositoryRoot, key).directory;
 	assert.equal(existsSync(join(directory, "checkpoint.json")), true);
 	assert.equal(JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")).identity.sessionId, manager.getSessionId());
+});
+
+test("real Pi baseline memory crosses CWDs while project memory remains scoped", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const first = await fixture.createSession("new");
+	t.after(() => first.dispose());
+	fixture.faux.setResponses([fauxAssistantMessage(scopedTerminal([
+		{ scope: "global", patch: { contract: { preference: "compact" } } },
+		{ scope: "cwd", patch: { contract: { projectRule: "local-only" } } },
+	], "Memory retained."))]);
+	await first.prompt("Retain the established cross-project preference and project-only rule");
+	assert.equal(fixture.readState(first, 0, "global").contract.preference, "compact");
+	assert.equal(fixture.readState(first, 0, "cwd").contract.projectRule, "local-only");
+
+	const otherCwd = join(fixture.root, "other-project");
+	const second = await fixture.createSessionAt(otherCwd, "new");
+	t.after(() => second.dispose());
+	assert.equal(fixture.readState(second, 0, "global").contract.preference, "compact");
+	assert.equal(fixture.readState(second, 0, "cwd").contract.projectRule, undefined);
+	assert.deepEqual(fixture.readState(second, 0, "session"), { artifacts: {}, contract: {}, working: {}, response: "" });
+});
+
+test("real Pi preserves failed external promotion and recovers proven destination pointers", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const first = await fixture.createSession("new");
+	t.after(() => first.dispose());
+	fixture.faux.setResponses([fauxAssistantMessage(scopedTerminal([{
+		scope: "global",
+		patch: { working: {
+			durableCandidate: { preference: "compact" },
+			memory_promotions: { preference: {
+				status: "failed", owner: "knowledge", pointer: "MEMORY.md#preference", error: "write rejected",
+			} },
+		} },
+	}], "Promotion remains recoverable."))]);
+	await first.prompt("Attempt the external handoff without losing the accepted copy");
+
+	const recovery = await fixture.createSessionAt(join(fixture.root, "promotion-recovery"), "new");
+	t.after(() => recovery.dispose());
+	assert.deepEqual(fixture.readState(recovery, 0, "global").working.durableCandidate, { preference: "compact" });
+	assert.deepEqual((fixture.readState(recovery, 0, "global").working.memory_promotions as any).preference, {
+		status: "failed", owner: "knowledge", pointer: "MEMORY.md#preference", error: "write rejected",
+	});
+
+	fixture.faux.setResponses([fauxAssistantMessage(scopedTerminal([{
+		scope: "global",
+		patch: { working: {
+			durableCandidate: null,
+			memory_promotions: { preference: {
+				status: "accepted", owner: "knowledge", pointer: "MEMORY.md#preference", revision: "accepted-revision", error: null,
+			} },
+		} },
+	}], "External acceptance proven."))]);
+	await recovery.prompt("Finalize only after proving destination acceptance");
+
+	const verified = await fixture.createSessionAt(join(fixture.root, "promotion-verified"), "new");
+	t.after(() => verified.dispose());
+	const global = fixture.readState(verified, 0, "global");
+	assert.equal(global.working.durableCandidate, undefined);
+	assert.deepEqual((global.working.memory_promotions as any).preference, {
+		status: "accepted", owner: "knowledge", pointer: "MEMORY.md#preference", revision: "accepted-revision",
+	});
+});
+
+test("real Pi turn-end policy queues the newest local target without pushing inline", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const session = await fixture.createSession("new");
+	t.after(() => session.dispose());
+	const remoteBefore = childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
+	writeFileSync(join(fixture.remote, "hooks", "pre-receive"), "#!/bin/sh\nsleep 1\n", { mode: 0o755 });
+	fixture.faux.setResponses([fauxAssistantMessage("Queued after local acceptance.")]);
+	await session.prompt("Accept locally and queue remote publication");
+	const destination = resolveGitPushDestination(fixture.repositoryRoot)!;
+	const queue = loadPublicationQueue(publicationQueuePath(destination));
+	assert.ok(queue);
+	assert.equal(queue.target, runGit(fixture.repositoryRoot, "rev-parse", "HEAD"));
+	assert.equal(childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteBefore);
+	for (let attempt = 0; attempt < 40 && loadPublicationQueue(publicationQueuePath(destination)); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	assert.equal(loadPublicationQueue(publicationQueuePath(destination)), undefined);
+	assert.equal(childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), runGit(fixture.repositoryRoot, "rev-parse", "HEAD"));
+});
+
+test("real Pi concurrent sessions preserve a newer queued descendant while an older push is active", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const first = await fixture.createSession("new");
+	const second = await fixture.createSession("new");
+	t.after(() => { first.dispose(); second.dispose(); });
+	writeFileSync(join(fixture.remote, "hooks", "pre-receive"), "#!/bin/sh\nsleep 1\n", { mode: 0o755 });
+	fixture.faux.setResponses([fauxAssistantMessage("First local target."), fauxAssistantMessage("Second local target.")]);
+	await first.prompt("Publish the older target");
+	const older = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
+	await second.prompt("Publish the newer target while the first worker is active");
+	const newer = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
+	assert.notEqual(newer, older);
+	const destination = resolveGitPushDestination(fixture.repositoryRoot)!;
+	const path = publicationQueuePath(destination);
+	assert.equal(loadPublicationQueue(path)?.target, newer);
+	for (let attempt = 0; attempt < 60 && loadPublicationQueue(path); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	assert.equal(loadPublicationQueue(path), undefined);
+	assert.equal(childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), newer);
+});
+
+test("real Pi off policy accepts locally without queue or remote attempt", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true, remotePublication: "off" });
+	const session = await fixture.createSession("new");
+	t.after(() => session.dispose());
+	const remoteBefore = childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
+	fixture.faux.setResponses([fauxAssistantMessage("Local-only by policy.")]);
+	await session.prompt("Accept without remote replication");
+	const destination = resolveGitPushDestination(fixture.repositoryRoot)!;
+	assert.equal(loadPublicationQueue(publicationQueuePath(destination)), undefined);
+	assert.equal(childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteBefore);
+	assert.equal(fixture.readState(session).response, "Local-only by policy.");
+});
+
+test("real Pi retries a failed durable queue after restart without duplicating local state", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const session = await fixture.createSession("new");
+	const file = session.sessionManager.getSessionFile()!;
+	const missing = join(fixture.root, "replacement-remote.git");
+	runGit(fixture.repositoryRoot, "remote", "set-url", "origin", missing);
+	fixture.faux.setResponses([fauxAssistantMessage("Locally durable while offline.")]);
+	await session.prompt("Accept while remote publication is unavailable");
+	const destination = resolveGitPushDestination(fixture.repositoryRoot)!;
+	const queuePath = publicationQueuePath(destination);
+	for (let attempt = 0; attempt < 40 && loadPublicationQueue(queuePath)?.status !== "failed"; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	const failed = loadPublicationQueue(queuePath);
+	assert.equal(failed?.status, "failed");
+	assert.match(failed?.error ?? "", /git|repository|remote|exit/i);
+	const head = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
+	const step = latestSnapshot(session).meta.step;
+	session.dispose();
+
+	childProcess.execFileSync("git", ["init", "--bare", missing], { stdio: "ignore" });
+	const resumed = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
+	t.after(() => resumed.dispose());
+	for (let attempt = 0; attempt < 60 && loadPublicationQueue(queuePath); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	assert.equal(loadPublicationQueue(queuePath), undefined);
+	assert.equal(runGit(fixture.repositoryRoot, "rev-parse", "HEAD"), head);
+	assert.equal(latestSnapshot(resumed).meta.step, step);
+	assert.equal(fixture.readState(resumed).response, "Locally durable while offline.");
+	assert.equal(childProcess.execFileSync("git", ["--git-dir", missing, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), head);
+});
+
+test("real Pi projects resume bootstrap once and then uses step rehydration", async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true });
+	const first = await fixture.createSession("new");
+	fixture.faux.setResponses([fauxAssistantMessage("Continuation established.")]);
+	await first.prompt("Establish a resumable session");
+	const file = first.sessionManager.getSessionFile()!;
+	first.dispose();
+
+	const resumed = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
+	t.after(() => resumed.dispose());
+	const phase = (context: any) => {
+		const text = context.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+			.map((block: any) => block.text)
+			.find((value: unknown) => typeof value === "string" && value.startsWith("State Flow runtime context"));
+		assert.ok(text);
+		return JSON.parse(text.slice(text.indexOf("\n") + 1)).knowledge_rehydration.phase;
+	};
+	fixture.faux.setResponses([(context) => {
+		assert.equal(phase(context), "resume-bootstrap");
+		return fauxAssistantMessage("Resume bootstrap remained materialized-first.");
+	}]);
+	await resumed.prompt("Resume the exact continuation");
+	fixture.faux.setResponses([(context) => {
+		assert.equal(phase(context), "step");
+		return fauxAssistantMessage("Later step used the same bounded route.");
+	}]);
+	await resumed.prompt("Continue with a later step");
 });
 
 test("real Pi auto-start follows agent configuration without overriding resumed branch mode", async (t) => {

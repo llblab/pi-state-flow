@@ -26,7 +26,7 @@ import {
 	type OwnedFileUpdate,
 } from "./durable.ts";
 import { planLegacyStorageMigration } from "./migration.ts";
-import { hashJson } from "./json.ts";
+import { sameJson } from "./json.ts";
 import { validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
 import { createSessionRuntime, parseSessionRuntime, serializeSessionRuntime, type SessionRuntime, type Snapshot } from "./snapshot.ts";
 import { assertTemporalFileBase, loadTemporalFileRevision, planTemporalPublication, temporalFileReceipts, withStoragePublicationLock } from "./storage.ts";
@@ -490,13 +490,14 @@ function publishOwnedCohort(
 	head: string | undefined,
 	scopes: readonly StateScope[],
 	operation: "persist" | "migrate",
+	push = true,
 ): { commit?: string; push?: GitPushResult } {
 	let published = false;
 	try {
 		writeOwnedFileUpdates(updates, bases, root);
 		published = true;
 		const commit = commitOwnedFiles(root, updates, head, scopes, operation);
-		return commit === undefined ? {} : { commit, push: pushGitCommit(root, commit) };
+		return commit === undefined ? {} : push ? { commit, push: pushGitCommit(root, commit) } : { commit };
 	} catch (error) {
 		if (published) {
 			try {
@@ -528,7 +529,7 @@ export function adoptFileStateToGit(cwd: string, sessionId: string, repositoryRo
 		updates.push({ path: paths.config, content: sources.config }, { path: paths.meta, content: sources.meta });
 		const existing = current.head && updates.every(({ path, content }) => revisionFile(root, current.head!, path).content === content)
 			? loadTemporalRevision(cwd, sessionId, root, current.head, sessionKey) : undefined;
-		if (existing && (!existing.runtime || hashJson({ lineage: existing.runtime.document.meta.lineage, scopes: existing.scopes }) !== hashJson(selected.view))) {
+		if (existing && (!existing.runtime || !sameJson({ lineage: existing.runtime.document.meta.lineage, scopes: existing.scopes }, selected.view))) {
 			throw new Error("Existing Git runtime does not anchor the selected file cohort");
 		}
 		const publication = publishOwnedCohort(root, updates, current.files, current.head, [], "persist");
@@ -570,6 +571,7 @@ export function publishTemporalStateToGit(
 	repositoryRoot: string,
 	runtime?: SessionRuntime,
 	sessionKey = sessionId,
+	push = true,
 ): { base: TemporalGitBase; commit?: string; push?: GitPushResult } {
 	return withPublicationLock(repositoryRoot, (root) => {
 		const current = captureTemporalBaseUnderLock(cwd, sessionId, root, sessionKey);
@@ -583,15 +585,23 @@ export function publishTemporalStateToGit(
 		if (runtimeOnly) {
 			if (scopes.length !== 0) throw new Error("Runtime-only publication cannot write semantic scopes");
 			const selected = loadTemporalRevision(cwd, sessionId, root, runtime!.meta.temporalRevision!, sessionKey);
-			if (hashJson(selected.scopes) !== hashJson(view.scopes)) throw new Error("Runtime temporal reference does not match selected streams");
+			if (!sameJson(selected.scopes, view.scopes)) throw new Error("Runtime temporal reference does not match selected streams");
 		}
 		const { updates, changedScopes } = planTemporalPublication(cwd, sessionId, view, scopes, current, root, runtime, runtimeOnly, sessionKey);
 		if (!runtimeOnly) includeUncommittedCohort(cwd, sessionId, root, current, updates, changedScopes, scopes, runtime !== undefined, sessionKey);
 		if (updates.length === 0) return { base: current };
-		const publication = publishOwnedCohort(root, updates, current.files, current.head, changedScopes, "persist");
+		const publication = publishOwnedCohort(root, updates, current.files, current.head, changedScopes, "persist", push);
 		const nextFiles = temporalFileReceipts(current, updates);
 		return { ...publication, base: { head: publication.commit ?? current.head, files: nextFiles } };
 	});
+}
+
+export function resolveGitPushDestination(repositoryRoot: string): { gitCommonDir: string; remote: string; ref: string } | undefined {
+	const root = assertRepositoryRoot(repositoryRoot);
+	const common = git(root, ["rev-parse", "--git-common-dir"]).stdout.trim();
+	const gitCommonDir = resolve(root, common);
+	const destination = pushDestination(root);
+	return destination === undefined ? undefined : { gitCommonDir, ...destination };
 }
 
 function pushDestination(repositoryRoot: string): { remote: string; ref: string } | undefined {
@@ -621,6 +631,16 @@ export function isLocalGitRepository(repositoryRoot: string): boolean {
 }
 
 /** Push an already-created commit exactly; failures are publication state, not transition rejection. */
+export function isGitCommitAncestor(repositoryRoot: string, ancestor: string, descendant: string): boolean {
+	const root = assertRepositoryRoot(repositoryRoot);
+	assertReadableRevision(root, ancestor);
+	assertReadableRevision(root, descendant);
+	const result = git(root, ["merge-base", "--is-ancestor", ancestor, descendant], { allowFailure: true });
+	if (result.status === 0) return true;
+	if (result.status === 1) return false;
+	throw new Error(`Cannot inspect Git commit ancestry: ${result.stderr || `exit ${result.status}`}`);
+}
+
 export function pushGitCommit(repositoryRoot: string, commit: string): GitPushResult {
 	try {
 		const root = assertRepositoryRoot(repositoryRoot);

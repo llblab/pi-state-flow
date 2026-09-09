@@ -1,5 +1,5 @@
 import { RECENT_TRANSITION_LIMIT, validateRecentTransition, type RecentScopePatch } from "./history.ts";
-import { applyPatch, containsNull, hashJson, isJsonValue, isObject, type JsonObject } from "./json.ts";
+import { applyPatch, containsNull, isJsonValue, isObject, sameJson, type JsonObject } from "./json.ts";
 import { isMaterializedState, overlayStates, type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
 
 /** Owns hot temporal algebra; excludes filesystem, Git, identity allocation, and Pi lifecycle. */
@@ -87,7 +87,7 @@ export function validateScopeStream(value: unknown, scope: StateScope): asserts 
 		}
 		validateRecentTransition({ id: record.transition.id, at: 0, transitions: [{ scope, patch: record.patch }] });
 		const next = apply(state, record.patch);
-		if (hashJson(next) === hashJson(state)) throw new Error("Temporal scope tail contains a semantic no-op");
+		if (sameJson(next, state)) throw new Error("Temporal scope tail contains a semantic no-op");
 		state = next;
 		previous = record.transition;
 		identities.add(previous.id);
@@ -207,7 +207,7 @@ export function advanceTemporalState(
 	const head = view.lineage.at(-1)!;
 	const changes = transitions.filter(({ scope, patch }) => {
 		const current = scopeAt(view.scopes[scope], head);
-		return hashJson(current) !== hashJson(apply(current, patch));
+		return !sameJson(current, apply(current, patch));
 	});
 	if (changes.length === 0) return view;
 	const knownIds = new Set(view.lineage.map((boundary) => boundary.id));

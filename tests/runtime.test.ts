@@ -15,6 +15,33 @@ import { commitScopedTransition, stageScopedPatch } from "../lib/transition.ts";
 import { commitTerminal, harness, start } from "./harness.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 
+test("runtime keeps native session storage identity paired and detached from caller mutation", () => {
+	const address = { id: "session-id", key: "timestamp_session-id" };
+	const runtime = new TemporalRuntime("/project", address, "/store");
+	address.id = "mutated";
+	address.key = "mutated";
+	assert.equal(runtime.sessionId, "session-id");
+	assert.equal(runtime.sessionKey, "timestamp_session-id");
+});
+
+test("runtime can retain an accepted local commit as a queue target without pushing", () => {
+	const h = harness();
+	const runtime = new TemporalRuntime(h.ctx.cwd, "queued-runtime", h.repositoryRoot);
+	const snapshot = emptySnapshot(true);
+	const initial = runtime.initialize(snapshot, true)!;
+	snapshot.meta.durableBase = initial.commit;
+	const remote = execFileSync("git", ["-C", h.repositoryRoot, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+	const remoteBefore = execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
+	const current = runtime.states();
+	const next = { ...current, session: { ...current.session, response: "Queued locally" } };
+	snapshot.meta.step++;
+	const publication = runtime.publish(snapshot, true, createAcceptedTransition(current, next), { pushRemote: false })!;
+	assert.ok(publication.commit);
+	assert.equal(publication.push, undefined);
+	assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteBefore);
+	assert.equal(runtime.read().response, "Queued locally");
+});
+
 test("pointer round-trips preserve source-owned config, counters, bootstrap and retry state across runtime revisions", () => {
 	const h = harness();
 	const runtime = new TemporalRuntime(h.ctx.cwd, "roundtrip", h.repositoryRoot);

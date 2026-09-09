@@ -7,13 +7,14 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadStateFlowConfig } from "../lib/config.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 import type { MaterializedState, StateScope } from "../lib/state.ts";
-import { sessionStorageKey } from "../lib/durable.ts";
+import { resolveSessionAddress } from "../lib/durable.ts";
 
 export type Handler = (...args: any[]) => any;
 
 export interface HarnessOptions {
 	agentDir?: string;
 	autoStart?: boolean;
+	remotePublication?: "off" | "turn-end" | "transition";
 	cwd?: string;
 	repositoryRoot?: string;
 	knowledgeRoot?: string;
@@ -65,9 +66,12 @@ export function harness(options: HarnessOptions = {}) {
 	};
 	const fixtureRoot = options.repositoryRoot ?? mkdtempSync(join(tmpdir(), "state-flow-harness-"));
 	const agentDir = options.agentDir ?? (options.useDefaultKnowledgeRoot ? getAgentDir() : join(fixtureRoot, "agent"));
-	if (options.autoStart !== undefined) {
+	if (options.autoStart !== undefined || options.remotePublication !== undefined) {
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "state-flow.json"), JSON.stringify({ autoStart: options.autoStart }));
+		writeFileSync(join(agentDir, "state-flow.json"), JSON.stringify({
+			...(options.autoStart === undefined ? {} : { autoStart: options.autoStart }),
+			...(options.remotePublication === undefined ? {} : { remotePublication: options.remotePublication }),
+		}));
 	}
 	const repositoryRoot = options.useConfiguredDirectory ? loadStateFlowConfig(agentDir).directory : fixtureRoot;
 	if (options.initializeRepository !== false) {
@@ -101,7 +105,7 @@ export function harness(options: HarnessOptions = {}) {
 		repositoryRoot,
 		agentDir,
 		resolveSnapshot: (data: unknown = entries.at(-1)?.data) => resolveCheckpoint(data, ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot,
-			sessionStorageKey(options.sessionFile, ctx.sessionManager.getSessionId(), options.sessionTimestamp)),
+			resolveSessionAddress(options.sessionFile, ctx.sessionManager.getSessionId(), options.sessionTimestamp).key),
 		readState: (offset?: number, scope?: StateScope) => accessor.read(offset, scope),
 		get registeredTools() { return tools.size; },
 		get activeTools() { return [...activeTools]; },

@@ -7,6 +7,7 @@ import {
 	isArtifactMetadata,
 	isArtifactRegistry,
 	planArtifactInvalidation,
+	selectArtifactsByTags,
 	updateArtifactRegistry,
 	validateArtifactMetadata,
 	validateArtifactRegistry,
@@ -36,6 +37,7 @@ test("accepts minimum metadata and forward-compatible unknown fields", () => {
 		compiled_at: "2026-03-12T12:00:00.000Z",
 		compilation: { route: "artifact" },
 		kind: "skill",
+		tags: ["architecture", "memory"],
 		future_policy: { refresh: ["hash", "compiler"] },
 	});
 	assert.equal(isArtifactMetadata(value), true);
@@ -64,10 +66,25 @@ test("validates path-keyed registries without inventing artifact IDs", () => {
 	assert.equal(isArtifactRegistry({ "/knowledge/a.md": { description: "Incomplete" } }), false);
 });
 
+test("selects artifacts by validated tags without authorizing source acquisition", () => {
+	const registry = {
+		"/z.md": metadata({ tags: ["memory", "architecture"] }),
+		"/a.md": metadata({ tags: ["memory", "operations"] }),
+		"/untagged.md": metadata(),
+	};
+	assert.deepEqual(selectArtifactsByTags(registry, ["memory"]), ["/a.md", "/z.md"]);
+	assert.deepEqual(selectArtifactsByTags(registry, ["memory", "architecture"]), ["/z.md"]);
+	assert.deepEqual(selectArtifactsByTags(registry, ["architecture", "operations"], "any"), ["/a.md", "/z.md"]);
+	assert.throws(() => selectArtifactsByTags(registry, []), /one or more/);
+});
+
 test("rejects invalid known optional metadata while leaving unknown metadata open", () => {
 	assert.equal(isArtifactMetadata(metadata({ compiled_at: 7 })), false);
 	assert.equal(isArtifactMetadata(metadata({ compilation: "summary" })), false);
 	assert.equal(isArtifactMetadata(metadata({ kind: "" })), false);
+	assert.equal(isArtifactMetadata(metadata({ tags: "memory" })), false);
+	assert.equal(isArtifactMetadata(metadata({ tags: ["memory", ""] })), false);
+	assert.equal(isArtifactMetadata(metadata({ tags: ["memory", "memory"] })), false);
 	assert.equal(isArtifactMetadata(metadata({ future_scalar: true })), true);
 	assert.equal(isArtifactMetadata(metadata({ future_null: null })), false);
 });

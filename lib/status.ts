@@ -1,5 +1,7 @@
 import type { ArtifactInvalidationReason } from "./artifact.ts";
 import { projectRecentTransitionsWithLimit, type RecentTransitionWindow } from "./history.ts";
+import { inspectMemoryPromotions, retainedMemoryScopes } from "./memory.ts";
+import type { PublicationQueueState } from "./publication.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { overlayStates, type ScopedStates, type StateScope } from "./state.ts";
 import type { TransitionBoundary } from "./temporal.ts";
@@ -33,6 +35,8 @@ export interface StatusDiagnostics {
 	durableStateError?: string;
 	pendingPublication?: PendingPublicationDiagnostic;
 	retryQueued: boolean;
+	publicationQueue?: PublicationQueueState;
+	publicationQueueError?: string;
 }
 
 export function compactStatus(snapshot: Snapshot, colorize: Colorize): string | undefined {
@@ -92,6 +96,14 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 			`Hot history: offsets 0..${temporal.historyDepth}; maximum depth 7`,
 			`Retained patch tails: global ${temporal.tailCounts.global}; CWD ${temporal.tailCounts.cwd}; session ${temporal.tailCounts.session}`];
 	const artifacts = (scope: StateScope) => available ? countArtifacts(diagnostics.scopeStates, scope) : "unknown";
+	const promotions = available ? inspectMemoryPromotions(diagnostics.scopeStates.global) : [];
+	const promotionCounts = Object.fromEntries(["pending", "accepted", "failed", "unknown", "invalid"].map((status) => [status, promotions.filter((entry) => entry.status === status).length]));
+	const memoryScopes = available ? retainedMemoryScopes(diagnostics.scopeStates) : undefined;
+	const oneLine = (value: string) => value.replace(/\s+/g, " ").slice(0, 240);
+	const promotionLines = !available || promotions.length === 0 ? [] : [
+		"Memory promotions:",
+		...promotions.map((entry) => `- ${oneLine(entry.id)} — ${entry.status}; owner ${oneLine(entry.owner ?? "unavailable")}${entry.pointer ? `; pointer ${oneLine(entry.pointer)}` : ""}${entry.revision ? `; revision ${oneLine(entry.revision)}` : ""}${entry.error ? `; error ${oneLine(entry.error)}` : ""}`),
+	];
 
 	return [
 		`State Flow diagnostics — config.enabled=${snapshot.config.enabled}; config.transitionWindow=${snapshot.config.transitionWindow}; branch mode=${snapshot.config.enabled ? "active" : "inactive"}`,
@@ -99,9 +111,20 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 		`Scope keys: CWD ${diagnostics.cwdScopeKey}; session ${diagnostics.sessionScopeKey}`,
 		"Session files: config.json owns behavior; meta.json owns lineage and provenance",
 		`Runtime metadata: step #${snapshot.meta.step}; active revision ${snapshot.meta.durableBase ?? "none"}; bootstrap ${snapshot.meta.bootstrap === true}; validation attempts ${snapshot.meta.validation?.attempt ?? 0}`,
+		`Remote publication policy: ${snapshot.meta.remotePublication?.mode ?? "legacy-transition"}`,
+		diagnostics.publicationQueueError !== undefined
+			? `Remote queue: unavailable; error ${diagnostics.publicationQueueError}`
+			: diagnostics.publicationQueue === undefined
+			? "Remote queue: idle"
+			: `Remote queue: ${diagnostics.publicationQueue.status}; target ${abbreviatedCommit(diagnostics.publicationQueue.target)}; confirmed ${diagnostics.publicationQueue.confirmed ? abbreviatedCommit(diagnostics.publicationQueue.confirmed) : "none"}; attempt ${diagnostics.publicationQueue.attempt}${diagnostics.publicationQueue.error ? `; error ${diagnostics.publicationQueue.error}` : ""}`,
+		"Memory: owner state-flow; global retention enabled; global fallback active",
+		`Memory-bearing scopes: global ${memoryScopes?.global ?? "unknown"}; CWD ${memoryScopes?.cwd ?? "unknown"}; session ${memoryScopes?.session ?? "unknown"}`,
+		`Promotion status: pending ${promotionCounts.pending}; accepted ${promotionCounts.accepted}; failed ${promotionCounts.failed}; unknown ${promotionCounts.unknown}; invalid ${promotionCounts.invalid}`,
+		...promotionLines,
 		...temporalLines,
 		`Artifacts: global ${artifacts("global")}; CWD ${artifacts("cwd")}; session ${artifacts("session")}; stale ${stale}`,
 		available ? `Recent transitions: global ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "global")).length}; CWD ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "cwd")).length}; session ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "session")).length}; active ${projectedRecent.length}` : "Recent transitions: unavailable",
+		`Publication policy: ${snapshot.meta.remotePublication?.mode ?? "legacy-unresolved"}`,
 		`Publication: ${publication}`,
 		`Terminal retry: ${retry}`,
 		...staleLines,

@@ -4,6 +4,10 @@ import type { ScopePatch, ScopedPatch, StateScope, TerminalTransition } from "./
 
 export type { StateDocument } from "./state.ts";
 
+function baselineMemoryProtocol(): string {
+	return "BASELINE MEMORY: State Flow owns durable memory while enabled. Global is always available for established cross-project/user/environment knowledge; preserve information at the narrowest correct scope. Never retain secrets, raw history, speculation, or transient progress.";
+}
+
 export function stateFlowProtocol(bootstrap: boolean): string {
 	const bootstrapProtocol = bootstrap
 		? `\nBOOTSTRAP RUN: This is the final access to pre-Flow context. Migrate every future-relevant goal, decision, constraint, fact, completed prerequisite, domain state, and continuation into the patch.\n`
@@ -30,6 +34,8 @@ Complete user-facing answer
 With transitions: one blank separator, no fence or duplicate; never put literal --> in JSON. Runtime strips the comment and stores the finalized answer as session response. Without one: preserve memory and update only session response.
 
 SCOPES: Use the narrowest owner: session for branch/run continuation, cwd for project state and Skills, global for cross-project state. patch_state changes one scope immediately; terminal may update several scopes atomically. Deleting an override affects only its scope and may reveal a parent value.
+
+${baselineMemoryProtocol()}
 
 PATCH: Each transition has exactly scope and patch. Patches use only object-valued artifacts, contract, and working; omitted fields preserve. Never patch runtime config/meta/response. Recursive merge; empty/no-op scopes do not write; arrays/primitives replace; nested null deletes. Materialized null is forbidden.
 

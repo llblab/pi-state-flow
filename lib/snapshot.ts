@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { RECENT_TRANSITION_LIMIT } from "./history.ts";
+import { parseRemotePublicationPolicyDocument, serializeRemotePublicationPolicyDocument, type RemotePublicationPolicyDocument } from "./publication.ts";
 import { applyPatch, canonicalJson, containsNull, isJsonValue, isObject, type JsonObject } from "./json.ts";
 import { validateTemporalLineage, type TransitionBoundary } from "./temporal.ts";
 import { migrateLegacySkillCompilations } from "./skills.ts";
@@ -28,6 +29,7 @@ export interface SnapshotMeta {
 	specification?: string;
 	validation?: ValidationFeedback;
 	bootstrap?: boolean;
+	remotePublication?: RemotePublicationPolicyDocument;
 }
 
 export interface LegacySessionMigration {
@@ -71,7 +73,7 @@ export function validateSessionRuntime(value: unknown, cwd: string, sessionId: s
 		throw new Error("State Flow runtime scope identity mismatch");
 	}
 	validateTemporalLineage(lineage);
-	const allowed = new Set(["step", "specification", "validation", "bootstrap"]);
+	const allowed = new Set(["step", "specification", "validation", "bootstrap", "remotePublication"]);
 	if (Object.keys(fields).some((key) => !allowed.has(key))) throw new Error("Unexpected State Flow runtime metadata field");
 	const normalized = migrateSnapshot({ config: value.config, meta: fields });
 	if (fields.bootstrap === false) normalized.meta.bootstrap = false;
@@ -193,6 +195,14 @@ function restoredMeta(value: unknown, legacy: JsonObject = {}): SnapshotMeta {
 	const meta = isObject(value) ? value : legacy;
 	const pendingPublication = restoredPendingPublication(meta.pendingPublication);
 	const validation = restoredValidation(meta.validation);
+	let remotePublication: RemotePublicationPolicyDocument | undefined;
+	try {
+		if (meta.remotePublication !== undefined) remotePublication = serializeRemotePublicationPolicyDocument(
+			parseRemotePublicationPolicyDocument(meta.remotePublication, { legacyRuntime: false }),
+		);
+	} catch {
+		remotePublication = undefined;
+	}
 	return {
 		...(isDurableRevision(meta.durableBase)
 			? { durableBase: meta.durableBase }
@@ -202,6 +212,7 @@ function restoredMeta(value: unknown, legacy: JsonObject = {}): SnapshotMeta {
 		...(typeof meta.specification === "string" ? { specification: meta.specification } : {}),
 		...(validation === undefined ? {} : { validation }),
 		...(meta.bootstrap === true ? { bootstrap: true } : {}),
+		...(remotePublication === undefined ? {} : { remotePublication }),
 	};
 }
 

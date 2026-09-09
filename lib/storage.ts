@@ -9,7 +9,7 @@ import {
 	sessionRuntimePaths, temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
 	type DurableFileBase, type OwnedFileUpdate,
 } from "./durable.ts";
-import { hashJson } from "./json.ts";
+import { hashJson, sameJson } from "./json.ts";
 import { RevisionUnavailableError, isFileRevision, parseSessionRuntime, serializeSessionRuntime, type FileRevision, type SessionRuntime } from "./snapshot.ts";
 import { planLegacyStorageMigration } from "./migration.ts";
 export { isFileRevision, type FileRevision } from "./snapshot.ts";
@@ -83,7 +83,7 @@ export function planTemporalPublication(
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		if (files.get(resolve(paths.directory, "state.json"))!.identity !== "missing") throw new Error("Legacy State Flow storage requires explicit migration");
 		const previous = parseScopeStream(files.get(paths.checkpoint)!.content, files.get(paths.patches)!.content, scope, scope === "cwd" ? cwd : undefined);
-		if (runtimeOnly || (previous !== undefined && hashJson(previous) === hashJson(view.scopes[scope]))) continue;
+		if (runtimeOnly || (previous !== undefined && sameJson(previous, view.scopes[scope]))) continue;
 		if (!scopes.includes(scope)) throw new Error(`Temporal scope update omitted a changed stream: ${scope}`);
 		changedScopes.push(scope);
 	}
@@ -93,8 +93,8 @@ export function planTemporalPublication(
 	const runtimeUpdates: OwnedFileUpdate[] = [];
 	if (runtime !== undefined) {
 		const sources = serializeSessionRuntime(runtime, cwd, sessionId);
-		if (hashJson(runtime.meta.lineage) !== hashJson(view.lineage)) throw new Error("Runtime lineage does not match the temporal cohort");
-		if (previousRuntime === undefined || hashJson(previousRuntime) !== hashJson(runtime)) {
+		if (!sameJson(runtime.meta.lineage, view.lineage)) throw new Error("Runtime lineage does not match the temporal cohort");
+		if (previousRuntime === undefined || !sameJson(previousRuntime, runtime)) {
 			runtimeUpdates.push({ path: runtimePaths.config, content: sources.config }, { path: runtimePaths.meta, content: sources.meta });
 		}
 	}

@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
 	captureTemporalFileBases, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath,
-	loadScopeStream, parseScopeStream, serializeScopeStream, sessionScopeKey, sessionStorageKey,
+	loadScopeStream, parseScopeStream, resolveSessionAddress, serializeScopeStream, sessionScopeKey, sessionStorageKey,
 	temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates, parseStateSource,
 } from "../lib/durable.ts";
 import { emptyState, type StateScope } from "../lib/state.ts";
@@ -44,6 +44,10 @@ test("canonical scope hierarchy mirrors Pi project and session names without red
 		"2026-09-07T20-01-08-993Z_01a07d75-d380-72ad-84f6-e83040c93368");
 	assert.equal(sessionStorageKey(undefined, "session-1", "2026-09-07T20:01:08.993Z"), "2026-09-07T20-01-08-993Z_session-1");
 	assert.equal(sessionStorageKey(undefined, "session-1"), "session-1");
+	assert.deepEqual(resolveSessionAddress(undefined, "session-1", "2026-09-07T20:01:08.993Z"), {
+		id: "session-1", key: "2026-09-07T20-01-08-993Z_session-1",
+	});
+	assert.throws(() => resolveSessionAddress(undefined, " session-1"), /non-empty and trimmed/);
 	assert.throws(() => sessionStorageKey("/sessions/not-jsonl", "session-1"), /.jsonl format/);
 	assert.equal(sessionScopeKey("session-1"), "session-1");
 	assert.notEqual(sessionScopeKey("session-1"), sessionScopeKey("session-2"));

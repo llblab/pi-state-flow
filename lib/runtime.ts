@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { join } from "node:path";
-import { parseScopeStream, sessionRuntimePaths, temporalScopePaths } from "./durable.ts";
+import { parseScopeStream, sessionRuntimePaths, temporalScopePaths, type SessionAddress } from "./durable.ts";
 import { adoptFileStateToGit, initializeGitRepository, isLocalGitRepository, captureTemporalGitBase, loadLegacyStatesAtRevision, loadTemporalRevision, migrateHashedCwdAtHead, migrateHashedLayoutAtHead, migrateLegacyStorageToGit, publishTemporalStateToGit, type TemporalGitBase } from "./git.ts";
 import { captureTemporalFileBase, detectGitCapability, initializeFileStore, loadTemporalFileRevision, migrateLegacyStorageToFiles, publishTemporalStateToFiles } from "./storage.ts";
 import { type AcceptedTransition, type RecentTransitionWindow } from "./history.ts";
-import { hashJson } from "./json.ts";
+import { hashJson, sameJson } from "./json.ts";
 import { hasCwdMaterialization } from "./migration.ts";
 import { RevisionUnavailableError, createSessionRuntime, isFileRevision, parseSessionRuntime, resolveFileSessionRuntime, resolveSessionRuntime, type Snapshot } from "./snapshot.ts";
 import { emptyState, type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
@@ -52,15 +52,16 @@ export class TemporalRuntime {
 	private savedRuntime: string | undefined;
 	private backend: "git" | "files" | undefined;
 	readonly cwd: string;
-	readonly sessionId: string;
-	readonly sessionKey: string;
+	private readonly session: SessionAddress;
 	readonly root: string;
-	constructor(cwd: string, sessionId: string, root: string, sessionKey = sessionId) {
+	constructor(cwd: string, session: string | SessionAddress, root: string, sessionKey?: string) {
 		this.cwd = cwd;
-		this.sessionId = sessionId;
-		this.sessionKey = sessionKey;
+		this.session = Object.freeze(typeof session === "string" ? { id: session, key: sessionKey ?? session } : { ...session });
 		this.root = root;
 	}
+
+	get sessionId(): string { return this.session.id; }
+	get sessionKey(): string { return this.session.key; }
 
 	/** Explicit start owns directory/repository creation; reads never call this. */
 	prepare(): void {
@@ -175,10 +176,11 @@ export class TemporalRuntime {
 	}
 
 	initialize(snapshot: Snapshot, allowCreateCwd: boolean, expectedShared?: Pick<ScopedStates, "global" | "cwd">, newSessionOrigin = false): RuntimePublication | undefined {
-		if (!allowCreateCwd && !hasCwdMaterialization(this.cwd, this.root)) return undefined;
+		const hasCwd = hasCwdMaterialization(this.cwd, this.root);
+		if (!allowCreateCwd && !hasCwd) return undefined;
 		const backend = this.backend ?? (detectGitCapability() === "git" && lstatSync(join(this.root, ".git"), { throwIfNoEntry: false }) ? "git" : "files");
 		if (backend === "git") {
-			migrateHashedCwdAtHead(this.cwd, this.root);
+			if (!hasCwd) migrateHashedCwdAtHead(this.cwd, this.root);
 			migrateLegacyStorageToGit(this.cwd, this.sessionId, this.root, this.sessionKey);
 		}
 		else {
@@ -198,11 +200,11 @@ export class TemporalRuntime {
 		// Explicit start before any branch runtime is a new origin, never inheritance of a later session layer.
 		if (snapshot.legacySession || newSessionOrigin) streams.session = undefined;
 		const fresh = createTemporalState({ global: emptyState(), cwd: emptyState(), session: snapshot.legacySession?.state ?? emptyState() }, randomUUID());
-		const candidate = new TemporalRuntime(this.cwd, this.sessionId, this.root, this.sessionKey);
+		const candidate = new TemporalRuntime(this.cwd, this.session, this.root);
 		candidate.backend = backend;
 		candidate.base = base;
 		candidate.view = adoptTemporalStreams({ global: streams.global ?? fresh.scopes.global, cwd: streams.cwd ?? fresh.scopes.cwd, session: streams.session ?? fresh.scopes.session }, `${base.head ?? "unborn"}:${randomUUID()}`);
-		if (expectedShared && (["global", "cwd"] as const).some((scope) => hashJson(candidate.read(0, scope)) !== hashJson(expectedShared[scope]))) {
+		if (expectedShared && (["global", "cwd"] as const).some((scope) => !sameJson(candidate.read(0, scope), expectedShared[scope]))) {
 			throw new Error("Legacy branch shared scopes diverged from the selected revision; migration cannot overwrite them");
 		}
 		const publication = candidate.publish(snapshot, true);
@@ -214,7 +216,7 @@ export class TemporalRuntime {
 		return publication;
 	}
 
-	publish(snapshot: Snapshot, semantic = false, accepted?: AcceptedTransition): RuntimePublication | undefined {
+	publish(snapshot: Snapshot, semantic = false, accepted?: AcceptedTransition, options: { pushRemote?: boolean } = {}): RuntimePublication | undefined {
 		if (!this.view || !this.base) throw new Error("State Flow temporal publication is unavailable; restore or initialize before accepting a transition");
 		const next = accepted ? advanceTemporalState(this.view, accepted.transitions, accepted.id) : this.view;
 		const runtime = createSessionRuntime(snapshot, this.cwd, this.sessionId, next.lineage, this.backend === "files" ? "files" : "unconfirmed");
@@ -226,7 +228,7 @@ export class TemporalRuntime {
 			for (const scope of ["global", "cwd"] as const) {
 				const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
 				const stream = parseScopeStream(live.get(paths.checkpoint), live.get(paths.patches), scope, scope === "cwd" ? this.cwd : undefined);
-				if (hashJson(stream) !== hashJson(this.view.scopes[scope])) throw new Error("State Flow cannot publish this restored branch because its global or CWD scope changed concurrently after the linked revision");
+				if (!sameJson(stream, this.view.scopes[scope])) throw new Error("State Flow cannot publish this restored branch because its global or CWD scope changed concurrently after the linked revision");
 			}
 		}
 		if (this.backend === "files") {
@@ -249,7 +251,10 @@ export class TemporalRuntime {
 			this.base = current;
 		}
 		runtime.meta.temporalRevision = semantic ? "self" : this.semanticRevision!;
-		const result = publishTemporalStateToGit(this.cwd, this.sessionId, next, semantic ? SCOPES : [], this.base, this.root, runtime, this.sessionKey);
+		const result = publishTemporalStateToGit(
+			this.cwd, this.sessionId, next, semantic ? SCOPES : [], this.base, this.root, runtime, this.sessionKey,
+			options.pushRemote !== false,
+		);
 		this.base = result.base;
 		this.view = next;
 		this.savedRuntime = fingerprint;

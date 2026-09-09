@@ -28,6 +28,7 @@ import {
 	migrateLegacyStorageToGit,
 	pushGitCommit,
 	initializeGitRepository,
+	isGitCommitAncestor,
 } from "../lib/git.ts";
 import { writeCwdState, writeGlobalState, writeSessionState } from "./legacy-fixture.ts";
 import { emptyState, type ScopedStates } from "../lib/state.ts";
@@ -67,6 +68,19 @@ function fixture(t: TestContext, temporal = false): { repository: string; remote
 	if (!temporal) writeCwdState(cwd, emptyState(), repository);
 	return { repository, remote, cwd };
 }
+
+test("inspects exact Git ancestry without moving HEAD or the worktree", (t) => {
+	const { repository } = fixture(t, true);
+	const first = run(repository, "rev-parse", "HEAD");
+	writeFileSync(join(repository, "README.md"), "second\n");
+	run(repository, "add", "README.md");
+	run(repository, "commit", "-m", "second");
+	const second = run(repository, "rev-parse", "HEAD");
+	assert.equal(isGitCommitAncestor(repository, first, second), true);
+	assert.equal(isGitCommitAncestor(repository, second, first), false);
+	assert.equal(run(repository, "rev-parse", "HEAD"), second);
+	assert.equal(readFileSync(join(repository, "README.md"), "utf8"), "second\n");
+});
 
 test("explicit repository initialization rejects unsafe roots and supports real worktrees", (t) => {
 	const { repository } = fixture(t, true);
@@ -472,21 +486,10 @@ test("the extension accepts a local durable commit without regenerating on push 
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.deepEqual(h.entries.at(-1)!.data, { revision: run(h.repositoryRoot, "rev-parse", "HEAD") });
 	assert.equal(h.sentMessages.length, 0);
-	assert.match(h.notifications.at(-1)!, /accepted durable commit .* push is pending/i);
+	assert.doesNotMatch(h.notifications.at(-1)!, /push is pending/i);
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /Publication: pending [0-9a-f]{12} —/);
+	assert.match(h.notifications.at(-1)!, /Remote publication policy: turn-end/);
 	assert.match(h.notifications.at(-1)!, /"accepted": true/);
-
-	const remote = mkdtempSync(join(tmpdir(), "state-flow-extension-remote-"));
-	t.after(() => rmSync(remote, { recursive: true, force: true }));
-	rmSync(remote, { recursive: true });
-	execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" });
-	run(h.repositoryRoot, "remote", "set-url", "origin", remote);
-	h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
-	assert.match(h.notifications.find((message) => /pushed pending durable commit/.test(message))!, /pushed pending/);
-	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /Publication: idle/);
-	assert.equal(run(remote, "rev-parse", "refs/heads/main"), run(h.repositoryRoot, "rev-parse", "HEAD"));
 });
 
 test("migrates all three current snapshots in one isolated commit without losing semantic or cold history", (t) => {
@@ -625,6 +628,20 @@ test("linked worktree publishers share common-Git-directory exclusion", (t) => {
 	assert.throws(() => migrateLegacyStorageToGit(cwd, session, linked), /publication lock is unavailable/);
 	assert.equal(existsSync(join(linked, "checkpoint.json")), false);
 	assert.equal(readFileSync(lock, "utf8"), "common owner\n");
+});
+
+test("local temporal acceptance can return an immutable target without remote push", (t) => {
+	const { repository, remote, cwd } = fixture(t, true);
+	const remoteBefore = execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
+	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
+	const publication = publishTemporalStateToGit(
+		cwd, "queued", view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, "queued", repository),
+		repository, undefined, "queued", false,
+	);
+	assert.ok(publication.commit);
+	assert.equal(publication.push, undefined);
+	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
+	assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteBefore);
 });
 
 test("accepted temporal publication retains prepared receipts rather than adopting bytes changed during push", (t) => {

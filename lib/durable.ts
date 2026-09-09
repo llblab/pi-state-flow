@@ -30,6 +30,11 @@ export interface ScopeStreamSources {
 	patches: string;
 }
 
+export interface SessionAddress {
+	readonly id: string;
+	readonly key: string;
+}
+
 /** CWD storage requires its canonical owner; legacy ownerless sources are read-only. */
 export function serializeScopeStream(stream: ScopeStream, scope: StateScope, cwdIdentity?: string): ScopeStreamSources {
 	validateScopeStream(stream, scope);
@@ -210,6 +215,11 @@ export function sessionStorageKey(sessionFile: string | undefined, sessionId: st
 	}
 	if (timestamp !== undefined) return sessionScopeKey(`${timestamp.replace(/[:.]/g, "-")}_${sessionId}`);
 	return sessionScopeKey(sessionId);
+}
+
+export function resolveSessionAddress(sessionFile: string | undefined, sessionId: string, timestamp?: string): SessionAddress {
+	if (sessionId.trim().length === 0 || sessionId !== sessionId.trim()) throw new Error("State Flow session identity must be non-empty and trimmed");
+	return Object.freeze({ id: sessionId, key: sessionStorageKey(sessionFile, sessionId, timestamp) });
 }
 
 /** Read-only migration input for the untagged hashed-layout draft. */

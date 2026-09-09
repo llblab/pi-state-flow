@@ -37,12 +37,14 @@ Optional `~/.pi/agent/state-flow.json` (or `state-flow.json` beneath `PI_CODING_
 ```json
 {
   "directory": "~/.pi/agent/state-flow",
-  "autoStart": false
+  "autoStart": false,
+  "remotePublication": "turn-end"
 }
 ```
 
 - `directory`: State storage location; omitted defaults to `state-flow/` beneath Pi's agent directory. Absolute paths, `~`/`~/` and relative paths are supported; relative paths resolve from the configuration directory, not the project CWD.
 - `autoStart`: Set to `true` to enable State Flow automatically for genuinely new sessions, including fresh CWDs. Omitted defaults to `false`: manual activation, even when previous CWD materialization exists.
+- `remotePublication`: For new runtimes, `turn-end` (default) queues one newest target after local acceptance and pushes asynchronously; `off` keeps commits local; `transition` preserves legacy synchronous push behavior. A resumed branch keeps its persisted policy.
 
 Configuration is read at extension load; edit it and use `/reload` (or restart Pi) before opening a new session. Existing branches retain their stored enablement on resume/tree navigation. `/state-flow-stop` does not rewrite this file or disable automatic mode for later new sessions. Invalid JSON, unknown keys or invalid values fail extension loading rather than silently choosing another directory. A missing file uses defaults and is not generated automatically.
 
@@ -229,7 +231,7 @@ Artifacts use exact source paths as keys. Minimum metadata is:
 {"description":"What this source contains and when it is useful","hash":"sha256:<64 lowercase hex characters>","compiler":"artifact-v1"}
 ```
 
-Descriptions and compiler revisions are non-empty; hashes are canonical lowercase SHA-256. Optional `kind`, `compiled_at`, and `compilation` are validated when present, while unknown JSON metadata remains forward-compatible. Ordinary artifacts need no `kind`. Hash plus compiler revision determines freshness, not `compiled_at`.
+Descriptions and compiler revisions are non-empty; hashes are canonical lowercase SHA-256. Optional `kind`, `compiled_at`, `compilation`, and `tags` are validated when present, while arbitrary unknown finite non-null JSON metadata remains forward-compatible. Tags are unique non-empty trimmed strings; `selectArtifactsByTags` provides deterministic all/any candidate filtering, but a tag match never authorizes source acquisition. Ordinary artifacts need no `kind` or tags. Hash plus compiler revision determines freshness, not `compiled_at`.
 
 Session initialization generically discovers regular lowercase `*.md` beneath the independent canonical Knowledge source root, normally `~/.pi/agent/knowledge` (or `knowledge/` beneath the agent directory selected by `PI_CODING_AGENT_DIR`). This source directory need not be a Git repository. Discovery hashes opaque bytes and retains byte counts without decoding or storing bodies; it skips symlinks and never escapes the root. A missing root means no candidates. Root and nested Markdown are treated alike, without reserved names, frontmatter parsing, validators, templates, or a `save_knowledge` implementation/call. Arbitrary repository files remain independent from State Flow.
 
@@ -239,7 +241,7 @@ Default compilation is a compact routing description, not raw Markdown or a full
 
 ### Materialized-first policy
 
-Read a source only for a concrete relevant gap not covered by sufficient compilation, an exact-source operation including edits, evidenced invalidation, contradiction/failure reconciliation, explicit request, or bounded maintenance selection. New sessions, routine recall/activation, reassurance, and a description/index alone are not reasons to reread. Changed hashes require reacquisition; prefer the smallest sufficient read. Semantic sufficiency is caller-assessed, not proven by the existence of a compilation field.
+Read a source only for a concrete relevant gap not covered by sufficient compilation, an exact-source operation including edits, evidenced invalidation, contradiction/failure reconciliation, explicit request, or bounded maintenance selection. The explicit rehydration planner binds scope, path, candidate hash, and reason, then reuses Pi's visible native `read`; State Flow does not register a duplicate artifact-reading tool. New sessions, routine recall/activation, reassurance, and a description/index alone are not reasons to reread. Changed hashes require reacquisition; prefer the smallest sufficient read. Semantic sufficiency is caller-assessed, not proven by the existence of a compilation field.
 
 Optional `planArtifactMaintenance` selects only otherwise-fresh old artifacts, ranking missing/unparseable timestamps first, then oldest `compiled_at` and path. Defaults admit at most one source and 16 KiB after 30 days. Strict count/byte ceilings can be zero; source bytes conservatively bound tokenizer input. The planner never reads, compiles, or modifies sources. Correctness invalidation takes precedence; explicit full refresh is separate from maintenance budgets and never an automatic startup rebuild.
 
@@ -248,6 +250,12 @@ Optional `planArtifactMaintenance` selects only otherwise-fresh old artifacts, r
 Every successful `SKILL.md` read requires CWD compiler output at the exact executed path at the next barrier or terminal transition, with non-empty `description`, `kind: "skill"`, and a non-empty flexible `compilation` object. Compile applicability, routing, constraints, and failure conditions rather than source text. Runtime attaches the executed byte hash and `skill-artifact-v1`; missing/unhashable/forged freshness or missing compilation fails validation. Refresh replaces the complete old artifact, including obsolete metadata.
 
 Correlation follows finalized mutable `tool_call` arguments with execution-start compatibility fallback. Legacy `contract.compiled_skills` entries migrate into artifacts, preserving behavior and marking unavailable-source fallback hashes unverified. New patches cannot recreate the retired store.
+
+### Optional memory curation
+
+The package includes the progressively disclosed `state-flow-memory` Skill for explicit audits, contradiction cleanup, scope narrowing, stale continuation review, and ownership migration. It is not part of routine retention and never runs as background maintenance. The Skill reads only required state projections, preserves uncertainty, verifies changed scopes, and treats external promotion as a two-phase handoff that cannot delete the only accepted copy without destination evidence. State Flow remains the memory owner and global memory remains available throughout.
+
+External handoffs may use the generic global `working.memory_promotions` map. Each entry requires `status` (`pending`, `accepted`, `failed`, or `unknown`) and a non-empty `owner`; accepted entries additionally require an exact destination `pointer` and `revision`. Other fields remain forward-compatible and destination-specific. This bookkeeping does not replace the retained candidate: failures and uncertainty keep the accepted State Flow body plus exact continuation, while proven acceptance may remove the duplicate body and retain the compact pointer record. `/state-flow-status` reports owner mode, fallback activation, memory-bearing scopes, promotion counts, and bounded pointer/error details; malformed or incompletely evidenced accepted records appear as invalid rather than accepted.
 
 ## Handoff quality and external reality
 
