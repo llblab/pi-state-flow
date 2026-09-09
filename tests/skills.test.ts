@@ -46,8 +46,63 @@ test("discovers the packaged optional memory-curation Skill without diagnostics"
 	assert.equal(result.skills[0].name, "state-flow-memory");
 	assert.match(result.skills[0].description, /explicit memory curation.*not for routine turns/);
 	const body = readFileSync(result.skills[0].filePath, "utf8");
+	assert.match(body, /Use this Skill only for one bounded, explicit maintenance request/);
+	assert.match(body, /`reframe`: useful, but expressed with unsupported certainty, authority, or breadth/);
+	assert.match(body, /These are audit decisions, not required stored labels/);
+	assert.match(body, /fresh executor know what must still hold, what changed, what remains unresolved, and how to continue/);
+	assert.match(body, /compile it into its exact-path CWD artifact before acquiring a stale global Markdown source/);
+	assert.match(body, /verify it with a separate `read_state`, then delete or narrow the source/);
+	assert.match(body, /Do all readback before the terminal answer/);
+	assert.match(body, /Simultaneously pending CWD and global acquisitions require complete compilation/);
+	assert.match(body, /Write and verify the destination before deleting the source/);
+	assert.match(body, /Separate calls are not an atomic multi-scope transaction/);
+	assert.match(body, /stored claim of acceptance is not verification/);
 	assert.match(body, /Never delete the only accepted copy/);
-	assert.match(body, /Stop after one bounded reconciliation cohort/);
+	assert.match(body, /Removing a secret from active state does not erase prior offsets, Git history, or external copies/);
+	assert.match(body, /Report the bounded change, unresolved items, any partial migration/);
+	assert.match(body, /Stop after this reconciliation cohort, including when no change is warranted or a blocker remains/);
+});
+
+test("curation compiles an acquired Skill before write-verify-delete barriers", async () => {
+	const h = harness();
+	await start(h);
+	const patchState = h.tools.get("patch_state")!;
+	const readState = h.tools.get("read_state")!;
+	await patchState.execute("seed", {
+		scope: "global", patch: { contract: { projectRule: "project-only" } },
+	}, undefined, undefined, h.ctx);
+	const source = skillFile("curation-sequence");
+	recordRead(h, source);
+	await assert.rejects(
+		patchState.execute("premature", {
+			scope: "session", patch: { working: { unrelated: true } },
+		}, undefined, undefined, h.ctx),
+		/newly read Skill must be compiled|successfully read Skill must have a CWD artifact compiler output/,
+	);
+	assert.equal(h.readState().working.unrelated, undefined);
+	await patchState.execute("compile", {
+		scope: "cwd", patch: { artifacts: { [source]: compilerOutput("Curate one requested cohort") } },
+	}, undefined, undefined, h.ctx);
+	await patchState.execute("after-compilation", {
+		scope: "session", patch: { working: { unrelated: true } },
+	}, undefined, undefined, h.ctx);
+	await patchState.execute("destination", {
+		scope: "cwd", patch: { contract: { projectRule: "project-only" } },
+	}, undefined, undefined, h.ctx);
+	const destination = await readState.execute("verify-destination", {
+		offset: 0, scope: "cwd",
+	}, undefined, undefined, h.ctx);
+	assert.equal(JSON.parse(destination.content[0].text).state.contract.projectRule, "project-only");
+	await patchState.execute("delete-source", {
+		scope: "global", patch: { contract: { projectRule: null } },
+	}, undefined, undefined, h.ctx);
+	const effective = await readState.execute("verify-effective", {
+		offset: 0, scope: "effective",
+	}, undefined, undefined, h.ctx);
+	assert.equal(JSON.parse(effective.content[0].text).state.contract.projectRule, "project-only");
+	assert.equal(h.readState(0, "global").contract.projectRule, undefined);
+	const terminal = commitTerminal(h, {}, {}, "Curation verified.");
+	assert.equal(terminal.message.content[0].text, "Curation verified.");
 });
 
 test("memory curation can narrow an established value without retaining two authoritative scopes", async () => {

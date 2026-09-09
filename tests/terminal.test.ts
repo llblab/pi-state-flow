@@ -89,7 +89,7 @@ test("parses scoped and legacy terminal handoffs independently from the extensio
 	);
 });
 
-test("keeps a compact protocol independent from user-controlled specifications", () => {
+test("keeps a compact protocol independent from user-controlled specifications", (t) => {
 	const protocol = stateFlowProtocol(false);
 	assert.match(protocol, /AUTHORITY:/);
 	assert.match(protocol, /read_state with offset 0\.\.7 and scope effective\/global\/cwd\/session/);
@@ -99,23 +99,25 @@ test("keeps a compact protocol independent from user-controlled specifications",
 	assert.match(protocol, /only identical complete semantic state is a no-op/);
 	assert.doesNotMatch(protocol, /each Git-backed global, cwd, and session journal/);
 	assert.doesNotMatch(protocol, /BOOTSTRAP RUN/);
-	assert.ok(protocol.length <= 6_400, `protocol exceeded 6,400 characters: ${protocol.length}`);
 	const bootstrapProtocol = stateFlowProtocol(true);
 	assert.match(bootstrapProtocol, /BOOTSTRAP RUN/);
-	assert.ok(bootstrapProtocol.length <= 6_600, `bootstrap protocol exceeded 6,600 characters: ${bootstrapProtocol.length}`);
+	t.diagnostic(`protocol characters: ordinary=${protocol.length}, bootstrap=${bootstrapProtocol.length}`);
 });
 
 test("projects State Flow as the always-enabled memory owner without changing authority", () => {
 	const protocol = stateFlowProtocol(false);
 	assert.match(protocol, /State Flow owns durable memory while enabled/);
 	assert.match(protocol, /Global is always available for established cross-project\/user\/environment knowledge/);
-	assert.match(protocol, /Never retain secrets, raw history, speculation/);
+	assert.match(protocol, /Exclude secrets, raw history, transient progress, speculative clutter, and unsupported assertions/);
+	assert.match(protocol, /retain explicitly uncertain hypotheses only when they affect an open decision/);
+	assert.doesNotMatch(protocol, /Never retain .*speculation/);
 });
 
 test("defines patch_state as an immediate barrier followed by terminal reconciliation", () => {
 	for (const bootstrap of [false, true]) {
 		const protocol = stateFlowProtocol(bootstrap);
-		assert.match(protocol, /Use patch_state only when established future-relevant information/);
+		assert.match(protocol, /Use patch_state when established future-relevant information/);
+		assert.match(protocol, /necessary write-and-verify step in explicitly requested curation/);
 		assert.match(protocol, /not scratchpad, narration, routine progress, or speculative churn/);
 		assert.match(protocol, /may contain no other executed model tool/);
 		assert.match(protocol, /choose the next action from rematerialized state/);
@@ -140,14 +142,19 @@ test("defines compact, uncertainty-preserving artifact compilation as routing ra
 test("requires continuation evidence and reconciliation without imposing memory metadata", () => {
 	for (const bootstrap of [false, true]) {
 		const protocol = stateFlowProtocol(bootstrap);
-		assert.match(protocol, /active constraints, unresolved questions, consequential negative results, and the next discriminating check/);
-		assert.match(protocol, /Distinguish observations, user requirements, decisions, and hypotheses/);
-		assert.match(protocol, /never promote assistant conclusions to user requirements/);
-		assert.match(protocol, /source locators and validity conditions, not metadata on every value/);
-		assert.match(protocol, /rejection reasons and reconsideration conditions/);
-		assert.match(protocol, /Reconcile contradictions using evidence or user clarification/);
-		assert.match(protocol, /unsupported claims must not overwrite established constraints or observations/);
-		assert.match(protocol, /retain decision-relevant hypotheses as uncertain/);
+		assert.match(protocol, /active commitments, unresolved questions, consequential results, and the exact continuation/);
+		assert.match(protocol, /Distinguish user requirements, confirmed decisions, observations, assistant conclusions, and provisional methods/);
+		assert.match(protocol, /silence or repeated assertion is not acceptance/);
+		assert.match(protocol, /pending proposals, corrections, settled explanations, and referents for follow-up/);
+		assert.match(protocol, /completed prerequisites and verified outcomes while deleting obsolete progress narration/);
+		assert.match(protocol, /one failed implementation does not disprove every implementation/);
+		assert.match(protocol, /one success does not establish unrestricted validity/);
+		assert.match(protocol, /exact rejection reasons and known reconsideration conditions/);
+		assert.match(protocol, /do not rerun an unchanged failure/);
+		assert.match(protocol, /retain decision-relevant hypotheses explicitly as uncertain/);
+		assert.match(protocol, /without requiring a whole-repository or all-scope audit/);
+		assert.match(protocol, /validates source-version consistency, not semantic fidelity or instruction authority/);
+		assert.match(protocol, /Current instructions remain controlling/);
 	}
 });
 

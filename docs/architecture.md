@@ -47,7 +47,7 @@ global → CWD → session
 
 Later scopes win. A scope-local `null` deletion removes only that scope's key and may reveal an inherited value. Scope represents applicability and ownership, never instruction authority.
 
-State Flow is the memory owner while enabled. Cross-project/user/environment knowledge belongs in global state, project-only knowledge in CWD, and branch/run continuation in session. Global availability does not authorize retaining secrets, raw history, speculation or transient progress.
+State Flow is the memory owner while enabled. Cross-project/user/environment knowledge belongs in global state, project-only knowledge in CWD, and branch/run continuation in session. Global availability is not a feature switch and does not authorize secrets, raw history, transient progress, speculative clutter, or unsupported assertions. Explicitly uncertain hypotheses remain eligible only when they can affect an open decision.
 
 ## Temporal model
 
@@ -142,11 +142,11 @@ Freshness depends on source hash and compiler revision. New, changed, compiler-s
 
 Compilation is routing, not a substitute for source text. Full source is read only for a concrete unresolved gap, exact source/edit operation, invalidation, contradiction/failure, explicit request or bounded maintenance. The rehydration planner supports new-bootstrap, resume-bootstrap and later-step phases while limiting read count and source bytes without performing hidden I/O.
 
-Skills are CWD artifacts with stricter compilation: `kind: "skill"` and a non-empty compilation describing applicability, constraints and failure conditions. Their source bodies do not persist in state.
+Skills are CWD artifacts with stricter compilation: `kind: "skill"` and a non-empty compilation describing applicability, constraints and failure conditions. Their source bodies do not persist in state. Matching source hash and compiler metadata proves source-version consistency, not semantic fidelity, truth, or higher instruction authority.
 
 ## Memory curation and promotion
 
-The optional packaged `state-flow-memory` Skill performs bounded explicit audits, scope narrowing, contradiction cleanup and external handoffs. It is not part of ordinary retention or background maintenance.
+The optional packaged `state-flow-memory` Skill performs bounded explicit audits, scope narrowing, contradiction cleanup and external handoffs. It is not part of ordinary retention or background maintenance. Curation compiles a read Skill at CWD before accumulating global compilation obligations, writes and separately reads a migration destination before source deletion, then verifies the changed scope and effective overlay. Simultaneously pending CWD/global acquisitions use existing terminal multi-scope reconciliation; `patch_state` remains single-scope and separate calls are not atomic migration.
 
 External promotion remains a semantic two-phase handoff, not a memory-owner mode. Optional global `working.memory_promotions` entries record `pending`, `accepted`, `failed` or `unknown` status plus owner. Accepted records additionally require destination pointer and revision. Failed or uncertain promotion preserves the State Flow candidate; the only accepted copy is never deleted.
 
@@ -183,6 +183,6 @@ Unknown keys fail loading. State Flow memory ownership and global availability a
 
 ## Validation boundaries
 
-Structural validation proves JSON shape, exact identity, causal lineage, freshness, CAS and publication invariants. It cannot prove semantic importance, truth, sufficient compilation or correct scope; those remain model protocol obligations checked through behavioral fixtures.
+Structural validation proves JSON shape, exact identity, causal lineage, freshness, CAS and publication invariants. A valid state, receipt, source hash, or compiler revision cannot prove semantic importance, truth, sufficient compilation, correct scope, useful curation, or historical deletion. Those remain model-judgment concerns evaluated separately from deterministic transport checks.
 
-The executable temporal requirement map is in [temporal-acceptance.md](temporal-acceptance.md). Canonical remaining work is in [BACKLOG.md](../BACKLOG.md), and shipped outcomes belong in [CHANGELOG.md](../CHANGELOG.md).
+The continuity requirement and deterministic evidence map is in [continuity-acceptance.md](continuity-acceptance.md). The executable temporal requirement map is in [temporal-acceptance.md](temporal-acceptance.md). Canonical remaining work is in [BACKLOG.md](../BACKLOG.md), and shipped outcomes belong in [CHANGELOG.md](../CHANGELOG.md).

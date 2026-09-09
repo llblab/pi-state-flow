@@ -501,10 +501,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	pi.registerTool({
 		name: PATCH_STATE_TOOL_NAME,
 		label: "Patch State",
-		description: "Materialize established future-relevant semantic state at a session, CWD, or global barrier. Do not use for scratchpad, narration, routine progress, or speculative churn. This call must be the only State Flow barrier in its assistant response; sibling tool calls are blocked and reconsidered after rematerialization.",
+		description: "Materialize established future-relevant semantic state at a session, CWD, or global barrier, including a necessary write-and-verify step during explicitly requested curation. Do not use for scratchpad, narration, routine progress, or speculative churn. This call must be the only State Flow barrier in its assistant response; sibling tool calls are blocked and reconsidered after rematerialization.",
 		promptSnippet: "Materialize established future-relevant state as an immediate inference barrier",
 		promptGuidelines: [
-			"Use patch_state only when established future-relevant information would face meaningful loss or recovery risk if delayed until terminal reconciliation.",
+			"Use patch_state when established future-relevant information would face meaningful loss or recovery risk if delayed until terminal reconciliation, or for a necessary write-and-verify step in explicitly requested curation.",
 			"Call patch_state alone in an assistant response; choose subsequent actions only after its compact acknowledgement and rematerialized State Flow context.",
 		],
 		executionMode: "sequential",
