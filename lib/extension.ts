@@ -7,6 +7,7 @@ import { assistantToolCallCount, finalizedAssistantResponse, stateFlowProtocol }
 import { createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, runtimeContextMessage, VALIDATION_MESSAGE_TYPE, withoutPrivateValidation, type PassiveContinuation } from "./context.ts";
 import { ArtifactReadTracker } from "./acquisition.ts";
 import { loadStateFlowConfig } from "./config.ts";
+import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramLoader } from "./telegram.ts";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { SkillReadTracker } from "./skills.ts";
 import { emptySnapshot, migrationFailure, persistableSnapshot, type Snapshot } from "./snapshot.ts";
@@ -44,6 +45,7 @@ export interface StateFlowExtensionOptions {
 	repositoryRoot?: string;
 	knowledgeRoot?: string;
 	onRuntime?: (accessor: { read(offset?: number, scope?: StateScope): MaterializedState }) => void;
+	telegram?: { load?: StateFlowTelegramLoader };
 }
 
 export const PATCH_STATE_TOOL_NAME = "patch_state";
@@ -85,6 +87,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	const globalMarkdown = new GlobalMarkdownDiscovery(options.knowledgeRoot ?? getKnowledgeRoot(agentDir));
 	let artifactInvalidations: ArtifactInvalidationRequest[] = [];
 	let loggingWarningReported = false;
+	let telegramStartPending = false;
 
 	function sessionAddress(ctx: ExtensionContext): SessionAddress {
 		return resolveSessionAddress(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getSessionId(), ctx.sessionManager.getHeader()?.timestamp);
@@ -455,6 +458,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		artifactInvalidations = [];
 		artifactReads.setCandidates([]);
 		artifactRefreshPending = false;
+		telegramStartPending = false;
 		activeContext = ctx;
 		const session = sessionAddress(ctx);
 		runtime = new TemporalRuntime(ctx.cwd, session, repositoryRoot);
@@ -748,74 +752,79 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		},
 	});
 
+	function startStateFlow(ctx: ExtensionContext): StateFlowTelegramControlResult {
+		if (!activeContext) restoreActiveBranch(ctx);
+		telegramStartPending = false;
+		const previousSnapshot = structuredClone(snapshot);
+		const previousPassiveContinuation = passiveContinuation;
+		const previousBootstrapContinuation = bootstrapContinuation;
+		const previousArtifactRefreshPending = artifactRefreshPending;
+		const previousArtifactInvalidations = structuredClone(artifactInvalidations);
+		try {
+			if (!runtime?.view && !snapshot.meta.durableBase && !branchStartsWithoutRuntime) {
+				throw new Error("Selected branch revision is unavailable; restore its original Git history before starting State Flow");
+			}
+			const branch = ctx.sessionManager.getBranch();
+			activeContext = ctx;
+			runtime ??= createRuntime(ctx);
+			if (branchStartsWithoutRuntime) runtime.prepare();
+			const bootstrap = (!branchHasSnapshot || !snapshot.config.enabled)
+				&& (hasPriorConversation(branch) || previousPassiveContinuation !== undefined);
+			if (!runtime.view && snapshot.meta.durableBase) {
+				snapshot = runtime.restore(snapshot.meta.durableBase, snapshot);
+				setPendingPublication(snapshot.meta.pendingPublication);
+				branchHasSnapshot = true;
+			}
+			const existingBranch = branchHasSnapshot;
+			snapshot = existingBranch
+				? resumeEpisode(snapshot, bootstrap)
+				: startEpisode(bootstrap);
+			if (snapshot.meta.remotePublication === undefined) {
+				snapshot.meta.remotePublication = serializeRemotePublicationPolicyDocument(
+					resolveRemotePublicationPolicy(existingBranch ? undefined : config.remotePublication, { legacyRuntime: existingBranch }),
+				);
+			}
+			branchHasSnapshot = true;
+			const publication = runtime.view
+				? runtime.promote(snapshot) ?? runtime.publish(snapshot)
+				: runtime.initialize(snapshot, true, undefined, branchStartsWithoutRuntime);
+			recordPolicyPublication(publication, ctx);
+			installScopeStates();
+			delete snapshot.legacySession;
+			clearRunTransient();
+			passiveContinuation = undefined;
+			bootstrapContinuation = snapshot.meta.bootstrap
+				? previousPassiveContinuation ?? previousBootstrapContinuation
+				: undefined;
+			deferArtifactRefresh();
+			syncStateFlowTools();
+			persist();
+			updateUi(ctx);
+			ctx.ui.notify(
+				snapshot.meta.bootstrap
+					? "State Flow enabled. The next complete agent run will migrate active context into state."
+					: "State Flow enabled. The next prompt starts a stateful agent run.",
+				"info",
+			);
+			return { ok: true, message: "State Flow enabled" };
+		} catch (error) {
+			snapshot = previousSnapshot;
+			passiveContinuation = previousPassiveContinuation;
+			bootstrapContinuation = previousBootstrapContinuation;
+			artifactRefreshPending = previousArtifactRefreshPending;
+			artifactInvalidations = previousArtifactInvalidations;
+			artifactReads.setCandidates(artifactInvalidations);
+			syncStateFlowTools();
+			const message = `State Flow could not initialize CWD state: ${error instanceof Error ? error.message : String(error)}`;
+			ctx.ui.notify(message, "error");
+			return { ok: false, message };
+		}
+	}
+
 	pi.registerCommand("state-flow-start", {
 		description: "Start State Flow mode",
 		handler: async (_args, ctx) => {
-			if (!activeContext) restoreActiveBranch(ctx);
-			const previousSnapshot = structuredClone(snapshot);
-			const previousPassiveContinuation = passiveContinuation;
-			const previousBootstrapContinuation = bootstrapContinuation;
-			const previousArtifactRefreshPending = artifactRefreshPending;
-			const previousArtifactInvalidations = structuredClone(artifactInvalidations);
-			try {
-				if (!runtime?.view && !snapshot.meta.durableBase && !branchStartsWithoutRuntime) {
-					throw new Error("Selected branch revision is unavailable; restore its original Git history before starting State Flow");
-				}
-				const branch = ctx.sessionManager.getBranch();
-				activeContext = ctx;
-				runtime ??= createRuntime(ctx);
-				if (branchStartsWithoutRuntime) runtime.prepare();
-				const bootstrap = (!branchHasSnapshot || !snapshot.config.enabled)
-					&& (hasPriorConversation(branch) || previousPassiveContinuation !== undefined);
-				if (!runtime.view && snapshot.meta.durableBase) {
-					snapshot = runtime.restore(snapshot.meta.durableBase, snapshot);
-					setPendingPublication(snapshot.meta.pendingPublication);
-					branchHasSnapshot = true;
-				}
-				const existingBranch = branchHasSnapshot;
-				snapshot = existingBranch
-					? resumeEpisode(snapshot, bootstrap)
-					: startEpisode(bootstrap);
-				if (snapshot.meta.remotePublication === undefined) {
-					snapshot.meta.remotePublication = serializeRemotePublicationPolicyDocument(
-						resolveRemotePublicationPolicy(existingBranch ? undefined : config.remotePublication, { legacyRuntime: existingBranch }),
-					);
-				}
-				branchHasSnapshot = true;
-				const publication = runtime.view
-					? runtime.promote(snapshot) ?? runtime.publish(snapshot)
-					: runtime.initialize(snapshot, true, undefined, branchStartsWithoutRuntime);
-				recordPolicyPublication(publication, ctx);
-				installScopeStates();
-				delete snapshot.legacySession;
-				clearRunTransient();
-				passiveContinuation = undefined;
-				bootstrapContinuation = snapshot.meta.bootstrap
-					? previousPassiveContinuation ?? previousBootstrapContinuation
-					: undefined;
-				deferArtifactRefresh();
-				syncStateFlowTools();
-				persist();
-				updateUi(ctx);
-				ctx.ui.notify(
-					snapshot.meta.bootstrap
-						? "State Flow enabled. The next complete agent run will migrate active context into state."
-						: "State Flow enabled. The next prompt starts a stateful agent run.",
-					"info",
-				);
-			} catch (error) {
-				snapshot = previousSnapshot;
-				passiveContinuation = previousPassiveContinuation;
-				bootstrapContinuation = previousBootstrapContinuation;
-				artifactRefreshPending = previousArtifactRefreshPending;
-				artifactInvalidations = previousArtifactInvalidations;
-				artifactReads.setCandidates(artifactInvalidations);
-				syncStateFlowTools();
-				ctx.ui.notify(
-					`State Flow could not initialize CWD state: ${error instanceof Error ? error.message : String(error)}`,
-					"error",
-				);
-			}
+			startStateFlow(ctx);
 		},
 	});
 
@@ -826,46 +835,84 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		},
 	});
 
+	function stopStateFlow(ctx: ExtensionContext): StateFlowTelegramControlResult {
+		if (!activeContext) restoreActiveBranch(ctx);
+		telegramStartPending = false;
+		let selected = runtime;
+		let current = snapshot;
+		if (!selected?.view && snapshot.meta.durableBase) {
+			selected = createRuntime(ctx);
+			current = selected.restore(snapshot.meta.durableBase, snapshot);
+		}
+		const stoppedAt = Date.now();
+		const exitStates = selected?.view ? selected.states() : undefined;
+		const exitHandoff = current.config.enabled && exitStates
+			? createPassiveContinuation(
+				projectStateForModel(overlayStates(exitStates.global, exitStates.cwd, exitStates.session)),
+				stoppedAt,
+			)
+			: undefined;
+		const retainedHandoff = exitHandoff ?? (!current.config.enabled ? passiveContinuation : undefined);
+		const stopped = stopEpisode(current);
+		const publication = selected?.view ? selected.publish(stopped) : undefined;
+		if (selected !== runtime) {
+			runtime = selected;
+			installScopeStates();
+		}
+		snapshot = stopped;
+		recordPolicyPublication(publication, ctx);
+		branchHasSnapshot = true;
+		clearRunTransient();
+		passiveContinuation = retainedHandoff;
+		bootstrapContinuation = undefined;
+		artifactInvalidations = [];
+		artifactReads.setCandidates([]);
+		artifactRefreshPending = false;
+		if (exitHandoff) pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, { at: stoppedAt });
+		syncStateFlowTools();
+		persist();
+		updateUi(ctx);
+		return { ok: true, message: "State Flow disabled" };
+	}
+
 	pi.registerCommand("state-flow-stop", {
 		description: "Stop State Flow on the current session branch",
 		handler: async (_args, ctx) => {
-			if (!activeContext) restoreActiveBranch(ctx);
-			let selected = runtime;
-			let current = snapshot;
-			if (!selected?.view && snapshot.meta.durableBase) {
-				selected = createRuntime(ctx);
-				current = selected.restore(snapshot.meta.durableBase, snapshot);
-			}
-			const stoppedAt = Date.now();
-			const exitStates = selected?.view ? selected.states() : undefined;
-			const exitHandoff = current.config.enabled && exitStates
-				? createPassiveContinuation(
-					projectStateForModel(overlayStates(exitStates.global, exitStates.cwd, exitStates.session)),
-					stoppedAt,
-				)
-				: undefined;
-			const retainedHandoff = exitHandoff ?? (!current.config.enabled ? passiveContinuation : undefined);
-			const stopped = stopEpisode(current);
-			const publication = selected?.view ? selected.publish(stopped) : undefined;
-			if (selected !== runtime) {
-				runtime = selected;
-				installScopeStates();
-			}
-			snapshot = stopped;
-			recordPolicyPublication(publication, ctx);
-			branchHasSnapshot = true;
-			clearRunTransient();
-			passiveContinuation = retainedHandoff;
-			bootstrapContinuation = undefined;
-			artifactInvalidations = [];
-			artifactReads.setCandidates([]);
-			artifactRefreshPending = false;
-			if (exitHandoff) pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, { at: stoppedAt });
-			syncStateFlowTools();
-			persist();
-			updateUi(ctx);
+			stopStateFlow(ctx);
 		},
 	});
+
+	const telegram = createStateFlowTelegramAdapter({
+		...(options.telegram?.load === undefined ? {} : { load: options.telegram.load }),
+		port: {
+			snapshot: () => ({
+				enabled: snapshot.config.enabled,
+				step: snapshot.meta.step,
+				bootstrap: snapshot.meta.bootstrap === true,
+				startPending: telegramStartPending,
+			}),
+			canStartNow: () => activeContext === undefined || activeContext.isIdle(),
+			start: () => {
+				if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
+				return startStateFlow(activeContext);
+			},
+			stop: () => {
+				if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
+				try {
+					return stopStateFlow(activeContext);
+				} catch (error) {
+					return { ok: false, message: error instanceof Error ? error.message : String(error) };
+				}
+			},
+			deferStart: () => {
+				telegramStartPending = true;
+			},
+			cancelStart: () => {
+				telegramStartPending = false;
+			},
+		},
+	});
+	void telegram.ensure();
 
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!snapshot.config.enabled) return;
@@ -1005,7 +1052,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		updateUi(ctx);
 	});
 
-	pi.on("agent_settled", (_event, _ctx) => {
+	pi.on("agent_settled", (_event, ctx) => {
+		if (telegramStartPending && !snapshot.config.enabled) {
+			telegramStartPending = false;
+			startStateFlow(ctx);
+		}
 		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 	});
 
@@ -1015,8 +1066,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		retryPendingPush(ctx);
 		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 		updateUi(ctx);
+		void telegram.ensure();
 	});
 	pi.on("session_tree", (_event, ctx) => {
 		restoreActiveBranch(ctx);
+	});
+	pi.on("session_shutdown", () => {
+		telegramStartPending = false;
+		telegram.dispose();
 	});
 }

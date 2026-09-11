@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stateFlowExtension from "../index.ts";
+import type { StateFlowTelegramLoader, StateFlowTelegramModules } from "../lib/telegram.ts";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadStateFlowConfig } from "../lib/config.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
@@ -24,6 +25,7 @@ export interface HarnessOptions {
 	sessionId?: string;
 	sessionFile?: string;
 	sessionTimestamp?: string;
+	telegram?: { load?: StateFlowTelegramLoader };
 }
 
 export function harness(options: HarnessOptions = {}) {
@@ -50,6 +52,7 @@ export function harness(options: HarnessOptions = {}) {
 	const ctx = {
 		cwd: options.cwd ?? "/tmp",
 		isProjectTrusted: () => false,
+		isIdle: () => true,
 		ui: {
 			theme: { fg: (color: string, text: string) => `<${color}>${text}</${color}>` },
 			setStatus(_key: string, value: string | undefined) { statuses.push(value); },
@@ -92,7 +95,7 @@ export function harness(options: HarnessOptions = {}) {
 		}
 	}
 	let accessor: { read(offset?: number, scope?: StateScope): MaterializedState };
-	stateFlowExtension(pi as any, { agentDir, repositoryRoot: options.useConfiguredDirectory ? undefined : repositoryRoot, knowledgeRoot: options.useDefaultKnowledgeRoot ? undefined : options.knowledgeRoot ?? repositoryRoot, onRuntime: (value) => { accessor = value; } });
+	stateFlowExtension(pi as any, { agentDir, repositoryRoot: options.useConfiguredDirectory ? undefined : repositoryRoot, knowledgeRoot: options.useDefaultKnowledgeRoot ? undefined : options.knowledgeRoot ?? repositoryRoot, onRuntime: (value) => { accessor = value; }, ...(options.telegram === undefined ? {} : { telegram: options.telegram }) });
 	return {
 		handlers,
 		commands,

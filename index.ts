@@ -185,4 +185,25 @@ export {
   type StateScope,
   type TerminalTransition
 } from "./lib/state.ts";
+export {
+  buildStateFlowSectionView,
+  createStateFlowTelegramAdapter,
+  formatStateFlowSectionLabel,
+  formatStateFlowStatusLine,
+  loadStateFlowTelegramModules,
+  STATE_FLOW_TELEGRAM_ID,
+  type StateFlowTelegramAdapter,
+  type StateFlowTelegramButton,
+  type StateFlowTelegramCallbackContext,
+  type StateFlowTelegramControlResult,
+  type StateFlowTelegramLoader,
+  type StateFlowTelegramModules,
+  type StateFlowTelegramPort,
+  type StateFlowTelegramSectionContext,
+  type StateFlowTelegramSectionModule,
+  type StateFlowTelegramSnapshot,
+  type StateFlowTelegramStatusLine,
+  type StateFlowTelegramStatusModule,
+  type StateFlowTelegramView
+} from "./lib/telegram.ts";
 export { advanceTemporalState, readTemporalState, type TemporalState } from "./lib/temporal.ts";

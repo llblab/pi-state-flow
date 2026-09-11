@@ -1,6 +1,6 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "private": false,
   "description": "Incremental scoped state/context compiler for Pi, inspired by SKILL.state",
   "keywords": [

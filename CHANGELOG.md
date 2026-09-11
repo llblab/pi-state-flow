@@ -2,6 +2,12 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.9.0: Telegram status surface
+
+- `Interop`: Added an optional fail-open `pi-telegram` presentation adapter. With the transport installed, the status screen shows `State Flow: on · step #N` while enabled, and the inline main menu places a `🌀 State Flow: #N` or `⚫️ State Flow: off` section button directly before Settings.
+- `Control`: The section submenu exposes the branch lifecycle already owned by the commands: Start, Stop, Refresh, and Cancel start while a start deferred behind an active run is pending. A busy start waits for the current run to settle, Stop applies immediately, and the adapter calls the same start/stop functions as `/state-flow-start` and `/state-flow-stop`.
+- `Compatibility`: Registration fails open when pi-telegram is absent or its section registry is not ready, retries on session start, and disposes on session shutdown. Core semantics, storage, inference, and hosts without pi-telegram are unchanged.
+
 ## 0.8.1: Preserved answers and bounded fallback resolution
 
 - `Resolution`: A terminal draft is never discarded. A draft ending before eligibility — or an eligible draft whose final validation fails for a later acquisition — is preserved as the runtime-owned response at `turn_end`, then at most two same-run fallback turns exist only to obtain the `final:true` patch. Fallback turns never enter `response`; success commits their patches with the preserved answer intact, and exhaustion closes the iteration with the preserved answer, current state, one bounded warning, and a finalization diagnostic.

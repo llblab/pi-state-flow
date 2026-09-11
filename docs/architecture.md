@@ -19,7 +19,7 @@ The extension owns durable memory while enabled. Global semantic memory is alway
 - `memory`: external promotion records and memory diagnostics.
 - `continuation`: native-header discovery, runtime-provenance inspection, deterministic recommendation, and host startup precedence.
 - `publication`: remote policy, durable CAS queue/store, cross-process leases, and asynchronous worker lifecycle.
-- `status`, `extension`: operator projection and Pi adapter wiring.
+- `status`, `telegram`, `extension`: operator projection, the optional fail-open pi-telegram presentation adapter, and Pi adapter wiring.
 
 ## Semantic state
 
@@ -198,6 +198,8 @@ Unknown keys fail loading. State Flow memory ownership and global availability a
 ## Observability
 
 `/state-flow-status` reports branch mode, runtime revision, temporal head/history depth, scope keys, patch tails, artifact freshness, memory-bearing scopes, external-promotion summaries, remote policy/queue state, and pending publication. Unavailable materialization is reported as unavailable, never fabricated as empty. Artifact source bodies are not read for status.
+
+With `pi-telegram` installed, the optional `telegram` adapter mirrors the same identity in Telegram: the Status screen row shows `State Flow: on · step #N` while enabled, and the main-menu section button before Settings opens the branch start/stop submenu. Registration is fail-open and retried on session start, disposal happens on session shutdown, the adapter reads the same snapshot as the compact terminal status, and its start/stop actions call the same functions as the commands.
 
 Opt-in `logging` appends local JSONL diagnostics for rejected `patch_state` calls and preserved drafts plus fallback turns while turn resolution is pending. A rejected call retains its exact attempted arguments, the precise error, and, when available, tool identity, call id, resolution attempt, and terminal-eligibility state; accepted patches are never logged. Records preserve useful exact text blocks and reduce other blocks to structural identity without duplicating reasoning. They are never semantic state, scope `meta.json`, Pi checkpoints, or repository input. Write failure changes no resolution, enablement, or accepted state and reports at most one bounded local warning.
 
