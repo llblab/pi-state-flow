@@ -80,7 +80,7 @@ export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot)
 
 /** Short help under the state line: what State Flow is and why its action button exists. */
 const STATE_FLOW_SECTION_HELP =
-	"Durable memory for this conversation: State Flow records the latest accepted state after every turn, so a new session resumes from the last committed point. Start it to keep memory live on this branch, stop it to pause.";
+	"Records the latest accepted state after every turn, so a new session resumes from the last committed point. Start it to keep memory live on this branch, stop it to pause.";
 
 /** The submenu header repeats the button's state line; the single action matches the current state. */
 export function buildStateFlowSectionView(

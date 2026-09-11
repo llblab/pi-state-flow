@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.9.5: Shorter submenu help line
+
+- `Interop`: The submenu help line now opens directly with "Records the latest accepted state after every turn…"; the "Durable memory for this conversation: State Flow" prefix was removed at the operator's request.
+
 ## 0.9.4: Telegram submenu mirrors the status line
 
 - `Interop`: The section button always carries the spiral identity and the live value — `🌀 State Flow: off` while disabled, `🌀 State Flow: #N` while enabled; the black-circle variant is gone.

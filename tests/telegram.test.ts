@@ -91,7 +91,7 @@ test("section label always carries the spiral identity and the live state value"
 test("section view repeats the state line with one lifecycle button and no refresh or cancel", () => {
 	const off = buildStateFlowSectionView(snapshot(), (action) => `cb:${action}`);
 	assert.match(off.text, /^<b>🌀 State Flow: off<\/b>/);
-	assert.match(off.text, /Durable memory for this conversation/);
+	assert.match(off.text, /Records the latest accepted state after every turn/);
 	assert.deepEqual(off.replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "cb:start" }]]);
 	const on = buildStateFlowSectionView(snapshot({ enabled: true, step: 3 }), (action) => `cb:${action}`);
 	assert.match(on.text, /^<b>🌀 State Flow: #3<\/b>/);
@@ -209,7 +209,7 @@ test("render and dynamic label always read the live snapshot", async () => {
 	const section = sections[0];
 	const renderContext = { callbackData: (action: string) => `cb:${action}` } as StateFlowTelegramSectionContext;
 	assert.equal(section.getLabel!(), "🌀 State Flow: off");
-	assert.match((await section.render(renderContext)).text, /Durable memory for this conversation/);
+	assert.match((await section.render(renderContext)).text, /Records the latest accepted state after every turn/);
 	await port.deferStart();
 	assert.equal(section.getLabel!(), "🌀 State Flow: off");
 });
