@@ -2,9 +2,9 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
-## Unreleased
+## 0.8.1: Preserved answers and bounded fallback resolution
 
-- `Resolution`: A terminal draft is never discarded. The first two ineligible completions are still intercepted and steered; when the three-attempt budget is exhausted the draft is accepted as the runtime-owned response with one bounded warning and a finalization diagnostic. The same budget now governs an eligible draft whose final validation fails after a later acquisition, so a persistently unmet obligation can neither loop steering nor lose the answer.
+- `Resolution`: A terminal draft is never discarded. A draft ending before eligibility — or an eligible draft whose final validation fails for a later acquisition — is preserved as the runtime-owned response at `turn_end`, then at most two same-run fallback turns exist only to obtain the `final:true` patch. Fallback turns never enter `response`; success commits their patches with the preserved answer intact, and exhaustion closes the iteration with the preserved answer, current state, one bounded warning, and a finalization diagnostic.
 
 ## 0.8.0: Atomic cohorts and final eligibility
 

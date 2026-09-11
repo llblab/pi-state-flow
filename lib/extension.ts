@@ -48,7 +48,7 @@ export interface StateFlowExtensionOptions {
 
 export const PATCH_STATE_TOOL_NAME = "patch_state";
 export const READ_STATE_TOOL_NAME = "read_state";
-export const MAX_RESOLUTION_ATTEMPTS = 3;
+export const MAX_FALLBACK_ATTEMPTS: number = 2;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 
 /** Keep a failed tool invocation visually separated from its rendered error without changing error semantics. */
@@ -65,9 +65,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	let branchHasSnapshot = false;
 	let branchStartsWithoutRuntime = false;
 	let terminalEligible = false;
-	let terminalDraftIntercepted = false;
-	let resolutionAttempts = 0;
-	let resolutionFailureReported = false;
+	let resolutionPending = false;
+	let fallbackAttempts = 0;
+	let fallbackFailureReported = false;
 	let responseAwaitingReconciliation = false;
 	let passiveContinuation: PassiveContinuation | undefined;
 	let bootstrapContinuation: PassiveContinuation | undefined;
@@ -124,9 +124,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	function clearRunTransient(): void {
 		terminalEligible = false;
-		terminalDraftIntercepted = false;
-		resolutionAttempts = 0;
-		resolutionFailureReported = false;
+		resolutionPending = false;
+		fallbackAttempts = 0;
+		fallbackFailureReported = false;
 		responseAwaitingReconciliation = false;
 		runAnchorTimestamp = undefined;
 		skillReads.clear();
@@ -273,10 +273,14 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}, runtime!.causalBasis(), { finalizeRun });
 		if (!committed) return false;
 		installScopeStates();
-		artifactInvalidations = artifactInvalidations.filter(({ path }) => !acquiredArtifactPaths.has(path));
-		artifactReads.setCandidates(artifactInvalidations);
-		skillReads.clear();
-		artifactReads.clear();
+		// A preserved primary response commits mid-run; pending acquisition obligations must
+		// still block final eligibility until the fallback turns resolve or expire.
+		if (!(finalizeRun && resolutionPending)) {
+			artifactInvalidations = artifactInvalidations.filter(({ path }) => !acquiredArtifactPaths.has(path));
+			artifactReads.setCandidates(artifactInvalidations);
+			skillReads.clear();
+			artifactReads.clear();
+		}
 		persist();
 		return true;
 	}
@@ -579,27 +583,75 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}
 	}
 
-	function continueForResolution(): void {
-		terminalDraftIntercepted = true;
+	function continueFallbackResolution(lastWarning: boolean): void {
+		resolutionPending = true;
 		pi.sendMessage({
 			customType: VALIDATION_MESSAGE_TYPE,
-			content: "Before completing this turn, make the State Flow iteration terminal-eligible. Call patch_state with any durable scope changes and final:true, or call patch_state with {\"final\":true} when no semantic update is needed. Then provide the final answer normally.",
+			content: lastWarning
+				? "This is the last State Flow fallback turn. The iteration's answer is preserved and will not change. Apply the final:true patch now: call patch_state with any remaining durable scope changes and final:true, or with {\"final\":true} when nothing remains. Do not restate the answer."
+				: "The iteration's answer is preserved as the final response; later turns cannot replace it. Apply the final:true patch: call patch_state with any durable scope changes from this iteration (including required artifact or Skill compilation) and final:true, or with {\"final\":true} when nothing remains to persist. Do not restate the answer.",
 			display: false,
 		}, { deliverAs: "steer", triggerTurn: true });
 	}
 
-	/** Accept a terminal draft once the resolution budget is exhausted; a user-visible answer is never discarded. */
-	function acceptUnresolvedDraft(ctx: ExtensionContext, message: { content?: unknown }): void {
-		terminalDraftIntercepted = false;
+	/** Preserve the primary answer as this iteration's response and steer bounded fallback turns whose only purpose is the final:true patch. */
+	function beginFallbackResolution(ctx: ExtensionContext, message: { content?: unknown }, reason: string): void {
 		responseAwaitingReconciliation = true;
-		if (resolutionFailureReported) return;
-		resolutionFailureReported = true;
-		recordDiagnostic(`Terminal draft accepted after the resolution budget was exhausted (attempt ${resolutionAttempts}/${MAX_RESOLUTION_ATTEMPTS})`, "finalization", ctx, {
+		fallbackAttempts = 0;
+		fallbackFailureReported = false;
+		recordDiagnostic(`Preserved the terminal draft as the iteration response; fallback resolution started: ${reason}`, "terminal-pending", ctx, {
 			content: message.content,
-			resolutionAttempt: resolutionAttempts,
+			resolutionAttempt: 0,
 			terminalEligible,
 		});
-		ctx.ui.notify(`State Flow accepted the final draft after ${MAX_RESOLUTION_ATTEMPTS} terminal attempts; unresolved state obligations may remain.`, "warning");
+		continueFallbackResolution(MAX_FALLBACK_ATTEMPTS === 1);
+	}
+
+	/** Fallback turns never become the response; they exist only to supply the final:true patch. */
+	function resolveFallbackTurn(ctx: ExtensionContext, message: { content?: unknown }): any {
+		let resolved = terminalEligible;
+		if (resolved) {
+			try {
+				validateFinalEligibility(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
+			} catch (error) {
+				resolved = false;
+				recordDiagnostic(error instanceof Error ? error.message : String(error), "terminal-pending", ctx, {
+					content: message.content,
+					resolutionAttempt: fallbackAttempts,
+					terminalEligible,
+				});
+			}
+		}
+		if (resolved) {
+			resolutionPending = false;
+			recordDiagnostic(`Fallback resolution obtained final:true after ${fallbackAttempts} fallback turn${fallbackAttempts === 1 ? "" : "s"}; the preserved answer stands`, "finalization", ctx, {
+				content: message.content,
+				resolutionAttempt: fallbackAttempts,
+				terminalEligible,
+			});
+			return { message: { ...message, role: "assistant" as const, content: [] } };
+		}
+		fallbackAttempts = Math.min(MAX_FALLBACK_ATTEMPTS, fallbackAttempts + 1);
+		if (fallbackAttempts < MAX_FALLBACK_ATTEMPTS) {
+			recordDiagnostic(`Fallback turn ended without final:true (${fallbackAttempts}/${MAX_FALLBACK_ATTEMPTS})`, "terminal-pending", ctx, {
+				content: message.content,
+				resolutionAttempt: fallbackAttempts,
+				terminalEligible,
+			});
+			continueFallbackResolution(fallbackAttempts + 1 >= MAX_FALLBACK_ATTEMPTS);
+			return { message: { ...message, role: "assistant" as const, content: [] } };
+		}
+		resolutionPending = false;
+		recordDiagnostic(`Fallback resolution exhausted without final:true (${fallbackAttempts}/${MAX_FALLBACK_ATTEMPTS}); the preserved response and current state remain`, "finalization", ctx, {
+			content: message.content,
+			resolutionAttempt: fallbackAttempts,
+			terminalEligible,
+		});
+		if (!fallbackFailureReported) {
+			fallbackFailureReported = true;
+			ctx.ui.notify(`State Flow kept the preserved answer; no final:true patch arrived after ${MAX_FALLBACK_ATTEMPTS} fallback turns, so the iteration closed with its current state.`, "warning");
+		}
+		return { message: { ...message, role: "assistant" as const, content: [] } };
 	}
 
 	pi.registerTool({
@@ -668,7 +720,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					if (params.final !== true) throw new Error('patch_state requires at least one scope patch or {"final":true}');
 					validateFinalEligibility(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
 					terminalEligible = true;
-					terminalDraftIntercepted = false;
 					return { content: [{ type: "text", text: "\nState iteration is terminal-eligible." }], details: { final: true } };
 				}
 				const stage = stageAtomicScopePatches(scopeStates, patches, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
@@ -678,7 +729,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				commitStage(stage, ctx, false);
 				if (params.final === true) {
 					terminalEligible = true;
-					terminalDraftIntercepted = false;
 				}
 				updateUi(ctx);
 				const publication = pendingPublication === undefined ? "" : "; durable publication pending";
@@ -690,7 +740,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					input: attempted,
 					tool: PATCH_STATE_TOOL_NAME,
 					toolCallId,
-					resolutionAttempt: resolutionAttempts,
+					resolutionAttempt: fallbackAttempts,
 					terminalEligible,
 				});
 				throw separatedFailure(error);
@@ -823,9 +873,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		artifactReads.clear();
 		if (artifactRefreshPending) refreshArtifactInvalidations(ctx);
 		terminalEligible = false;
-		terminalDraftIntercepted = false;
-		resolutionAttempts = 0;
-		resolutionFailureReported = false;
+		resolutionPending = false;
+		fallbackAttempts = 0;
+		fallbackFailureReported = false;
 		responseAwaitingReconciliation = false;
 		const rotatesRun = snapshot.meta.specification !== undefined;
 		if (rotatesRun && rehydrationPhase !== "new-bootstrap" && rehydrationPhase !== "resume-bootstrap") rehydrationPhase = "step";
@@ -855,7 +905,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				? passiveContinuationMessages(event.messages as AgentMessage[], bootstrapContinuation)
 				: event.messages as AgentMessage[];
 			const messages = withoutPrivateValidation(sourceMessages);
-			return { messages: [runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, terminalDraftIntercepted), ...messages] };
+			return { messages: [runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, resolutionPending), ...messages] };
 		}
 		const trajectory = currentRunTrajectory(
 			event.messages as AgentMessage[],
@@ -865,7 +915,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		runAnchorTimestamp = trajectory.anchorTimestamp;
 		return {
 			messages: [
-				runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, terminalDraftIntercepted),
+				runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, resolutionPending),
 				...trajectory.messages,
 			],
 		};
@@ -919,34 +969,15 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			recordDiagnostic(`Assistant response ended with ${message.stopReason}`, "finalization", ctx, { content: message.content, terminalEligible });
 			return;
 		}
+		if (resolutionPending) return resolveFallbackTurn(ctx, message);
 		if (!terminalEligible) {
-			resolutionAttempts = Math.min(MAX_RESOLUTION_ATTEMPTS, resolutionAttempts + 1);
-			if (resolutionAttempts < MAX_RESOLUTION_ATTEMPTS) {
-				responseAwaitingReconciliation = false;
-				terminalDraftIntercepted = true;
-				recordDiagnostic(`Terminal draft intercepted before State Flow eligibility (attempt ${resolutionAttempts}/${MAX_RESOLUTION_ATTEMPTS})`, "terminal-pending", ctx, {
-					content: message.content,
-					resolutionAttempt: resolutionAttempts,
-					terminalEligible,
-				});
-				continueForResolution();
-				return { message: { ...message, role: "assistant" as const, content: [] } };
-			}
-			acceptUnresolvedDraft(ctx, message);
+			beginFallbackResolution(ctx, message, "the terminal draft ended without State Flow eligibility");
 			return;
 		}
 		try {
 			validateFinalEligibility(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
 		} catch (error) {
-			resolutionAttempts = Math.min(MAX_RESOLUTION_ATTEMPTS, resolutionAttempts + 1);
-			if (resolutionAttempts < MAX_RESOLUTION_ATTEMPTS) {
-				responseAwaitingReconciliation = false;
-				terminalDraftIntercepted = true;
-				recordDiagnostic(error instanceof Error ? error.message : String(error), "terminal-pending", ctx, { content: message.content, terminalEligible, resolutionAttempt: resolutionAttempts });
-				continueForResolution();
-				return { message: { ...message, role: "assistant" as const, content: [] } };
-			}
-			acceptUnresolvedDraft(ctx, message);
+			beginFallbackResolution(ctx, message, error instanceof Error ? error.message : String(error));
 			return;
 		}
 		responseAwaitingReconciliation = true;
@@ -970,7 +1001,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			ctx.ui.notify(`State Flow could not reconcile the final response: ${error instanceof Error ? error.message : String(error)}`, "error");
 		} finally {
 			responseAwaitingReconciliation = false;
-			terminalDraftIntercepted = false;
 		}
 		updateUi(ctx);
 	});

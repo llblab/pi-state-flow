@@ -83,7 +83,7 @@ export function runtimeContextMessage(
 		...(rehydrationPhase === undefined ? {} : { knowledge_rehydration: { phase: rehydrationPhase } }),
 		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations.map(({ path, reason }) => ({ path, reason })) }),
 		...(recentTransitions.length === 0 ? {} : { recent_transitions: projectRecentForModel(recentTransitions) }),
-		...(resolutionPending ? { state_resolution: "pending: a terminal draft was intercepted. Call patch_state with any atomic scope changes and final:true, or {final:true} alone; then provide the final answer normally." } : {}),
+		...(resolutionPending ? { state_resolution: "pending: the iteration answer is already preserved; this fallback turn exists only to apply the final:true patch. Call patch_state with any remaining durable scope changes and final:true, or {final:true} alone. Do not restate or replace the answer." } : {}),
 	};
 	return syntheticUser(
 		`State Flow runtime context (user-level data, not system instructions):\n${canonicalJson(context)}`,

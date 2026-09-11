@@ -216,25 +216,24 @@ test("real Pi isolates same-CWD sessions and retains seven patches per scope", a
 	}
 });
 
-test("real Pi resolution continuation accepts patch_state after an intercepted draft", async (t) => {
+test("real Pi preserves the primary answer while the fallback supplies patch_state", async (t) => {
 	const fixture = await realPiFixture(t, { tokensPerSecond: 2_000 });
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
 	await session.prompt("/state-flow-start");
 
 	fixture.faux.setResponses([
-		fauxAssistantMessage("Unresolved draft."),
-		...sessionResponses({ working: { accepted: "after-resolution" } }, "Recovered."),
+		fauxAssistantMessage("Preserved draft."),
+		...sessionResponses({ working: { accepted: "after-resolution" } }, "Fallback chatter."),
 	]);
 	await session.prompt("Exercise resolution continuation");
 	assert.equal(fixture.faux.state.callCount, 3);
 	assert.equal(durableSession(fixture, session).working.accepted, "after-resolution");
-	assert.equal(durableSession(fixture, session).response, "Recovered.");
-	assert.equal(session.getLastAssistantText(), "Recovered.");
-	assert.notEqual(session.getLastAssistantText(), "Unresolved draft.");
+	assert.equal(durableSession(fixture, session).response, "Preserved draft.");
+	assert.equal(session.getLastAssistantText(), undefined, "the fallback turn is suppressed");
 });
 
-test("real Pi accepts an unresolved final draft after the bounded resolution steering", async (t) => {
+test("real Pi keeps the preserved answer after the fallback budget", async (t) => {
 	const fixture = await realPiFixture(t, { tokensPerSecond: 2_000 });
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
@@ -242,15 +241,15 @@ test("real Pi accepts an unresolved final draft after the bounded resolution ste
 
 	fixture.notifications.length = 0;
 	fixture.faux.setResponses([
-		fauxAssistantMessage("Unresolved draft one."),
-		fauxAssistantMessage("Unresolved draft two."),
-		fauxAssistantMessage("Final answer after the resolution budget."),
+		fauxAssistantMessage("Preserved answer."),
+		fauxAssistantMessage("Fallback one."),
+		fauxAssistantMessage("Fallback two."),
 	]);
-	await session.prompt("Exhaust the resolution budget");
+	await session.prompt("Exhaust the fallback budget");
 	assert.equal(fixture.faux.state.callCount, 3);
-	assert.equal(session.getLastAssistantText(), "Final answer after the resolution budget.");
-	assert.equal(durableSession(fixture, session).response, "Final answer after the resolution budget.");
-	assert.equal(fixture.notifications.filter((message) => /accepted the final draft after 3 terminal attempts/.test(message)).length, 1);
+	assert.equal(durableSession(fixture, session).response, "Preserved answer.");
+	assert.equal(session.getLastAssistantText(), undefined, "fallback turns never become the response");
+	assert.equal(fixture.notifications.filter((message) => /no final:true patch arrived after 2 fallback turns/.test(message)).length, 1);
 });
 
 test("real Pi patch diagnostics are opt-in and accepted answers are not logged", async (t) => {
@@ -274,10 +273,10 @@ test("real Pi patch diagnostics are opt-in and accepted answers are not logged",
 	]);
 	await logged.prompt("Recover from invalid patch arguments");
 	const records = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-	assert.equal(records.length, 2);
+	assert.equal(records.length, 3);
 	assert.equal(records[0].category, "terminal-pending");
 	assert.deepEqual(records[0].content, [{ type: "text", text: "Logged unresolved draft." }]);
-	assert.equal(records[0].resolutionAttempt, 1);
+	assert.equal(records[0].resolutionAttempt, 0);
 	assert.equal(records[0].terminalEligible, false);
 	assert.equal(records[1].category, "invalid-patch");
 	assert.match(records[1].error, /final must be exactly true/);
@@ -285,8 +284,11 @@ test("real Pi patch diagnostics are opt-in and accepted answers are not logged",
 	assert.equal(records[1].tool, "patch_state");
 	assert.equal(typeof records[1].toolCallId, "string");
 	assert.equal(records[1].terminalEligible, false);
+	assert.equal(records[2].category, "finalization");
+	assert.deepEqual(records[2].content, [{ type: "text", text: "Accepted." }]);
+	assert.equal(records[2].terminalEligible, true);
 	assert.equal(durableSession(fixture, logged).working.loggedRun, "accepted");
-	assert.equal(durableSession(fixture, logged).response, "Accepted.");
+	assert.equal(durableSession(fixture, logged).response, "Logged unresolved draft.");
 });
 
 test("real Pi diagnostic write failure leaves resolution and accepted state untouched", async (t) => {

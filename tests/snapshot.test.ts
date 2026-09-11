@@ -278,7 +278,7 @@ test("sanitizes malformed snapshot counters and retired validation feedback on r
 	const unresolved = h.handlers.get("message_end")!({
 		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ordinary historical text" }] },
 	}, h.ctx);
-	assert.deepEqual(unresolved.message.content, []);
+	assert.equal(unresolved, undefined, "the primary draft is preserved instead of intercepted");
 });
 test("bounds restored counters before later increments", async () => {
 	const malformed = harness();

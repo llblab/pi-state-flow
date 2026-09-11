@@ -13,7 +13,7 @@ import {
 	SkillReadTracker,
 	skillPathFromRead,
 } from "../lib/skills.ts";
-import { MAX_RESOLUTION_ATTEMPTS } from "../lib/extension.ts";
+import { MAX_FALLBACK_ATTEMPTS } from "../lib/extension.ts";
 import { commitTerminal, harness, start } from "./harness.ts";
 
 const skillRoot = mkdtempSync(join(tmpdir(), "pi-state-flow-skills-"));
@@ -258,7 +258,7 @@ test("falls back to intercepted input when a successful execution omits args", a
 	assert.equal(result.message.content[0].text, "Done");
 });
 
-test("a Skill acquired after terminal eligibility still blocks turn_end until compiled", async () => {
+test("a Skill acquired after terminal eligibility preserves the primary answer and resolves through the fallback", async () => {
 	const h = harness();
 	await start(h);
 	await h.tools.get("patch_state")!.execute(
@@ -267,17 +267,19 @@ test("a Skill acquired after terminal eligibility still blocks turn_end until co
 	const source = skillFile("late-obligation");
 	recordRead(h, source);
 	const draft = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Too early." }] };
-	const intercepted = h.handlers.get("message_end")!({ message: draft }, h.ctx);
-	assert.deepEqual(intercepted.message.content, []);
-	assert.equal(h.readState().response, "");
+	assert.equal(h.handlers.get("message_end")!({ message: draft }, h.ctx), undefined, "final validation failure preserves the draft");
+	h.handlers.get("turn_end")!({ message: draft }, h.ctx);
+	assert.equal(h.readState().response, "Too early.");
 	await patchCwdArtifacts(h, { [source]: compilerOutput("compiled after the late read") });
-	const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Complete." }] };
-	assert.equal(h.handlers.get("message_end")!({ message: final }, h.ctx), undefined);
-	h.handlers.get("turn_end")!({ message: final }, h.ctx);
-	assert.equal(h.readState().response, "Complete.");
+	const fallback = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Complete." }] };
+	const suppressed = h.handlers.get("message_end")!({ message: fallback }, h.ctx);
+	assert.deepEqual(suppressed.message.content, [], "the fallback turn is suppressed");
+	h.handlers.get("turn_end")!({ message: suppressed.message }, h.ctx);
+	assert.equal(loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source].kind, "skill", "the late Skill compilation is persisted");
+	assert.equal(h.readState().response, "Too early.");
 });
 
-test("a late Skill obligation that outlives the resolution budget accepts the draft", async () => {
+test("a late Skill obligation that outlives the fallback budget keeps the preserved answer", async () => {
 	const h = harness();
 	await start(h);
 	await h.tools.get("patch_state")!.execute(
@@ -285,16 +287,18 @@ test("a late Skill obligation that outlives the resolution budget accepts the dr
 	);
 	const source = skillFile("late-exhaustion");
 	recordRead(h, source);
-	for (let attempt = 1; attempt < MAX_RESOLUTION_ATTEMPTS; attempt++) {
-		const intercepted = h.handlers.get("message_end")!({ message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `Draft ${attempt}.` }] } }, h.ctx);
-		assert.deepEqual(intercepted.message.content, []);
+	const primary = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Preserved before compilation." }] };
+	assert.equal(h.handlers.get("message_end")!({ message: primary }, h.ctx), undefined);
+	h.handlers.get("turn_end")!({ message: primary }, h.ctx);
+	assert.equal(h.readState().response, "Preserved before compilation.");
+	for (let attempt = 1; attempt <= MAX_FALLBACK_ATTEMPTS; attempt++) {
+		const fallback = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `Fallback ${attempt}.` }] };
+		const suppressed = h.handlers.get("message_end")!({ message: fallback }, h.ctx);
+		assert.deepEqual(suppressed.message.content, []);
+		h.handlers.get("turn_end")!({ message: suppressed.message }, h.ctx);
 	}
-	assert.equal(h.readState().response, "");
-	const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted after the budget." }] };
-	assert.equal(h.handlers.get("message_end")!({ message: final }, h.ctx), undefined);
-	assert.equal(h.notifications.filter((message) => /accepted the final draft after 3 terminal attempts/.test(message)).length, 1);
-	h.handlers.get("turn_end")!({ message: final }, h.ctx);
-	assert.equal(h.readState().response, "Accepted after the budget.");
+	assert.equal(h.readState().response, "Preserved before compilation.");
+	assert.equal(h.notifications.filter((message) => /no final:true patch arrived after 2 fallback turns/.test(message)).length, 1);
 });
 
 test("final-only resolution cannot bypass a successful Skill compilation obligation", async () => {

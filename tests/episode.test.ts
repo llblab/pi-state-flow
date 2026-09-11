@@ -38,15 +38,13 @@ test("does not demand a terminal handoff from an aborted response", async () => 
 	assert.equal(h.sentMessages.length, 0);
 	assert.equal(h.resolveSnapshot().meta.step, 0);
 });
-test("an interrupted unresolved draft never becomes response and the next user run rotates specification", async () => {
+test("a preserved unresolved draft becomes response and the next user run rotates specification", async () => {
 	const h = harness();
 	await start(h, "Old request");
-	const draft = h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Unresolved draft" }] },
-	}, h.ctx);
-	assert.deepEqual(draft.message.content, []);
-	h.handlers.get("turn_end")!({ message: draft.message }, h.ctx);
-	assert.equal(h.readState().response, "");
+	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Unresolved draft" }] };
+	assert.equal(h.handlers.get("message_end")!({ message }, h.ctx), undefined, "the primary draft is preserved instead of intercepted");
+	h.handlers.get("turn_end")!({ message }, h.ctx);
+	assert.equal(h.readState().response, "Unresolved draft");
 	const next = h.handlers.get("before_agent_start")!({ prompt: "New request", systemPrompt: "base" }, h.ctx);
 	assert.doesNotMatch(next.systemPrompt, /Old request|New request/);
 	assert.equal(h.resolveSnapshot().meta.specification, "New request");

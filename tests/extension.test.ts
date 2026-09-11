@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStorageKey, temporalScopePaths } from "../lib/durable.ts";
 import { getKnowledgeRoot } from "../lib/discovery.ts";
 import { hashArtifactSource } from "../lib/artifact.ts";
-import { MAX_RESOLUTION_ATTEMPTS } from "../lib/extension.ts";
+import { MAX_FALLBACK_ATTEMPTS } from "../lib/extension.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
@@ -276,7 +276,9 @@ test("patch_state commits global, CWD, and session as one model-facing atomic ba
 	assert.equal(h.readState(0, "global").contract.shared, "global");
 	assert.equal(h.readState(0, "cwd").working.project, "cwd");
 	assert.equal(h.readState(0, "session").working.continuation, "session");
-	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Still pending.") }, h.ctx).message.content.length, 0);
+	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Still pending.") }, h.ctx), undefined);
+	h.handlers.get("turn_end")!({ message: finalMessage("Still pending.") }, h.ctx);
+	assert.equal(h.readState().response, "Still pending.");
 });
 
 test("patch_state materializes session state before the next inference and response reconciliation", async () => {
@@ -368,73 +370,78 @@ function finalMessage(text: string) {
 	return { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
 }
 
-test("an unresolved terminal draft is intercepted, then final-only resolution permits the final answer", async () => {
+test("a primary draft without eligibility is preserved as the response and final-only fallback resolution keeps it", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "No durable work");
-	const draft = h.handlers.get("message_end")!({ message: finalMessage("Draft that must not persist.") }, h.ctx);
-	assert.deepEqual(draft.message.content, []);
-	assert.equal(h.sentMessages.length, 1);
-	h.handlers.get("turn_end")!({ message: draft.message }, h.ctx);
-	assert.equal(h.readState().response, "");
+	const primary = h.handlers.get("message_end")!({ message: finalMessage("Preserved answer.") }, h.ctx);
+	assert.equal(primary, undefined, "the primary draft is never intercepted");
+	assert.equal(h.sentMessages.length, 1, "the fallback steer starts the resolution turn");
+	h.handlers.get("turn_end")!({ message: finalMessage("Preserved answer.") }, h.ctx);
+	assert.equal(h.readState().response, "Preserved answer.");
 
 	const beforeStep = h.resolveSnapshot().meta.step;
 	const resolution = await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
 	assert.deepEqual(resolution.details, { final: true });
 	assert.equal(h.resolveSnapshot().meta.step, beforeStep);
-	const accepted = h.handlers.get("message_end")!({ message: finalMessage("Final answer.") }, h.ctx);
-	assert.equal(accepted, undefined);
-	h.handlers.get("turn_end")!({ message: finalMessage("Final answer.") }, h.ctx);
-	assert.equal(h.readState().response, "Final answer.");
+	const fallback = h.handlers.get("message_end")!({ message: finalMessage("Fallback text.") }, h.ctx);
+	assert.deepEqual(fallback.message.content, [], "fallback messages never become the response");
+	assert.equal(h.sentMessages.length, 1, "the resolved fallback needs no further steering");
+	h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
+	assert.equal(h.readState().response, "Preserved answer.");
+	assert.equal(h.resolveSnapshot().meta.step, 1);
 });
 
-test("an unresolved terminal draft is accepted after the bounded resolution steering", async () => {
+test("the preserved answer stands after two fallback turns without final:true", async () => {
 	const h = harness({ remotePublication: "off" });
-	await start(h, "Bound resolution attempts");
+	await start(h, "Bound fallback attempts");
 	await assert.rejects(
 		h.tools.get("patch_state")!.execute("invalid", { final: false }, undefined, undefined, h.ctx),
 		/final must be exactly true/,
 	);
-	assert.equal(h.sentMessages.length, 0, "failed patch calls do not consume terminal attempts");
-	for (let attempt = 1; attempt < MAX_RESOLUTION_ATTEMPTS; attempt++) {
-		const intercepted = h.handlers.get("message_end")!({ message: finalMessage(`Draft ${attempt}`) }, h.ctx);
-		assert.deepEqual(intercepted.message.content, []);
-		assert.equal(h.sentMessages.length, attempt);
+	assert.equal(h.sentMessages.length, 0, "failed patch calls do not consume fallback attempts");
+	const primary = h.handlers.get("message_end")!({ message: finalMessage("Primary answer.") }, h.ctx);
+	assert.equal(primary, undefined);
+	h.handlers.get("turn_end")!({ message: finalMessage("Primary answer.") }, h.ctx);
+	assert.equal(h.readState().response, "Primary answer.");
+	for (let attempt = 1; attempt <= MAX_FALLBACK_ATTEMPTS; attempt++) {
+		const fallback = h.handlers.get("message_end")!({ message: finalMessage(`Fallback ${attempt}`) }, h.ctx);
+		assert.deepEqual(fallback.message.content, []);
+		h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
 	}
-	assert.equal(h.readState().response, "");
-	const accepted = h.handlers.get("message_end")!({ message: finalMessage("Final draft") }, h.ctx);
-	assert.equal(accepted, undefined, "the exhausted budget accepts the draft instead of discarding it");
-	assert.equal(h.sentMessages.length, MAX_RESOLUTION_ATTEMPTS - 1, "the accepted draft needs no further steering");
-	assert.equal(h.notifications.filter((message) => /accepted the final draft after 3 terminal attempts/.test(message)).length, 1);
+	assert.equal(h.sentMessages.length, MAX_FALLBACK_ATTEMPTS, "each fallback turn consumes at most one steering message");
+	assert.equal(h.notifications.filter((message) => /no final:true patch arrived after 2 fallback turns/.test(message)).length, 1);
 	assert.equal(h.activeTools.includes("patch_state"), true);
-	h.handlers.get("turn_end")!({ message: finalMessage("Final draft") }, h.ctx);
-	assert.equal(h.readState().response, "Final draft");
+	assert.equal(h.readState().response, "Primary answer.");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 });
 
-test("resolution-attempt count resets with the next enabled iteration", async () => {
+test("fallback resolution state resets with the next enabled iteration", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "First iteration");
-	for (let attempt = 0; attempt < MAX_RESOLUTION_ATTEMPTS - 1; attempt++) {
-		h.handlers.get("message_end")!({ message: finalMessage(`First ${attempt}`) }, h.ctx);
+	h.handlers.get("message_end")!({ message: finalMessage("First primary") }, h.ctx);
+	h.handlers.get("turn_end")!({ message: finalMessage("First primary") }, h.ctx);
+	for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
+		const fallback = h.handlers.get("message_end")!({ message: finalMessage(`First fallback ${attempt}`) }, h.ctx);
+		h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
 	}
-	assert.equal(h.sentMessages.length, MAX_RESOLUTION_ATTEMPTS - 1);
+	assert.equal(h.sentMessages.length, MAX_FALLBACK_ATTEMPTS);
 	h.handlers.get("before_agent_start")!({ prompt: "Next iteration", systemPrompt: "base" }, h.ctx);
-	h.handlers.get("message_end")!({ message: finalMessage("Next first attempt") }, h.ctx);
-	assert.equal(h.sentMessages.length, MAX_RESOLUTION_ATTEMPTS);
-	assert.equal(h.notifications.some((message) => /could not obtain final:true/.test(message)), false);
+	h.handlers.get("message_end")!({ message: finalMessage("Next primary") }, h.ctx);
+	assert.equal(h.sentMessages.length, MAX_FALLBACK_ATTEMPTS + 1, "the next iteration starts a fresh fallback resolution");
 });
 
-test("an atomic patch with final resolves the same intercepted turn before response reconciliation", async () => {
+test("an atomic fallback patch applies while the preserved answer stands", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Remember this");
-	const draft = h.handlers.get("message_end")!({ message: finalMessage("Unresolved draft.") }, h.ctx);
-	h.handlers.get("turn_end")!({ message: draft.message }, h.ctx);
+	const primary = h.handlers.get("message_end")!({ message: finalMessage("Preserved draft.") }, h.ctx);
+	assert.equal(primary, undefined);
+	h.handlers.get("turn_end")!({ message: finalMessage("Preserved draft.") }, h.ctx);
 	await h.tools.get("patch_state")!.execute("patch", { session: { working: { next: "ship" } }, final: true }, undefined, undefined, h.ctx);
-	const accepted = h.handlers.get("message_end")!({ message: finalMessage("Done.") }, h.ctx);
-	assert.equal(accepted, undefined);
-	h.handlers.get("turn_end")!({ message: finalMessage("Done.") }, h.ctx);
+	const fallback = h.handlers.get("message_end")!({ message: finalMessage("Fallback text.") }, h.ctx);
+	assert.deepEqual(fallback.message.content, []);
+	h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
 	assert.equal(h.readState().working.next, "ship");
-	assert.equal(h.readState().response, "Done.");
+	assert.equal(h.readState().response, "Preserved draft.");
 });
 
 test("a failed later patch does not revoke terminal eligibility", async () => {
@@ -485,11 +492,15 @@ test("accepts only canonical atomic scope patches and final:true", async () => {
 		{ global: null },
 	]) await assert.rejects(execute(input));
 
-	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Still unresolved.") }, h.ctx);
-	assert.deepEqual(blocked.message.content, []);
-	assert.equal(h.readState().response, "");
+	const primary = h.handlers.get("message_end")!({ message: finalMessage("Still unresolved.") }, h.ctx);
+	assert.equal(primary, undefined, "the unresolved draft is preserved instead of intercepted");
+	h.handlers.get("turn_end")!({ message: finalMessage("Still unresolved.") }, h.ctx);
+	assert.equal(h.readState().response, "Still unresolved.");
 	await h.tools.get("patch_state")!.execute("valid", { final: true }, undefined, undefined, h.ctx);
-	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Resolved.") }, h.ctx), undefined);
+	const fallback = h.handlers.get("message_end")!({ message: finalMessage("Resolved.") }, h.ctx);
+	assert.deepEqual(fallback.message.content, [], "fallback messages stay out of the response");
+	h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
+	assert.equal(h.readState().response, "Still unresolved.");
 });
 
 test("terminal eligibility remains latched through later tools, patches, and repeated final calls", async () => {
@@ -516,9 +527,12 @@ test("a new enabled iteration resets terminal eligibility", async () => {
 	h.handlers.get("message_end")!({ message: first }, h.ctx);
 	h.handlers.get("turn_end")!({ message: first }, h.ctx);
 	h.handlers.get("before_agent_start")!({ prompt: "Second iteration", systemPrompt: "base" }, h.ctx);
-	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Second unresolved draft.") }, h.ctx);
-	assert.deepEqual(blocked.message.content, []);
+	const primary = h.handlers.get("message_end")!({ message: finalMessage("Second unresolved draft.") }, h.ctx);
+	assert.equal(primary, undefined, "the second iteration starts ineligible and preserves its draft");
+	assert.equal(h.sentMessages.length, 1, "fallback resolution starts for the second iteration");
 	assert.equal(h.readState().response, "First complete answer.");
+	h.handlers.get("turn_end")!({ message: finalMessage("Second unresolved draft.") }, h.ctx);
+	assert.equal(h.readState().response, "Second unresolved draft.");
 });
 
 test("one atomic final patch resolves simultaneous global artifact and CWD Skill obligations", async (t) => {
