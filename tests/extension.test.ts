@@ -93,7 +93,9 @@ test("explicit activation defers artifact discovery until the next enabled infer
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const knowledgeRoot = join(root, "knowledge");
 	mkdirSync(knowledgeRoot);
-	const h = harness({ repositoryRoot: join(root, "store"), knowledgeRoot, initializeRepository: false });
+	const repositoryRoot = join(root, "store");
+	mkdirSync(repositoryRoot);
+	const h = harness({ repositoryRoot, knowledgeRoot });
 	await h.commands.get("state-flow-start").handler("", h.ctx);
 	const lateSource = join(knowledgeRoot, "late.md");
 	writeFileSync(lateSource, "Created after the activation command returned.\n");
@@ -111,7 +113,9 @@ test("unchanged resolution cannot bypass an acquired invalidated artifact", asyn
 	mkdirSync(knowledgeRoot);
 	const source = join(knowledgeRoot, "routing.md");
 	writeFileSync(source, "Routing source.\n");
-	const h = harness({ repositoryRoot: join(root, "store"), knowledgeRoot, initializeRepository: false });
+	const repositoryRoot = join(root, "store");
+	mkdirSync(repositoryRoot);
+	const h = harness({ repositoryRoot, knowledgeRoot });
 	await start(h, "Acquire routing");
 	const input = { path: source };
 	h.handlers.get("tool_call")!({ toolCallId: "artifact-read", toolName: "read", input }, h.ctx);
