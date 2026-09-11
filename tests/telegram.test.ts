@@ -90,14 +90,16 @@ test("section label always carries the spiral identity and the live state value"
 
 test("section view repeats the state line with one lifecycle button and no refresh or cancel", () => {
 	const off = buildStateFlowSectionView(snapshot(), (action) => `cb:${action}`);
-	assert.match(off.text, /^<b>🌀 State Flow: off<\/b>/);
-	assert.match(off.text, /Records the latest accepted state after every turn/);
+	assert.equal(
+		off.text,
+		"<b>🌀 State Flow: <code>off</code></b>\n\nRecords the latest accepted state after every turn, so a new session resumes from the last committed point.",
+	);
 	assert.deepEqual(off.replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "cb:start" }]]);
 	const on = buildStateFlowSectionView(snapshot({ enabled: true, step: 3 }), (action) => `cb:${action}`);
-	assert.match(on.text, /^<b>🌀 State Flow: #3<\/b>/);
+	assert.match(on.text, /^<b>🌀 State Flow: <code>#3<\/code><\/b>/);
 	assert.deepEqual(on.replyMarkup?.inline_keyboard, [[{ text: "⏹ Stop", callback_data: "cb:stop" }]]);
 	const pending = buildStateFlowSectionView(snapshot({ startPending: true }), (action) => `cb:${action}`);
-	assert.match(pending.text, /^<b>🌀 State Flow: off<\/b>/);
+	assert.match(pending.text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
 	assert.deepEqual(pending.replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "cb:start" }]]);
 });
 
@@ -146,7 +148,7 @@ test("start applies immediately when idle and edits the refreshed view", async (
 	assert.deepEqual(calls, ["start"]);
 	assert.deepEqual(notices, ["State Flow enabled"]);
 	assert.equal(edits.length, 1);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: #1<\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>#1<\/code><\/b>/);
 });
 
 test("start defers while a run is active and reports a pending intent", async () => {
@@ -158,7 +160,7 @@ test("start defers while a run is active and reports a pending intent", async ()
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(calls, ["deferStart"]);
 	assert.deepEqual(notices, ["State Flow will start after the current turn"]);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: off<\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
 	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "section:0:start" }]]);
 });
 
@@ -198,7 +200,7 @@ test("start failure surfaces the control message without corrupting the menu", a
 	const { context, edits, notices } = sectionContext("start");
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(notices, ["Selected branch revision is unavailable"]);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: off<\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
 });
 
 test("render and dynamic label always read the live snapshot", async () => {

@@ -75,12 +75,22 @@ export interface StateFlowTelegramAdapter {
 
 /** Main-menu section label doubles as the live status value: the spiral identity is constant, the value is not. */
 export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string {
-	return snapshot.enabled ? `🌀 State Flow: #${snapshot.step}` : "🌀 State Flow: off";
+	return `🌀 State Flow: ${stateFlowLabelValue(snapshot)}`;
+}
+
+/** Shared live value: plain in the button label, monospaced in the submenu state line. */
+function stateFlowLabelValue(snapshot: StateFlowTelegramSnapshot): string {
+	return snapshot.enabled ? `#${snapshot.step}` : "off";
+}
+
+/** Submenu state line: the same identity as the button label, with the live value in monospace. */
+function formatStateFlowSectionHeader(snapshot: StateFlowTelegramSnapshot): string {
+	return `<b>🌀 State Flow: <code>${stateFlowLabelValue(snapshot)}</code></b>`;
 }
 
 /** Short help under the state line: what State Flow is and why its action button exists. */
 const STATE_FLOW_SECTION_HELP =
-	"Records the latest accepted state after every turn, so a new session resumes from the last committed point. Start it to keep memory live on this branch, stop it to pause.";
+	"Records the latest accepted state after every turn, so a new session resumes from the last committed point.";
 
 /** The submenu header repeats the button's state line; the single action matches the current state. */
 export function buildStateFlowSectionView(
@@ -91,7 +101,7 @@ export function buildStateFlowSectionView(
 		? { text: "⏹ Stop", callback_data: callbackData("stop") }
 		: { text: "▶️ Start", callback_data: callbackData("start") };
 	return {
-		text: [`<b>${formatStateFlowSectionLabel(snapshot)}</b>`, "", STATE_FLOW_SECTION_HELP].join("\n"),
+		text: [formatStateFlowSectionHeader(snapshot), "", STATE_FLOW_SECTION_HELP].join("\n"),
 		parseMode: "html",
 		replyMarkup: { inline_keyboard: [[action]] },
 	};

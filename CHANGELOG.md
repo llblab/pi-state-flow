@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.9.6: Monospaced state value in the submenu
+
+- `Interop`: The submenu help line now consists solely of the operator-specified sentence "Records the latest accepted state after every turn, so a new session resumes from the last committed point."; the trailing "Start it to keep memory live on this branch, stop it to pause." sentence was removed.
+- `Interop`: The submenu state line renders the live value in monospace — `off` or `#N` — while the section button keeps the same plain-text label.
+
 ## 0.9.5: Shorter submenu help line
 
 - `Interop`: The submenu help line now opens directly with "Records the latest accepted state after every turn…"; the "Durable memory for this conversation: State Flow" prefix was removed at the operator's request.
