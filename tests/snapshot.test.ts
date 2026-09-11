@@ -315,7 +315,7 @@ test("bounds restored counters before later increments", async () => {
 	await commitTerminal(boundary, {}, {}, "At boundary.");
 	assert.equal(boundary.resolveSnapshot().meta.step, Number.MAX_SAFE_INTEGER);
 	await assert.rejects(
-		boundary.tools.get("patch_state")!.execute("past-boundary", { scope: "session", patch: { working: { past: true } } }, undefined, undefined, boundary.ctx),
+		boundary.tools.get("patch_state")!.execute("past-boundary", { session: { working: { past: true } } }, undefined, undefined, boundary.ctx),
 		/iteration counter is exhausted/,
 	);
 	assert.equal(boundary.resolveSnapshot().meta.step, Number.MAX_SAFE_INTEGER);

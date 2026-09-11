@@ -153,7 +153,7 @@ test("status distinguishes retained shared tails from new-origin depth and resto
 	const heads: string[] = [];
 	let oldEntries: any[] = [];
 	for (let n = 1; n <= 8; n++) {
-		await h.tools.get("patch_state").execute("global", { scope: "global", patch: { working: { n } } }, undefined, undefined, h.ctx);
+		await h.tools.get("patch_state").execute("global", { global: { working: { n } } }, undefined, undefined, h.ctx);
 		const read = await h.tools.get("read_state").execute("head", {}, undefined);
 		heads.push(JSON.parse(read.content[0].text).boundary.id);
 		if (n === 1) oldEntries = structuredClone(h.entries);

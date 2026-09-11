@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { commitScopedTransition, stageScopedPatch, stageScopedTransition } from "../lib/transition.ts";
+import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition } from "../lib/transition.ts";
 import type { AcceptedTransition } from "../lib/history.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState } from "../lib/temporal.ts";
 import { parseScopeStream, serializeScopeStream } from "../lib/durable.ts";
-import { emptyState, type ScopedStates } from "../lib/state.ts";
+import { emptyState, type AtomicScopePatches, type ScopedStates } from "../lib/state.ts";
 import { loadCwdState, loadGlobalState, loadSessionMaterialization, loadSessionState } from "./temporal-fixture.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
 import { commitScopedTerminal, commitTerminal, harness, start } from "./harness.ts";
@@ -19,6 +19,47 @@ function snapshot() {
 	result.meta.bootstrap = true;
 	return result;
 }
+
+test("stages every canonical scope combination as one atomic transition", () => {
+	const combinations = [
+		["global"],
+		["cwd"],
+		["session"],
+		["global", "cwd"],
+		["global", "session"],
+		["cwd", "session"],
+		["global", "cwd", "session"],
+	] as const;
+	for (const scopes of combinations) {
+		const current = snapshot();
+		const state = states();
+		const patches: AtomicScopePatches = {};
+		for (const scope of scopes) patches[scope] = { working: { [scope]: true } };
+		const stage = stageAtomicScopePatches(state, patches, [], "origin");
+		let accepted: AcceptedTransition | undefined;
+		let publications = 0;
+		commitScopedTransition(current, state, stage, (cohort) => {
+			publications += 1;
+			accepted = cohort;
+		}, "origin", { finalizeRun: false });
+		assert.equal(publications, 1);
+		assert.equal(current.meta.step, 1);
+		assert.deepEqual(accepted!.transitions.map(({ scope }) => scope), scopes);
+		assert.ok(accepted!.id.length > 0);
+		for (const scope of scopes) assert.equal(state[scope].working[scope], true);
+	}
+});
+
+test("rejects an invalid member without mutating any scope in the atomic cohort", () => {
+	const state = states();
+	const before = structuredClone(state);
+	assert.throws(() => stageAtomicScopePatches(state, {
+		global: { working: { accepted: true } },
+		cwd: { working: { invalid: [null] } },
+	}, [], "origin"), /Materialized state cannot contain null/);
+	assert.deepEqual(state, before);
+	assert.throws(() => stageAtomicScopePatches(state, { other: {} } as AtomicScopePatches, [], "origin"), /Unknown atomic State Flow scope/);
+});
 
 test("publishes one exact multi-scope replay cohort without explanatory windows or current-state DTOs", () => {
 	const current = snapshot();
@@ -109,7 +150,7 @@ test("intermediate barriers preserve response/bootstrap and failed publication l
 	const state = states();
 	state.session.response = "Previous answer";
 	const before = structuredClone(state);
-	const stage = stageScopedPatch(state, { scope: "session", patch: { working: { checkpoint: "verified" } } }, [], "origin");
+	const stage = stageAtomicScopePatches(state, { session: { working: { checkpoint: "verified" } } }, [], "origin");
 	assert.throws(() => commitScopedTransition(current, state, stage, () => { throw new Error("publication failed"); }, "origin"), /publication failed/);
 	assert.deepEqual(state, before);
 	assert.equal(stage.committed, false);
@@ -127,7 +168,7 @@ test("rejects stale state and identical values at a different active causal boun
 	const origin = createTemporalState(state, "origin");
 	const fork = createTemporalState(state, "other-origin");
 	assert.deepEqual(readTemporalState(origin), readTemporalState(fork));
-	const stage = stageScopedPatch(state, { scope: "session", patch: { working: { accepted: true } } }, [], origin.lineage.at(-1)!.id);
+	const stage = stageAtomicScopePatches(state, { session: { working: { accepted: true } } }, [], origin.lineage.at(-1)!.id);
 	assert.throws(() => commitScopedTransition(current, state, stage, () => assert.fail("cross-lineage publication"), fork.lineage.at(-1)!.id), /causal basis changed/);
 	state.session.working.changed = true;
 	assert.throws(() => commitScopedTransition(current, state, stage, () => assert.fail("stale publication"), origin.lineage.at(-1)!.id), /session scope changed before response reconciliation/);
@@ -138,13 +179,13 @@ test("validates acquired artifact and Skill outputs before staging trusted fresh
 	const state = states();
 	const source = { path: "/knowledge/changed.md", hash: `sha256:${"b".repeat(64)}`, reason: "source-changed" as const };
 	const skill = { path: "/skills/demo/SKILL.md", hash: `sha256:${"a".repeat(64)}` };
-	assert.throws(() => stageScopedPatch(state, { scope: "session", patch: { artifacts: { "/a.md": { description: "Invalid hash", hash: "sha256:invalid" } } } }, [], "origin"), /sha256:<64 lowercase hex characters>/);
+	assert.throws(() => stageAtomicScopePatches(state, { session: { artifacts: { "/a.md": { description: "Invalid hash", hash: "sha256:invalid" } } } }, [], "origin"), /sha256:<64 lowercase hex characters>/);
 	assert.throws(() => stageScopedTransition(state, { transitions: [], response: "Missing" }, [], "origin", [source]), /global compiler output/);
-	assert.throws(() => stageScopedPatch(state, { scope: "cwd", patch: {} }, [skill], "origin"), /missing: \/skills\/demo\/SKILL\.md/);
-	const stage = stageScopedTransition(state, { transitions: [
-		{ scope: "global", patch: { artifacts: { [source.path]: { description: "Guidance" } } } },
-		{ scope: "cwd", patch: { artifacts: { [skill.path]: { description: "Skill", kind: "skill", compilation: { route: "demo" } } } } },
-	], response: "Compiled" }, [skill], "origin", [source]);
+	assert.throws(() => stageAtomicScopePatches(state, { cwd: {} }, [skill], "origin"), /missing: \/skills\/demo\/SKILL\.md/);
+	const stage = stageAtomicScopePatches(state, {
+		global: { artifacts: { [source.path]: { description: "Guidance" } } },
+		cwd: { artifacts: { [skill.path]: { description: "Skill", kind: "skill", compilation: { route: "demo" } } } },
+	}, [skill], "origin", [source]);
 	assert.deepEqual(stage.nextStates.global.artifacts[source.path], { description: "Guidance" });
 	assert.deepEqual(stage.provenanceUpdates.global[source.path], { sourceHash: source.hash, compilerRevision: "artifact-v1" });
 	assert.deepEqual(stage.nextStates.cwd.artifacts[skill.path], { description: "Skill", kind: "skill", compilation: { route: "demo" } });
@@ -152,7 +193,7 @@ test("validates acquired artifact and Skill outputs before staging trusted fresh
 	assert.throws(() => stageScopedTransition(state, { transitions: [
 		{ scope: "global", patch: { artifacts: { [source.path]: { description: "Forged", hash: source.hash } } } },
 	], response: "Rejected" }, [], "origin", [source]), /cannot set runtime-owned/);
-	assert.throws(() => stageScopedPatch(state, { scope: "session", patch: { contract: { compiled_skills: { legacy: true } } } }, [], "origin"), /contract\.compiled_skills is retired/);
+	assert.throws(() => stageAtomicScopePatches(state, { session: { contract: { compiled_skills: { legacy: true } } } }, [], "origin"), /contract\.compiled_skills is retired/);
 });
 
 test("session-only transitions persist only the current temporal session layer", async () => {
@@ -170,7 +211,7 @@ test("session-only transitions persist only the current temporal session layer",
 	]);
 });
 
-test("commits global, CWD, and session patches through explicit sequential barriers", async () => {
+test("commits global, CWD, and session patches through one atomic model barrier", async () => {
 	const h = harness({ cwd: "/tmp/state-flow-scoped-transition" });
 	await start(h);
 	await commitScopedTerminal(h, [
@@ -198,7 +239,7 @@ test("commits and hides one useful terminal patch after the tool loop", async ()
 	assert.match(h.notifications.at(-1)!, /"next": "run tests"/);
 });
 
-test("accepts unchanged memory without invented bookkeeping and rejects materialized null", async () => {
+test("accepts final-only eligibility without invented bookkeeping and rejects materialized null", async () => {
 	const h = harness();
 	const started = await start(h);
 	assert.match(started.systemPrompt, /never invent memory changes/i);
@@ -208,7 +249,7 @@ test("accepts unchanged memory without invented bookkeeping and rejects material
 	await commitTerminal(h, {}, { move: null, result: "ok" });
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working, { result: "ok" });
 	await assert.rejects(
-		h.tools.get("patch_state")!.execute("null", { scope: "session", patch: { working: { cells: ["pawn", null] } } }, undefined, undefined, h.ctx),
+		h.tools.get("patch_state")!.execute("null", { session: { working: { cells: ["pawn", null] } } }, undefined, undefined, h.ctx),
 		/Materialized state cannot contain null/,
 	);
 });

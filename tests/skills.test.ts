@@ -18,7 +18,7 @@ import { commitTerminal, harness, start } from "./harness.ts";
 const skillRoot = mkdtempSync(join(tmpdir(), "pi-state-flow-skills-"));
 
 async function patchCwdArtifacts(h: ReturnType<typeof harness>, artifacts: unknown) {
-	return h.tools.get("patch_state")!.execute("compile-skill", { scope: "cwd", patch: { artifacts } }, undefined, undefined, h.ctx);
+	return h.tools.get("patch_state")!.execute("compile-skill", { cwd: { artifacts } }, undefined, undefined, h.ctx);
 }
 
 function skillFile(name: string, body = `# ${name}\n\nOperational rules.`): string {
@@ -57,9 +57,9 @@ test("discovers the packaged optional memory-curation Skill without diagnostics"
 	assert.match(body, /compile it into its exact-path CWD artifact before acquiring a stale global Markdown source/);
 	assert.match(body, /verify it with a separate `read_state`, then delete or narrow the source/);
 	assert.match(body, /Do all readback before the terminal answer/);
-	assert.match(body, /Simultaneously pending CWD and global acquisitions require complete compilation/);
+	assert.match(body, /Simultaneously pending CWD and global acquisitions must be compiled together in one atomic `patch_state` call/);
 	assert.match(body, /Write and verify the destination before deleting the source/);
-	assert.match(body, /Separate calls are not an atomic multi-scope transaction/);
+	assert.match(body, /Do not combine destination creation and source deletion merely because multi-scope publication is atomic/);
 	assert.match(body, /stored claim of acceptance is not verification/);
 	assert.match(body, /Never delete the only accepted copy/);
 	assert.match(body, /Removing a secret from active state does not erase prior offsets, Git history, or external copies/);
@@ -73,32 +73,32 @@ test("curation compiles an acquired Skill before write-verify-delete barriers", 
 	const patchState = h.tools.get("patch_state")!;
 	const readState = h.tools.get("read_state")!;
 	await patchState.execute("seed", {
-		scope: "global", patch: { contract: { projectRule: "project-only" } },
+		global: { contract: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
 	const source = skillFile("curation-sequence");
 	recordRead(h, source);
 	await assert.rejects(
 		patchState.execute("premature", {
-			scope: "session", patch: { working: { unrelated: true } },
+			session: { working: { unrelated: true } },
 		}, undefined, undefined, h.ctx),
 		/newly read Skill must be compiled|successfully read Skill must have a CWD artifact compiler output/,
 	);
 	assert.equal(h.readState().working.unrelated, undefined);
 	await patchState.execute("compile", {
-		scope: "cwd", patch: { artifacts: { [source]: compilerOutput("Curate one requested cohort") } },
+		cwd: { artifacts: { [source]: compilerOutput("Curate one requested cohort") } },
 	}, undefined, undefined, h.ctx);
 	await patchState.execute("after-compilation", {
-		scope: "session", patch: { working: { unrelated: true } },
+		session: { working: { unrelated: true } },
 	}, undefined, undefined, h.ctx);
 	await patchState.execute("destination", {
-		scope: "cwd", patch: { contract: { projectRule: "project-only" } },
+		cwd: { contract: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
 	const destination = await readState.execute("verify-destination", {
 		offset: 0, scope: "cwd",
 	}, undefined, undefined, h.ctx);
 	assert.equal(JSON.parse(destination.content[0].text).state.contract.projectRule, "project-only");
 	await patchState.execute("delete-source", {
-		scope: "global", patch: { contract: { projectRule: null } },
+		global: { contract: { projectRule: null } },
 	}, undefined, undefined, h.ctx);
 	const effective = await readState.execute("verify-effective", {
 		offset: 0, scope: "effective",
@@ -113,13 +113,11 @@ test("memory curation can narrow an established value without retaining two auth
 	const h = harness();
 	await start(h);
 	await h.tools.get("patch_state")!.execute("retain-global", {
-		scope: "global", patch: { contract: { projectRule: "project-only" } },
+		global: { contract: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
-	await h.tools.get("patch_state")!.execute("narrow-global", {
-		scope: "global", patch: { contract: { projectRule: null } },
-	}, undefined, undefined, h.ctx);
-	await h.tools.get("patch_state")!.execute("narrow-cwd", {
-		scope: "cwd", patch: { contract: { projectRule: "project-only" } },
+	await h.tools.get("patch_state")!.execute("narrow", {
+		global: { contract: { projectRule: null } },
+		cwd: { contract: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
 	assert.equal(h.readState(0, "global").contract.projectRule, undefined);
 	assert.equal(h.readState(0, "cwd").contract.projectRule, "project-only");
@@ -259,11 +257,11 @@ test("falls back to intercepted input when a successful execution omits args", a
 	assert.equal(result.message.content[0].text, "Done");
 });
 
-test("a Skill acquired after an earlier resolution reopens the terminal gate until compiled", async () => {
+test("a Skill acquired after terminal eligibility still blocks turn_end until compiled", async () => {
 	const h = harness();
 	await start(h);
 	await h.tools.get("patch_state")!.execute(
-		"early-resolution", { scope: "session", patch: { working: { inspected: true } } }, undefined, undefined, h.ctx,
+		"early-resolution", { session: { working: { inspected: true } }, final: true }, undefined, undefined, h.ctx,
 	);
 	const source = skillFile("late-obligation");
 	recordRead(h, source);
@@ -278,16 +276,16 @@ test("a Skill acquired after an earlier resolution reopens the terminal gate unt
 	assert.equal(h.readState().response, "Complete.");
 });
 
-test("unchanged resolution cannot bypass a successful Skill compilation obligation", async () => {
+test("final-only resolution cannot bypass a successful Skill compilation obligation", async () => {
 	const h = harness();
 	await start(h);
-	const source = skillFile("unchanged-obligation");
+	const source = skillFile("final-obligation");
 	recordRead(h, source);
 	await assert.rejects(
-		h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx),
+		h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx),
 		/Every successfully read Skill must have a CWD artifact compiler output/,
 	);
-	await patchCwdArtifacts(h, { [source]: compilerOutput("compiled after rejected unchanged") });
+	await patchCwdArtifacts(h, { [source]: compilerOutput("compiled after rejected final") });
 });
 
 test("does not require compilation for a failed Skill read", async () => {

@@ -11,8 +11,8 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { SkillReadTracker } from "./skills.ts";
 import { emptySnapshot, migrationFailure, persistableSnapshot, type Snapshot } from "./snapshot.ts";
 import { inspectSnapshotRevision, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
-import { emptyState, overlayStates, projectStateForModel, type MaterializedState, type ScopePatch, type ScopedStates, type StateScope } from "./state.ts";
-import { commitScopedTransition, stageScopedPatch, stageScopedTransition, validateUnchangedResolution, type StagedScopedTransition } from "./transition.ts";
+import { emptyState, overlayStates, projectStateForModel, type AtomicScopePatches, type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
+import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, validateFinalEligibility, type StagedScopedTransition } from "./transition.ts";
 import { discoverSnapshotData, hasPriorConversation, isNewSession, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
 import { compactStatus, detailedStatus, STATUS_KEY, type PendingPublicationDiagnostic, type StatusDiagnostics } from "./status.ts";
 import { prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
@@ -48,6 +48,7 @@ export interface StateFlowExtensionOptions {
 
 export const PATCH_STATE_TOOL_NAME = "patch_state";
 export const READ_STATE_TOOL_NAME = "read_state";
+export const MAX_RESOLUTION_ATTEMPTS = 3;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 
 /** Keep a failed tool invocation visually separated from its rendered error without changing error semantics. */
@@ -63,8 +64,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	let scopeStates: ScopedStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
 	let branchHasSnapshot = false;
 	let branchStartsWithoutRuntime = false;
-	let stateResolutionSatisfied = false;
+	let terminalEligible = false;
 	let terminalDraftIntercepted = false;
+	let resolutionAttempts = 0;
+	let resolutionFailureReported = false;
 	let responseAwaitingReconciliation = false;
 	let passiveContinuation: PassiveContinuation | undefined;
 	let bootstrapContinuation: PassiveContinuation | undefined;
@@ -120,8 +123,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	}
 
 	function clearRunTransient(): void {
-		stateResolutionSatisfied = false;
+		terminalEligible = false;
 		terminalDraftIntercepted = false;
+		resolutionAttempts = 0;
+		resolutionFailureReported = false;
 		responseAwaitingReconciliation = false;
 		runAnchorTimestamp = undefined;
 		skillReads.clear();
@@ -170,9 +175,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			artifactInvalidations = structuredClone(plan.requiresCompilation);
 			if (plan.removed.length > 0) {
 				const removals = Object.fromEntries(plan.removed.map((path) => [path, null]));
-				const stage = stageScopedPatch(
+				const stage = stageAtomicScopePatches(
 					scopeStates,
-					{ scope: "global", patch: { artifacts: removals } },
+					{ global: { artifacts: removals } },
 					[],
 					runtime!.causalBasis(),
 				);
@@ -537,7 +542,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		updateUi(ctx);
 	}
 
-	function recordDiagnostic(error: string, category: StateFlowDiagnosticCategory, ctx: ExtensionContext, content?: unknown): void {
+	interface DiagnosticExtras {
+		content?: unknown;
+		input?: unknown;
+		tool?: string;
+		toolCallId?: string;
+		resolutionAttempt?: number;
+		terminalEligible?: boolean;
+	}
+
+	function recordDiagnostic(error: string, category: StateFlowDiagnosticCategory, ctx: ExtensionContext, extras: DiagnosticExtras = {}): void {
 		if (!config.logging) return;
 		try {
 			const path = stateFlowLogPath(agentDir);
@@ -551,7 +565,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				cwd: resolve(ctx.cwd),
 				category,
 				error,
-				...(content === undefined ? {} : { content: projectDiagnosticContent(content) }),
+				...(extras.content === undefined ? {} : { content: projectDiagnosticContent(extras.content) }),
+				...(extras.input === undefined ? {} : { input: extras.input }),
+				...(extras.tool === undefined ? {} : { tool: extras.tool }),
+				...(extras.toolCallId === undefined ? {} : { toolCallId: extras.toolCallId }),
+				...(extras.resolutionAttempt === undefined ? {} : { resolutionAttempt: extras.resolutionAttempt }),
+				...(extras.terminalEligible === undefined ? {} : { terminalEligible: extras.terminalEligible }),
 			});
 		} catch (failure) {
 			if (loggingWarningReported) return;
@@ -564,7 +583,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		terminalDraftIntercepted = true;
 		pi.sendMessage({
 			customType: VALIDATION_MESSAGE_TYPE,
-			content: "Before completing this turn, resolve State Flow. Call patch_state with durable semantic changes, or call patch_state with {\"unchanged\":true} if no state update is required. Then provide the final answer normally.",
+			content: "Before completing this turn, make the State Flow iteration terminal-eligible. Call patch_state with any durable scope changes and final:true, or call patch_state with {\"final\":true} when no semantic update is needed. Then provide the final answer normally.",
 			display: false,
 		}, { deliverAs: "steer", triggerTurn: true });
 	}
@@ -599,52 +618,67 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	pi.registerTool({
 		name: PATCH_STATE_TOOL_NAME,
 		label: "Patch State",
-		description: "The sole State Flow semantic mutation protocol. Use exactly one form: PATCH {scope, patch} to materialize established future-relevant state, or UNCHANGED {unchanged:true} after explicitly deciding no durable update is needed. Never combine unchanged with scope or patch. This call must be the only State Flow barrier in its assistant response; sibling tool calls are reconsidered after rematerialization.",
-		promptSnippet: "PATCH {scope, patch} or UNCHANGED {unchanged:true}",
+		description: "The sole State Flow semantic mutation protocol. Supply any combination of global, cwd, and session patches; all supplied scopes commit atomically. Set final:true when the current iteration may finish at a later turn_end. final:true does not stop reasoning, tools, or later patch_state calls. Use {final:true} when no semantic update is needed. This call must be the only State Flow barrier in its assistant response.",
+		promptSnippet: "Atomically patch global/cwd/session; final:true permits a later turn_end",
 		promptGuidelines: [
-			"Use patch_state for every durable semantic change. Before a final answer, resolve State Flow with PATCH {scope, patch} or UNCHANGED {unchanged:true}.",
-			"Call patch_state alone in an assistant response; choose subsequent actions only after its acknowledgement and rematerialized State Flow context.",
+			"Use patch_state for durable semantic changes. Before a final answer, make the iteration terminal-eligible with final:true, optionally alongside atomic global/cwd/session patches.",
+			"Call patch_state alone in an assistant response; after its acknowledgement, further reasoning, tools, and later patch_state calls remain allowed.",
 		],
 		executionMode: "sequential",
-		// Type.Union/Type.Literal schemas are not portable across Pi's Google-compatible tool adapters.
-		// Field descriptions expose the discriminated forms while runtime validation preserves exclusivity.
 		parameters: Type.Object({
-			scope: Type.Optional(StringEnum(["session", "cwd", "global"] as const, { description: "PATCH form only: required with patch; forbidden with unchanged" })),
-			patch: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "PATCH form only: required with scope; forbidden with unchanged" })),
-			unchanged: Type.Optional(Type.Boolean({ description: "UNCHANGED form only: set exactly true and omit scope and patch" })),
+			global: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Optional global semantic patch" })),
+			cwd: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Optional project semantic patch" })),
+			session: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Optional session semantic patch" })),
+			final: Type.Optional(Type.Boolean({ description: "Set exactly true to permit this iteration to finish at a later turn_end" })),
 		}, { additionalProperties: false }),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			try {
 				if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
 				if (signal?.aborted) throw new Error("State Flow patch was aborted before materialization");
-				if (!isObject(params)) throw new Error("patch_state requires an object in exactly one supported form");
-				const keys = Object.keys(params).sort();
-				if (params.unchanged === true) {
-					if (keys.length !== 1 || keys[0] !== "unchanged") throw new Error('patch_state {"unchanged":true} cannot include any other field');
-					validateUnchangedResolution(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
-					stateResolutionSatisfied = true;
+				if (!isObject(params)) throw new Error("patch_state requires an object");
+				const allowed = new Set(["global", "cwd", "session", "final"]);
+				for (const key of Object.keys(params)) {
+					if (!allowed.has(key)) throw new Error(`patch_state does not accept field ${key}`);
+				}
+				if (Object.hasOwn(params, "final") && params.final !== true) throw new Error("patch_state final must be exactly true when supplied");
+				const patches: AtomicScopePatches = {};
+				for (const scope of ["global", "cwd", "session"] as const) {
+					if (!Object.hasOwn(params, scope)) continue;
+					const patch = params[scope];
+					if (!isObject(patch)) throw new Error(`patch_state ${scope} must be a semantic patch object`);
+					if (Object.keys(patch).length === 0) throw new Error(`patch_state ${scope} cannot be empty; omit it when unchanged`);
+					patches[scope] = patch;
+				}
+				const scopes = Object.keys(patches) as StateScope[];
+				if (scopes.length === 0) {
+					if (params.final !== true) throw new Error('patch_state requires at least one scope patch or {"final":true}');
+					validateFinalEligibility(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
+					terminalEligible = true;
 					terminalDraftIntercepted = false;
-					return { content: [{ type: "text", text: "\nState resolution acknowledged unchanged." }], details: { unchanged: true } };
+					return { content: [{ type: "text", text: "\nState iteration is terminal-eligible." }], details: { final: true } };
 				}
-				if (keys.length !== 2 || keys[0] !== "patch" || keys[1] !== "scope"
-					|| params.scope === undefined || !isObject(params.patch)) {
-					throw new Error("patch_state requires exactly scope and patch, or {\"unchanged\":true}");
-				}
-				if (Object.keys(params.patch).length === 0) throw new Error("An empty semantic patch is not an unchanged acknowledgement; use {\"unchanged\":true}");
-				const transition = { scope: params.scope as StateScope, patch: params.patch as ScopePatch };
-				const stage = stageScopedPatch(scopeStates, transition, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
+				const stage = stageAtomicScopePatches(scopeStates, patches, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
 				const semanticChange = (["global", "cwd", "session"] as const).some((scope) => !sameJson(scopeStates[scope], stage.nextStates[scope]));
 				const provenanceChange = Object.values(stage.provenanceUpdates).some((updates) => Object.keys(updates).length > 0);
-				if (!semanticChange && !provenanceChange) throw new Error('patch_state PATCH must materially update state or required provenance; use {"unchanged":true} instead');
+				if (!semanticChange && !provenanceChange) throw new Error('patch_state scope patches must materially update state or required provenance; omit them and use {"final":true} when unchanged');
 				commitStage(stage, ctx, false);
-				stateResolutionSatisfied = true;
-				terminalDraftIntercepted = false;
+				if (params.final === true) {
+					terminalEligible = true;
+					terminalDraftIntercepted = false;
+				}
 				updateUi(ctx);
 				const publication = pendingPublication === undefined ? "" : "; durable publication pending";
-				return { content: [{ type: "text", text: `\nState materialized at ${params.scope} scope${publication}.` }], details: { scope: params.scope, step: snapshot.meta.step } };
+				return { content: [{ type: "text", text: `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}${publication}.` }], details: { scopes, final: params.final === true, step: snapshot.meta.step } };
 			} catch (error) {
-				stateResolutionSatisfied = false;
-				recordDiagnostic(error instanceof Error ? error.message : String(error), /concurrently|advanced/.test(String(error)) ? "publication-conflict" : "invalid-patch", ctx);
+				let attempted: unknown;
+				try { attempted = structuredClone(params); } catch { attempted = undefined; }
+				recordDiagnostic(error instanceof Error ? error.message : String(error), /concurrently|advanced/.test(String(error)) ? "publication-conflict" : "invalid-patch", ctx, {
+					input: attempted,
+					tool: PATCH_STATE_TOOL_NAME,
+					toolCallId,
+					resolutionAttempt: resolutionAttempts,
+					terminalEligible,
+				});
 				throw separatedFailure(error);
 			}
 		},
@@ -774,8 +808,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		skillReads.clear();
 		artifactReads.clear();
 		if (artifactRefreshPending) refreshArtifactInvalidations(ctx);
-		stateResolutionSatisfied = false;
+		terminalEligible = false;
 		terminalDraftIntercepted = false;
+		resolutionAttempts = 0;
+		resolutionFailureReported = false;
 		responseAwaitingReconciliation = false;
 		const rotatesRun = snapshot.meta.specification !== undefined;
 		if (rotatesRun && rehydrationPhase !== "new-bootstrap" && rehydrationPhase !== "resume-bootstrap") rehydrationPhase = "step";
@@ -853,7 +889,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	pi.on("tool_execution_end", (event) => {
 		if (!snapshot.config.enabled) return;
-		if (event.toolName === PATCH_STATE_TOOL_NAME && event.isError) stateResolutionSatisfied = false;
 		skillReads.recordEnd(event.toolCallId, event.toolName, event.isError);
 		artifactReads.recordEnd(event.toolCallId, event.toolName, event.isError);
 	});
@@ -867,23 +902,32 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}
 		if (message.stopReason === "length" || message.stopReason === "error") {
 			responseAwaitingReconciliation = false;
-			recordDiagnostic(`Assistant response ended with ${message.stopReason}`, "finalization", ctx, message.content);
+			recordDiagnostic(`Assistant response ended with ${message.stopReason}`, "finalization", ctx, { content: message.content, terminalEligible });
 			return;
 		}
-		if (!stateResolutionSatisfied) {
+		if (!terminalEligible) {
 			responseAwaitingReconciliation = false;
 			terminalDraftIntercepted = true;
-			recordDiagnostic("Terminal draft intercepted before State Flow resolution", "terminal-pending", ctx, message.content);
-			continueForResolution();
+			resolutionAttempts = Math.min(MAX_RESOLUTION_ATTEMPTS, resolutionAttempts + 1);
+			recordDiagnostic(`Terminal draft intercepted before State Flow eligibility (attempt ${resolutionAttempts}/${MAX_RESOLUTION_ATTEMPTS})`, "terminal-pending", ctx, {
+				content: message.content,
+				resolutionAttempt: resolutionAttempts,
+				terminalEligible,
+			});
+			if (resolutionAttempts < MAX_RESOLUTION_ATTEMPTS) {
+				continueForResolution();
+			} else if (!resolutionFailureReported) {
+				resolutionFailureReported = true;
+				ctx.ui.notify(`State Flow could not obtain final:true after ${MAX_RESOLUTION_ATTEMPTS} terminal attempts; committed state was preserved and no draft was accepted.`, "error");
+			}
 			return { message: { ...message, role: "assistant" as const, content: [] } };
 		}
 		try {
-			validateUnchangedResolution(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
+			validateFinalEligibility(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
 		} catch (error) {
-			stateResolutionSatisfied = false;
 			responseAwaitingReconciliation = false;
 			terminalDraftIntercepted = true;
-			recordDiagnostic(error instanceof Error ? error.message : String(error), "terminal-pending", ctx, message.content);
+			recordDiagnostic(error instanceof Error ? error.message : String(error), "terminal-pending", ctx, { content: message.content, terminalEligible });
 			continueForResolution();
 			return { message: { ...message, role: "assistant" as const, content: [] } };
 		}

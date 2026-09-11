@@ -80,7 +80,7 @@ export {
   sessionStorageKey, temporalScopePaths,
   temporalStateFileUpdates, type ScopeStreamSources, type TemporalScopePaths
 } from "./lib/durable.ts";
-export { default, PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME, type StateFlowExtensionOptions } from "./lib/extension.ts";
+export { default, MAX_RESOLUTION_ATTEMPTS, PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME, type StateFlowExtensionOptions } from "./lib/extension.ts";
 export {
   captureTemporalGitBase,
   isGitCommitAncestor,
@@ -178,7 +178,7 @@ export {
   overlayStates,
   projectStateForModel,
   updateMaterializedArtifacts,
-  type MaterializedState, type ScopedPatch,
+  type AtomicScopePatches, type MaterializedState, type ScopedPatch,
   type ScopedStates, type ScopePatch, type SemanticTransition,
   type StateDocument,
   type StatePatch,

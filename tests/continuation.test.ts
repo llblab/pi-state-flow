@@ -166,7 +166,7 @@ test("inspects exact Git-backed State Flow provenance without changing repositor
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	f.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("Git provenance established."),
 	]);
 	await session.prompt("Establish continuation provenance");
@@ -188,7 +188,7 @@ test("inspects exact file-only provenance and fails malformed runtime closed", a
 	t.after(() => session.dispose());
 	try {
 		f.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" }),
 			fauxAssistantMessage("File provenance established."),
 		]);
 		await session.prompt("Establish file continuation provenance");

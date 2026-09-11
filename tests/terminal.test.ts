@@ -5,8 +5,10 @@ import { finalizedAssistantResponse, stateFlowProtocol } from "../lib/terminal.t
 test("protocol names patch_state as the sole semantic mutation mechanism", () => {
 	const protocol = stateFlowProtocol(false);
 	assert.match(protocol, /sole model-authored semantic mutation mechanism/);
-	assert.match(protocol, /UNCHANGED \{"unchanged":true\}/);
-	assert.match(protocol, /resolution pending/);
+	assert.match(protocol, /\{"final":true\}/);
+	assert.match(protocol, /starts terminal-ineligible/);
+	assert.match(protocol, /all supplied scopes are validated and durably accepted as one atomic transition/);
+	assert.doesNotMatch(protocol, /unchanged/i);
 	assert.doesNotMatch(protocol, /state_flow/);
 	assert.doesNotMatch(protocol, /terminal reconciliation/i);
 });

@@ -474,7 +474,7 @@ test("the extension accepts a local durable commit without regenerating on push 
 	await start(h, "Persist durable state");
 	run(h.repositoryRoot, "remote", "set-url", "origin", join(h.repositoryRoot, "missing.git"));
 	await h.tools.get("patch_state")!.execute("accept", {
-		scope: "cwd", patch: { working: { accepted: true } },
+		cwd: { working: { accepted: true } }, final: true,
 	}, undefined, undefined, h.ctx);
 	const terminal = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted." }] };
 	assert.equal(h.handlers.get("message_end")!({ message: terminal }, h.ctx), undefined);
