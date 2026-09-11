@@ -1,5 +1,6 @@
 import {
 	isArtifactRegistry,
+	projectArtifactsForModel,
 	updateArtifactRegistry,
 	type ArtifactCompilationUpdate,
 	type ArtifactRegistry,
@@ -84,4 +85,9 @@ export function overlayStates(...scopes: readonly MaterializedState[]): Material
 	return scopes.reduce<MaterializedState>((effective, scope) => {
 		return applyPatch(effective, scope) as MaterializedState;
 	}, emptyState());
+}
+
+/** Model-visible projection: runtime artifact bookkeeping never reaches ordinary context. */
+export function projectStateForModel(state: MaterializedState): MaterializedState {
+	return { ...structuredClone(state), artifacts: projectArtifactsForModel(state.artifacts) };
 }

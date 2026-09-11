@@ -10,7 +10,7 @@ import { emptyState } from "../lib/state.ts";
 import { harness, start } from "./harness.ts";
 
 const snapshot = {
-	config: { enabled: true, transitionWindow: 7 },
+	config: { enabled: true },
 	meta: { step: 7, durableBase: "abcdef1234567890" },
 };
 const sessionState = { ...emptyState(), response: "Done" };
@@ -28,7 +28,6 @@ function diagnostics(overrides: Partial<StatusDiagnostics> = {}): StatusDiagnost
 		recent: [],
 		temporal: { head: { id: "origin", position: 7, parent: null }, historyDepth: 0, tailCounts: { global: 1, cwd: 2, session: 0 } },
 		staleArtifacts: [],
-		retryQueued: false,
 		...overrides,
 	};
 }
@@ -40,12 +39,12 @@ test("uses one stable status ownership key", () => {
 test("renders compact status only while enabled", () => {
 	const colorize = (color: "accent" | "dim", text: string) => `<${color}>${text}</${color}>`;
 	assert.equal(compactStatus(snapshot, colorize), "<accent>state-flow</accent> <dim>#7</dim>");
-	assert.equal(compactStatus({ ...snapshot, config: { enabled: false, transitionWindow: 7 } }, colorize), undefined);
+	assert.equal(compactStatus({ ...snapshot, config: { enabled: false } }, colorize), undefined);
 });
 
 test("distinguishes branch, durable scopes, session state, and the effective overlay", () => {
 	const output = detailedStatus(snapshot, diagnostics());
-	assert.match(output, /^State Flow diagnostics — config\.enabled=true; config\.transitionWindow=7; branch mode=active/);
+	assert.match(output, /^State Flow diagnostics — config\.enabled=true; branch mode=active/);
 	assert.match(output, /Repository: \/tmp\/knowledge/);
 	assert.match(output, /Scope keys: CWD --tmp-project--hash; session session-hash/);
 	assert.match(output, /Session files: config\.json owns behavior; meta\.json owns lineage and provenance/);
@@ -58,7 +57,6 @@ test("distinguishes branch, durable scopes, session state, and the effective ove
 	assert.match(output, /Artifacts: global 0; CWD 0; session 0; stale 0/);
 	assert.match(output, /Recent transitions: global 0; CWD 0; session 0; active 0/);
 	assert.match(output, /Publication: idle/);
-	assert.match(output, /Terminal retry: idle/);
 	assert.match(output, /Materialized states \(\d+ bytes; global\/CWD\/session Git-backed, effective overlay\):\n\n\{/);
 	assert.match(output, /"shared": true/);
 	assert.match(output, /"project": true/);
@@ -100,23 +98,18 @@ test("reports durable remote queue target, confirmation, attempts, and bounded f
 	assert.match(output, /Remote queue: failed; target a{12}; confirmed b{12}; attempt 2; error offline/);
 });
 
-test("reports inspectable stale reasons and pending publication/retry state", () => {
-	const output = detailedStatus({
-		...snapshot,
-		meta: { ...snapshot.meta, validation: { attempt: 2, error: "invalid", instruction: "retry" } },
-	}, diagnostics({
+test("reports inspectable stale reasons and pending publication", () => {
+	const output = detailedStatus(snapshot, diagnostics({
 		staleArtifacts: [
 			{ scope: "global", path: "/knowledge/new.md", reason: "new" },
 			{ scope: "global", path: "/knowledge/gone.md", reason: "source-removed" },
 		],
 		pendingPublication: { commit: "1234567890abcdef", error: "remote unavailable" },
-		retryQueued: true,
 	}));
 	assert.match(output, /stale 2/);
 	assert.match(output, /\[global\] \/knowledge\/new\.md — new/);
 	assert.match(output, /\[global\] \/knowledge\/gone\.md — source-removed/);
 	assert.match(output, /Publication: pending 1234567890ab — remote unavailable/);
-	assert.match(output, /Terminal retry: queued \(attempt 2\)/);
 });
 
 test("does not report an unknown freshness result as zero stale artifacts", () => {

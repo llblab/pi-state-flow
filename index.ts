@@ -9,26 +9,37 @@ export {
 } from "./lib/acquisition.ts";
 export {
   classifyArtifactFreshness,
+  compileArtifact,
   hashArtifactSource,
   isArtifactHash,
   isArtifactMetadata,
   isArtifactRegistry,
   ORDINARY_ARTIFACT_COMPILER,
+  parseArtifactProvenanceRegistry,
   planArtifactInvalidation,
+  projectArtifactForModel,
+  projectArtifactsForModel,
+  pruneArtifactProvenance,
   selectArtifactsByTags,
+  serializeArtifactProvenanceRegistry,
+  updateArtifactProvenance,
   updateArtifactRegistry,
   validateArtifactMetadata,
   validateArtifactRegistry,
   type ArtifactCompilationUpdate,
   type ArtifactCompilerOutput,
   type ArtifactFreshness,
+  type ArtifactInvalidationNotice,
   type ArtifactInvalidationOptions,
   type ArtifactInvalidationPlan,
   type ArtifactInvalidationReason,
   type ArtifactInvalidationRequest,
   type ArtifactMetadata,
+  type ArtifactProvenance,
+  type ArtifactProvenanceRegistry,
   type ArtifactRegistry,
-  type ArtifactSourceIdentity
+  type ArtifactSourceIdentity,
+  type CompiledArtifact
 } from "./lib/artifact.ts";
 export {
   buildContinuationCandidates,
@@ -62,7 +73,9 @@ export {
   getDurableRepositoryRoot,
   isStateFlowOwnedPath,
   loadScopeStream,
+  parseScopeProvenance,
   parseScopeStream,
+  serializeScopeProvenance,
   serializeScopeStream, sessionRuntimePaths, sessionScopeKey,
   sessionStorageKey, temporalScopePaths,
   temporalStateFileUpdates, type ScopeStreamSources, type TemporalScopePaths
@@ -88,6 +101,14 @@ export {
 } from "./lib/history.ts";
 export { applyPatch, canonicalJson, hashJson, isObject, validatePatch } from "./lib/json.ts";
 export type { JsonObject, JsonValue } from "./lib/json.ts";
+export {
+  appendStateFlowDiagnostic,
+  projectDiagnosticContent,
+  stateFlowLogPath,
+  type StateFlowDiagnosticBlock,
+  type StateFlowDiagnosticCategory,
+  type StateFlowDiagnosticRecord
+} from "./lib/logging.ts";
 export {
   DEFAULT_ARTIFACT_MAINTENANCE_MAX_READS,
   DEFAULT_ARTIFACT_MAINTENANCE_MAX_SOURCE_BYTES,
@@ -155,6 +176,7 @@ export {
   isMaterializedState,
   isStateDocument,
   overlayStates,
+  projectStateForModel,
   updateMaterializedArtifacts,
   type MaterializedState, type ScopedPatch,
   type ScopedStates, type ScopePatch, type SemanticTransition,

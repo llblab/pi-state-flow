@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,12 +7,15 @@ import { join, relative } from "node:path";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import { sessionRuntimePaths, temporalScopePaths, sessionPatchesPath } from "../lib/durable.ts";
 import { writeCwdState, writeGlobalState, writeSessionState } from "./legacy-fixture.ts";
-import { emptySnapshot, isFileRevision, parsePiCheckpoint, persistableSnapshot } from "../lib/snapshot.ts";
+import { createSessionRuntime, emptySnapshot, isFileRevision, parsePiCheckpoint, persistableSnapshot, type Snapshot } from "../lib/snapshot.ts";
 import { withStoragePublicationLock } from "../lib/storage.ts";
-import { emptyState } from "../lib/state.ts";
+import { captureTemporalGitBase, publishTemporalStateToGit } from "../lib/git.ts";
+import { emptyState, type StateScope } from "../lib/state.ts";
+import type { JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
+import { validateTemporalState } from "../lib/temporal.ts";
 import { commitScopedTransition, stageScopedPatch } from "../lib/transition.ts";
-import { commitTerminal, harness, start } from "./harness.ts";
+import { commitScopedTerminal, commitTerminal, harness, start } from "./harness.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 
 test("runtime keeps native session storage identity paired and detached from caller mutation", () => {
@@ -42,7 +45,7 @@ test("runtime can retain an accepted local commit as a queue target without push
 	assert.equal(runtime.read().response, "Queued locally");
 });
 
-test("pointer round-trips preserve source-owned config, counters, bootstrap and retry state across runtime revisions", () => {
+test("pointer round-trips preserve source-owned config, counters, and bootstrap state across runtime revisions", () => {
 	const h = harness();
 	const runtime = new TemporalRuntime(h.ctx.cwd, "roundtrip", h.repositoryRoot);
 	const snapshot = emptySnapshot(true);
@@ -50,11 +53,10 @@ test("pointer round-trips preserve source-owned config, counters, bootstrap and 
 	snapshot.meta.durableBase = initial.commit;
 	const retained = [];
 	for (const [index, step] of [0, 7, Number.MAX_SAFE_INTEGER].entries()) {
-		snapshot.config = { enabled: index !== 1, transitionWindow: index };
+		snapshot.config = { enabled: index !== 1 };
 		snapshot.meta.step = step;
 		snapshot.meta.specification = `Specification ${index}`;
 		snapshot.meta.bootstrap = index === 0;
-		snapshot.meta.validation = { attempt: index + 1, error: `Error ${index}`, instruction: `Retry ${index}` };
 		const result = runtime.publish(snapshot)!;
 		snapshot.meta.durableBase = result.commit;
 		const pointer = persistableSnapshot(snapshot);
@@ -86,9 +88,9 @@ test("live adapter writes only temporal pairs and runtime, and restores old bran
 	assert.equal(files.length, 8);
 	assert.equal(files.filter((name) => name.endsWith("checkpoint.json")).length, 3);
 	assert.equal(files.some((name) => name.endsWith("state.json")), false);
-	commitTerminal(h, {}, { branch: "old" }, "Old");
+	await commitTerminal(h, {}, { branch: "old" }, "Old");
 	const oldEntries = structuredClone(h.entries);
-	commitTerminal(h, {}, { branch: "new" }, "New");
+	await commitTerminal(h, {}, { branch: "new" }, "New");
 	const pair = temporalScopePaths(h.ctx.cwd, "harness-session", "session", h.repositoryRoot);
 	const before = readFileSync(pair.patches);
 	h.ctx.sessionManager.getBranch = () => oldEntries;
@@ -99,7 +101,7 @@ test("live adapter writes only temporal pairs and runtime, and restores old bran
 	const runtime = new TemporalRuntime(h.ctx.cwd, "harness-session", h.repositoryRoot);
 	assert.equal(runtime.restore(stopped.revision).config.enabled, false);
 	assert.equal(runtime.read().working.branch, "old");
-	assert.equal(runtime.read(1).working.branch, undefined);
+	assert.equal(runtime.read(1).working.branch, "old");
 	assert.throws(() => runtime.read(8), /0 to 7/);
 });
 
@@ -122,7 +124,7 @@ test("live initialization explicitly migrates a revision-linked predecessor sess
 test("failed restore installs no partial runtime and unavailable publication cannot accept transitions", async () => {
 	const h = harness();
 	await start(h);
-	commitTerminal(h, {}, { value: "old" }, "Old");
+	await commitTerminal(h, {}, { value: "old" }, "Old");
 	const revision = h.entries.at(-1).data.revision;
 	const runtime = new TemporalRuntime(h.ctx.cwd, "harness-session", h.repositoryRoot);
 	const lock = join(h.repositoryRoot, ".git", "state-flow-publication.lock");
@@ -143,10 +145,10 @@ for (const legacy of [false, true]) test(`start retries the selected ${legacy ? 
 	const h = harness();
 	const head = () => execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 	await start(h);
-	commitTerminal(h, {}, { value: "old" }, "Old");
+	await commitTerminal(h, {}, { value: "old" }, "Old");
 	const selectedBranch = structuredClone(h.entries);
 	if (legacy) selectedBranch.at(-1).data = h.resolveSnapshot(selectedBranch.at(-1).data);
-	commitTerminal(h, {}, { value: "unselected future" }, "Future");
+	await commitTerminal(h, {}, { value: "unselected future" }, "Future");
 	h.ctx.sessionManager.getBranch = () => selectedBranch;
 	const before = head();
 	const lock = join(h.repositoryRoot, ".git", "state-flow-publication.lock");
@@ -167,11 +169,12 @@ for (const legacy of [false, true]) test(`start retries the selected ${legacy ? 
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	assert.equal(h.readState().working.value, "old");
 	const resumedHead = head();
-	commitTerminal(h, {}, { value: "new" }, "New");
+	await commitTerminal(h, {}, { value: "new" }, "New");
 	assert.notEqual(head(), resumedHead);
 	assert.equal(h.readState().working.value, "new");
-	assert.equal(h.readState(1).working.value, "old");
-	assert.equal(h.resolveSnapshot().meta.step, 2);
+	assert.equal(h.readState(1).working.value, "new");
+	assert.equal(h.readState(2).working.value, "old");
+	assert.equal(h.resolveSnapshot().meta.step, 4);
 	assert.match(h.entries.at(-1).data.revision, /^[a-f0-9]{40}$/);
 });
 
@@ -209,7 +212,7 @@ test("stopping an ordinary disabled session is harmless and does not initialize 
 test("stop retries a failed branch restoration and remains disabled after resume without losing state", async () => {
 	const h = harness();
 	await start(h);
-	commitTerminal(h, {}, { keep: "selected" }, "Selected");
+	await commitTerminal(h, {}, { keep: "selected" }, "Selected");
 	const lock = join(h.repositoryRoot, ".git", "state-flow-publication.lock");
 	writeFileSync(lock, "fixture\n");
 	try {
@@ -223,14 +226,14 @@ test("stop retries a failed branch restoration and remains disabled after resume
 	await h.commands.get("state-flow-stop").handler("", h.ctx);
 	const checkpoint = h.entries.at(-1);
 	assert.equal(h.resolveSnapshot(checkpoint.data).config.enabled, false);
-	assert.equal(h.resolveSnapshot(checkpoint.data).meta.step, 1);
+	assert.equal(h.resolveSnapshot(checkpoint.data).meta.step, 2);
 	assert.equal(h.readState().working.keep, "selected");
 	const resumed = harness({ repositoryRoot: h.repositoryRoot, cwd: h.ctx.cwd });
 	resumed.entries.push(checkpoint);
 	resumed.handlers.get("session_start")!({ reason: "resume" }, resumed.ctx);
 	assert.equal(resumed.activeTools.includes("patch_state"), false);
 	assert.equal(resumed.readState().working.keep, "selected");
-	assert.equal(resumed.readState(1).working.keep, undefined);
+	assert.equal(resumed.readState(1).working.keep, "selected");
 });
 
 test("explicit start on a pre-runtime branch creates an empty session origin without losing later cold history", async () => {
@@ -240,7 +243,7 @@ test("explicit start on a pre-runtime branch creates an empty session origin wit
 		if (marker) await h.commands.get("state-flow-stop").handler("", h.ctx);
 		const early = structuredClone(h.entries);
 		await start(h);
-		commitTerminal(h, {}, { later: "private" }, "Later");
+		await commitTerminal(h, {}, { later: "private" }, "Later");
 		const laterRevision = h.entries.at(-1).data.revision;
 		h.entries.splice(0, h.entries.length, ...early);
 		h.handlers.get("session_tree")!({}, h.ctx);
@@ -259,7 +262,7 @@ test("explicit start on a pre-runtime branch creates an empty session origin wit
 test("stop cannot turn invalid-only recovery into permission to replace an existing session runtime", async () => {
 	const owner = harness();
 	await start(owner);
-	commitTerminal(owner, {}, { later: "private" }, "Later");
+	await commitTerminal(owner, {}, { later: "private" }, "Later");
 	const revision = owner.entries.at(-1).data.revision;
 	const head = () => execFileSync("git", ["-C", owner.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 	const before = head();
@@ -404,7 +407,7 @@ test("file runtime starts without Git, retains locked pointers, resumes stopped 
 	await start(h, "File lifecycle");
 	assert.equal(h.resolveSnapshot().config.enabled, true);
 	assert.equal(existsSync(join(root, ".git")), false);
-	commitTerminal(h, {}, { file: "first" }, "File answer");
+	await commitTerminal(h, {}, { file: "first" }, "File answer");
 	const first = structuredClone(h.entries);
 	const pointer = h.entries.at(-1).data;
 	assert.deepEqual(Object.keys(pointer), ["revision"]);
@@ -414,7 +417,7 @@ test("file runtime starts without Git, retains locked pointers, resumes stopped 
 	assert.equal(h.readState().working.file, "first");
 	assert.equal(h.readState(1).response, "");
 	const step = h.resolveSnapshot().meta.step;
-	commitTerminal(h, {}, { file: "first" }, "File answer");
+	await commitScopedTerminal(h, [], "File answer");
 	assert.equal(h.resolveSnapshot().meta.step, step);
 	withStoragePublicationLock(root, () => {
 		h.handlers.get("session_tree")!({}, h.ctx);
@@ -424,7 +427,7 @@ test("file runtime starts without Git, retains locked pointers, resumes stopped 
 	await h.commands.get("state-flow-start").handler("", h.ctx);
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	assert.equal(h.readState().working.file, "first");
-	commitTerminal(h, {}, { file: "second" }, "Second answer");
+	await commitTerminal(h, {}, { file: "second" }, "Second answer");
 	const semanticFiles = (["global", "cwd", "session"] as const).flatMap((scope) => {
 		const pair = temporalScopePaths(h.ctx.cwd, "harness-session", scope, root);
 		return [pair.checkpoint, pair.patches];
@@ -433,7 +436,7 @@ test("file runtime starts without Git, retains locked pointers, resumes stopped 
 	await h.commands.get("state-flow-stop").handler("", h.ctx);
 	const stopped = h.resolveSnapshot();
 	assert.equal(stopped.config.enabled, false);
-	assert.equal(stopped.meta.step, step + 1);
+	assert.equal(stopped.meta.step, step + 2);
 	assert.deepEqual(semanticFiles.map((file) => readFileSync(file)), before);
 	const resumed = harness(options);
 	resumed.entries.push(...structuredClone(h.entries));
@@ -453,4 +456,305 @@ test("file runtime starts without Git, retains locked pointers, resumes stopped 
 	assert.deepEqual(semanticFiles.map((file) => readFileSync(file)), before);
 	for (const revision of ["file:" + "A".repeat(64), "file:" + "a".repeat(63)]) assert.throws(() => parsePiCheckpoint({ revision }));
 	assert.throws(() => parsePiCheckpoint({ ...pointer, enabled: true }));
+});
+
+// --- Shared-scope drift reconciliation ---
+
+const driftIdentityKeys = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] as const;
+
+/** A git-backed session A with one retained session layer; older revisions stay readable. */
+function driftFixture(t: TestContext) {
+	const parent = mkdtempSync(join(tmpdir(), "state-flow-shared-drift-"));
+	t.after(() => rmSync(parent, { recursive: true, force: true }));
+	const previous = Object.fromEntries(driftIdentityKeys.map((key) => [key, process.env[key]]));
+	process.env.GIT_AUTHOR_NAME = "State Flow Tests";
+	process.env.GIT_AUTHOR_EMAIL = "state-flow@example.invalid";
+	process.env.GIT_COMMITTER_NAME = "State Flow Tests";
+	process.env.GIT_COMMITTER_EMAIL = "state-flow@example.invalid";
+	t.after(() => {
+		for (const key of driftIdentityKeys) {
+			const value = previous[key];
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	});
+	const root = join(parent, "store");
+	const cwd = join(parent, "project");
+	const runtime = new TemporalRuntime(cwd, "session-a", root);
+	runtime.prepare();
+	const snapshot = emptySnapshot(true);
+	runtime.initialize(snapshot, true);
+	const initial = runtime.states();
+	const seeded = structuredClone(initial);
+	seeded.session.working.sessionA = "retained";
+	snapshot.meta.step = 1;
+	const publication = runtime.publish(snapshot, true, createAcceptedTransition(initial, seeded, "a-seed"))!;
+	return { parent, root, cwd, revision: publication.commit! };
+}
+
+/** A separate session inherits shared scopes, then advances one of them. */
+function advanceShared(fixture: ReturnType<typeof driftFixture>, scope: "global" | "cwd", label: string): string {
+	const runtime = new TemporalRuntime(fixture.cwd, `session-b-${label}`, fixture.root);
+	runtime.prepare();
+	runtime.initialize(emptySnapshot(true), true);
+	const snapshot = emptySnapshot(true);
+	const publication = publishScopedPatch(runtime, snapshot, scope, { [scope === "global" ? "globalAdvanced" : "cwdAdvanced"]: label }, `advance-${label}`)!;
+	return publication.commit!;
+}
+
+function restoreSessionA(fixture: ReturnType<typeof driftFixture>): { runtime: TemporalRuntime; snapshot: Snapshot } {
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	return { runtime, snapshot: runtime.restore(fixture.revision) };
+}
+
+function seedGlobalArtifact(fixture: ReturnType<typeof driftFixture>) {
+	const selected = restoreSessionA(fixture);
+	const before = selected.runtime.states();
+	const after = structuredClone(before);
+	const path = "/sources/shared.md";
+	after.global.artifacts[path] = { description: "Shared routing" };
+	selected.snapshot.meta.step += 1;
+	const publication = selected.runtime.publish(
+		selected.snapshot,
+		true,
+		createAcceptedTransition(before, after, "artifact-seed"),
+		{ provenance: { global: { [path]: { sourceHash: `sha256:${"a".repeat(64)}`, compilerRevision: "artifact-v1" } } } },
+	)!;
+	return { path, revision: publication.commit!, snapshot: selected.snapshot };
+}
+
+function publishScopedPatch(
+	runtime: TemporalRuntime,
+	snapshot: Snapshot,
+	scope: StateScope,
+	working: JsonObject,
+	id: string,
+) {
+	const before = runtime.states();
+	const after = structuredClone(before);
+	after[scope].working = { ...after[scope].working, ...structuredClone(working) };
+	snapshot.meta.step += 1;
+	return runtime.publish(snapshot, true, createAcceptedTransition(before, after, id));
+}
+
+function sharedBytes(root: string, cwd: string, scope: "global" | "cwd"): Buffer[] {
+	const paths = temporalScopePaths(cwd, "session-a", scope, root);
+	return [readFileSync(paths.checkpoint), readFileSync(paths.patches)];
+}
+
+test("a session patch adopts an advanced live global scope without rewinding shared history", (t) => {
+	const fixture = driftFixture(t);
+	const liveHead = advanceShared(fixture, "global", "one");
+	const restored = restoreSessionA(fixture);
+	const bytes = sharedBytes(fixture.root, fixture.cwd, "global");
+	const publication = publishScopedPatch(restored.runtime, restored.snapshot, "session", { sessionPatch: "applied" }, "a-global-drift")!;
+	assert.ok(publication.commit);
+	validateTemporalState(restored.runtime.view!);
+	const view = restored.runtime.view!;
+	assert.equal(view.lineage.length, 2);
+	assert.equal(view.lineage[0]!.parent, null);
+	assert.equal(view.lineage[1]!.parent, view.lineage[0]!.id);
+	assert.equal(restored.runtime.read().working.globalAdvanced, "one");
+	assert.equal(restored.runtime.read().working.sessionA, "retained");
+	assert.equal(restored.runtime.read().working.sessionPatch, "applied");
+	assert.deepEqual(restored.runtime.read(0, "global"), restored.runtime.read(1, "global"));
+	assert.deepEqual(restored.runtime.read(0, "cwd"), restored.runtime.read(1, "cwd"));
+	assert.equal(restored.runtime.read(1, "session").working.sessionPatch, undefined);
+	assert.deepEqual(restored.runtime.recent().map(({ id }) => id), ["a-global-drift"]);
+	assert.throws(() => restored.runtime.read(2), /origin/);
+	assert.deepEqual(sharedBytes(fixture.root, fixture.cwd, "global"), bytes);
+	for (const revision of [fixture.revision, liveHead]) {
+		assert.doesNotThrow(() => execFileSync("git", ["-C", fixture.root, "cat-file", "-e", revision], { stdio: "ignore" }));
+	}
+});
+
+test("a session patch adopts an advanced live CWD scope", (t) => {
+	const fixture = driftFixture(t);
+	advanceShared(fixture, "cwd", "one");
+	const restored = restoreSessionA(fixture);
+	const bytes = sharedBytes(fixture.root, fixture.cwd, "cwd");
+	const publication = publishScopedPatch(restored.runtime, restored.snapshot, "session", { sessionPatch: "applied" }, "a-cwd-drift")!;
+	assert.ok(publication.commit);
+	assert.equal(restored.runtime.read().working.cwdAdvanced, "one");
+	assert.equal(restored.runtime.read().working.sessionA, "retained");
+	assert.equal(restored.runtime.read().working.sessionPatch, "applied");
+	assert.deepEqual(sharedBytes(fixture.root, fixture.cwd, "cwd"), bytes);
+});
+
+test("a session patch adopts both advanced shared scopes at one proven origin", (t) => {
+	const fixture = driftFixture(t);
+	advanceShared(fixture, "global", "one");
+	advanceShared(fixture, "cwd", "two");
+	const restored = restoreSessionA(fixture);
+	const publication = publishScopedPatch(restored.runtime, restored.snapshot, "session", { sessionPatch: "applied" }, "a-both-drift")!;
+	assert.ok(publication.commit);
+	validateTemporalState(restored.runtime.view!);
+	assert.equal(restored.runtime.read().working.globalAdvanced, "one");
+	assert.equal(restored.runtime.read().working.cwdAdvanced, "two");
+	assert.equal(restored.runtime.read().working.sessionPatch, "applied");
+	assert.deepEqual(restored.runtime.recent().map(({ id }) => id), ["a-both-drift"]);
+});
+
+test("file-backed publication reconciles an untouched shared scope advanced by another session", (t) => {
+	const parent = mkdtempSync(join(tmpdir(), "state-flow-file-drift-"));
+	t.after(() => rmSync(parent, { recursive: true, force: true }));
+	const root = join(parent, "store");
+	const cwd = join(parent, "project");
+	const path = process.env.PATH;
+	process.env.PATH = parent;
+	t.after(() => { process.env.PATH = path; });
+	const a = new TemporalRuntime(cwd, "session-a", root);
+	a.prepare();
+	const snapshot = emptySnapshot(true);
+	a.initialize(snapshot, true);
+	publishScopedPatch(a, snapshot, "session", { sessionA: "retained" }, "a-file-seed");
+	const b = new TemporalRuntime(cwd, "session-b", root);
+	b.prepare();
+	b.initialize(emptySnapshot(true), true);
+	publishScopedPatch(b, emptySnapshot(true), "global", { globalAdvanced: "file" }, "b-file-advance");
+	const publication = publishScopedPatch(a, snapshot, "session", { sessionPatch: "applied" }, "a-file-drift")!;
+	assert.ok(publication.revision);
+	validateTemporalState(a.view!);
+	assert.equal(a.read().working.globalAdvanced, "file");
+	assert.equal(a.read().working.sessionA, "retained");
+	assert.equal(a.read().working.sessionPatch, "applied");
+});
+
+test("a CWD patch adopts an advanced global scope while requiring its own basis", (t) => {
+	const fixture = driftFixture(t);
+	advanceShared(fixture, "global", "one");
+	const restored = restoreSessionA(fixture);
+	const publication = publishScopedPatch(restored.runtime, restored.snapshot, "cwd", { cwdPatch: "applied" }, "a-cwd-patch")!;
+	assert.ok(publication.commit);
+	validateTemporalState(restored.runtime.view!);
+	assert.equal(restored.runtime.read().working.globalAdvanced, "one");
+	assert.equal(restored.runtime.read().working.cwdPatch, "applied");
+	assert.equal(restored.runtime.read().working.sessionA, "retained");
+});
+
+test("a CWD patch fails precisely when the live CWD state advanced", (t) => {
+	const fixture = driftFixture(t);
+	const liveHead = advanceShared(fixture, "cwd", "one");
+	const restored = restoreSessionA(fixture);
+	const before = restored.runtime.states();
+	const after = structuredClone(before);
+	after.cwd.working.cwdPatch = "rejected";
+	restored.snapshot.meta.step += 1;
+	assert.throws(
+		() => restored.runtime.publish(restored.snapshot, true, createAcceptedTransition(before, after, "a-cwd-conflict")),
+		/cannot publish the CWD patch because the live CWD state advanced after this transition's selected basis/,
+	);
+	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), liveHead);
+});
+
+test("a global patch adopts an advanced CWD scope while requiring its own basis", (t) => {
+	const fixture = driftFixture(t);
+	advanceShared(fixture, "cwd", "one");
+	const restored = restoreSessionA(fixture);
+	const publication = publishScopedPatch(restored.runtime, restored.snapshot, "global", { globalPatch: "applied" }, "a-global-patch")!;
+	assert.ok(publication.commit);
+	validateTemporalState(restored.runtime.view!);
+	assert.equal(restored.runtime.read().working.cwdAdvanced, "one");
+	assert.equal(restored.runtime.read().working.globalPatch, "applied");
+	assert.equal(restored.runtime.read().working.sessionA, "retained");
+});
+
+test("a global patch fails precisely when the live global state advanced", (t) => {
+	const fixture = driftFixture(t);
+	const liveHead = advanceShared(fixture, "global", "one");
+	const restored = restoreSessionA(fixture);
+	const before = restored.runtime.states();
+	const after = structuredClone(before);
+	after.global.working.globalPatch = "rejected";
+	restored.snapshot.meta.step += 1;
+	assert.throws(
+		() => restored.runtime.publish(restored.snapshot, true, createAcceptedTransition(before, after, "a-global-conflict")),
+		/cannot publish the global patch because the live global state advanced after this transition's selected basis/,
+	);
+	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), liveHead);
+});
+
+test("a provenance-only write adopts drift in an untouched shared scope", (t) => {
+	const fixture = driftFixture(t);
+	const seeded = seedGlobalArtifact(fixture);
+	advanceShared(fixture, "cwd", "provenance-untouched");
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = runtime.restore(seeded.revision);
+	const publication = runtime.publish(snapshot, false, undefined, { provenance: { global: {
+		[seeded.path]: { sourceHash: `sha256:${"b".repeat(64)}`, compilerRevision: "artifact-v1" },
+	} } })!;
+	assert.ok(publication.commit);
+	assert.equal(runtime.read().working.cwdAdvanced, "provenance-untouched");
+	assert.equal(runtime.artifactProvenance("global")[seeded.path]!.sourceHash, `sha256:${"b".repeat(64)}`);
+});
+
+test("a provenance-only write fails when its shared target advanced", (t) => {
+	const fixture = driftFixture(t);
+	const seeded = seedGlobalArtifact(fixture);
+	advanceShared(fixture, "global", "provenance-target");
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = runtime.restore(seeded.revision);
+	assert.throws(
+		() => runtime.publish(snapshot, false, undefined, { provenance: { global: {
+			[seeded.path]: { sourceHash: `sha256:${"b".repeat(64)}`, compilerRevision: "artifact-v1" },
+		} } }),
+		/cannot publish the global patch because the live global state advanced/,
+	);
+});
+
+test("a multi-scope transition names every shared target that advanced", (t) => {
+	const fixture = driftFixture(t);
+	advanceShared(fixture, "global", "one");
+	advanceShared(fixture, "cwd", "two");
+	const restored = restoreSessionA(fixture);
+	const before = restored.runtime.states();
+	const after = structuredClone(before);
+	after.global.working.globalPatch = "rejected";
+	after.cwd.working.cwdPatch = "rejected";
+	restored.snapshot.meta.step += 1;
+	assert.throws(
+		() => restored.runtime.publish(restored.snapshot, true, createAcceptedTransition(before, after, "a-both-conflict")),
+		/cannot publish the global and CWD patches because the live global and CWD states advanced/,
+	);
+});
+
+test("a multi-scope transition adopts an untouched shared scope and still writes its targets", (t) => {
+	const fixture = driftFixture(t);
+	advanceShared(fixture, "global", "one");
+	const restored = restoreSessionA(fixture);
+	const before = restored.runtime.states();
+	const after = structuredClone(before);
+	after.cwd.working.cwdPatch = "applied";
+	after.session.working.sessionPatch = "applied";
+	restored.snapshot.meta.step += 1;
+	const publication = restored.runtime.publish(restored.snapshot, true, createAcceptedTransition(before, after, "a-multi"))!;
+	assert.ok(publication.commit);
+	validateTemporalState(restored.runtime.view!);
+	assert.equal(restored.runtime.read().working.globalAdvanced, "one");
+	assert.equal(restored.runtime.read().working.cwdPatch, "applied");
+	assert.equal(restored.runtime.read().working.sessionPatch, "applied");
+});
+
+test("publication CAS still rejects a target advance after a reconciliation capture", (t) => {
+	const fixture = driftFixture(t);
+	advanceShared(fixture, "global", "one");
+	const restored = restoreSessionA(fixture);
+	const first = publishScopedPatch(restored.runtime, restored.snapshot, "session", { sessionPatch: "first" }, "a-first")!;
+	assert.ok(first.commit);
+	const stale = captureTemporalGitBase(fixture.cwd, "session-a", fixture.root);
+	advanceShared(fixture, "cwd", "second");
+	restored.snapshot.meta.step += 1;
+	assert.throws(
+		() => publishTemporalStateToGit(
+			fixture.cwd,
+			"session-a",
+			restored.runtime.view!,
+			["session"],
+			stale,
+			fixture.root,
+			createSessionRuntime(restored.snapshot, fixture.cwd, "session-a", restored.runtime.view!.lineage),
+			"session-a",
+		),
+		/changed concurrently/,
+	);
 });

@@ -1,20 +1,40 @@
 import { createHash } from "node:crypto";
-import { containsNull, isJsonValue, isObject, type JsonObject } from "./json.ts";
+import { containsNull, isJsonValue, isObject, type JsonObject, type JsonValue } from "./json.ts";
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const MODEL_FORBIDDEN_PROVENANCE_FIELDS = ["hash", "compiler", "sourceHash", "compilerRevision", "compiledAt", "source_hash_verified"] as const;
 
 /** Current compiler protocol for ordinary source artifacts such as Knowledge Markdown. */
 export const ORDINARY_ARTIFACT_COMPILER = "artifact-v1";
 
-/** Source-addressed metadata retained after artifact compilation. */
+/** Freshness fields that runtime-owned scope metadata may retain per artifact path. */
+export interface ArtifactProvenance {
+	/** Retained value; absent means unavailable, malformed means fail closed. */
+	sourceHash?: unknown;
+	compilerRevision?: unknown;
+	compiledAt?: unknown;
+	/** Internal marker for an uninterpretable retained entry; every dependent capability fails closed. */
+	malformed?: true;
+}
+
+export type ArtifactProvenanceRegistry = Record<string, ArtifactProvenance>;
+
+/**
+ * Model-visible artifact metadata retained per canonical source path.
+ *
+ * `hash`, `compiler`, and `compiled_at` remain accepted only as retired embedded
+ * provenance input from pre-0.7 state; they are consumed as compatibility evidence
+ * and stripped from model projection. New compilations keep semantic fields here and
+ * runtime-owned freshness in the scope `meta.json` provenance registry.
+ */
 export type ArtifactMetadata = JsonObject & {
 	description: string;
-	hash: string;
-	compiler: string;
-	compiled_at?: string;
 	compilation?: JsonObject;
 	kind?: string;
 	tags?: string[];
+	hash?: string;
+	compiler?: string;
+	compiled_at?: string;
 };
 
 /** Artifact source paths are the canonical registry keys. */
@@ -38,6 +58,12 @@ export type ArtifactFreshness =
 	| { kind: "requires-compilation"; reason: ArtifactInvalidationReason };
 
 export interface ArtifactInvalidationRequest extends ArtifactSourceIdentity {
+	reason: ArtifactInvalidationReason;
+}
+
+/** Model-visible invalidation projection: paths and reasons only, never source identity. */
+export interface ArtifactInvalidationNotice {
+	path: string;
 	reason: ArtifactInvalidationReason;
 }
 
@@ -67,6 +93,12 @@ export interface ArtifactCompilationUpdate {
 	output: ArtifactCompilerOutput;
 }
 
+/** One compilation split into its model-visible and runtime-owned halves. */
+export interface CompiledArtifact {
+	semantic: ArtifactMetadata;
+	provenance: ArtifactProvenance;
+}
+
 export function hashArtifactSource(source: string | Uint8Array): string {
 	return `sha256:${createHash("sha256").update(source).digest("hex")}`;
 }
@@ -83,15 +115,6 @@ export function validateArtifactMetadata(value: unknown, path = "<unknown>"): as
 	if (typeof value.description !== "string" || value.description.trim().length === 0) {
 		throw new Error(`Artifact metadata at ${path} must have a non-empty description`);
 	}
-	if (!isArtifactHash(value.hash)) {
-		throw new Error(`Artifact metadata at ${path} must have a sha256:<64 lowercase hex characters> hash`);
-	}
-	if (typeof value.compiler !== "string" || value.compiler.trim().length === 0) {
-		throw new Error(`Artifact metadata at ${path} must have a non-empty compiler revision`);
-	}
-	if (Object.hasOwn(value, "compiled_at") && typeof value.compiled_at !== "string") {
-		throw new Error(`Artifact metadata at ${path} compiled_at must be a string`);
-	}
 	if (Object.hasOwn(value, "compilation") && !isObject(value.compilation)) {
 		throw new Error(`Artifact metadata at ${path} compilation must be an object`);
 	}
@@ -103,6 +126,15 @@ export function validateArtifactMetadata(value: unknown, path = "<unknown>"): as
 		|| value.tags.some((tag) => typeof tag !== "string" || tag.trim().length === 0 || tag !== tag.trim())
 		|| new Set(value.tags).size !== value.tags.length)) {
 		throw new Error(`Artifact metadata at ${path} tags must be unique non-empty trimmed strings`);
+	}
+	if (Object.hasOwn(value, "hash") && !isArtifactHash(value.hash)) {
+		throw new Error(`Artifact metadata at ${path} must have a sha256:<64 lowercase hex characters> hash`);
+	}
+	if (Object.hasOwn(value, "compiler") && (typeof value.compiler !== "string" || value.compiler.trim().length === 0)) {
+		throw new Error(`Artifact metadata at ${path} must have a non-empty compiler revision`);
+	}
+	if (Object.hasOwn(value, "compiled_at") && typeof value.compiled_at !== "string") {
+		throw new Error(`Artifact metadata at ${path} compiled_at must be a string`);
 	}
 }
 
@@ -176,29 +208,102 @@ function refreshRequested(path: string, explicitRefresh: boolean | ReadonlySet<s
 	return explicitRefresh.has(path);
 }
 
-/** Classify freshness from source identity and metadata without acquiring the source body. */
+function isProvenanceEntry(value: unknown): value is ArtifactProvenance {
+	return isObject(value) && (value.malformed === undefined || value.malformed === true);
+}
+
+/** Parse one scope `meta.json` provenance registry; missing input means no recorded evidence. */
+export function parseArtifactProvenanceRegistry(value: unknown, context = "Artifact provenance"): ArtifactProvenanceRegistry {
+	if (value === undefined) return {};
+	if (!isObject(value)) throw new Error(`${context} must be a path-keyed JSON object`);
+	const registry: ArtifactProvenanceRegistry = {};
+	for (const [path, entry] of Object.entries(value)) {
+		if (path.trim().length === 0) throw new Error(`${context} path keys must be non-empty`);
+		if (!isObject(entry) || !isJsonValue(entry)) {
+			registry[path] = { malformed: true };
+			continue;
+		}
+		const known = new Set(["sourceHash", "compilerRevision", "compiledAt"]);
+		if (Object.keys(entry).some((key) => !known.has(key))) {
+			registry[path] = { malformed: true };
+			continue;
+		}
+		registry[path] = {
+			...(Object.hasOwn(entry, "sourceHash") ? { sourceHash: entry.sourceHash } : {}),
+			...(Object.hasOwn(entry, "compilerRevision") ? { compilerRevision: entry.compilerRevision } : {}),
+			...(Object.hasOwn(entry, "compiledAt") ? { compiledAt: entry.compiledAt } : {}),
+		};
+	}
+	return registry;
+}
+
+/** Canonical retained form; uninterpretable entries cannot round-trip and are omitted. */
+export function serializeArtifactProvenanceRegistry(registry: Readonly<ArtifactProvenanceRegistry>): JsonObject {
+	const artifacts: JsonObject = {};
+	for (const [path, entry] of Object.entries(registry)) {
+		if (entry.malformed === true) continue;
+		const fields: JsonObject = {};
+		if (entry.sourceHash !== undefined) fields.sourceHash = entry.sourceHash as JsonValue;
+		if (entry.compilerRevision !== undefined) fields.compilerRevision = entry.compilerRevision as JsonValue;
+		if (entry.compiledAt !== undefined) fields.compiledAt = entry.compiledAt as JsonValue;
+		if (Object.keys(fields).length === 0) continue;
+		artifacts[path] = fields;
+	}
+	return artifacts;
+}
+
+function invalidField(value: unknown, validate: (candidate: unknown) => boolean): boolean {
+	return value !== undefined && !validate(value);
+}
+
+const INVALID_EVIDENCE = Symbol("invalid-evidence");
+
+/** Later authority wins per field; absent runtime evidence falls back to retired embedded values. */
+function fieldEvidence(entry: ArtifactProvenance | undefined, field: "sourceHash" | "compilerRevision" | "compiledAt", legacy: unknown): unknown {
+	if (entry?.malformed === true) return INVALID_EVIDENCE;
+	if (entry !== undefined && Object.hasOwn(entry, field)) return entry[field];
+	return legacy;
+}
+
+/** Classify freshness from semantic state and runtime provenance without acquiring the source body. */
 export function classifyArtifactFreshness(
 	source: ArtifactSourceIdentity,
 	metadata: unknown,
 	compiler: string,
 	explicitRefresh = false,
+	provenance?: unknown,
 ): ArtifactFreshness {
 	validateSourceIdentity(source);
 	validateCompilerRevision(compiler);
 	if (metadata === undefined) return { kind: "requires-compilation", reason: "new" };
 	if (!isArtifactMetadata(metadata)) return { kind: "requires-compilation", reason: "invalid-metadata" };
-	if (metadata.hash !== source.hash) return { kind: "requires-compilation", reason: "source-changed" };
-	if (metadata.compiler !== compiler) return { kind: "requires-compilation", reason: "compiler-changed" };
+	const entry = isProvenanceEntry(provenance) ? provenance : undefined;
+	const runtime = entry?.malformed === true;
+	const sourceHash = runtime ? INVALID_EVIDENCE : fieldEvidence(entry, "sourceHash", metadata.hash);
+	if (sourceHash === INVALID_EVIDENCE || invalidField(sourceHash, (value) => isArtifactHash(value))) {
+		return { kind: "requires-compilation", reason: "invalid-metadata" };
+	}
+	if (typeof sourceHash === "string" && sourceHash !== source.hash) {
+		return { kind: "requires-compilation", reason: "source-changed" };
+	}
+	const compilerRevision = runtime ? INVALID_EVIDENCE : fieldEvidence(entry, "compilerRevision", metadata.compiler);
+	if (compilerRevision === INVALID_EVIDENCE || invalidField(compilerRevision, (value) => typeof value === "string" && value.trim().length > 0)) {
+		return { kind: "requires-compilation", reason: "invalid-metadata" };
+	}
+	if (typeof compilerRevision === "string" && compilerRevision !== compiler) {
+		return { kind: "requires-compilation", reason: "compiler-changed" };
+	}
 	if (explicitRefresh) return { kind: "requires-compilation", reason: "explicit-refresh" };
 	return { kind: "fresh" };
 }
 
-/** Produce a deterministic acquisition plan from path/hash candidates alone. */
+/** Produce a deterministic acquisition plan from path/hash candidates and retained evidence. */
 export function planArtifactInvalidation(
 	sources: readonly ArtifactSourceIdentity[],
 	registry: Readonly<Record<string, unknown>>,
 	compiler: string,
 	options: ArtifactInvalidationOptions = {},
+	provenance: Readonly<ArtifactProvenanceRegistry> = {},
 ): ArtifactInvalidationPlan {
 	if (!isObject(registry)) throw new Error("Artifacts must be a path-keyed JSON object");
 	validateCompilerRevision(compiler);
@@ -210,11 +315,13 @@ export function planArtifactInvalidation(
 		if (seen.has(source.path)) throw new Error(`Duplicate artifact source path: ${source.path}`);
 		seen.add(source.path);
 		const metadata = Object.hasOwn(registry, source.path) ? registry[source.path] : undefined;
+		const entry = Object.hasOwn(provenance, source.path) ? provenance[source.path] : undefined;
 		const freshness = classifyArtifactFreshness(
 			source,
 			metadata,
 			compiler,
 			refreshRequested(source.path, options.explicitRefresh),
+			entry,
 		);
 		const identity = { path: source.path, hash: source.hash };
 		if (freshness.kind === "fresh") fresh.push(identity);
@@ -224,22 +331,52 @@ export function planArtifactInvalidation(
 	return { fresh, requiresCompilation, removed };
 }
 
-function compilationMetadata(update: ArtifactCompilationUpdate): ArtifactMetadata {
+/** Split one compiler output into model-visible semantics and runtime-owned provenance. */
+export function compileArtifact(update: ArtifactCompilationUpdate): CompiledArtifact {
 	validateSourceIdentity(update.source);
 	validateCompilerRevision(update.compiler, update.source.path);
-	if (!isObject(update.output) || Object.hasOwn(update.output, "hash") || Object.hasOwn(update.output, "compiler")) {
-		throw new Error(`Artifact compiler output at ${update.source.path} cannot set runtime-owned hash or compiler fields`);
+	if (!isObject(update.output) || MODEL_FORBIDDEN_PROVENANCE_FIELDS.some((field) => Object.hasOwn(update.output, field))) {
+		throw new Error(`Artifact compiler output at ${update.source.path} cannot set runtime-owned provenance fields`);
 	}
-	const metadata = {
-		...structuredClone(update.output),
-		hash: update.source.hash,
-		compiler: update.compiler,
+	// Timestamps are runtime evidence; the model-visible entry never retains them.
+	const semantic = structuredClone(update.output) as ArtifactMetadata;
+	delete semantic.compiled_at;
+	validateArtifactMetadata(semantic, update.source.path);
+	return {
+		semantic,
+		provenance: {
+			sourceHash: update.source.hash,
+			compilerRevision: update.compiler,
+			...(typeof update.output.compiled_at === "string" ? { compiledAt: update.output.compiled_at } : {}),
+		},
 	};
-	validateArtifactMetadata(metadata, update.source.path);
-	return metadata;
 }
 
-/** Validate and apply a whole compilation/removal cohort without mutating the prior registry. */
+/** Merge one compilation/removal cohort into the runtime-owned provenance registry. */
+export function updateArtifactProvenance(
+	registry: Readonly<ArtifactProvenanceRegistry>,
+	updates: readonly ArtifactCompilationUpdate[],
+	removed: readonly string[] = [],
+): ArtifactProvenanceRegistry {
+	const next = structuredClone(registry) as ArtifactProvenanceRegistry;
+	for (const update of updates) next[update.source.path] = compileArtifact(update).provenance;
+	for (const path of removed) delete next[path];
+	return next;
+}
+
+/** Keep only provenance whose artifact path still exists in the given semantic registry. */
+export function pruneArtifactProvenance(
+	registry: Readonly<ArtifactProvenanceRegistry>,
+	semantic: Readonly<Record<string, unknown>>,
+): ArtifactProvenanceRegistry {
+	const next: ArtifactProvenanceRegistry = {};
+	for (const [path, entry] of Object.entries(registry)) {
+		if (Object.hasOwn(semantic, path)) next[path] = structuredClone(entry);
+	}
+	return next;
+}
+
+/** Validate and apply a whole compilation/removal cohort of model-visible artifacts. */
 export function updateArtifactRegistry(
 	registry: ArtifactRegistry,
 	updates: readonly ArtifactCompilationUpdate[],
@@ -249,7 +386,7 @@ export function updateArtifactRegistry(
 	const compiled = new Map<string, ArtifactMetadata>();
 	for (const update of updates) {
 		if (compiled.has(update.source.path)) throw new Error(`Duplicate artifact compilation: ${update.source.path}`);
-		compiled.set(update.source.path, compilationMetadata(update));
+		compiled.set(update.source.path, compileArtifact(update).semantic);
 	}
 	const removals = new Set<string>();
 	for (const path of removed) {
@@ -270,4 +407,29 @@ export function updateArtifactRegistry(
 		});
 	}
 	return next;
+}
+
+/** Runtime-owned artifact fields that never belong in ordinary model context. */
+const RUNTIME_ARTIFACT_FIELDS = [...MODEL_FORBIDDEN_PROVENANCE_FIELDS, "compiled_at"] as const;
+
+/** Strip retained runtime bookkeeping from one model-visible artifact entry. */
+export function projectArtifactForModel(entry: unknown): unknown {
+	if (!isObject(entry)) return entry;
+	const projected = structuredClone(entry);
+	for (const field of RUNTIME_ARTIFACT_FIELDS) delete projected[field];
+	return projected;
+}
+
+/** Strip retained runtime bookkeeping from a model-visible artifact registry. */
+export function projectArtifactsForModel(registry: Readonly<ArtifactRegistry>): ArtifactRegistry {
+	const projected: ArtifactRegistry = {};
+	for (const [path, entry] of Object.entries(registry)) {
+		Object.defineProperty(projected, path, {
+			value: projectArtifactForModel(entry),
+			enumerable: true,
+			configurable: true,
+			writable: true,
+		});
+	}
+	return projected;
 }

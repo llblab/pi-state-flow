@@ -35,6 +35,8 @@ export interface ArtifactAcquisitionOptions {
 	/** Caller-assessed semantic sufficiency; only relevant to a concrete relevant gap. */
 	materializedSufficient?: boolean;
 	explicitRefresh?: boolean;
+	/** Runtime-owned freshness evidence retained beside the semantic artifact. */
+	provenance?: unknown;
 }
 
 /** A successful read correlated to a runtime-observed invalidation candidate. */
@@ -111,6 +113,7 @@ export function decideArtifactAcquisition(
 		metadata,
 		compiler,
 		options.explicitRefresh ?? false,
+		options.provenance,
 	);
 	if (freshness.kind === "requires-compilation") {
 		return { kind: "read-source", reason: freshness.reason };

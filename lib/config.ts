@@ -9,6 +9,8 @@ import { isObject } from "./json.ts";
 export interface StateFlowConfig {
 	directory: string;
 	autoStart: boolean;
+	/** Opt-in local capture of rejected patch attempts and unresolved terminal drafts. */
+	logging: boolean;
 	remotePublication?: "off" | "turn-end" | "transition";
 }
 
@@ -18,6 +20,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir()): StateFlowConfig {
 	const defaults: StateFlowConfig = {
 		directory: getDurableRepositoryRoot(agentDir),
 		autoStart: false,
+		logging: false,
 	};
 	let value: unknown;
 	try {
@@ -26,11 +29,12 @@ export function loadStateFlowConfig(agentDir = getAgentDir()): StateFlowConfig {
 	} catch (error) {
 		throw new Error(`Cannot read State Flow configuration: ${path}`, { cause: error });
 	}
-	const allowed = new Set(["directory", "autoStart", "remotePublication"]);
+	const allowed = new Set(["directory", "autoStart", "logging", "remotePublication"]);
 	if (!isObject(value) || Object.keys(value).some((key) => !allowed.has(key))) {
 		throw new Error(`State Flow configuration contains unknown settings: ${path}`);
 	}
 	if (Object.hasOwn(value, "autoStart") && typeof value.autoStart !== "boolean") throw new Error(`State Flow autoStart must be a boolean: ${path}`);
+	if (Object.hasOwn(value, "logging") && typeof value.logging !== "boolean") throw new Error(`State Flow logging must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "remotePublication") && value.remotePublication !== "off" && value.remotePublication !== "turn-end" && value.remotePublication !== "transition") {
 		throw new Error(`State Flow remotePublication must be off, turn-end, or transition: ${path}`);
 	}
@@ -43,6 +47,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir()): StateFlowConfig {
 	return {
 		directory: expanded === undefined ? defaults.directory : resolve(dirname(path), expanded),
 		autoStart: value.autoStart === true,
+		logging: value.logging === true,
 		...(value.remotePublication === undefined ? {} : { remotePublication: value.remotePublication as "off" | "turn-end" | "transition" }),
 	};
 }

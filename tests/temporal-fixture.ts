@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "../lib/artifact.ts";
 import { isLocalGitRepository } from "../lib/git.ts";
 import { inspectSnapshotRevision } from "../lib/runtime.ts";
 import { emptySnapshot, isFileRevision, parsePiCheckpoint, type Snapshot } from "../lib/snapshot.ts";
-import { loadScopeStream } from "../lib/durable.ts";
+import { loadScopeStream, parseScopeProvenance, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 import type { MaterializedState, StateScope } from "../lib/state.ts";
 
@@ -37,3 +39,26 @@ export const loadGlobalMaterialization = (root: string) => materialization("/tmp
 export const loadSessionState = (cwd: string, session: string, root: string, sessionKey = session) => loadSessionMaterialization(cwd, session, root, sessionKey)?.state;
 export const loadCwdState = (cwd: string, root: string) => loadCwdMaterialization(cwd, root)?.state;
 export const loadGlobalState = (root: string) => loadGlobalMaterialization(root)?.state;
+
+function optionalSource(path: string): string | undefined {
+	try {
+		return readFileSync(path, "utf8");
+	} catch {
+		return undefined;
+	}
+}
+
+/** Test-only provenance projection from the canonical scope `meta.json` files. */
+export function loadScopeProvenance(cwd: string, sessionId: string, scope: StateScope, root: string, sessionKey = sessionId): ArtifactProvenanceRegistry {
+	if (scope === "session") {
+		const paths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
+		const source = optionalSource(paths.meta);
+		if (source === undefined) return {};
+		const document = JSON.parse(source) as { meta?: { artifacts?: unknown } };
+		return parseArtifactProvenanceRegistry(document.meta?.artifacts, "State Flow session artifact provenance");
+	}
+	const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
+	return parseScopeProvenance(optionalSource(paths.meta), paths.meta);
+}
+export const loadCwdProvenance = (cwd: string, root: string) => loadScopeProvenance(cwd, "fixture", "cwd", root);
+export const loadGlobalProvenance = (root: string) => loadScopeProvenance("/tmp", "fixture", "global", root);

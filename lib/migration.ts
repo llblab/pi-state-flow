@@ -1,5 +1,6 @@
 // Domain: conservative current-snapshot migration planning; Git owns publication and rollback.
 import { randomUUID } from "node:crypto";
+import { lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
 	captureOwnedFileBases,
@@ -34,6 +35,21 @@ export function hasCwdMaterialization(cwd: string, repositoryRoot: string): bool
 	if (legacy!.content !== undefined) return parseStateSource(legacy!.content, legacy!.path) !== undefined;
 	if (patches!.content !== undefined) throw new Error(`State Flow tail has no provable snapshot: ${directory}`);
 	return false;
+}
+
+/** Cheap canonical-layout fast path: inspect only the three predecessor snapshot names. */
+export function hasLegacyStateSources(
+	cwd: string,
+	sessionId: string,
+	repositoryRoot: string,
+	sessionKey = sessionId,
+): boolean {
+	const root = resolve(repositoryRoot);
+	return [
+		join(root, "state.json"),
+		join(cwdScopePaths(cwd, root).directory, "state.json"),
+		join(sessionScopePaths(cwd, sessionId, root, sessionKey).directory, "state.json"),
+	].some((path) => lstatSync(path, { throwIfNoEntry: false }) !== undefined);
 }
 
 /** Plan from current scope snapshots only; old explanatory journals are never replay input. */

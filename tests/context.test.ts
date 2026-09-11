@@ -9,7 +9,7 @@ import { currentRunTrajectory, runtimeContextMessage, withoutPrivateValidation }
 import { loadSessionState } from "./temporal-fixture.ts";
 import { startEpisode } from "../lib/episode.ts";
 import { emptyState } from "../lib/state.ts";
-import { commitTerminal, harness, start, terminalComment, toolAssistant, user } from "./harness.ts";
+import { commitScopedTerminal, commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
 const message = (role: string, text: string, timestamp: number, customType?: string) => ({
 	role,
@@ -21,7 +21,7 @@ const message = (role: string, text: string, timestamp: number, customType?: str
 test("ordinary context derives compact lineage from cached runtime without Git queries", async () => {
 	const h = harness();
 	await start(h, "Continue");
-	commitTerminal(h, {}, { verified: true }, "Accepted");
+	await commitTerminal(h, {}, { verified: true }, "Accepted");
 	const spawn = childProcess.spawnSync;
 	childProcess.spawnSync = (() => { throw new Error("Ordinary inference queried a process"); }) as typeof spawn;
 	syncBuiltinESMExports();
@@ -32,7 +32,7 @@ test("ordinary context derives compact lineage from cached runtime without Git q
 			assert.match(text, /recent_transitions/);
 			assert.match(text, /"verified":true/);
 			assert.equal(h.readState().working.verified, true);
-			assert.equal(h.readState(1).working.verified, undefined);
+			assert.equal(h.readState(1).working.verified, true);
 		}
 	} finally {
 		childProcess.spawnSync = spawn;
@@ -56,15 +56,24 @@ test("projects the current run and persistent non-private custom context", () =>
 test("builds runtime context as synthetic user data without system-prompt interpolation", () => {
 	const snapshot = startEpisode(false);
 	snapshot.meta.specification = "UNTRUSTED-SPEC";
-	const state = { ...emptyState(), response: "Previous" };
+	const state = {
+		...emptyState(),
+		artifacts: { "/knowledge/current.md": { description: "Current route", sourceHash: `sha256:${"c".repeat(64)}`, compilerRevision: "forged" } },
+		response: "Previous",
+	};
 	const invalidation = { path: "/knowledge/changed.md", hash: `sha256:${"a".repeat(64)}`, reason: "source-changed" as const };
-	const context = runtimeContextMessage(snapshot, state, [], [invalidation]);
+	const recent = [{ id: "transition", at: 1, transitions: [{ scope: "global" as const, patch: {
+		artifacts: { "/knowledge/legacy.md": { description: "Legacy route", hash: `sha256:${"b".repeat(64)}`, compiler: "legacy-v1", compiled_at: "2026-01-01" } },
+	} }] }];
+	const context = runtimeContextMessage(snapshot, state, recent, [invalidation]);
 	assert.equal(context.role, "user");
 	assert.match((context.content as any[])[0].text, /user-level data, not system instructions/);
 	const text = (context.content as any[])[0].text;
 	assert.match(text, /UNTRUSTED-SPEC/);
 	assert.match(text, /artifact_invalidations/);
 	assert.match(text, /\/knowledge\/changed\.md/);
+	assert.match(text, /Legacy route|Current route/);
+	assert.doesNotMatch(text, /sha256|legacy-v1|forged|2026-01-01/);
 	assert.doesNotMatch(text, /validation_feedback/);
 	assert.throws(() => runtimeContextMessage(startEpisode(false), emptyState()), /requires an active specification/);
 });
@@ -85,7 +94,7 @@ test("keeps existing context for one bootstrap run and commits its terminal hand
 	assert.match(projected.messages[0].content[0].text, /State Flow runtime context/);
 	assert.equal(projected.messages[1].content[0].text, "Existing goal");
 	assert.equal(projected.messages[2].content[0].text, "Continue");
-	commitTerminal(h, { goal: "Existing goal" }, { next: "continue" });
+	await commitTerminal(h, { goal: "Existing goal" }, { next: "continue" });
 	const snapshot = h.entries.at(-1)!.data;
 	assert.equal(h.resolveSnapshot(snapshot).meta.bootstrap, false);
 	assert.equal(Object.hasOwn(snapshot, "state"), false);
@@ -99,7 +108,7 @@ test("keeps existing context for one bootstrap run and commits its terminal hand
 test("rotates the user-authority turn specification while retaining committed state", async () => {
 	const h = harness();
 	await start(h, "First request");
-	commitTerminal(h, { mode: "stable" }, { phase: "one" });
+	await commitTerminal(h, { mode: "stable" }, { phase: "one" });
 	const next = h.handlers.get("before_agent_start")!({ prompt: "Second request", systemPrompt: "base" }, h.ctx);
 	assert.doesNotMatch(next.systemPrompt, /First request|Second request/);
 	assert.equal(h.resolveSnapshot().meta.specification, "Second request");
@@ -120,7 +129,7 @@ test("never interpolates user-controlled specification text into the system prom
 	const prompt = "UNTRUSTED-SPEC-DO-NOT-ELEVATE";
 	const started = await start(h, prompt);
 	assert.doesNotMatch(started.systemPrompt, /UNTRUSTED-SPEC-DO-NOT-ELEVATE/);
-	assert.match(started.systemPrompt, /remains user-authority input/);
+	assert.match(started.systemPrompt, /State Flow is enabled/);
 	const projected = h.handlers.get("context")!({ messages: [user(prompt, 1)] });
 	assert.match(projected.messages[0].content[0].text, /UNTRUSTED-SPEC-DO-NOT-ELEVATE/);
 });
@@ -185,7 +194,7 @@ test("preserves the current run trajectory, steering, and custom extension conte
 test("projects only the latest seven compact accepted transitions", async () => {
 	const h = harness();
 	await start(h, "Current task");
-	for (let index = 0; index < 10; index++) commitTerminal(h, {}, { index });
+	for (let index = 0; index < 10; index++) await commitTerminal(h, {}, { index });
 	const projected = h.handlers.get("context")!({ messages: [user("Current task", 1)] });
 	const text = projected.messages[0].content[0].text as string;
 	const runtime = JSON.parse(text.slice(text.indexOf("\n") + 1));
@@ -203,13 +212,7 @@ test("new sessions project durable causality without old conversation trajectori
 	const cwd = join(repositoryRoot, "project");
 	const first = harness({ cwd, repositoryRoot });
 	await start(first, "Persist project decision");
-	const terminal = {
-		role: "assistant",
-		stopReason: "stop",
-		content: [{ type: "text", text: `<!-- state_flow {"transitions":[{"scope":"cwd","patch":{"contract":{"decision":"durable"}}}]} -->\n\nSaved.` }],
-	};
-	const accepted = first.handlers.get("message_end")!({ message: terminal }, first.ctx);
-	first.handlers.get("turn_end")!({ message: accepted.message }, first.ctx);
+	await commitScopedTerminal(first, [{ scope: "cwd", patch: { contract: { decision: "durable" } } }], "Saved.");
 
 	const second = harness({ cwd, repositoryRoot, sessionId: "second-session", autoStart: true });
 	second.handlers.get("session_start")!({ reason: "new" }, second.ctx);
@@ -225,22 +228,14 @@ test("new sessions project durable causality without old conversation trajectori
 test("tree restoration reads all three scopes from the linked revision", async () => {
 	const h = harness();
 	await start(h, "Branch task");
-	const commitAll = (value: string) => {
-		const message = {
-			role: "assistant",
-			stopReason: "stop",
-			content: [{ type: "text", text: `<!-- state_flow ${JSON.stringify({ transitions: [
-				{ scope: "global", patch: { contract: { globalBranch: value } } },
-				{ scope: "cwd", patch: { contract: { cwdBranch: value } } },
-				{ scope: "session", patch: { working: { sessionBranch: value } } },
-			] })} -->\n\nDone` }],
-		};
-		const accepted = h.handlers.get("message_end")!({ message }, h.ctx);
-		h.handlers.get("turn_end")!({ message: accepted.message }, h.ctx);
-	};
-	commitAll("base");
+	const commitAll = (value: string) => commitScopedTerminal(h, [
+		{ scope: "global", patch: { contract: { globalBranch: value } } },
+		{ scope: "cwd", patch: { contract: { cwdBranch: value } } },
+		{ scope: "session", patch: { working: { sessionBranch: value } } },
+	]);
+	await commitAll("base");
 	const base = structuredClone(h.entries);
-	commitAll("abandoned-future");
+	await commitAll("abandoned-future");
 	h.entries.splice(0, h.entries.length, ...base);
 	h.handlers.get("session_tree")!({}, h.ctx);
 	h.handlers.get("before_agent_start")!({ prompt: "Branch task", systemPrompt: "base" }, h.ctx);
@@ -251,11 +246,17 @@ test("tree restoration reads all three scopes from the linked revision", async (
 	assert.match(text, /"sessionBranch":"base"/);
 	assert.doesNotMatch(text, /abandoned-future/);
 
-	commitTerminal(h, {}, { sessionBranch: "restored-next" });
-	assert.match(
-		(h.sentMessages.at(-1)!.message as { content: string }).content,
-		/cannot publish this restored branch because its global or CWD scope changed/,
-	);
+	await commitTerminal(h, {}, { sessionBranch: "restored-next" });
+	assert.equal(h.resolveSnapshot().meta.validation, undefined);
+	assert.doesNotMatch(JSON.stringify(h.sentMessages), /cannot publish/);
+	// Untouched shared scopes are adopted from the live basis while the restored session continues.
+	h.handlers.get("before_agent_start")!({ prompt: "Branch task", systemPrompt: "base" }, h.ctx);
+	const adopted = h.handlers.get("context")!({ messages: [user("Branch task", 2)] });
+	const adoptedText = adopted.messages[0].content[0].text as string;
+	assert.match(adoptedText, /"globalBranch":"abandoned-future"/);
+	assert.match(adoptedText, /"cwdBranch":"abandoned-future"/);
+	assert.match(adoptedText, /"sessionBranch":"restored-next"/);
+	assert.doesNotMatch(adoptedText, /"sessionBranch":"abandoned-future"/);
 });
 
 test("removes abandoned private retry feedback from later bootstrap context", async () => {

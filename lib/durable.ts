@@ -13,7 +13,12 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { canonicalJson, containsNull, isJsonValue } from "./json.ts";
+import {
+	parseArtifactProvenanceRegistry,
+	serializeArtifactProvenanceRegistry,
+	type ArtifactProvenanceRegistry,
+} from "./artifact.ts";
+import { canonicalJson, containsNull, isJsonValue, isObject } from "./json.ts";
 import { validateScopeStream, validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
 import { isMaterializedState, type MaterializedState, type StateScope } from "./state.ts";
 
@@ -23,6 +28,7 @@ const SESSION_KEY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const STATE_FILE = "state.json";
 const CHECKPOINT_FILE = "checkpoint.json";
 const PATCHES_FILE = "patches.jsonl";
+const META_FILE = "meta.json";
 
 /** Canonical replay sources; current state is deliberately not serialized beside the tail. */
 export interface ScopeStreamSources {
@@ -95,6 +101,8 @@ export interface TemporalScopePaths {
 	directory: string;
 	checkpoint: string;
 	patches: string;
+	/** Runtime-owned artifact provenance for this scope; the session file also owns runtime lineage. */
+	meta: string;
 }
 
 export function temporalScopePaths(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string, sessionKey = sessionId): TemporalScopePaths {
@@ -103,12 +111,12 @@ export function temporalScopePaths(cwd: string, sessionId: string, scope: StateS
 			: scope === "session" ? sessionScopePaths(cwd, sessionId, repositoryRoot, sessionKey).directory
 				: undefined;
 	if (directory === undefined) throw new Error("Unknown temporal scope");
-	return { directory, checkpoint: join(directory, CHECKPOINT_FILE), patches: join(directory, PATCHES_FILE) };
+	return { directory, checkpoint: join(directory, CHECKPOINT_FILE), patches: join(directory, PATCHES_FILE), meta: join(directory, META_FILE) };
 }
 
 export function sessionRuntimePaths(cwd: string, sessionId: string, repositoryRoot: string, sessionKey = sessionId): { config: string; meta: string } {
 	const directory = sessionScopePaths(cwd, sessionId, repositoryRoot, sessionKey).directory;
-	return { config: join(directory, "config.json"), meta: join(directory, "meta.json") };
+	return { config: join(directory, "config.json"), meta: join(directory, META_FILE) };
 }
 
 /** A temporal reader never treats a legacy current snapshot as an anchored checkpoint. */
@@ -125,7 +133,7 @@ export function captureTemporalFileBases(cwd: string, sessionId: string, reposit
 	const paths = (["global", "cwd", "session"] as const).flatMap((scope) => {
 		const pair = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
 		const runtime = scope === "session" ? sessionRuntimePaths(cwd, sessionId, repositoryRoot, sessionKey) : undefined;
-		return [pair.checkpoint, pair.patches, join(pair.directory, STATE_FILE), ...(runtime === undefined ? [] : [runtime.config, runtime.meta])];
+		return [pair.checkpoint, pair.patches, join(pair.directory, STATE_FILE), ...(runtime === undefined ? [pair.meta] : [runtime.config, runtime.meta])];
 	});
 	return captureOwnedFileBases(paths, repositoryRoot);
 }
@@ -157,6 +165,27 @@ export interface DurablePaths {
 	repositoryRoot: string;
 	globalState: string;
 	globalPatches: string;
+}
+
+/** One scope-level provenance document; versioned for lenient forward evolution. */
+export function serializeScopeProvenance(registry: Readonly<ArtifactProvenanceRegistry>): string {
+	return `${canonicalJson({ version: 1, artifacts: serializeArtifactProvenanceRegistry(registry) })}\n`;
+}
+
+/** Missing provenance is unavailable evidence, never corrupt state. */
+export function parseScopeProvenance(source: string | undefined, path: string): ArtifactProvenanceRegistry {
+	if (source === undefined) return {};
+	let value: unknown;
+	try {
+		value = JSON.parse(source);
+	} catch {
+		throw new Error(`State Flow provenance file contains invalid JSON: ${path}`);
+	}
+	if (!isObject(value) || value.version !== 1 || !Object.hasOwn(value, "artifacts")
+		|| Object.keys(value).some((key) => key !== "version" && key !== "artifacts")) {
+		throw new Error(`Invalid State Flow provenance document: ${path}`);
+	}
+	return parseArtifactProvenanceRegistry(value.artifacts, `State Flow provenance at ${path}`);
 }
 
 export interface ScopePaths {
@@ -260,7 +289,7 @@ export function legacyTemporalScopePaths(cwd: string, sessionId: string, scope: 
 	const root = resolve(repositoryRoot);
 	const cwdDirectory = join(root, legacyCwdScopeKey(cwd));
 	const directory = scope === "global" ? root : scope === "cwd" ? cwdDirectory : join(cwdDirectory, legacySessionScopeKey(sessionId));
-	return { directory, checkpoint: join(directory, CHECKPOINT_FILE), patches: join(directory, PATCHES_FILE) };
+	return { directory, checkpoint: join(directory, CHECKPOINT_FILE), patches: join(directory, PATCHES_FILE), meta: join(directory, META_FILE) };
 }
 
 export function legacySessionRuntimePaths(cwd: string, sessionId: string, repositoryRoot: string): { config: string; meta: string } {
@@ -290,20 +319,21 @@ export function isStateFlowOwnedPath(candidate: string, repositoryRoot = getDura
 	const root = resolve(repositoryRoot);
 	const absolute = resolve(candidate);
 	const global = durablePaths(root);
-	if (absolute === global.globalState || absolute === global.globalPatches || absolute === join(root, CHECKPOINT_FILE)) return true;
+	if (absolute === global.globalState || absolute === global.globalPatches
+		|| absolute === join(root, CHECKPOINT_FILE) || absolute === join(root, META_FILE)) return true;
 	const segments = relative(root, absolute).split(sep);
 	const cwdKey = (value: string) => (value.startsWith("--") && value.endsWith("--")) || LEGACY_SCOPE_KEY_PATTERN.test(value);
 	const sessionKey = (value: string) => {
 		try { return sessionScopeKey(value) === value; } catch { return false; }
 	};
 	if (segments.length === 2) {
-		return cwdKey(segments[0]!) && (segments[1] === STATE_FILE || segments[1] === CHECKPOINT_FILE || segments[1] === PATCHES_FILE);
+		return cwdKey(segments[0]!) && (segments[1] === STATE_FILE || segments[1] === CHECKPOINT_FILE || segments[1] === PATCHES_FILE || segments[1] === META_FILE);
 	}
 	if (segments.length === 3) {
 		return cwdKey(segments[0]!)
 			&& (sessionKey(segments[1]!) || LEGACY_SCOPE_KEY_PATTERN.test(segments[1]!))
 			&& (segments[2] === STATE_FILE || segments[2] === CHECKPOINT_FILE || segments[2] === PATCHES_FILE
-				|| segments[2] === "config.json" || segments[2] === "meta.json");
+				|| segments[2] === "config.json" || segments[2] === META_FILE);
 	}
 	return false;
 }

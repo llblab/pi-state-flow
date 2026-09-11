@@ -9,7 +9,7 @@ import { cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStor
 import { getKnowledgeRoot } from "../lib/discovery.ts";
 import { hashArtifactSource } from "../lib/artifact.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
-import { commitTerminal, harness, scopedTerminalComment, start, terminalComment, toolAssistant, user } from "./harness.ts";
+import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
 test("fresh explicit start is local-only; ordinary startup/status and old pointers never create storage", async (t) => {
 	const agentDir = mkdtempSync(join(tmpdir(), "state-flow-fresh-"));
@@ -51,7 +51,17 @@ test("fresh explicit start is local-only; ordinary startup/status and old pointe
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	assert.equal(h.notifications.some((message) => /push is pending/.test(message)), false);
 	const context = h.handlers.get("context")!({ messages: [user("Inspect", 1)] }, h.ctx);
-	assert.ok(JSON.stringify(context).includes(hashArtifactSource(bytes)));
+	const contextText = context.messages
+		.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+		.map((block: any) => block.text)
+		.find((text: unknown) => typeof text === "string" && text.startsWith("State Flow runtime context"));
+	assert.ok(contextText);
+	assert.deepEqual(JSON.parse(contextText.slice(contextText.indexOf("\n") + 1)).artifact_invalidations, [{
+		path: source,
+		reason: "new",
+	}]);
+	// Source identity and runtime bookkeeping never reach ordinary model context.
+	assert.equal(contextText.includes(hashArtifactSource(bytes)), false);
 	assert.deepEqual(readFileSync(source), bytes);
 	writeFileSync(join(repositoryRoot, "store-only.md"), "not a Knowledge source");
 	await h.commands.get("state-flow-status").handler("", h.ctx);
@@ -76,6 +86,43 @@ test("fresh explicit start is local-only; ordinary startup/status and old pointe
 	assert.equal(existsSync(missingRoot), false);
 	assert.deepEqual(old.entries, [checkpoint]);
 	assert.match(old.notifications.at(-1)!, /original Git history/);
+});
+
+test("explicit activation defers artifact discovery until the next enabled inference", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-deferred-discovery-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const knowledgeRoot = join(root, "knowledge");
+	mkdirSync(knowledgeRoot);
+	const h = harness({ repositoryRoot: join(root, "store"), knowledgeRoot, initializeRepository: false });
+	await h.commands.get("state-flow-start").handler("", h.ctx);
+	const lateSource = join(knowledgeRoot, "late.md");
+	writeFileSync(lateSource, "Created after the activation command returned.\n");
+
+	h.handlers.get("before_agent_start")!({ prompt: "Use current knowledge", systemPrompt: "base" }, h.ctx);
+	const projected = h.handlers.get("context")!({ messages: [user("Use current knowledge", Date.now())] }, h.ctx);
+	assert.match(JSON.stringify(projected.messages), new RegExp(lateSource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	assert.match(JSON.stringify(projected.messages), /\\\"reason\\\":\\\"new\\\"/);
+});
+
+test("unchanged resolution cannot bypass an acquired invalidated artifact", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-artifact-resolution-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const knowledgeRoot = join(root, "knowledge");
+	mkdirSync(knowledgeRoot);
+	const source = join(knowledgeRoot, "routing.md");
+	writeFileSync(source, "Routing source.\n");
+	const h = harness({ repositoryRoot: join(root, "store"), knowledgeRoot, initializeRepository: false });
+	await start(h, "Acquire routing");
+	const input = { path: source };
+	h.handlers.get("tool_call")!({ toolCallId: "artifact-read", toolName: "read", input }, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: "artifact-read", toolName: "read", result: {}, isError: false }, h.ctx);
+	await assert.rejects(
+		h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx),
+		/Every successfully read invalidated artifact must have a global compiler output/,
+	);
+	await h.tools.get("patch_state")!.execute("compile", {
+		scope: "global", patch: { artifacts: { [source]: { description: "Routing source" } } },
+	}, undefined, undefined, h.ctx);
 });
 
 test("live storage paths mirror Pi CWD and session file names without appended hashes", async (t) => {
@@ -210,7 +257,7 @@ test("global memory is always available while State Flow is enabled", async () =
 	assert.equal(h.readState(0, "global").working.preference, "compact");
 });
 
-test("patch_state materializes session state before the next inference and terminal reconciliation remains required", async () => {
+test("patch_state materializes session state before the next inference and response reconciliation", async () => {
 	const h = harness();
 	await start(h, "Long-running task");
 	const patchState = h.tools.get("patch_state")!;
@@ -231,10 +278,9 @@ test("patch_state materializes session state before the next inference and termi
 	assert.equal(projected.messages.filter((message: any) => message.content?.[0]?.text?.startsWith("State Flow runtime context")).length, 1);
 	assert.match(projected.messages[0].content[0].text, /"verified":"intermediate"/);
 
-	const terminal = h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Complete." }] },
-	}, h.ctx);
-	h.handlers.get("turn_end")!({ message: terminal.message }, h.ctx);
+	const terminal = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Complete." }] };
+	assert.equal(h.handlers.get("message_end")!({ message: terminal }, h.ctx), undefined);
+	h.handlers.get("turn_end")!({ message: terminal }, h.ctx);
 	assert.equal(h.resolveSnapshot().meta.step, 2);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "Complete.");
@@ -270,4 +316,216 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 		},
 	});
 	assert.match(gate({ toolCallId: "patch-2", toolName: "patch_state", input: {} }, h.ctx).reason, /exactly one/);
+});
+
+test("patch_state tolerates shared-scope drift while preserving the session layer", async () => {
+	const a = harness({ remotePublication: "off" });
+	await start(a, "Session A");
+	await a.tools.get("patch_state")!.execute("a-initial", { scope: "session", patch: { working: { owner: "A" } } }, undefined, undefined, a.ctx);
+	const b = harness({
+		repositoryRoot: a.repositoryRoot,
+		cwd: a.ctx.cwd,
+		sessionId: "harness-session-b",
+		remotePublication: "off",
+		initializeRepository: false,
+	});
+	await start(b, "Session B");
+	await b.tools.get("patch_state")!.execute("b-global", { scope: "global", patch: { working: { globalFromB: true } } }, undefined, undefined, b.ctx);
+	const beforeStep = a.resolveSnapshot().meta.step;
+	const result = await a.tools.get("patch_state")!.execute("a-session", { scope: "session", patch: { working: { continued: true } } }, undefined, undefined, a.ctx);
+	assert.equal(result.content[0].text, "\nState materialized at session scope.");
+	assert.equal(a.resolveSnapshot().meta.step, beforeStep + 1);
+	assert.equal(a.readState(0, "session").working.owner, "A");
+	assert.equal(a.readState(0, "session").working.continued, true);
+	assert.equal(a.readState(0, "global").working.globalFromB, true);
+	assert.equal(JSON.stringify(a.sentMessages).includes("cannot publish"), false);
+});
+
+
+function finalMessage(text: string) {
+	return { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
+}
+
+test("an unresolved terminal draft is intercepted, then unchanged resolution permits the final answer", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "No durable work");
+	const draft = h.handlers.get("message_end")!({ message: finalMessage("Draft that must not persist.") }, h.ctx);
+	assert.deepEqual(draft.message.content, []);
+	assert.equal(h.sentMessages.length, 1);
+	h.handlers.get("turn_end")!({ message: draft.message }, h.ctx);
+	assert.equal(h.readState().response, "");
+
+	const resolution = await h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx);
+	assert.equal(resolution.terminate, undefined);
+	const accepted = h.handlers.get("message_end")!({ message: finalMessage("Final answer.") }, h.ctx);
+	assert.equal(accepted, undefined);
+	h.handlers.get("turn_end")!({ message: finalMessage("Final answer.") }, h.ctx);
+	assert.equal(h.readState().response, "Final answer.");
+});
+
+test("a real patch resolves the same intercepted turn before final response reconciliation", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Remember this");
+	const draft = h.handlers.get("message_end")!({ message: finalMessage("Unresolved draft.") }, h.ctx);
+	h.handlers.get("turn_end")!({ message: draft.message }, h.ctx);
+	await h.tools.get("patch_state")!.execute("patch", { scope: "session", patch: { working: { next: "ship" } } }, undefined, undefined, h.ctx);
+	const accepted = h.handlers.get("message_end")!({ message: finalMessage("Done.") }, h.ctx);
+	assert.equal(accepted, undefined);
+	h.handlers.get("turn_end")!({ message: finalMessage("Done.") }, h.ctx);
+	assert.equal(h.readState().working.next, "ship");
+	assert.equal(h.readState().response, "Done.");
+});
+
+test("a failed patch after an earlier success returns the turn to unresolved state", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Two decisions");
+	await h.tools.get("patch_state")!.execute("accepted", { scope: "session", patch: { working: { first: true } } }, undefined, undefined, h.ctx);
+	await assert.rejects(
+		h.tools.get("patch_state")!.execute("failed", { scope: "session", patch: { working: { first: true } } }, undefined, undefined, h.ctx),
+		/must materially update state or required provenance/,
+	);
+	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Must not finalize.") }, h.ctx);
+	assert.deepEqual(blocked.message.content, []);
+	assert.equal(h.readState().response, "");
+});
+
+test("a host-rejected patch_state call also returns an earlier-resolved turn to pending", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Host validation");
+	await h.tools.get("patch_state")!.execute("accepted", { scope: "session", patch: { working: { first: true } } }, undefined, undefined, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: "schema-failure", toolName: "patch_state", isError: true }, h.ctx);
+	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Must not finalize.") }, h.ctx);
+	assert.deepEqual(blocked.message.content, []);
+});
+
+test("length and provider-error endings never become accepted responses", async () => {
+	for (const stopReason of ["length", "error"]) {
+		const h = harness({ remotePublication: "off" });
+		await start(h, `Stop reason ${stopReason}`);
+		await h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx);
+		const message = { ...finalMessage("Incomplete output."), stopReason };
+		assert.equal(h.handlers.get("message_end")!({ message }, h.ctx), undefined);
+		h.handlers.get("turn_end")!({ message }, h.ctx);
+		assert.equal(h.readState().response, "");
+		assert.equal(h.sentMessages.length, 0);
+	}
+});
+
+test("only the exclusive PATCH and UNCHANGED forms can satisfy resolution", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Resolve me");
+	const execute = (input: unknown) => h.tools.get("patch_state")!.execute("invalid", input, undefined, undefined, h.ctx);
+	for (const input of [
+		null,
+		[],
+		{},
+		{ unchanged: false },
+		{ unchanged: true, scope: "session", patch: {} },
+		{ unchanged: true, extra: "forbidden" },
+		{ scope: "session" },
+		{ patch: { working: { value: true } } },
+		{ scope: "session", patch: {} },
+		{ scope: "session", patch: { working: { value: true } }, extra: "forbidden" },
+	]) await assert.rejects(execute(input));
+
+	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Still unresolved.") }, h.ctx);
+	assert.deepEqual(blocked.message.content, []);
+	assert.equal(h.readState().response, "");
+	await h.tools.get("patch_state")!.execute("valid", { unchanged: true }, undefined, undefined, h.ctx);
+	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Resolved.") }, h.ctx), undefined);
+});
+
+test("stop removes State Flow semantics while retaining a bounded passive continuation", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Establish bounded state");
+	await h.tools.get("patch_state")!.execute("state", { scope: "session", patch: { working: { continuation: "keep this" } } }, undefined, undefined, h.ctx);
+	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
+
+	assert.equal(h.activeTools.includes("patch_state"), false);
+	assert.equal(h.activeTools.includes("read_state"), false);
+	assert.equal(h.handlers.get("before_agent_start")!({ prompt: "Continue", systemPrompt: "base" }, h.ctx), undefined);
+
+	const projected = h.handlers.get("context")!({ messages: [
+		user("Ancient raw history that must stay hidden", 1),
+		{ role: "assistant", content: [{ type: "text", text: "Ancient response" }], timestamp: 2 },
+		user("Continue with X", Date.now() + 1_000),
+	] });
+	assert.equal(projected.messages.length, 2);
+	assert.match(projected.messages[0].content[0].text, /State Flow exit handoff/);
+	assert.match(projected.messages[0].content[0].text, /keep this/);
+	assert.equal(projected.messages[1].content[0].text, "Continue with X");
+	assert.doesNotMatch(JSON.stringify(projected.messages), /Ancient raw history/);
+});
+
+test("reload, startup, resume, and tree restoration preserve only the same physical session handoff", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Remember state");
+	await h.tools.get("patch_state")!.execute("state", { scope: "session", patch: { working: { continuation: "reload" } } }, undefined, undefined, h.ctx);
+	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
+	for (const reason of ["reload", "startup", "resume", undefined]) {
+		if (reason === undefined) h.handlers.get("session_tree")!({}, h.ctx);
+		else h.handlers.get("session_start")!({ reason }, h.ctx);
+		const projected = h.handlers.get("context")!({ messages: [
+			user("Pre-stop history", 1),
+			user("Continue", Date.now() + 1_000),
+		] }, h.ctx);
+		assert.match(projected.messages[0].content[0].text, /exit handoff/);
+		assert.match(projected.messages[0].content[0].text, /reload/);
+		assert.equal(projected.messages.length, 2);
+	}
+
+	for (const reason of ["new", "fork"]) {
+		h.handlers.get("session_start")!({ reason }, h.ctx);
+		assert.equal(h.handlers.get("context")!({ messages: [user("Continue", Date.now() + 1_000)] }, h.ctx), undefined);
+	}
+});
+
+test("repeated stop retains one passive handoff without adding another marker", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Remember state");
+	await h.tools.get("patch_state")!.execute("state", { scope: "session", patch: { working: { continuation: "repeat" } } }, undefined, undefined, h.ctx);
+	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
+	const markerCount = h.entries.filter((entry) => entry.customType === "state-flow-passive-stop").length;
+	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
+	assert.equal(h.entries.filter((entry) => entry.customType === "state-flow-passive-stop").length, markerCount);
+	const projected = h.handlers.get("context")!({ messages: [user("Continue", Date.now() + 1_000)] }, h.ctx);
+	assert.match(projected.messages[0].content[0].text, /repeat/);
+});
+
+test("start uses the passive boundary for one active bootstrap instead of resurrecting raw history", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Remember state");
+	await h.tools.get("patch_state")!.execute("state", { scope: "session", patch: { working: { continuation: "restart" } } }, undefined, undefined, h.ctx);
+	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
+	const frozenResponse = h.readState().response;
+	const oldMessages = Array.from({ length: 200 }, (_, index) => user(`OLD-${index}`, index + 1));
+	const afterStop = Date.now() + 1_000;
+	const postStopAnswer = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Post-stop answer" }], timestamp: afterStop + 1 };
+	const postStopMessages = [
+		user("Post-stop question", afterStop),
+		postStopAnswer,
+		user("Restart State Flow", afterStop + 2),
+	];
+	assert.equal(h.handlers.get("message_end")!({ message: postStopAnswer }, h.ctx), undefined);
+	h.handlers.get("turn_end")!({ message: postStopAnswer }, h.ctx);
+	assert.equal(h.readState().response, frozenResponse);
+
+	await h.commands.get("state-flow-start")!.handler("", h.ctx);
+	const protocol = h.handlers.get("before_agent_start")!({ prompt: "Restart State Flow", systemPrompt: "base" }, h.ctx);
+	assert.match(protocol.systemPrompt, /State Flow is enabled/);
+	const projected = h.handlers.get("context")!({ messages: [...oldMessages, ...postStopMessages] }, h.ctx);
+	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.match(projected.messages[0].content[0].text, /State Flow runtime context/);
+	assert.match(projected.messages[1].content[0].text, /State Flow exit handoff/);
+	assert.match(JSON.stringify(projected.messages), /Post-stop question/);
+	assert.match(JSON.stringify(projected.messages), /Post-stop answer/);
+	assert.doesNotMatch(JSON.stringify(projected.messages), /OLD-/);
+
+	await h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx);
+	const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Active again." }] };
+	h.handlers.get("message_end")!({ message: final }, h.ctx);
+	h.handlers.get("turn_end")!({ message: final }, h.ctx);
+	const later = h.handlers.get("context")!({ messages: [user("Later", afterStop + 3)] }, h.ctx);
+	assert.match(later.messages[0].content[0].text, /State Flow runtime context/);
+	assert.doesNotMatch(JSON.stringify(later.messages), /exit handoff/);
 });

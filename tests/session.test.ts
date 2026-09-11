@@ -3,7 +3,7 @@ import test from "node:test";
 import { loadSessionState, writeCwdState, writeGlobalState } from "./temporal-fixture.ts";
 import { emptyState } from "../lib/state.ts";
 import { discoverSnapshotData, hasPriorConversation, latestSnapshotData, isNewSession, snapshotDataNewestFirst, SNAPSHOT_ENTRY_TYPE } from "../lib/session.ts";
-import { commitTerminal, harness, start, terminalComment, toolAssistant, user } from "./harness.ts";
+import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
 test("selects the latest snapshot from the active branch", () => {
 	const first = { enabled: true, step: 1 };
@@ -60,7 +60,7 @@ test("manual defaults ignore existing CWD state while configured new sessions in
 	const automatic = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, autoStart: true });
 	automatic.handlers.get("session_start")!({ reason: "new" }, automatic.ctx);
 	assert.equal(automatic.statuses.at(-1), "<accent>state-flow</accent> <dim>#0</dim>");
-	assert.deepEqual(automatic.resolveSnapshot().config, { enabled: true, transitionWindow: 7 });
+	assert.deepEqual(automatic.resolveSnapshot().config, { enabled: true });
 	assert.equal(automatic.resolveSnapshot().meta.step, 0);
 	assert.deepEqual(automatic.entries.at(-1)!.data, { revision: automatic.resolveSnapshot().meta.durableBase });
 	assert.equal(Object.hasOwn(automatic.entries.at(-1)!.data, "state"), false);
@@ -75,7 +75,7 @@ test("manual defaults ignore existing CWD state while configured new sessions in
 test("two Pi sessions in one CWD persist distinct Git-backed session layers", async () => {
 	const first = harness({ cwd: "/tmp/state-flow-shared-cwd", sessionId: "session-a" });
 	await start(first);
-	commitTerminal(first, { owner: "session-a" }, { next: "first" });
+	await commitTerminal(first, { owner: "session-a" }, { next: "first" });
 
 	const second = harness({
 		cwd: first.ctx.cwd,
@@ -93,15 +93,15 @@ test("two Pi sessions in one CWD persist distinct Git-backed session layers", as
 test("a stopped branch stays disabled on resume while the global flag enables a later new session", async () => {
 	const h = harness({ cwd: "/tmp/state-flow-stopped-branch", autoStart: true });
 	await start(h);
-	commitTerminal(h, { branch: "kept" }, { next: "later" });
+	await commitTerminal(h, { branch: "kept" }, { next: "later" });
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
 	const stopped = structuredClone(h.entries.at(-1)!);
 
 	h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 	assert.equal(h.statuses.at(-1), undefined);
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /config\.enabled=false; config\.transitionWindow=7; branch mode=inactive/);
-	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #1/);
+	assert.match(h.notifications.at(-1)!, /config\.enabled=false; branch mode=inactive/);
+	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #2/);
 	assert.match(h.notifications.at(-1)!, /"branch": "kept"/);
 
 	const next = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, sessionId: "next-session" });
@@ -113,12 +113,12 @@ test("a stopped branch stays disabled on resume while the global flag enables a 
 test("publishes a restored older session branch when shared scopes did not diverge", async () => {
 	const h = harness({ cwd: "/tmp/state-flow-restored-session" });
 	await start(h);
-	commitTerminal(h, {}, { branch: "base" });
+	await commitTerminal(h, {}, { branch: "base" });
 	const baseBranch = structuredClone(h.entries);
-	commitTerminal(h, {}, { branch: "abandoned" });
+	await commitTerminal(h, {}, { branch: "abandoned" });
 	h.entries.splice(0, h.entries.length, ...baseBranch);
 	h.handlers.get("session_tree")!({}, h.ctx);
-	commitTerminal(h, {}, { branch: "restored-next" });
+	await commitTerminal(h, {}, { branch: "restored-next" });
 	assert.equal(h.sentMessages.length, 0);
 	assert.equal(
 		loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.branch,
@@ -143,7 +143,7 @@ test("contains hostile branch entries and continues snapshot discovery", () => {
 test("restores State Flow from the active branch after tree navigation", async () => {
 	const h = harness();
 	await start(h);
-	commitTerminal(h, { branch: "abandoned" }, { next: "old" });
+	await commitTerminal(h, { branch: "abandoned" }, { next: "old" });
 	h.entries.splice(0, h.entries.length, {
 		type: "custom",
 		customType: "state-flow-snapshot",
@@ -168,6 +168,6 @@ test("restores State Flow from the active branch after tree navigation", async (
 	h.handlers.get("session_tree")!({}, h.ctx);
 	assert.equal(h.statuses.at(-1), undefined);
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /config\.enabled=false; config\.transitionWindow=7; branch mode=inactive/);
+	assert.match(h.notifications.at(-1)!, /config\.enabled=false; branch mode=inactive/);
 	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #0/);
 });

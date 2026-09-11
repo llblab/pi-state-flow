@@ -3,6 +3,7 @@ import {
 	hashArtifactSource,
 	isArtifactHash,
 	type ArtifactMetadata,
+	type ArtifactProvenance,
 	type ArtifactRegistry,
 } from "./artifact.ts";
 import { canonicalJson, isObject, type JsonObject, type JsonValue } from "./json.ts";
@@ -19,16 +20,24 @@ function hasContent(value: unknown): boolean {
 
 export function hasCompiledSkillArtifact(
 	artifacts: ArtifactRegistry,
+	provenance: ArtifactProvenance | undefined,
 	source: string,
 	expectedHash?: string,
 ): boolean {
 	const metadata = artifacts[source];
-	return isObject(metadata)
-		&& metadata.kind === "skill"
-		&& metadata.compiler === SKILL_ARTIFACT_COMPILER
-		&& (expectedHash === undefined || metadata.hash === expectedHash)
-		&& isObject(metadata.compilation)
-		&& hasContent(metadata.compilation);
+	if (!isObject(metadata)
+		|| metadata.kind !== "skill"
+		|| !isObject(metadata.compilation)
+		|| !hasContent(metadata.compilation)
+		|| provenance?.malformed === true) return false;
+	const compilerRevision = provenance !== undefined && Object.hasOwn(provenance, "compilerRevision")
+		? provenance.compilerRevision
+		: metadata.compiler;
+	const sourceHash = provenance !== undefined && Object.hasOwn(provenance, "sourceHash")
+		? provenance.sourceHash
+		: metadata.hash;
+	return compilerRevision === SKILL_ARTIFACT_COMPILER
+		&& (expectedHash === undefined || sourceHash === expectedHash);
 }
 
 export type SkillSourceHasher = (source: string) => string;

@@ -1,6 +1,7 @@
 import {
 	classifyArtifactFreshness,
 	type ArtifactMetadata,
+	type ArtifactProvenance,
 	type ArtifactRegistry,
 	type ArtifactSourceIdentity,
 } from "./artifact.ts";
@@ -55,10 +56,13 @@ function cycleTime(value: Date | number | string | undefined): number {
 	return timestamp;
 }
 
-function compiledTime(metadata: ArtifactMetadata): number {
-	if (typeof metadata.compiled_at !== "string") return Number.NEGATIVE_INFINITY;
-	const timestamp = Date.parse(metadata.compiled_at);
-	return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
+function compiledTime(entry: ArtifactProvenance | undefined, legacy: unknown): number {
+	const timestamp = entry?.malformed === true ? undefined
+		: entry !== undefined && Object.hasOwn(entry, "compiledAt") ? entry.compiledAt
+			: legacy;
+	if (typeof timestamp !== "string") return Number.NEGATIVE_INFINITY;
+	const parsed = Date.parse(timestamp);
+	return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
 function request(source: ArtifactSourceCandidate): ArtifactMaintenanceRequest {
@@ -81,6 +85,7 @@ export function planArtifactMaintenance(
 	registry: Readonly<Record<string, unknown>>,
 	compiler: string,
 	options: ArtifactMaintenanceOptions = {},
+	provenance: Readonly<Record<string, ArtifactProvenance>> = {},
 ): ArtifactMaintenancePlan {
 	if (!isObject(registry)) throw new Error("Artifacts must be a path-keyed JSON object");
 	const now = cycleTime(options.now);
@@ -104,9 +109,10 @@ export function planArtifactMaintenance(
 		seen.add(source.path);
 		nonNegativeSafeInteger(source.bytes, `Artifact source bytes at ${source.path}`);
 		const metadata = Object.hasOwn(registry, source.path) ? registry[source.path] : undefined;
-		const freshness = classifyArtifactFreshness(source, metadata, compiler);
+		const entry = Object.hasOwn(provenance, source.path) ? provenance[source.path] : undefined;
+		const freshness = classifyArtifactFreshness(source, metadata, compiler, false, entry);
 		if (freshness.kind !== "fresh") continue;
-		const compiledAt = compiledTime(metadata as ArtifactMetadata);
+		const compiledAt = compiledTime(entry, isObject(metadata) ? (metadata as ArtifactMetadata).compiled_at : undefined);
 		if (compiledAt !== Number.NEGATIVE_INFINITY && now - compiledAt < minimumAgeMs) continue;
 		eligible.push({ source, compiledAt });
 	}

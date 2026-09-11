@@ -4,7 +4,7 @@ import { loadSessionState } from "./temporal-fixture.ts";
 import { createSessionRuntime, emptySnapshot, migrateSnapshot, parsePiCheckpoint, parseSessionRuntime, persistableSnapshot, resolveSessionRuntime, serializeSessionRuntime } from "../lib/snapshot.ts";
 import { createTemporalState } from "../lib/temporal.ts";
 import { emptyState } from "../lib/state.ts";
-import { commitTerminal, harness, start, terminalComment, toolAssistant, user } from "./harness.ts";
+import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
 test("session config/meta codec separates runtime provenance from semantic state and resolves self explicitly", () => {
 	const snapshot = emptySnapshot(true);
@@ -15,7 +15,7 @@ test("session config/meta codec separates runtime provenance from semantic state
 	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
 	const runtime = createSessionRuntime(snapshot, "/project", "session", view.lineage);
 	const sources = serializeSessionRuntime(runtime, "/project", "session");
-	assert.deepEqual(JSON.parse(sources.config), { enabled: true, transitionWindow: 7 });
+	assert.deepEqual(JSON.parse(sources.config), { enabled: true });
 	assert.equal(JSON.parse(sources.meta).revision, "self");
 	assert.equal(JSON.parse(sources.meta).publication, "unconfirmed");
 	assert.equal(JSON.parse(sources.meta).lineage[0].parent, null);
@@ -24,6 +24,9 @@ test("session config/meta codec separates runtime provenance from semantic state
 	}
 	const restored = parseSessionRuntime(sources.config, sources.meta, "/project", "session")!;
 	assert.deepEqual(restored, runtime);
+	const legacySources = { config: JSON.stringify({ ...runtime.config, transitionWindow: 7 }), meta: sources.meta };
+	const legacyRestored = parseSessionRuntime(legacySources.config, legacySources.meta, "/project", "session")!;
+	assert.deepEqual(legacyRestored.config, { enabled: true });
 	const resolved = resolveSessionRuntime(restored, "c".repeat(40));
 	assert.equal(resolved.snapshot.meta.durableBase, "c".repeat(40));
 	assert.equal(resolved.publicationTarget, "c".repeat(40));
@@ -45,7 +48,7 @@ test("runtime decoding rejects mismatched identity, malformed lineage, invalid c
 	assert.throws(() => parseSessionRuntime(sources.config, sources.meta, "/other", "session"), /identity mismatch/);
 	assert.throws(() => parseSessionRuntime(sources.config, sources.meta, "/project", "other"), /identity mismatch/);
 	const invalid = [
-		{ ...runtime, config: { enabled: true, transitionWindow: 8 } },
+		{ ...runtime, config: { enabled: true, unexpected: true } },
 		{ ...runtime, meta: { ...runtime.meta, step: -1 } },
 		{ ...runtime, meta: { ...runtime.meta, working: { forged: true } } },
 		{ ...runtime, meta: { ...runtime.meta, version: 2 } },
@@ -61,7 +64,7 @@ test("migrates legacy two-part snapshots without runtime dependencies", () => {
 		step: 2,
 		state: { contract: { goal: "keep" }, working: { next: "continue" } },
 	}), {
-		config: { enabled: true, transitionWindow: 7 },
+		config: { enabled: true },
 		meta: { step: 2 },
 		legacySession: {
 			state: { artifacts: {}, contract: { goal: "keep" }, working: { next: "continue" }, response: "" },
@@ -98,11 +101,11 @@ test("checkpoint syntax admits only exact hash pointers or the explicit disabled
 	]) assert.throws(() => parsePiCheckpoint(candidate), Error, JSON.stringify(candidate));
 });
 
-test("restores a bounded branch-local transition window and defaults legacy snapshots to seven", () => {
+test("ignores and never writes the retired transitionWindow field", () => {
 	const state = { artifacts: {}, contract: {}, working: {}, response: "" };
-	assert.equal(migrateSnapshot({ config: { enabled: true, transitionWindow: 3 }, meta: {}, state }).config.transitionWindow, 3);
-	assert.equal(migrateSnapshot({ config: { enabled: true }, meta: {}, state }).config.transitionWindow, 7);
-	assert.equal(migrateSnapshot({ config: { enabled: true, transitionWindow: 8 }, meta: {}, state }).config.transitionWindow, 7);
+	assert.deepEqual(migrateSnapshot({ config: { enabled: true, transitionWindow: 3 }, meta: {}, state }).config, { enabled: true });
+	assert.deepEqual(migrateSnapshot({ config: { enabled: true }, meta: {}, state }).config, { enabled: true });
+	assert.deepEqual(migrateSnapshot({ config: { enabled: true, transitionWindow: 8 }, meta: {}, state }).config, { enabled: true });
 });
 
 test("migrates the retired contract Skill store into source-addressed artifacts without losing behavior", () => {
@@ -126,12 +129,12 @@ test("migrates the retired contract Skill store into source-addressed artifacts 
 	assert.equal(state.artifacts[source].kind, "skill");
 	assert.equal(state.artifacts[source].compiler, "skill-artifact-v1");
 	assert.equal(state.artifacts[source].source_hash_verified, false);
-	assert.match(state.artifacts[source].hash, /^sha256:[0-9a-f]{64}$/);
+	assert.match(state.artifacts[source].hash!, /^sha256:[0-9a-f]{64}$/);
 });
 
 test("restores runtime config, metadata, and semantic state independently", () => {
 	const source = {
-		config: { enabled: true, transitionWindow: 7 },
+		config: { enabled: true },
 		meta: {
 			durableBase: "b".repeat(40),
 			pendingPublication: { commit: "a".repeat(40), error: "remote unavailable" },
@@ -200,7 +203,7 @@ test("fails closed on invalid restored artifact metadata", () => {
 		config: { enabled: true, transitionWindow: 7 },
 		meta: { step: 3 },
 		state: {
-			artifacts: { "/a.md": { description: "Missing hash and compiler" } },
+			artifacts: { "/a.md": { description: "Broken", hash: "sha256:invalid" } },
 			contract: {},
 			working: {},
 			response: "old",
@@ -208,6 +211,19 @@ test("fails closed on invalid restored artifact metadata", () => {
 	});
 	assert.equal(result.config.enabled, false);
 	assert.match(result.meta.validation?.error ?? "", /invalid materialized-state schema/);
+	// Missing provenance is not corrupt state: semantic-only artifacts restore with degraded freshness.
+	const semanticOnly = migrateSnapshot({
+		config: { enabled: true },
+		meta: { step: 3 },
+		state: {
+			artifacts: { "/a.md": { description: "Semantic only" } },
+			contract: {},
+			working: {},
+			response: "old",
+		},
+	});
+	assert.equal(semanticOnly.config.enabled, true);
+	assert.equal(semanticOnly.legacySession?.state.artifacts["/a.md"].description, "Semantic only");
 });
 
 test("fails closed on materialized null", () => {
@@ -219,7 +235,7 @@ test("fails closed on materialized null", () => {
 	assert.match(result.meta.validation?.error ?? "", /null data/);
 });
 
-test("migrates an active two-field snapshot by adding an empty response", () => {
+test("migrates an active two-field snapshot by adding an empty response", async () => {
 	const h = harness();
 	h.entries.push({
 		type: "custom",
@@ -232,7 +248,7 @@ test("migrates an active two-field snapshot by adding an empty response", () => 
 		},
 	});
 	h.handlers.get("session_start")!({}, h.ctx);
-	const result = commitTerminal(h, {}, {}, "Migrated.");
+	const result = await commitTerminal(h, {}, {}, "Migrated.");
 	assert.equal(result.message.content[0].text, "Migrated.");
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), {
@@ -242,7 +258,7 @@ test("migrates an active two-field snapshot by adding an empty response", () => 
 		response: "Migrated.",
 	});
 });
-test("sanitizes malformed snapshot counters and validation feedback on restore", async () => {
+test("sanitizes malformed snapshot counters and retired validation feedback on restore", async () => {
 	const h = harness();
 	h.entries.push({
 		type: "custom",
@@ -257,12 +273,12 @@ test("sanitizes malformed snapshot counters and validation feedback on restore",
 	});
 	h.handlers.get("session_start")!({}, h.ctx);
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #0;[\s\S]*validation attempts 0/);
-
-	h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow invalid -->" }] },
+	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #0;/);
+	assert.equal(h.resolveSnapshot().meta.validation, undefined);
+	const unresolved = h.handlers.get("message_end")!({
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ordinary historical text" }] },
 	}, h.ctx);
-	assert.equal(h.resolveSnapshot().meta.validation!.attempt, 1);
+	assert.deepEqual(unresolved.message.content, []);
 });
 test("bounds restored counters before later increments", async () => {
 	const malformed = harness();
@@ -282,11 +298,8 @@ test("bounds restored counters before later increments", async () => {
 	});
 	malformed.handlers.get("session_start")!({}, malformed.ctx);
 	await malformed.commands.get("state-flow-status")!.handler("", malformed.ctx);
-	assert.match(malformed.notifications.at(-1)!, /Runtime metadata: step #0;[\s\S]*validation attempts 0/);
-	malformed.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow invalid -->" }] },
-	}, malformed.ctx);
-	assert.equal(malformed.resolveSnapshot().meta.validation!.attempt, 1);
+	assert.match(malformed.notifications.at(-1)!, /Runtime metadata: step #0;/);
+	assert.equal(malformed.resolveSnapshot().meta.validation, undefined);
 
 	const boundary = harness();
 	boundary.entries.push({
@@ -299,11 +312,13 @@ test("bounds restored counters before later increments", async () => {
 		},
 	});
 	boundary.handlers.get("session_start")!({}, boundary.ctx);
-	commitTerminal(boundary, {}, {}, "At boundary.");
+	await commitTerminal(boundary, {}, {}, "At boundary.");
 	assert.equal(boundary.resolveSnapshot().meta.step, Number.MAX_SAFE_INTEGER);
-	commitTerminal(boundary, {}, {}, "Past boundary.");
+	await assert.rejects(
+		boundary.tools.get("patch_state")!.execute("past-boundary", { scope: "session", patch: { working: { past: true } } }, undefined, undefined, boundary.ctx),
+		/iteration counter is exhausted/,
+	);
 	assert.equal(boundary.resolveSnapshot().meta.step, Number.MAX_SAFE_INTEGER);
-	assert.match(boundary.resolveSnapshot().meta.validation!.error, /iteration counter is exhausted/);
 });
 test("disables restoration of non-JSON materialized state", async () => {
 	const h = harness();
@@ -319,7 +334,7 @@ test("disables restoration of non-JSON materialized state", async () => {
 	h.handlers.get("session_start")!({}, h.ctx);
 	assert.match(h.notifications.at(-1)!, /restored disabled: Restored state contains non-JSON data/);
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /config\.enabled=false; config\.transitionWindow=7; branch mode=inactive/);
+	assert.match(h.notifications.at(-1)!, /config\.enabled=false; branch mode=inactive/);
 	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #3/);
 	assert.match(h.notifications.at(-1)!, /Materialized states: unavailable/);
 	assert.doesNotMatch(h.notifications.at(-1)!, /"response":/);

@@ -12,6 +12,8 @@ export interface RehydrationRoute {
 	scope: StateScope;
 	source: ArtifactSourceIdentity;
 	metadata: unknown;
+	/** Runtime-owned freshness evidence retained beside the semantic artifact. */
+	provenance?: unknown;
 	compiler: string;
 	intent: ArtifactAcquisitionIntent;
 	materializedSufficient?: boolean;
@@ -58,6 +60,7 @@ export function planKnowledgeRehydration(
 			intent: route.intent,
 			...(route.materializedSufficient === undefined ? {} : { materializedSufficient: route.materializedSufficient }),
 			...(route.explicitRefresh === undefined ? {} : { explicitRefresh: route.explicitRefresh }),
+			...(route.provenance === undefined ? {} : { provenance: route.provenance }),
 		});
 		if (decision.kind === "use-materialized") {
 			materialized.push(route.source.path);

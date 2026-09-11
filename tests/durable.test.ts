@@ -57,9 +57,11 @@ test("canonical scope hierarchy mirrors Pi project and session names without red
 	for (const scope of ["global", "cwd", "session"] as const) {
 		const paths = temporalScopePaths(cwd, "session-id", scope, root, "timestamp_session-id");
 		const directory = scope === "global" ? root : scope === "cwd" ? join(root, cwdScopeKey(cwd)) : join(root, cwdScopeKey(cwd), "timestamp_session-id");
-		assert.deepEqual(paths, { directory, checkpoint: join(directory, "checkpoint.json"), patches: join(directory, "patches.jsonl") });
-		for (const path of [paths.checkpoint, paths.patches, join(directory, "state.json")]) assert.equal(isStateFlowOwnedPath(path, root), true);
-		for (const name of ["config.json", "meta.json"]) assert.equal(isStateFlowOwnedPath(join(directory, name), root), scope === "session");
+		assert.deepEqual(paths, { directory, checkpoint: join(directory, "checkpoint.json"), patches: join(directory, "patches.jsonl"), meta: join(directory, "meta.json") });
+		for (const path of [paths.checkpoint, paths.patches, paths.meta, join(directory, "state.json")]) assert.equal(isStateFlowOwnedPath(path, root), true);
+		for (const name of ["config.json", "meta.json"]) {
+			assert.equal(isStateFlowOwnedPath(join(directory, name), root), name === "meta.json" ? true : scope === "session");
+		}
 	}
 	for (const path of ["notes.md", ".state-flow/global.json", "scopes/state.json", "arbitrary/state.json", "../state.json"]) {
 		assert.equal(isStateFlowOwnedPath(join(root, path), root), false, path);
@@ -209,7 +211,7 @@ test("temporal codec validates semantic replay instead of merely accepting valid
 		{ mutate: (stream) => { stream.checkpoint.state.working.invalid = null; }, error: /semantic state/ },
 		{ mutate: (stream) => { stream.patches[0]!.patch = { working: { invalid: [null] } }; }, error: /semantic state/ },
 		{ mutate: (stream) => { stream.patches[0]!.patch = {}; }, error: /semantic no-op/ },
-		{ mutate: (stream) => { stream.patches[0]!.patch = { artifacts: { source: { description: "incomplete" } } }; }, error: /semantic state/ },
+		{ mutate: (stream) => { stream.patches[0]!.patch = { artifacts: { source: { description: "" } } }; }, error: /semantic state/ },
 		{ mutate: (stream) => { stream.checkpoint.through.position = -1; }, error: /temporal boundary/ },
 	];
 	for (const { mutate, error } of malformed) {
