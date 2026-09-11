@@ -14,7 +14,7 @@ import { emptyState, type StateScope } from "../lib/state.ts";
 import type { JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { validateTemporalState } from "../lib/temporal.ts";
-import { commitScopedTransition, stageScopedPatch } from "../lib/transition.ts";
+import { commitScopedTransition, stageAtomicScopePatches } from "../lib/transition.ts";
 import { commitScopedTerminal, commitTerminal, harness, start } from "./harness.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 
@@ -300,7 +300,7 @@ test("runtime causal basis rejects staged work after accepted history returns to
 	const initial = runtime.states();
 	const initialBasis = runtime.causalBasis();
 	const originPosition = runtime.view!.lineage.at(-1)!.position;
-	const stage = stageScopedPatch(initial, { scope: "session", patch: { working: { stale: true } } }, [], initialBasis);
+	const stage = stageAtomicScopePatches(initial, { session: { working: { stale: true } } }, [], initialBasis);
 	const changed = structuredClone(initial);
 	changed.session.working.temporary = true;
 	snapshot.meta.step = 1;

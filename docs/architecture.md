@@ -63,21 +63,21 @@ The checkpoint is an older anchored materialization. The tail contains at most s
 
 `state[n]`, `state.global[n]`, `state.cwd[n]` and `state.session[n]` resolve the same nth previous causal boundary. They are not independent per-scope patch counters. Pre-origin history is unavailable rather than empty.
 
-True semantic no-ops and explicit `patch_state({"unchanged":true})` acknowledgements create no identity, commit or history step. A changed accepted response is runtime-owned semantic state and advances history.
+A final-only `patch_state({"final":true})` call changes only ephemeral terminal eligibility and creates no identity, commit, or history step. A changed accepted response is runtime-owned semantic state and advances history.
 
 ## Pi lifecycle
 
-`patch_state` is the sole mutation tool. It validates and publishes one scope patch immediately, then acts as an inference barrier. Pi executes no sibling tools from the same assistant response; the next inference sees rematerialized `state[0]`.
+`patch_state` is the sole mutation tool. It validates any supplied global/CWD/session patches against one causal basis and publishes them as one atomic transition, then acts as an inference barrier. Pi executes no sibling tools from the same assistant response; the next inference sees rematerialized `state[0]`.
 
 `read_state` reads one cached effective or scoped projection at offsets zero through seven. It never publishes or advances history.
 
-Every enabled assistant turn starts with turn resolution pending. A real `patch_state({scope,patch})` or `patch_state({unchanged:true})` satisfies it; real patches remain immediate one-scope inference barriers, so multi-scope work uses sequential calls. If terminal prose arrives while resolution is pending, State Flow replaces that draft with a hidden same-run instruction. The draft is not a final response, and a following patch is legal; only the later accepted ordinary answer is reconciled into runtime-owned `response` at `turn_end`. State Flow no longer parses `state_flow` or generic HTML comments; historical comments are ordinary text and other extensions retain their own comment handling.
+Every enabled assistant iteration starts terminal-ineligible. Only a successful `patch_state` call containing `final:true` latches eligibility for the next accepted `turn_end`; the call may atomically include global, CWD, and session patches. Eligibility does not stop later reasoning, tools, or patches. If terminal prose arrives before eligibility, State Flow discards that draft and issues a hidden same-run instruction for the first two terminal attempts. The third attempt ends steering with one concise error while preserving committed state and enablement; failed patch calls do not consume the budget. A following legal patch remains possible, and only a later accepted ordinary answer is reconciled into runtime-owned `response` at `turn_end`. State Flow no longer parses `state_flow` or generic HTML comments; historical comments are ordinary text and other extensions retain their own comment handling.
 
 ## Lifecycle planes
 
 ```text
 SEMANTIC STATE       artifacts + contract + working
-TURN RESOLUTION      pending → patch | unchanged → satisfied
+TURN ELIGIBILITY     false → patch_state(..., final:true) → latched true
 CONTEXT PROJECTION   active State Flow projection | passive post-stop handoff
 ```
 
@@ -199,7 +199,7 @@ Unknown keys fail loading. State Flow memory ownership and global availability a
 
 `/state-flow-status` reports branch mode, runtime revision, temporal head/history depth, scope keys, patch tails, artifact freshness, memory-bearing scopes, external-promotion summaries, remote policy/queue state, and pending publication. Unavailable materialization is reported as unavailable, never fabricated as empty. Artifact source bodies are not read for status.
 
-Opt-in `logging` appends local JSONL diagnostics for rejected `patch_state` calls and terminal drafts intercepted while turn resolution is pending. Records preserve useful exact text blocks and reduce other blocks to structural identity without duplicating reasoning. They are never semantic state, scope `meta.json`, Pi checkpoints, or repository input. Write failure changes no resolution, enablement, or accepted state and reports at most one bounded local warning.
+Opt-in `logging` appends local JSONL diagnostics for rejected `patch_state` calls and terminal drafts intercepted while turn eligibility is pending. A rejected call retains its exact attempted arguments, the precise error, and, when available, tool identity, call id, resolution attempt, and terminal-eligibility state; accepted patches are never logged. Records preserve useful exact text blocks and reduce other blocks to structural identity without duplicating reasoning. They are never semantic state, scope `meta.json`, Pi checkpoints, or repository input. Write failure changes no resolution, enablement, or accepted state and reports at most one bounded local warning.
 
 ## Validation boundaries
 

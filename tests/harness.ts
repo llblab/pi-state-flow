@@ -135,11 +135,8 @@ export async function commitScopedTerminal(
 	transitions: Array<{ scope: "session" | "cwd" | "global"; patch: unknown }>,
 	prose = "Done",
 ) {
-	if (transitions.length === 0) {
-		await h.tools.get("patch_state")!.execute("terminal-unchanged", { unchanged: true }, undefined, undefined, h.ctx);
-	} else for (const transition of transitions) {
-		await h.tools.get("patch_state")!.execute(`terminal-${transition.scope}`, transition, undefined, undefined, h.ctx);
-	}
+	const input = Object.fromEntries(transitions.map(({ scope, patch }) => [scope, patch]));
+	await h.tools.get("patch_state")!.execute("terminal", { ...input, final: true }, undefined, undefined, h.ctx);
 	const message = {
 		role: "assistant" as const,
 		stopReason: "stop",

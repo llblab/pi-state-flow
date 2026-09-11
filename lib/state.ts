@@ -40,6 +40,13 @@ export interface ScopedPatch {
 	patch: ScopePatch;
 }
 
+/** Canonical model-authored scope cohort before runtime final-eligibility handling. */
+export interface AtomicScopePatches {
+	global?: ScopePatch;
+	cwd?: ScopePatch;
+	session?: ScopePatch;
+}
+
 export interface SemanticTransition {
 	transitions: ScopedPatch[];
 }

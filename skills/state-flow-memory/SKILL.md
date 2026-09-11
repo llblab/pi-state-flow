@@ -88,18 +88,18 @@ Adjust only identified defects. This is a semantic review, not a request for ext
 
 ## Apply one reconciliation cohort
 
-Use `patch_state` only for material changes to `artifacts`, `contract`, or `working`. Each call must be alone in its assistant response; reconsider subsequent actions from the rematerialized state. Do not patch runtime-owned `response`, config, or metadata, or bypass validation by editing backing files.
+Use `patch_state` only for material changes to `artifacts`, `contract`, or `working`. One call may supply `global`, `cwd`, and `session` patches as one atomic cohort; each call must be alone in its assistant response, and subsequent actions must use the rematerialized state. Set `final:true` only when the iteration is eligible to finish at a later `turn_end`. Do not patch runtime-owned `response`, config, or metadata, or bypass validation by editing backing files.
 
 Schedule acquisition and migration barriers in this order:
 
 1. After reading this Skill, compile it into its exact-path CWD artifact before acquiring a stale global Markdown source or attempting an unrelated state write.
-2. Read only the smallest required state projections. If a justified stale Markdown read creates a global compilation obligation, accept that compilation before an unrelated single-scope write.
+2. Read only the smallest required state projections. If a justified stale Markdown read creates a global compilation obligation, include every pending compilation scope in the next atomic patch before unrelated work.
 3. Write the migration destination with `patch_state`, verify it with a separate `read_state`, then delete or narrow the source and verify both its scope and the effective overlay. Do all readback before the terminal answer.
-4. Complete one terminal reconciliation without repeating accepted compilations or inventing memory changes. Simultaneously pending CWD and global acquisitions require complete compilation through the existing terminal multi-scope reconciliation; do not bypass them with an insufficient single-scope patch.
+4. Complete one terminal reconciliation without repeating accepted compilations or inventing memory changes. Simultaneously pending CWD and global acquisitions must be compiled together in one atomic `patch_state` call; set `final:true` in that call only when the iteration is otherwise ready to finish.
 
 Scope-local deletion may reveal a lower-scope value. Deleting an override is not necessarily removal from effective state.
 
-For movement between State Flow scopes, resolve destination conflicts before writing; do not overwrite stronger or unrelated knowledge. Write and verify the destination before deleting the source. Separate calls are not an atomic multi-scope transaction; allow a temporary duplicate rather than a gap. Do not claim migration is complete until source cleanup and the effective result are verified.
+For movement between State Flow scopes, resolve destination conflicts before writing; do not overwrite stronger or unrelated knowledge. Write and verify the destination before deleting the source. Do not combine destination creation and source deletion merely because multi-scope publication is atomic: preserve a temporary duplicate until readback proves the destination. Do not claim migration is complete until source cleanup and the effective result are verified.
 
 On rejection, interruption, or conflicting state, inspect what was actually accepted before continuing. Never assume the entire cohort succeeded or failed. Keep recovery bounded; report a blocker rather than repeatedly regenerating patches.
 

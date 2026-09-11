@@ -12,6 +12,7 @@ import { applyPatch, containsNull, hashJson, isObject, validatePatch } from "./j
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER, type SuccessfulSkillRead } from "./skills.ts";
 import type { Snapshot } from "./snapshot.ts";
 import type {
+	AtomicScopePatches,
 	MaterializedState,
 	ScopePatch,
 	ScopedPatch,
@@ -194,8 +195,8 @@ function stageScopedSemanticTransition(
 	};
 }
 
-/** Validate that explicit unchanged resolution has no pending acquisition/compilation obligation. */
-export function validateUnchangedResolution(
+/** Validate that final eligibility has no pending acquisition/compilation obligation. */
+export function validateFinalEligibility(
 	currentStates: ScopedStates,
 	successfulSkillReads: Iterable<SuccessfulSkillRead>,
 	causalBasis: string,
@@ -210,17 +211,25 @@ export function validateUnchangedResolution(
 	);
 }
 
-/** Stage one intermediate state barrier without changing the finalized response. */
-export function stageScopedPatch(
+/** Stage one canonical atomic scope cohort without changing the finalized response. */
+export function stageAtomicScopePatches(
 	currentStates: ScopedStates,
-	transition: ScopedPatch,
+	patches: AtomicScopePatches,
 	successfulSkillReads: Iterable<SuccessfulSkillRead>,
 	causalBasis: string,
 	successfulArtifactReads: Iterable<SuccessfulArtifactRead> = [],
 ): StagedScopedTransition {
+	if (!isObject(patches)) throw new Error("Atomic State Flow scope patches must be an object");
+	for (const key of Object.keys(patches)) {
+		if (!SCOPES.has(key as StateScope)) throw new Error(`Unknown atomic State Flow scope: ${key}`);
+	}
+	const transitions: ScopedPatch[] = [];
+	for (const scope of ["global", "cwd", "session"] as const) {
+		if (Object.hasOwn(patches, scope)) transitions.push({ scope, patch: patches[scope] as ScopePatch });
+	}
 	return stageScopedSemanticTransition(
 		currentStates,
-		{ transitions: [transition] },
+		{ transitions },
 		successfulSkillReads,
 		causalBasis,
 		successfulArtifactReads,

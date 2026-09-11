@@ -2,6 +2,14 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.8.0: Atomic cohorts and final eligibility
+
+- `Protocol`: Replaced the single-scope PATCH and UNCHANGED forms with one canonical `patch_state({global?, cwd?, session?, final?})` call. Supplied scopes validate against one causal basis and publish as one atomic transition with a single identity, temporal boundary, durable cohort, and inference barrier; unknown fields, `final:false`, empty scopes, and material no-ops fail closed.
+- `Eligibility`: `final:true` is now an ephemeral per-iteration latch rather than a resolution form. It permits a later `turn_end` without stopping reasoning, tools, or further patches; eligibility survives later activity and repeated final calls, resets only with the next enabled iteration, and `{final:true}` alone creates no semantic transition, identity, step, or Git commit.
+- `Resolution`: An ineligible terminal draft is discarded and steered for at most three attempted completions. The first two attempts emit hidden same-run instructions; the third reports one bounded error while preserving committed state, enablement, and runtime-owned response. Failed and host-rejected patch calls consume no attempts, and only the accepted post-eligibility answer becomes `response`.
+- `Diagnostics`: Rejected `patch_state` calls now retain their exact attempted arguments alongside the precise error, tool identity, call id, resolution-attempt count, and terminal-eligibility state; publication conflicts use the same record and successful patches are never logged.
+- `Compatibility`: Persisted checkpoints, tails, provenance registries, scope layout, and Git/file durability are unchanged and need no migration; the removed model-facing grammar is not accepted as a compatibility alias.
+
 ## 0.7.0: Explicit resolution and leaner runtime
 
 - `Protocol`: Made `patch_state` the sole model-authored semantic mutation path. Every enabled turn now requires a successful resolution call, each exactly PATCH `{scope, patch}` or UNCHANGED `{"unchanged":true}`; unresolved prose is discarded and steered within the same run, failed calls remain unresolved, and only the later accepted ordinary answer becomes runtime-owned `response`.

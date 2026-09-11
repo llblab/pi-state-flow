@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStorageKey, temporalScopePaths } from "../lib/durable.ts";
 import { getKnowledgeRoot } from "../lib/discovery.ts";
 import { hashArtifactSource } from "../lib/artifact.ts";
+import { MAX_RESOLUTION_ATTEMPTS } from "../lib/extension.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
@@ -106,7 +107,7 @@ test("explicit activation defers artifact discovery until the next enabled infer
 	assert.match(JSON.stringify(projected.messages), /\\\"reason\\\":\\\"new\\\"/);
 });
 
-test("unchanged resolution cannot bypass an acquired invalidated artifact", async (t) => {
+test("final-only resolution cannot bypass an acquired invalidated artifact", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-artifact-resolution-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const knowledgeRoot = join(root, "knowledge");
@@ -121,11 +122,11 @@ test("unchanged resolution cannot bypass an acquired invalidated artifact", asyn
 	h.handlers.get("tool_call")!({ toolCallId: "artifact-read", toolName: "read", input }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "artifact-read", toolName: "read", result: {}, isError: false }, h.ctx);
 	await assert.rejects(
-		h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx),
+		h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx),
 		/Every successfully read invalidated artifact must have a global compiler output/,
 	);
 	await h.tools.get("patch_state")!.execute("compile", {
-		scope: "global", patch: { artifacts: { [source]: { description: "Routing source" } } },
+		global: { artifacts: { [source]: { description: "Routing source" } } }, final: true,
 	}, undefined, undefined, h.ctx);
 });
 
@@ -198,7 +199,7 @@ test("read_state lazily projects all hot offsets and scopes at one boundary with
 	const changes = [["global", "G1"], ["cwd", "C2"], ["session", "S3"], ["session", null],
 		["cwd", null], ["global", "G6"], ["cwd", "C7"], ["session", "S8"]] as const;
 	for (const [scope, value] of changes) {
-		await h.tools.get("patch_state").execute("patch", { scope, patch: { working: { shared: value } } }, undefined, undefined, h.ctx);
+		await h.tools.get("patch_state").execute("patch", { [scope]: { working: { shared: value } } }, undefined, undefined, h.ctx);
 		if (value === null) delete expected[scope]!.shared;
 		else expected[scope]!.shared = value;
 		history.push(structuredClone(expected));
@@ -255,10 +256,27 @@ test("global memory is always available while State Flow is enabled", async () =
 	const started = await start(h, "Durable preference");
 	assert.match(started.systemPrompt, /State Flow owns durable memory while enabled/);
 	const accepted = await h.tools.get("patch_state")!.execute(
-		"global-memory", { scope: "global", patch: { working: { preference: "compact" } } }, undefined, undefined, h.ctx,
+		"global-memory", { global: { working: { preference: "compact" } } }, undefined, undefined, h.ctx,
 	);
-	assert.equal(accepted.content[0].text, "\nState materialized at global scope.");
+	assert.equal(accepted.content[0].text, "\nState materialized atomically at global scope.");
 	assert.equal(h.readState(0, "global").working.preference, "compact");
+});
+
+test("patch_state commits global, CWD, and session as one model-facing atomic barrier", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Atomic scope cohort");
+	const beforeStep = h.resolveSnapshot().meta.step;
+	const result = await h.tools.get("patch_state")!.execute("atomic", {
+		global: { contract: { shared: "global" } },
+		cwd: { working: { project: "cwd" } },
+		session: { working: { continuation: "session" } },
+	}, undefined, undefined, h.ctx);
+	assert.deepEqual(result.details.scopes, ["global", "cwd", "session"]);
+	assert.equal(h.resolveSnapshot().meta.step, beforeStep + 1);
+	assert.equal(h.readState(0, "global").contract.shared, "global");
+	assert.equal(h.readState(0, "cwd").working.project, "cwd");
+	assert.equal(h.readState(0, "session").working.continuation, "session");
+	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Still pending.") }, h.ctx).message.content.length, 0);
 });
 
 test("patch_state materializes session state before the next inference and response reconciliation", async () => {
@@ -267,12 +285,12 @@ test("patch_state materializes session state before the next inference and respo
 	const patchState = h.tools.get("patch_state")!;
 	const result = await patchState.execute(
 		"patch-1",
-		{ scope: "session", patch: { working: { verified: "intermediate" } } },
+		{ session: { working: { verified: "intermediate" } }, final: true },
 		undefined,
 		undefined,
 		h.ctx,
 	);
-	assert.equal(result.content[0].text, "\nState materialized at session scope.");
+	assert.equal(result.content[0].text, "\nState materialized atomically at session scope.");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
@@ -300,22 +318,22 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 			content: [
 				{ type: "toolCall", id: "history-1", name: "read_state", arguments: { offset: 1 } },
 				{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "echo stale" } },
-				{ type: "toolCall", id: "patch-1", name: "patch_state", arguments: { scope: "session", patch: {} } },
+				{ type: "toolCall", id: "patch-1", name: "patch_state", arguments: { session: { working: { next: true } } } },
 			],
 		},
 	});
 	const gate = h.handlers.get("tool_call")!;
 	assert.match(gate({ toolCallId: "history-1", toolName: "read_state", input: { offset: 1 } }, h.ctx).reason, /barrier/);
 	assert.match(gate({ toolCallId: "bash-1", toolName: "bash", input: { command: "echo stale" } }, h.ctx).reason, /barrier/);
-	assert.equal(gate({ toolCallId: "patch-1", toolName: "patch_state", input: { scope: "session", patch: {} } }, h.ctx), undefined);
+	assert.equal(gate({ toolCallId: "patch-1", toolName: "patch_state", input: { session: { working: { next: true } } } }, h.ctx), undefined);
 
 	h.entries.push({
 		type: "message",
 		message: {
 			role: "assistant",
 			content: [
-				{ type: "toolCall", id: "patch-2", name: "patch_state", arguments: { scope: "session", patch: {} } },
-				{ type: "toolCall", id: "patch-3", name: "patch_state", arguments: { scope: "cwd", patch: {} } },
+				{ type: "toolCall", id: "patch-2", name: "patch_state", arguments: { session: { working: { first: true } } } },
+				{ type: "toolCall", id: "patch-3", name: "patch_state", arguments: { cwd: { working: { second: true } } } },
 			],
 		},
 	});
@@ -325,7 +343,7 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 test("patch_state tolerates shared-scope drift while preserving the session layer", async () => {
 	const a = harness({ remotePublication: "off" });
 	await start(a, "Session A");
-	await a.tools.get("patch_state")!.execute("a-initial", { scope: "session", patch: { working: { owner: "A" } } }, undefined, undefined, a.ctx);
+	await a.tools.get("patch_state")!.execute("a-initial", { session: { working: { owner: "A" } } }, undefined, undefined, a.ctx);
 	const b = harness({
 		repositoryRoot: a.repositoryRoot,
 		cwd: a.ctx.cwd,
@@ -334,10 +352,10 @@ test("patch_state tolerates shared-scope drift while preserving the session laye
 		initializeRepository: false,
 	});
 	await start(b, "Session B");
-	await b.tools.get("patch_state")!.execute("b-global", { scope: "global", patch: { working: { globalFromB: true } } }, undefined, undefined, b.ctx);
+	await b.tools.get("patch_state")!.execute("b-global", { global: { working: { globalFromB: true } } }, undefined, undefined, b.ctx);
 	const beforeStep = a.resolveSnapshot().meta.step;
-	const result = await a.tools.get("patch_state")!.execute("a-session", { scope: "session", patch: { working: { continued: true } } }, undefined, undefined, a.ctx);
-	assert.equal(result.content[0].text, "\nState materialized at session scope.");
+	const result = await a.tools.get("patch_state")!.execute("a-session", { session: { working: { continued: true } } }, undefined, undefined, a.ctx);
+	assert.equal(result.content[0].text, "\nState materialized atomically at session scope.");
 	assert.equal(a.resolveSnapshot().meta.step, beforeStep + 1);
 	assert.equal(a.readState(0, "session").working.owner, "A");
 	assert.equal(a.readState(0, "session").working.continued, true);
@@ -350,7 +368,7 @@ function finalMessage(text: string) {
 	return { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
 }
 
-test("an unresolved terminal draft is intercepted, then unchanged resolution permits the final answer", async () => {
+test("an unresolved terminal draft is intercepted, then final-only resolution permits the final answer", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "No durable work");
 	const draft = h.handlers.get("message_end")!({ message: finalMessage("Draft that must not persist.") }, h.ctx);
@@ -359,20 +377,58 @@ test("an unresolved terminal draft is intercepted, then unchanged resolution per
 	h.handlers.get("turn_end")!({ message: draft.message }, h.ctx);
 	assert.equal(h.readState().response, "");
 
-	const resolution = await h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx);
-	assert.equal(resolution.terminate, undefined);
+	const beforeStep = h.resolveSnapshot().meta.step;
+	const resolution = await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
+	assert.deepEqual(resolution.details, { final: true });
+	assert.equal(h.resolveSnapshot().meta.step, beforeStep);
 	const accepted = h.handlers.get("message_end")!({ message: finalMessage("Final answer.") }, h.ctx);
 	assert.equal(accepted, undefined);
 	h.handlers.get("turn_end")!({ message: finalMessage("Final answer.") }, h.ctx);
 	assert.equal(h.readState().response, "Final answer.");
 });
 
-test("a real patch resolves the same intercepted turn before final response reconciliation", async () => {
+test("resolution steering stops after three terminal attempts without accepting a draft", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Bound resolution attempts");
+	await assert.rejects(
+		h.tools.get("patch_state")!.execute("invalid", { final: false }, undefined, undefined, h.ctx),
+		/final must be exactly true/,
+	);
+	assert.equal(h.sentMessages.length, 0, "failed patch calls do not consume terminal attempts");
+	for (let attempt = 1; attempt <= MAX_RESOLUTION_ATTEMPTS; attempt++) {
+		const intercepted = h.handlers.get("message_end")!({ message: finalMessage(`Draft ${attempt}`) }, h.ctx);
+		assert.deepEqual(intercepted.message.content, []);
+		assert.equal(h.sentMessages.length, Math.min(attempt, MAX_RESOLUTION_ATTEMPTS - 1));
+	}
+	assert.equal(h.notifications.filter((message) => /could not obtain final:true after 3 terminal attempts/.test(message)).length, 1);
+	const fourth = h.handlers.get("message_end")!({ message: finalMessage("Draft 4") }, h.ctx);
+	assert.deepEqual(fourth.message.content, []);
+	assert.equal(h.sentMessages.length, MAX_RESOLUTION_ATTEMPTS - 1);
+	assert.equal(h.notifications.filter((message) => /could not obtain final:true/.test(message)).length, 1);
+	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.resolveSnapshot().meta.step, 0);
+	assert.equal(h.readState().response, "");
+});
+
+test("resolution-attempt count resets with the next enabled iteration", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "First iteration");
+	for (let attempt = 0; attempt < MAX_RESOLUTION_ATTEMPTS - 1; attempt++) {
+		h.handlers.get("message_end")!({ message: finalMessage(`First ${attempt}`) }, h.ctx);
+	}
+	assert.equal(h.sentMessages.length, MAX_RESOLUTION_ATTEMPTS - 1);
+	h.handlers.get("before_agent_start")!({ prompt: "Next iteration", systemPrompt: "base" }, h.ctx);
+	h.handlers.get("message_end")!({ message: finalMessage("Next first attempt") }, h.ctx);
+	assert.equal(h.sentMessages.length, MAX_RESOLUTION_ATTEMPTS);
+	assert.equal(h.notifications.some((message) => /could not obtain final:true/.test(message)), false);
+});
+
+test("an atomic patch with final resolves the same intercepted turn before response reconciliation", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Remember this");
 	const draft = h.handlers.get("message_end")!({ message: finalMessage("Unresolved draft.") }, h.ctx);
 	h.handlers.get("turn_end")!({ message: draft.message }, h.ctx);
-	await h.tools.get("patch_state")!.execute("patch", { scope: "session", patch: { working: { next: "ship" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("patch", { session: { working: { next: "ship" } }, final: true }, undefined, undefined, h.ctx);
 	const accepted = h.handlers.get("message_end")!({ message: finalMessage("Done.") }, h.ctx);
 	assert.equal(accepted, undefined);
 	h.handlers.get("turn_end")!({ message: finalMessage("Done.") }, h.ctx);
@@ -380,33 +436,30 @@ test("a real patch resolves the same intercepted turn before final response reco
 	assert.equal(h.readState().response, "Done.");
 });
 
-test("a failed patch after an earlier success returns the turn to unresolved state", async () => {
+test("a failed later patch does not revoke terminal eligibility", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Two decisions");
-	await h.tools.get("patch_state")!.execute("accepted", { scope: "session", patch: { working: { first: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("accepted", { session: { working: { first: true } }, final: true }, undefined, undefined, h.ctx);
 	await assert.rejects(
-		h.tools.get("patch_state")!.execute("failed", { scope: "session", patch: { working: { first: true } } }, undefined, undefined, h.ctx),
+		h.tools.get("patch_state")!.execute("failed", { session: { working: { first: true } } }, undefined, undefined, h.ctx),
 		/must materially update state or required provenance/,
 	);
-	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Must not finalize.") }, h.ctx);
-	assert.deepEqual(blocked.message.content, []);
-	assert.equal(h.readState().response, "");
+	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Still final.") }, h.ctx), undefined);
 });
 
-test("a host-rejected patch_state call also returns an earlier-resolved turn to pending", async () => {
+test("a host-rejected patch_state call does not revoke terminal eligibility", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Host validation");
-	await h.tools.get("patch_state")!.execute("accepted", { scope: "session", patch: { working: { first: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("accepted", { session: { working: { first: true } }, final: true }, undefined, undefined, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "schema-failure", toolName: "patch_state", isError: true }, h.ctx);
-	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Must not finalize.") }, h.ctx);
-	assert.deepEqual(blocked.message.content, []);
+	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Still final.") }, h.ctx), undefined);
 });
 
 test("length and provider-error endings never become accepted responses", async () => {
 	for (const stopReason of ["length", "error"]) {
 		const h = harness({ remotePublication: "off" });
 		await start(h, `Stop reason ${stopReason}`);
-		await h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx);
+		await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
 		const message = { ...finalMessage("Incomplete output."), stopReason };
 		assert.equal(h.handlers.get("message_end")!({ message }, h.ctx), undefined);
 		h.handlers.get("turn_end")!({ message }, h.ctx);
@@ -415,7 +468,7 @@ test("length and provider-error endings never become accepted responses", async 
 	}
 });
 
-test("only the exclusive PATCH and UNCHANGED forms can satisfy resolution", async () => {
+test("accepts only canonical atomic scope patches and final:true", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Resolve me");
 	const execute = (input: unknown) => h.tools.get("patch_state")!.execute("invalid", input, undefined, undefined, h.ctx);
@@ -423,26 +476,87 @@ test("only the exclusive PATCH and UNCHANGED forms can satisfy resolution", asyn
 		null,
 		[],
 		{},
-		{ unchanged: false },
-		{ unchanged: true, scope: "session", patch: {} },
-		{ unchanged: true, extra: "forbidden" },
-		{ scope: "session" },
-		{ patch: { working: { value: true } } },
-		{ scope: "session", patch: {} },
-		{ scope: "session", patch: { working: { value: true } }, extra: "forbidden" },
+		{ final: false },
+		{ unchanged: true },
+		{ scope: "session", patch: { working: { value: true } } },
+		{ session: {} },
+		{ session: { working: { value: true } }, extra: "forbidden" },
+		{ global: null },
 	]) await assert.rejects(execute(input));
 
 	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Still unresolved.") }, h.ctx);
 	assert.deepEqual(blocked.message.content, []);
 	assert.equal(h.readState().response, "");
-	await h.tools.get("patch_state")!.execute("valid", { unchanged: true }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("valid", { final: true }, undefined, undefined, h.ctx);
 	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Resolved.") }, h.ctx), undefined);
+});
+
+test("terminal eligibility remains latched through later tools, patches, and repeated final calls", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Latch terminal eligibility");
+	const beforeStep = h.resolveSnapshot().meta.step;
+	await h.tools.get("patch_state")!.execute("first-final", { final: true }, undefined, undefined, h.ctx);
+	assert.equal(h.resolveSnapshot().meta.step, beforeStep);
+	h.handlers.get("message_end")!({ message: toolAssistant("later-read") }, h.ctx);
+	await h.tools.get("patch_state")!.execute("later-patch", {
+		session: { working: { afterFinal: true } },
+	}, undefined, undefined, h.ctx);
+	assert.equal(h.resolveSnapshot().meta.step, beforeStep + 1);
+	await h.tools.get("patch_state")!.execute("repeated-final", { final: true }, undefined, undefined, h.ctx);
+	assert.equal(h.resolveSnapshot().meta.step, beforeStep + 1);
+	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Latched.") }, h.ctx), undefined);
+});
+
+test("a new enabled iteration resets terminal eligibility", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "First iteration");
+	await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
+	const first = finalMessage("First complete answer.");
+	h.handlers.get("message_end")!({ message: first }, h.ctx);
+	h.handlers.get("turn_end")!({ message: first }, h.ctx);
+	h.handlers.get("before_agent_start")!({ prompt: "Second iteration", systemPrompt: "base" }, h.ctx);
+	const blocked = h.handlers.get("message_end")!({ message: finalMessage("Second unresolved draft.") }, h.ctx);
+	assert.deepEqual(blocked.message.content, []);
+	assert.equal(h.readState().response, "First complete answer.");
+});
+
+test("one atomic final patch resolves simultaneous global artifact and CWD Skill obligations", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-mixed-obligations-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const knowledgeRoot = join(root, "knowledge");
+	const skill = join(root, "skills", "mixed", "SKILL.md");
+	mkdirSync(knowledgeRoot, { recursive: true });
+	mkdirSync(join(root, "skills", "mixed"), { recursive: true });
+	const artifact = join(knowledgeRoot, "routing.md");
+	writeFileSync(artifact, "Routing guidance.\n");
+	writeFileSync(skill, "# Mixed\n\nCompile with global knowledge.\n");
+	const repositoryRoot = join(root, "store");
+	mkdirSync(repositoryRoot);
+	const h = harness({ repositoryRoot, knowledgeRoot, remotePublication: "off" });
+	await start(h, "Acquire both sources");
+	for (const [toolCallId, path] of [["artifact", artifact], ["skill", skill]]) {
+		h.handlers.get("tool_call")!({ toolCallId, toolName: "read", input: { path } }, h.ctx);
+		h.handlers.get("tool_execution_end")!({ toolCallId, toolName: "read", result: {}, isError: false }, h.ctx);
+	}
+	const result = await h.tools.get("patch_state")!.execute("compile-both", {
+		global: { artifacts: { [artifact]: { description: "Global routing guidance" } } },
+		cwd: { artifacts: { [skill]: {
+			description: "Mixed-obligation Skill",
+			kind: "skill",
+			compilation: { route: "combine global and CWD compilation" },
+		} } },
+		final: true,
+	}, undefined, undefined, h.ctx);
+	assert.deepEqual(result.details, { scopes: ["global", "cwd"], final: true, step: 1 });
+	assert.equal(h.readState(0, "global").artifacts[artifact]!.description, "Global routing guidance");
+	assert.equal(h.readState(0, "cwd").artifacts[skill]!.kind, "skill");
+	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Both compiled.") }, h.ctx), undefined);
 });
 
 test("stop removes State Flow semantics while retaining a bounded passive continuation", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Establish bounded state");
-	await h.tools.get("patch_state")!.execute("state", { scope: "session", patch: { working: { continuation: "keep this" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("state", { session: { working: { continuation: "keep this" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
 
 	assert.equal(h.activeTools.includes("patch_state"), false);
@@ -464,7 +578,7 @@ test("stop removes State Flow semantics while retaining a bounded passive contin
 test("reload, startup, resume, and tree restoration preserve only the same physical session handoff", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Remember state");
-	await h.tools.get("patch_state")!.execute("state", { scope: "session", patch: { working: { continuation: "reload" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("state", { session: { working: { continuation: "reload" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
 	for (const reason of ["reload", "startup", "resume", undefined]) {
 		if (reason === undefined) h.handlers.get("session_tree")!({}, h.ctx);
@@ -487,7 +601,7 @@ test("reload, startup, resume, and tree restoration preserve only the same physi
 test("repeated stop retains one passive handoff without adding another marker", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Remember state");
-	await h.tools.get("patch_state")!.execute("state", { scope: "session", patch: { working: { continuation: "repeat" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("state", { session: { working: { continuation: "repeat" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
 	const markerCount = h.entries.filter((entry) => entry.customType === "state-flow-passive-stop").length;
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
@@ -499,7 +613,7 @@ test("repeated stop retains one passive handoff without adding another marker", 
 test("start uses the passive boundary for one active bootstrap instead of resurrecting raw history", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Remember state");
-	await h.tools.get("patch_state")!.execute("state", { scope: "session", patch: { working: { continuation: "restart" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("state", { session: { working: { continuation: "restart" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
 	const frozenResponse = h.readState().response;
 	const oldMessages = Array.from({ length: 200 }, (_, index) => user(`OLD-${index}`, index + 1));
@@ -525,7 +639,7 @@ test("start uses the passive boundary for one active bootstrap instead of resurr
 	assert.match(JSON.stringify(projected.messages), /Post-stop answer/);
 	assert.doesNotMatch(JSON.stringify(projected.messages), /OLD-/);
 
-	await h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
 	const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Active again." }] };
 	h.handlers.get("message_end")!({ message: final }, h.ctx);
 	h.handlers.get("turn_end")!({ message: final }, h.ctx);

@@ -18,6 +18,12 @@ export interface StateFlowDiagnosticRecord {
 	category: StateFlowDiagnosticCategory;
 	error: string;
 	content?: StateFlowDiagnosticBlock[];
+	/** Rejected tool arguments, captured for reproducible diagnosis. Never reasoning bodies. */
+	input?: unknown;
+	tool?: string;
+	toolCallId?: string;
+	resolutionAttempt?: number;
+	terminalEligible?: boolean;
 }
 
 /** Preserve exact text blocks and block boundaries; reasoning bodies are never duplicated. */

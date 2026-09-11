@@ -38,10 +38,10 @@ import {
 
 function scopedResponses(transitions: Array<{ scope: "session" | "cwd" | "global"; patch: unknown }>, answer: string) {
 	return [
-		...transitions.map((transition) => fauxAssistantMessage(
-			fauxToolCall("patch_state", transition),
+		fauxAssistantMessage(
+			fauxToolCall("patch_state", { ...Object.fromEntries(transitions.map(({ scope, patch }) => [scope, patch])), final: true }),
 			{ stopReason: "toolUse" },
-		)),
+		),
 		fauxAssistantMessage(answer),
 	];
 }
@@ -52,7 +52,7 @@ function sessionResponses(patch: unknown, answer: string) {
 
 function unchangedResponses(answer: string) {
 	return [
-		fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" }),
 		fauxAssistantMessage(answer),
 	];
 }
@@ -250,7 +250,7 @@ test("real Pi patch diagnostics are opt-in and accepted answers are not logged",
 	await logged.prompt("/state-flow-start");
 	fixture.faux.setResponses([
 		fauxAssistantMessage("Logged unresolved draft."),
-		fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true, scope: "session", patch: {} }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { final: false }), { stopReason: "toolUse" }),
 		...sessionResponses({ working: { loggedRun: "accepted" } }, "Accepted."),
 	]);
 	await logged.prompt("Recover from invalid patch arguments");
@@ -258,8 +258,14 @@ test("real Pi patch diagnostics are opt-in and accepted answers are not logged",
 	assert.equal(records.length, 2);
 	assert.equal(records[0].category, "terminal-pending");
 	assert.deepEqual(records[0].content, [{ type: "text", text: "Logged unresolved draft." }]);
+	assert.equal(records[0].resolutionAttempt, 1);
+	assert.equal(records[0].terminalEligible, false);
 	assert.equal(records[1].category, "invalid-patch");
-	assert.match(records[1].error, /cannot include any other field/);
+	assert.match(records[1].error, /final must be exactly true/);
+	assert.deepEqual(records[1].input, { final: false });
+	assert.equal(records[1].tool, "patch_state");
+	assert.equal(typeof records[1].toolCallId, "string");
+	assert.equal(records[1].terminalEligible, false);
 	assert.equal(durableSession(fixture, logged).working.loggedRun, "accepted");
 	assert.equal(durableSession(fixture, logged).response, "Accepted.");
 });
@@ -273,7 +279,7 @@ test("real Pi diagnostic write failure leaves resolution and accepted state unto
 	writeFileSync(join(fixture.agentDir, "tmp"), "blocked");
 	const beforeFailure = fixture.notifications.length;
 	fixture.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true, scope: "session", patch: {} }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { final: false }), { stopReason: "toolUse" }),
 		...sessionResponses({ working: { ioFailureRun: "recovered" } }, "Recovered despite diagnostics."),
 	]);
 	await session.prompt("Recover while diagnostics cannot be written");
@@ -299,16 +305,14 @@ test("real Pi patch_state barriers rematerialize every scope before the next inf
 
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", {
-			scope: "session",
-			patch: { working: { sessionCheckpoint: "verified" } },
+			session: { working: { sessionCheckpoint: "verified" } },
 		}), { stopReason: "toolUse" }),
 		(context) => {
 			assert.equal(runtime(context).state.working.sessionCheckpoint, "verified");
 			assert.equal(fixture.readState(session, 1).working.sessionCheckpoint, undefined);
 			assert.equal(fixture.readState(session, 0, "session").working.sessionCheckpoint, "verified");
 			return fauxAssistantMessage(fauxToolCall("patch_state", {
-				scope: "cwd",
-				patch: { contract: { projectDecision: "retained" } },
+				cwd: { contract: { projectDecision: "retained" } },
 			}), { stopReason: "toolUse" });
 		},
 		(context) => {
@@ -316,8 +320,7 @@ test("real Pi patch_state barriers rematerialize every scope before the next inf
 			assert.equal(state.working.sessionCheckpoint, "verified");
 			assert.equal(state.contract.projectDecision, "retained");
 			return fauxAssistantMessage(fauxToolCall("patch_state", {
-				scope: "global",
-				patch: { contract: { sharedDecision: "retained" } },
+				global: { contract: { sharedDecision: "retained" } }, final: true,
 			}), { stopReason: "toolUse" });
 		},
 		(context) => {
@@ -365,7 +368,7 @@ test("real Pi reads prior scoped state lazily after a barrier and rejects offset
 		return JSON.parse(text.slice(text.indexOf("\n") + 1));
 	}
 	fixture.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("patch_state", { scope: "session", patch: { working: { version: "new" } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { version: "new" } }, final: true }), { stopReason: "toolUse" }),
 		(context) => {
 			assert.equal(projection(context).state.working.version, "new");
 			beforeReads = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
@@ -402,7 +405,7 @@ test("real Pi reads prior scoped state lazily after a barrier and rejects offset
 	fixture.faux.setResponses([
 		(context) => {
 			assert.equal(context.messages.some((message: any) => message.role === "toolResult" && message.toolCallId === "history-read"), false);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("Next run."),
 	]);
@@ -430,8 +433,7 @@ test("real Pi executes only patch_state when a response also proposes a sibling 
 			fauxToolCall("read", { path: join(fixture.cwd, "must-not-run.md") }, { id: "blocked-read" }),
 			fauxToolCall("read_state", { offset: 0 }, { id: "blocked-history" }),
 			fauxToolCall("patch_state", {
-				scope: "session",
-				patch: { working: { barrier: "accepted" } },
+				session: { working: { barrier: "accepted" } }, final: true,
 			}, { id: "accepted-patch" }),
 		], { stopReason: "toolUse" }),
 		(context) => {
@@ -445,7 +447,7 @@ test("real Pi executes only patch_state when a response also proposes a sibling 
 			assert.match(results[1].content[0].text, /patch_state barrier/);
 			assert.equal(results[2].toolCallId, "accepted-patch");
 			assert.equal(results[2].isError, false);
-			assert.match(results[2].content[0].text, /State materialized at session scope/);
+			assert.match(results[2].content[0].text, /State materialized atomically at session scope/);
 			return fauxAssistantMessage("Barrier enforced.");
 		},
 	]);
@@ -463,14 +465,14 @@ test("real Pi keeps a malformed patch_state failure separated from the invocatio
 	const beforeHead = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
 	const beforeStep = latestSnapshot(session).meta.step;
 	fixture.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("patch_state", { scope: "session", patch: { working: { invalid: null } } }, { id: "malformed-patch" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { invalid: [null] } } }, { id: "malformed-patch" }), { stopReason: "toolUse" }),
 		(context) => {
 			const result = context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === "malformed-patch") as any;
 			assert.equal(result.isError, true);
 			assert.match(result.content[0].text, /^\nMaterialized state cannot contain null/);
 			assert.equal(latestSnapshot(session).meta.step, beforeStep);
 			assert.equal(runGit(fixture.repositoryRoot, "rev-parse", "HEAD"), beforeHead);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("Malformed patch rejected without state change."),
 	]);
@@ -502,7 +504,7 @@ test("real Pi reconciles unrelated Knowledge history and contains a simultaneous
 
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", {
-			scope: "cwd", patch: { working: { writer: "second" } },
+			cwd: { working: { writer: "second" } },
 		}), { stopReason: "toolUse" }),
 		...unchangedResponses("Second writer was rejected."),
 	]);
@@ -602,7 +604,7 @@ test("real Pi incrementally acquires only invalidated global Markdown and attach
 			// Legacy embedded provenance is consumed for freshness but stripped from model projection.
 			assert.deepEqual(runtime(context).state.artifacts[unchangedPath], { description: "Stable unchanged guidance" });
 			assert.deepEqual(runtime(context).state.artifacts[changedPath], { description: "Original changed guidance" });
-			return fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("Fresh artifacts reused without source acquisition."),
 	]);
@@ -703,7 +705,7 @@ test("real Pi incrementally acquires only invalidated global Markdown and attach
 	fixture.faux.setResponses([
 		(context) => {
 			assert.equal(runtime(context).artifact_invalidations, undefined);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("Provenance retained without reacquisition."),
 	]);
@@ -718,7 +720,7 @@ test("real Pi incrementally acquires only invalidated global Markdown and attach
 	fixture.faux.setResponses([
 		(context) => {
 			assert.equal(runtime(context).artifact_invalidations, undefined);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("Removed artifact no longer projected."),
 	]);
@@ -740,8 +742,7 @@ test("a fresh real Pi agent continues from compact state and a runtime-compiled 
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("read", { path: skill }), { stopReason: "toolUse" }),
 		fauxAssistantMessage(fauxToolCall("patch_state", {
-			scope: "cwd",
-			patch: {
+			cwd: {
 				artifacts: {
 					[skill]: {
 						description: "Continuation rules for evidence-preserving handoffs",
@@ -781,7 +782,7 @@ test("a fresh real Pi agent continues from compact state and a runtime-compiled 
 	fixture.faux.setResponses([
 		(context) => {
 			observedContext = JSON.stringify(context.messages);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("Continuation context verified."),
 	]);
@@ -825,7 +826,7 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 	assert.equal(fixture.readState(session).working.selected, "old");
 	await session.prompt("/state-flow-stop");
 	const stopped = latestSnapshot(session);
-	assert.equal(stopped.meta.step, 3);
+	assert.equal(stopped.meta.step, 2);
 	const after = owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("meta.json"))
 		.map((path) => readFileSync(join(fixture.repositoryRoot, path)));
 	assert.deepEqual(after, before);
@@ -884,11 +885,11 @@ test("real Pi persists without Git, resumes its file cohort and adopts Git witho
 		return JSON.parse(texts[0].slice(texts[0].indexOf("\n") + 1)).state;
 	};
 	fixture.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("patch_state", { scope: "cwd", patch: { working: { fileCwd: "visible" } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { cwd: { working: { fileCwd: "visible" } } }), { stopReason: "toolUse" }),
 		(context) => {
 			assert.equal(current(context).working.fileCwd, "visible");
 			assert.equal(fixture.readState(session, 1, "cwd").working.fileCwd, undefined);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { scope: "session", patch: { working: { fileSession: "visible" } } }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { fileSession: "visible" } }, final: true }), { stopReason: "toolUse" });
 		},
 		(context) => {
 			assert.equal(current(context).working.fileSession, "visible");
@@ -1191,7 +1192,7 @@ test("real Pi projects resume bootstrap once and then uses step rehydration", as
 	fixture.faux.setResponses([
 		(context) => {
 			assert.equal(phase(context), "resume-bootstrap");
-			return fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("Resume bootstrap remained materialized-first."),
 	]);
@@ -1199,7 +1200,7 @@ test("real Pi projects resume bootstrap once and then uses step rehydration", as
 	fixture.faux.setResponses([
 		(context) => {
 			assert.equal(phase(context), "step");
-			return fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("Later step used the same bounded route."),
 	]);
