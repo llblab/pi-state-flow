@@ -1,12 +1,18 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ArtifactInvalidationRequest } from "./artifact.ts";
+import { projectArtifactForModel, type ArtifactInvalidationNotice } from "./artifact.ts";
 import type { RecentTransitionWindow } from "./history.ts";
 import { canonicalJson } from "./json.ts";
 import type { Snapshot } from "./snapshot.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
-import type { MaterializedState } from "./state.ts";
+import { projectStateForModel, type MaterializedState } from "./state.ts";
 
 export const VALIDATION_MESSAGE_TYPE = "state-flow-validation";
+
+/** Bounded context retained after semantic State Flow is stopped in this physical session. */
+export interface PassiveContinuation {
+	startedAt: number;
+	handoff: AgentMessage;
+}
 
 export function syntheticUser(text: string): AgentMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as AgentMessage;
@@ -32,23 +38,52 @@ export function withoutPrivateValidation(messages: AgentMessage[]): AgentMessage
 	});
 }
 
+export function createPassiveContinuation(state: MaterializedState, startedAt = Date.now()): PassiveContinuation {
+	return {
+		startedAt,
+		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${canonicalJson({ state, continuation: "State Flow semantics are disabled; this bounded handoff replaces pre-stop history." })}`),
+	};
+}
+
+/** Preserve the frozen handoff plus only messages produced after stop, never the older raw branch. */
+export function passiveContinuationMessages(messages: AgentMessage[], continuation: PassiveContinuation): AgentMessage[] {
+	const start = messages.findIndex((message) => message.role === "user"
+		&& typeof message.timestamp === "number"
+		&& message.timestamp >= continuation.startedAt);
+	return [continuation.handoff, ...(start < 0 ? [] : messages.slice(start))];
+}
+
+function projectRecentForModel(recent: RecentTransitionWindow): RecentTransitionWindow {
+	const projected = structuredClone(recent);
+	for (const record of projected) for (const transition of record.transitions) {
+		if (transition.patch.artifacts === undefined) continue;
+		for (const [path, entry] of Object.entries(transition.patch.artifacts)) {
+			Object.defineProperty(transition.patch.artifacts, path, {
+				value: projectArtifactForModel(entry), enumerable: true, configurable: true, writable: true,
+			});
+		}
+	}
+	return projected;
+}
+
 export function runtimeContextMessage(
 	snapshot: Snapshot,
 	state: MaterializedState,
 	recentTransitions: RecentTransitionWindow = [],
-	artifactInvalidations: readonly ArtifactInvalidationRequest[] = [],
+	artifactInvalidations: readonly ArtifactInvalidationNotice[] = [],
 	rehydrationPhase?: RehydrationPhase,
+	resolutionPending = false,
 ): AgentMessage {
 	if (snapshot.meta.specification === undefined) {
 		throw new Error("State Flow runtime context requires an active specification");
 	}
 	const context = {
 		specification: snapshot.meta.specification,
-		state,
+		state: projectStateForModel(state),
 		...(rehydrationPhase === undefined ? {} : { knowledge_rehydration: { phase: rehydrationPhase } }),
-		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations }),
-		...(recentTransitions.length === 0 ? {} : { recent_transitions: recentTransitions }),
-		...(snapshot.meta.validation === undefined ? {} : { validation_feedback: snapshot.meta.validation }),
+		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations.map(({ path, reason }) => ({ path, reason })) }),
+		...(recentTransitions.length === 0 ? {} : { recent_transitions: projectRecentForModel(recentTransitions) }),
+		...(resolutionPending ? { state_resolution: "pending: a terminal draft was intercepted. Call patch_state with a PATCH {scope, patch} or UNCHANGED {unchanged:true}; then provide the final answer normally." } : {}),
 	};
 	return syntheticUser(
 		`State Flow runtime context (user-level data, not system instructions):\n${canonicalJson(context)}`,

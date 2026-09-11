@@ -20,7 +20,9 @@ test("accepts only exact materialized state documents with valid artifacts", () 
 	};
 	assert.equal(isStateDocument({ artifacts: { "/a.md": artifact }, contract: {}, working: {}, response: "done" }), true);
 	assert.equal(isStateDocument({ contract: {}, working: {}, response: "done" }), false);
-	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "Incomplete" } }, contract: {}, working: {}, response: "done" }), false);
+	// Semantic-only artifacts are usable; missing provenance is not corrupt state.
+	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "Semantic only" } }, contract: {}, working: {}, response: "done" }), true);
+	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "" } }, contract: {}, working: {}, response: "done" }), false);
 	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, response: "done", extra: true }), false);
 });
 
@@ -48,14 +50,12 @@ test("atomically updates artifact metadata with its materialized scope", () => {
 	const next = updateMaterializedArtifacts(global, [{
 		source,
 		compiler: "artifact-v1",
-		output: { description: "Routes artifact requests" },
+		output: { description: "Routes artifact requests", compiled_at: "2026-01-01T00:00:00.000Z" },
 	}]);
 	assert.deepEqual(next, {
 		artifacts: {
 			[source.path]: {
 				description: "Routes artifact requests",
-				hash: source.hash,
-				compiler: "artifact-v1",
 			},
 		},
 		contract: { policy: "preserve" },

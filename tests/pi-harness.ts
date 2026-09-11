@@ -172,10 +172,6 @@ export function resolvedSnapshot(session: AgentSession, data: unknown = snapshot
 	return resolveCheckpoint(data, session.sessionManager.getCwd(), session.sessionManager.getSessionId(), store.root, store.sessionKey);
 }
 
-export function scopedTerminal(transitions: unknown[], answer: string): string {
-	return `<!-- state_flow ${JSON.stringify({ transitions })} -->\n\n${answer}`;
-}
-
 export function runGit(repository: string, ...args: string[]): string {
 	return git(repository, ...args);
 }

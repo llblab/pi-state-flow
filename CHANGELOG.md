@@ -2,6 +2,17 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.7.0: Explicit resolution and leaner runtime
+
+- `Protocol`: Made `patch_state` the sole model-authored semantic mutation path. Every enabled turn now requires a successful resolution call, each exactly PATCH `{scope, patch}` or UNCHANGED `{"unchanged":true}`; unresolved prose is discarded and steered within the same run, failed calls remain unresolved, and only the later accepted ordinary answer becomes runtime-owned `response`.
+- `Stop`: `/state-flow-stop` still creates no semantic transition, but now prevents raw-history resurrection with a frozen effective-state handoff plus post-stop messages. The bounded projection survives reload, resume, and tree restoration for that physical session; active restart uses the same boundary for one migration run, while new/forked sessions inherit nothing.
+- `Metadata`: Moved artifact source hashes, compiler revisions, and compilation timestamps from model-visible artifacts into each scope's existing `meta.json`. Missing evidence degrades only dependent freshness capabilities, malformed present evidence fails locally, and legacy embedded provenance remains readable compatibility input but is stripped from projection.
+- `Temporal`: Removed configurable `transitionWindow` output in favor of one fixed seven-boundary hot history, while tolerating retired input. Restored branches now adopt proven advances in untouched global/CWD streams at a fresh origin and fail precisely when the current patch targets a shared scope that diverged; publication CAS still protects the captured basis.
+- `Durability`: Git publication now commits the complete non-ignored state-repository delta, including tracked edits, new files, and manual deletions, before overlaying exact prepared State Flow bytes. Active files retain CAS protection, ignored files remain untouched, rollback preserves concurrent bytes, and the caller-visible index is synchronized to the accepted tree.
+- `Activation`: Normal `turn-end`/`off` activation accepts locally without waiting for remote push, Markdown freshness discovery is deferred until the next enabled inference, and canonical stores skip full predecessor-format planning when legacy snapshot names are absent. Warm reactivation has one config commit; timing and Git Trace2 evidence are recorded in the architecture guide.
+- `Diagnostics`: Added opt-in local JSONL diagnostics for rejected `patch_state` calls and intercepted unresolved drafts, excluding reasoning bodies and all semantic/publication planes. Logging failure is inert apart from one warning. Failed `patch_state` results remain real errors with a local blank-line rendering boundary.
+- `Compatibility`: Preserved the four-field semantic shape, three scopes, storage paths, existing 0.6.x stores, optional Git/file durability, and remote policy without a bulk migration or new metadata file. Removed the terminal HTML-comment parser/retry protocol and its validation module; historical and foreign comments remain ordinary owner-controlled text.
+
 ## 0.6.0: Continuity without fixation
 
 - `Memory`: Revised ordinary handoffs to preserve confirmed decisions, useful uncertainty, interaction consequences, completed prerequisites, bounded positive and negative results, and exact continuation without promoting provisional methods or unsupported assertions.

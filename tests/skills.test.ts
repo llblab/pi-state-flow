@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { loadSkillsFromDir } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js";
 import { hashArtifactSource } from "../lib/artifact.ts";
-import { loadCwdState } from "./temporal-fixture.ts";
+import { loadCwdProvenance, loadCwdState } from "./temporal-fixture.ts";
 import {
 	hasCompiledSkillArtifact,
 	hashSkillSource,
@@ -13,9 +13,13 @@ import {
 	SkillReadTracker,
 	skillPathFromRead,
 } from "../lib/skills.ts";
-import { commitTerminal, harness, scopedTerminalComment, start, terminalComment } from "./harness.ts";
+import { commitTerminal, harness, start } from "./harness.ts";
 
 const skillRoot = mkdtempSync(join(tmpdir(), "pi-state-flow-skills-"));
+
+async function patchCwdArtifacts(h: ReturnType<typeof harness>, artifacts: unknown) {
+	return h.tools.get("patch_state")!.execute("compile-skill", { scope: "cwd", patch: { artifacts } }, undefined, undefined, h.ctx);
+}
 
 function skillFile(name: string, body = `# ${name}\n\nOperational rules.`): string {
 	const source = join(skillRoot, name, "SKILL.md");
@@ -101,32 +105,22 @@ test("curation compiles an acquired Skill before write-verify-delete barriers", 
 	}, undefined, undefined, h.ctx);
 	assert.equal(JSON.parse(effective.content[0].text).state.contract.projectRule, "project-only");
 	assert.equal(h.readState(0, "global").contract.projectRule, undefined);
-	const terminal = commitTerminal(h, {}, {}, "Curation verified.");
+	const terminal = await commitTerminal(h, {}, {}, "Curation verified.");
 	assert.equal(terminal.message.content[0].text, "Curation verified.");
 });
 
 test("memory curation can narrow an established value without retaining two authoritative scopes", async () => {
 	const h = harness();
 	await start(h);
-	const retain = h.handlers.get("message_end")!({
-		message: {
-			role: "assistant", stopReason: "stop",
-			content: [{ type: "text", text: `${scopedTerminalComment([
-				{ scope: "global", patch: { contract: { projectRule: "project-only" } } },
-			])}\n\nRetained for review.` }],
-		},
-	}, h.ctx);
-	h.handlers.get("turn_end")!({ message: retain.message }, h.ctx);
-	const narrowed = h.handlers.get("message_end")!({
-		message: {
-			role: "assistant", stopReason: "stop",
-			content: [{ type: "text", text: `${scopedTerminalComment([
-				{ scope: "global", patch: { contract: { projectRule: null } } },
-				{ scope: "cwd", patch: { contract: { projectRule: "project-only" } } },
-			])}\n\nNarrowed to this project.` }],
-		},
-	}, h.ctx);
-	h.handlers.get("turn_end")!({ message: narrowed.message }, h.ctx);
+	await h.tools.get("patch_state")!.execute("retain-global", {
+		scope: "global", patch: { contract: { projectRule: "project-only" } },
+	}, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("narrow-global", {
+		scope: "global", patch: { contract: { projectRule: null } },
+	}, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("narrow-cwd", {
+		scope: "cwd", patch: { contract: { projectRule: "project-only" } },
+	}, undefined, undefined, h.ctx);
 	assert.equal(h.readState(0, "global").contract.projectRule, undefined);
 	assert.equal(h.readState(0, "cwd").contract.projectRule, "project-only");
 	assert.equal(h.readState().contract.projectRule, "project-only");
@@ -145,12 +139,12 @@ test("requires source-identified non-empty Skill artifact compilations", () => {
 		[source]: {
 			...compilerOutput(), hash, compiler: SKILL_ARTIFACT_COMPILER,
 		},
-	}, source, hash), true);
+	}, undefined, source, hash), true);
 	assert.equal(hasCompiledSkillArtifact({
 		[source]: {
 			description: "empty", hash, compiler: SKILL_ARTIFACT_COMPILER, kind: "skill", compilation: {},
 		},
-	}, source, hash), false);
+	}, undefined, source, hash), false);
 });
 
 test("tracks the mutable executed Skill path and trusted hash across Pi lifecycle order", () => {
@@ -191,31 +185,15 @@ test("requires every successful Skill read to compile a local source-addressed a
 	const source = skillFile("required");
 	recordRead(h, source);
 
-	const rejected = h.handlers.get("message_end")!({
-		message: {
-			role: "assistant",
-			stopReason: "stop",
-			content: [{ type: "text", text: `${terminalComment({}, {})}\n\nDone` }],
-		},
-	}, h.ctx);
-	assert.deepEqual(rejected.message.content, []);
-	assert.match(h.resolveSnapshot().meta.validation!.error, /CWD artifact compiler output/);
-	assert.ok(h.resolveSnapshot().meta.validation!.error.includes(source));
-
-	const accepted = h.handlers.get("message_end")!({
-		message: {
-			role: "assistant",
-			stopReason: "stop",
-			content: [{ type: "text", text: `${terminalComment({}, {}, { [source]: compilerOutput() })}\n\nDone` }],
-		},
-	}, h.ctx);
-	assert.equal(accepted.message.content[0].text, "Done");
-	h.handlers.get("turn_end")!({ message: accepted.message }, h.ctx);
+	await assert.rejects(patchCwdArtifacts(h, {}), (error: unknown) => {
+		return error instanceof Error && /CWD artifact compiler output/.test(error.message) && error.message.includes(source);
+	});
+	await patchCwdArtifacts(h, { [source]: compilerOutput() });
 	const artifact = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source];
-	assert.deepEqual(artifact, {
-		...compilerOutput(),
-		hash: hashSkillSource(source),
-		compiler: SKILL_ARTIFACT_COMPILER,
+	assert.deepEqual(artifact, compilerOutput());
+	assert.deepEqual(loadCwdProvenance(h.ctx.cwd, h.repositoryRoot)[source], {
+		sourceHash: hashSkillSource(source),
+		compilerRevision: SKILL_ARTIFACT_COMPILER,
 	});
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 });
@@ -230,15 +208,9 @@ test("attributes Skill acquisition to mutable tool input in Pi event order", asy
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
 	input.path = executed;
 	h.handlers.get("tool_execution_end")!({ toolCallId: "skill-1", toolName: "read", result: {}, isError: false }, h.ctx);
-	const rejected = h.handlers.get("message_end")!({
-		message: {
-			role: "assistant", stopReason: "stop",
-			content: [{ type: "text", text: `${terminalComment({}, {}, { [requested]: compilerOutput("wrong") })}\n\nDone` }],
-		},
-	}, h.ctx);
-	assert.deepEqual(rejected.message.content, []);
-	assert.ok(h.resolveSnapshot().meta.validation!.error.includes(executed));
-	assert.equal(h.resolveSnapshot().meta.validation!.error.includes(requested), false);
+	await assert.rejects(patchCwdArtifacts(h, { [requested]: compilerOutput("wrong") }), (error: unknown) => {
+		return error instanceof Error && error.message.includes(executed) && !error.message.includes(requested);
+	});
 });
 
 test("ordinary answers cannot bypass missing Skill artifacts", async () => {
@@ -247,13 +219,9 @@ test("ordinary answers cannot bypass missing Skill artifacts", async () => {
 	const source = skillFile("plain");
 	h.handlers.get("tool_execution_start")!({ toolCallId: "plain", toolName: "read", args: { path: source } }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "plain", toolName: "read", isError: false }, h.ctx);
-	const rejected = h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }] },
-	}, h.ctx);
-	assert.deepEqual(rejected.message.content, []);
-	assert.ok(h.resolveSnapshot().meta.validation!.error.includes(source));
+	await assert.rejects(patchCwdArtifacts(h, {}), (error: unknown) => error instanceof Error && error.message.includes(source));
 	assert.equal(h.resolveSnapshot().meta.step, 0);
-	commitTerminal(h, {}, {}, "Done", { [source]: compilerOutput() });
+	await patchCwdArtifacts(h, { [source]: compilerOutput() });
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 });
 
@@ -266,15 +234,9 @@ test("retains compatibility with execution-start updates after interception", as
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
 	h.handlers.get("tool_execution_start")!({ toolCallId: "skill-1", toolName: "read", args: { path: executed } }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "skill-1", toolName: "read", result: {}, isError: false }, h.ctx);
-	const rejected = h.handlers.get("message_end")!({
-		message: {
-			role: "assistant", stopReason: "stop",
-			content: [{ type: "text", text: `${terminalComment({}, {}, { [requested]: compilerOutput("wrong") })}\n\nDone` }],
-		},
-	}, h.ctx);
-	assert.deepEqual(rejected.message.content, []);
-	assert.ok(h.resolveSnapshot().meta.validation!.error.includes(executed));
-	assert.equal(h.resolveSnapshot().meta.validation!.error.includes(requested), false);
+	await assert.rejects(patchCwdArtifacts(h, { [requested]: compilerOutput("wrong") }), (error: unknown) => {
+		return error instanceof Error && error.message.includes(executed) && !error.message.includes(requested);
+	});
 });
 
 test("does not attribute stale reads when lifecycle ids are reused for other tools", async () => {
@@ -284,7 +246,7 @@ test("does not attribute stale reads when lifecycle ids are reused for other too
 	h.handlers.get("tool_execution_start")!({ toolCallId: "reused-id", toolName: "read", args: { path: stale } }, h.ctx);
 	h.handlers.get("tool_call")!({ toolCallId: "reused-id", toolName: "bash", input: { command: "true" } }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "reused-id", toolName: "bash", result: {}, isError: false }, h.ctx);
-	const result = commitTerminal(h, {}, {}, "No Skill acquired.");
+	const result = await commitTerminal(h, {}, {}, "No Skill acquired.");
 	assert.equal(result.message.content[0].text, "No Skill acquired.");
 });
 
@@ -293,8 +255,39 @@ test("falls back to intercepted input when a successful execution omits args", a
 	await start(h);
 	const source = skillFile("fallback");
 	recordRead(h, source);
-	const result = commitTerminal(h, {}, {}, "Done", { [source]: compilerOutput("use intercepted input fallback") });
+	const result = await commitTerminal(h, {}, {}, "Done", { [source]: compilerOutput("use intercepted input fallback") });
 	assert.equal(result.message.content[0].text, "Done");
+});
+
+test("a Skill acquired after an earlier resolution reopens the terminal gate until compiled", async () => {
+	const h = harness();
+	await start(h);
+	await h.tools.get("patch_state")!.execute(
+		"early-resolution", { scope: "session", patch: { working: { inspected: true } } }, undefined, undefined, h.ctx,
+	);
+	const source = skillFile("late-obligation");
+	recordRead(h, source);
+	const draft = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Too early." }] };
+	const intercepted = h.handlers.get("message_end")!({ message: draft }, h.ctx);
+	assert.deepEqual(intercepted.message.content, []);
+	assert.equal(h.readState().response, "");
+	await patchCwdArtifacts(h, { [source]: compilerOutput("compiled after the late read") });
+	const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Complete." }] };
+	assert.equal(h.handlers.get("message_end")!({ message: final }, h.ctx), undefined);
+	h.handlers.get("turn_end")!({ message: final }, h.ctx);
+	assert.equal(h.readState().response, "Complete.");
+});
+
+test("unchanged resolution cannot bypass a successful Skill compilation obligation", async () => {
+	const h = harness();
+	await start(h);
+	const source = skillFile("unchanged-obligation");
+	recordRead(h, source);
+	await assert.rejects(
+		h.tools.get("patch_state")!.execute("unchanged", { unchanged: true }, undefined, undefined, h.ctx),
+		/Every successfully read Skill must have a CWD artifact compiler output/,
+	);
+	await patchCwdArtifacts(h, { [source]: compilerOutput("compiled after rejected unchanged") });
 });
 
 test("does not require compilation for a failed Skill read", async () => {
@@ -304,7 +297,7 @@ test("does not require compilation for a failed Skill read", async () => {
 	const input = { path: source };
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "skill-1", toolName: "read", result: {}, isError: true }, h.ctx);
-	const result = commitTerminal(h, {}, {}, "Read failed.");
+	const result = await commitTerminal(h, {}, {}, "Read failed.");
 	assert.equal(result.message.content[0].text, "Read failed.");
 });
 
@@ -313,16 +306,18 @@ test("a reread refreshes the runtime-owned source hash and replaces stale compil
 	await start(h);
 	const source = skillFile("changed", "first");
 	recordRead(h, source, "first");
-	commitTerminal(h, {}, {}, "First", { [source]: { ...compilerOutput("first"), obsolete: true } });
-	const firstHash = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source].hash;
+	await commitTerminal(h, {}, {}, "First", { [source]: { ...compilerOutput("first"), obsolete: true } });
+	const firstHash = loadCwdProvenance(h.ctx.cwd, h.repositoryRoot)[source]!.sourceHash;
 
 	writeFileSync(source, "second");
 	h.handlers.get("before_agent_start")!({ prompt: "Refresh", systemPrompt: "base" }, h.ctx);
 	recordRead(h, source, "second");
-	commitTerminal(h, {}, {}, "Second", { [source]: compilerOutput("second") });
+	await commitTerminal(h, {}, {}, "Second", { [source]: compilerOutput("second") });
 	const refreshed = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source];
-	assert.notEqual(refreshed.hash, firstHash);
-	assert.equal(refreshed.hash, hashSkillSource(source));
+	const refreshedProvenance = loadCwdProvenance(h.ctx.cwd, h.repositoryRoot)[source]!;
+	assert.notEqual(refreshedProvenance.sourceHash, firstHash);
+	assert.equal(refreshedProvenance.sourceHash, hashSkillSource(source));
+	assert.equal(refreshedProvenance.compilerRevision, SKILL_ARTIFACT_COMPILER);
 	assert.equal(Object.hasOwn(refreshed, "obsolete"), false);
 	assert.equal(refreshed.compilation?.routing, "second");
 });
@@ -333,12 +328,5 @@ test("rejects model attempts to forge runtime-owned Skill freshness fields", asy
 	const source = skillFile("forged");
 	recordRead(h, source);
 	const forged = { ...compilerOutput(), hash: hashArtifactSource("forged") };
-	const rejected = h.handlers.get("message_end")!({
-		message: {
-			role: "assistant", stopReason: "stop",
-			content: [{ type: "text", text: `${terminalComment({}, {}, { [source]: forged })}\n\nDone` }],
-		},
-	}, h.ctx);
-	assert.deepEqual(rejected.message.content, []);
-	assert.match(h.resolveSnapshot().meta.validation!.error, /cannot set runtime-owned hash or compiler/);
+	await assert.rejects(patchCwdArtifacts(h, { [source]: forged }), /cannot set runtime-owned hash or compiler/);
 });

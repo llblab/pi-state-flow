@@ -8,7 +8,7 @@ import { parseScopeStream, serializeScopeStream } from "../lib/durable.ts";
 import { emptyState, type ScopedStates } from "../lib/state.ts";
 import { loadCwdState, loadGlobalState, loadSessionMaterialization, loadSessionState } from "./temporal-fixture.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
-import { commitTerminal, harness, scopedTerminalComment, start, terminalComment } from "./harness.ts";
+import { commitScopedTerminal, commitTerminal, harness, start } from "./harness.ts";
 
 function states(): ScopedStates {
 	return { global: emptyState(), cwd: emptyState(), session: emptyState() };
@@ -130,7 +130,7 @@ test("rejects stale state and identical values at a different active causal boun
 	const stage = stageScopedPatch(state, { scope: "session", patch: { working: { accepted: true } } }, [], origin.lineage.at(-1)!.id);
 	assert.throws(() => commitScopedTransition(current, state, stage, () => assert.fail("cross-lineage publication"), fork.lineage.at(-1)!.id), /causal basis changed/);
 	state.session.working.changed = true;
-	assert.throws(() => commitScopedTransition(current, state, stage, () => assert.fail("stale publication"), origin.lineage.at(-1)!.id), /session scope changed after response validation/);
+	assert.throws(() => commitScopedTransition(current, state, stage, () => assert.fail("stale publication"), origin.lineage.at(-1)!.id), /session scope changed before response reconciliation/);
 	assert.equal(current.meta.step, 0);
 });
 
@@ -138,15 +138,17 @@ test("validates acquired artifact and Skill outputs before staging trusted fresh
 	const state = states();
 	const source = { path: "/knowledge/changed.md", hash: `sha256:${"b".repeat(64)}`, reason: "source-changed" as const };
 	const skill = { path: "/skills/demo/SKILL.md", hash: `sha256:${"a".repeat(64)}` };
-	assert.throws(() => stageScopedPatch(state, { scope: "session", patch: { artifacts: { "/a.md": { description: "Missing freshness" } } } }, [], "origin"), /must have a sha256/);
+	assert.throws(() => stageScopedPatch(state, { scope: "session", patch: { artifacts: { "/a.md": { description: "Invalid hash", hash: "sha256:invalid" } } } }, [], "origin"), /sha256:<64 lowercase hex characters>/);
 	assert.throws(() => stageScopedTransition(state, { transitions: [], response: "Missing" }, [], "origin", [source]), /global compiler output/);
 	assert.throws(() => stageScopedPatch(state, { scope: "cwd", patch: {} }, [skill], "origin"), /missing: \/skills\/demo\/SKILL\.md/);
 	const stage = stageScopedTransition(state, { transitions: [
 		{ scope: "global", patch: { artifacts: { [source.path]: { description: "Guidance" } } } },
 		{ scope: "cwd", patch: { artifacts: { [skill.path]: { description: "Skill", kind: "skill", compilation: { route: "demo" } } } } },
 	], response: "Compiled" }, [skill], "origin", [source]);
-	assert.deepEqual(stage.nextStates.global.artifacts[source.path], { description: "Guidance", hash: source.hash, compiler: "artifact-v1" });
-	assert.deepEqual(stage.nextStates.cwd.artifacts[skill.path], { description: "Skill", kind: "skill", compilation: { route: "demo" }, hash: skill.hash, compiler: "skill-artifact-v1" });
+	assert.deepEqual(stage.nextStates.global.artifacts[source.path], { description: "Guidance" });
+	assert.deepEqual(stage.provenanceUpdates.global[source.path], { sourceHash: source.hash, compilerRevision: "artifact-v1" });
+	assert.deepEqual(stage.nextStates.cwd.artifacts[skill.path], { description: "Skill", kind: "skill", compilation: { route: "demo" } });
+	assert.deepEqual(stage.provenanceUpdates.cwd[skill.path], { sourceHash: skill.hash, compilerRevision: "skill-artifact-v1" });
 	assert.throws(() => stageScopedTransition(state, { transitions: [
 		{ scope: "global", patch: { artifacts: { [source.path]: { description: "Forged", hash: source.hash } } } },
 	], response: "Rejected" }, [], "origin", [source]), /cannot set runtime-owned/);
@@ -157,24 +159,25 @@ test("session-only transitions persist only the current temporal session layer",
 	const h = harness({ cwd: "/tmp/state-flow-session-only-transition" });
 	await start(h);
 	const before = loadCwdState(h.ctx.cwd, h.repositoryRoot);
-	commitTerminal(h, { branch: "only" }, { next: "continue" });
+	await commitTerminal(h, { branch: "only" }, { next: "continue" });
 	assert.deepEqual(loadGlobalState(h.repositoryRoot), emptyState());
 	assert.deepEqual(loadCwdState(h.ctx.cwd, h.repositoryRoot), before);
 	const session = loadSessionMaterialization(h.ctx.cwd, "harness-session", h.repositoryRoot)!;
 	assert.deepEqual(session.state, { ...emptyState(), contract: { branch: "only" }, working: { next: "continue" }, response: "Done" });
-	assert.deepEqual(session.recentTransitions[0]!.transitions, [{ scope: "session", patch: { contract: { branch: "only" }, working: { next: "continue" }, response: "Done" } }]);
+	assert.deepEqual(session.recentTransitions.map(({ transitions }) => transitions), [
+		[{ scope: "session", patch: { contract: { branch: "only" }, working: { next: "continue" } } }],
+		[{ scope: "session", patch: { response: "Done" } }],
+	]);
 });
 
-test("commits global, CWD, and session patches through one terminal transition", async () => {
+test("commits global, CWD, and session patches through explicit sequential barriers", async () => {
 	const h = harness({ cwd: "/tmp/state-flow-scoped-transition" });
 	await start(h);
-	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `${scopedTerminalComment([
+	await commitScopedTerminal(h, [
 		{ scope: "global", patch: { contract: { shared: "all projects" } } },
 		{ scope: "cwd", patch: { contract: { project: "local" } } },
 		{ scope: "session", patch: { working: { next: "continue" } } },
-	])}\n\nScoped.` }] };
-	const result = h.handlers.get("message_end")!({ message }, h.ctx);
-	h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
+	], "Scoped.");
 	assert.equal(loadGlobalState(h.repositoryRoot)!.contract.shared, "all projects");
 	assert.equal(loadCwdState(h.ctx.cwd, h.repositoryRoot)!.contract.project, "local");
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), { ...emptyState(), working: { next: "continue" }, response: "Scoped." });
@@ -184,12 +187,12 @@ test("commits global, CWD, and session patches through one terminal transition",
 test("commits and hides one useful terminal patch after the tool loop", async () => {
 	const h = harness();
 	await start(h);
-	const result = commitTerminal(h, { goal: "Inspect project", compiled_rules: { read_once: true } }, { verified: { readme: true }, next: "run tests" }, "Inspection complete.");
+	const result = await commitTerminal(h, { goal: "Inspect project", compiled_rules: { read_once: true } }, { verified: { readme: true }, next: "run tests" }, "Inspection complete.");
 	assert.equal(result.message.content[0].text, "Inspection complete.");
-	assert.equal(h.resolveSnapshot().meta.step, 1);
+	assert.equal(h.resolveSnapshot().meta.step, 2);
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "Inspection complete.");
-	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#1</dim>");
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#2</dim>");
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /"goal": "Inspect project"/);
 	assert.match(h.notifications.at(-1)!, /"next": "run tests"/);
@@ -198,13 +201,14 @@ test("commits and hides one useful terminal patch after the tool loop", async ()
 test("accepts unchanged memory without invented bookkeeping and rejects materialized null", async () => {
 	const h = harness();
 	const started = await start(h);
-	assert.match(started.systemPrompt, /Never invent memory changes/);
-	commitTerminal(h, {}, {}, "Done");
+	assert.match(started.systemPrompt, /never invent memory changes/i);
+	await commitTerminal(h, {}, {}, "Done");
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), { ...emptyState(), response: "Done" });
-	commitTerminal(h, { mode: "test" }, { move: "e2-e4", result: "pending" });
-	commitTerminal(h, {}, { move: null, result: "ok" });
+	await commitTerminal(h, { mode: "test" }, { move: "e2-e4", result: "pending" });
+	await commitTerminal(h, {}, { move: null, result: "ok" });
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working, { result: "ok" });
-	const rejected = h.handlers.get("message_end")!({ message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `${terminalComment({}, { cells: ["pawn", null] })}\n\nDone` }] } }, h.ctx);
-	assert.deepEqual(rejected.message.content, []);
-	assert.match(h.resolveSnapshot().meta.validation!.error, /Materialized state cannot contain null/);
+	await assert.rejects(
+		h.tools.get("patch_state")!.execute("null", { scope: "session", patch: { working: { cells: ["pawn", null] } } }, undefined, undefined, h.ctx),
+		/Materialized state cannot contain null/,
+	);
 });

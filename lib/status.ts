@@ -1,5 +1,5 @@
 import type { ArtifactInvalidationReason } from "./artifact.ts";
-import { projectRecentTransitionsWithLimit, type RecentTransitionWindow } from "./history.ts";
+import { projectRecentTransitionsWithLimit, RECENT_TRANSITION_LIMIT, type RecentTransitionWindow } from "./history.ts";
 import { inspectMemoryPromotions, retainedMemoryScopes } from "./memory.ts";
 import type { PublicationQueueState } from "./publication.ts";
 import type { Snapshot } from "./snapshot.ts";
@@ -34,7 +34,6 @@ export interface StatusDiagnostics {
 	artifactFreshnessError?: string;
 	durableStateError?: string;
 	pendingPublication?: PendingPublicationDiagnostic;
-	retryQueued: boolean;
 	publicationQueue?: PublicationQueueState;
 	publicationQueueError?: string;
 }
@@ -54,7 +53,7 @@ function abbreviatedCommit(commit: string): string {
 
 export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostics): string {
 	const projectedRecent = projectRecentTransitionsWithLimit(
-		snapshot.config.transitionWindow,
+		RECENT_TRANSITION_LIMIT,
 		diagnostics.recent,
 	);
 	const available = diagnostics.temporal !== undefined && diagnostics.durableStateError === undefined;
@@ -76,9 +75,6 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 	const publication = diagnostics.pendingPublication === undefined
 		? "idle"
 		: `pending ${abbreviatedCommit(diagnostics.pendingPublication.commit)} — ${diagnostics.pendingPublication.error}`;
-	const retry = diagnostics.retryQueued
-		? `queued (attempt ${snapshot.meta.validation?.attempt ?? 0})`
-		: "idle";
 	const staleLines = freshnessError !== undefined
 		? [`Artifact freshness unavailable: ${freshnessError}`]
 		: diagnostics.staleArtifacts.length === 0
@@ -106,11 +102,11 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 	];
 
 	return [
-		`State Flow diagnostics — config.enabled=${snapshot.config.enabled}; config.transitionWindow=${snapshot.config.transitionWindow}; branch mode=${snapshot.config.enabled ? "active" : "inactive"}`,
+		`State Flow diagnostics — config.enabled=${snapshot.config.enabled}; branch mode=${snapshot.config.enabled ? "active" : "inactive"}`,
 		`Repository: ${diagnostics.repositoryRoot}`,
 		`Scope keys: CWD ${diagnostics.cwdScopeKey}; session ${diagnostics.sessionScopeKey}`,
 		"Session files: config.json owns behavior; meta.json owns lineage and provenance",
-		`Runtime metadata: step #${snapshot.meta.step}; active revision ${snapshot.meta.durableBase ?? "none"}; bootstrap ${snapshot.meta.bootstrap === true}; validation attempts ${snapshot.meta.validation?.attempt ?? 0}`,
+		`Runtime metadata: step #${snapshot.meta.step}; active revision ${snapshot.meta.durableBase ?? "none"}; bootstrap ${snapshot.meta.bootstrap === true}`,
 		`Remote publication policy: ${snapshot.meta.remotePublication?.mode ?? "legacy-transition"}`,
 		diagnostics.publicationQueueError !== undefined
 			? `Remote queue: unavailable; error ${diagnostics.publicationQueueError}`
@@ -126,7 +122,6 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 		available ? `Recent transitions: global ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "global")).length}; CWD ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "cwd")).length}; session ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "session")).length}; active ${projectedRecent.length}` : "Recent transitions: unavailable",
 		`Publication policy: ${snapshot.meta.remotePublication?.mode ?? "legacy-unresolved"}`,
 		`Publication: ${publication}`,
-		`Terminal retry: ${retry}`,
 		...staleLines,
 		...(stateJson === undefined
 			? ["Materialized states: unavailable (global/CWD/session/effective)"]

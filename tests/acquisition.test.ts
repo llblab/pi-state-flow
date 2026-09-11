@@ -92,7 +92,7 @@ test("correlates only successful exact-path reads with current invalidation cand
 test("freshness invalidation overrides otherwise sufficient materialized state", () => {
 	for (const [stored, compiler, explicitRefresh, reason] of [
 		[undefined, "artifact-v1", false, "new"],
-		[{ description: "invalid" }, "artifact-v1", false, "invalid-metadata"],
+		[{ description: "invalid", hash: "sha256:invalid" }, "artifact-v1", false, "invalid-metadata"],
 		[metadata(), "artifact-v2", false, "compiler-changed"],
 		[metadata(), "artifact-v1", true, "explicit-refresh"],
 	] as const) {

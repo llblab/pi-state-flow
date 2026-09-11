@@ -1,20 +1,18 @@
 import { resolve } from "node:path";
-import { RECENT_TRANSITION_LIMIT } from "./history.ts";
+import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { parseRemotePublicationPolicyDocument, serializeRemotePublicationPolicyDocument, type RemotePublicationPolicyDocument } from "./publication.ts";
 import { applyPatch, canonicalJson, containsNull, isJsonValue, isObject, type JsonObject } from "./json.ts";
 import { validateTemporalLineage, type TransitionBoundary } from "./temporal.ts";
 import { migrateLegacySkillCompilations } from "./skills.ts";
 import { isMaterializedState, type MaterializedState } from "./state.ts";
-import { MAX_VALIDATION_RETRIES, type ValidationFeedback } from "./validation.ts";
-
 const MAX_RESTORED_STEP = Number.MAX_SAFE_INTEGER - 1;
+const MAX_LEGACY_VALIDATION_ATTEMPT = 7;
 
 /** Missing operational capability is not evidence that a checkpoint target is invalid. */
 export class RevisionUnavailableError extends Error {}
 
 export interface SnapshotConfig {
 	enabled: boolean;
-	transitionWindow: number;
 }
 
 export interface PendingPublicationState {
@@ -22,12 +20,19 @@ export interface PendingPublicationState {
 	error: string;
 }
 
+interface LegacyValidationFeedback {
+	attempt: number;
+	error: string;
+	instruction: string;
+}
+
 export interface SnapshotMeta {
 	durableBase?: string;
 	pendingPublication?: PendingPublicationState;
 	step: number;
 	specification?: string;
-	validation?: ValidationFeedback;
+	/** Read-only compatibility/recovery diagnostic; 0.7 never schedules terminal-envelope retries. */
+	validation?: LegacyValidationFeedback;
 	bootstrap?: boolean;
 	remotePublication?: RemotePublicationPolicyDocument;
 }
@@ -52,6 +57,8 @@ export interface SessionRuntime {
 		version: 1;
 		identity: { cwd: string; sessionId: string };
 		lineage: TransitionBoundary[];
+		/** Runtime-owned artifact freshness evidence; never projected as semantic state. */
+		artifacts?: ArtifactProvenanceRegistry;
 		/** Resolved against the commit that last wrote this runtime record, not arbitrary HEAD. */
 		revision: "self";
 		temporalRevision?: "self" | string;
@@ -63,7 +70,8 @@ export interface SessionRuntime {
 export function validateSessionRuntime(value: unknown, cwd: string, sessionId: string): asserts value is SessionRuntime {
 	if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "config,meta"
 		|| !isObject(value.config) || !isObject(value.meta)) throw new Error("Invalid State Flow session runtime envelope");
-	const { version, identity, lineage, revision, temporalRevision, publication, ...fields } = value.meta;
+	const { version, identity, lineage, revision, temporalRevision, publication, artifacts, ...fields } = value.meta;
+	if (artifacts !== undefined) parseArtifactProvenanceRegistry(artifacts, "State Flow session artifact provenance");
 	if (temporalRevision !== undefined && temporalRevision !== "self"
 		&& !isExactRevision(temporalRevision)) throw new Error("Invalid temporal revision reference");
 	if (version !== 1 || revision !== "self" || (publication !== "unconfirmed" && publication !== "files")) throw new Error("Unsupported State Flow runtime provenance format");
@@ -75,15 +83,23 @@ export function validateSessionRuntime(value: unknown, cwd: string, sessionId: s
 	validateTemporalLineage(lineage);
 	const allowed = new Set(["step", "specification", "validation", "bootstrap", "remotePublication"]);
 	if (Object.keys(fields).some((key) => !allowed.has(key))) throw new Error("Unexpected State Flow runtime metadata field");
-	const normalized = migrateSnapshot({ config: value.config, meta: fields });
+	const { transitionWindow: _retiredWindow, ...supportedConfig } = value.config;
+	const normalized = migrateSnapshot({ config: supportedConfig, meta: fields });
 	if (fields.bootstrap === false) normalized.meta.bootstrap = false;
 	if (fields.step === Number.MAX_SAFE_INTEGER) normalized.meta.step = Number.MAX_SAFE_INTEGER;
-	if (canonicalJson({ config: normalized.config, meta: normalized.meta }) !== canonicalJson({ config: value.config, meta: fields })) {
+	if (canonicalJson({ config: normalized.config, meta: normalized.meta }) !== canonicalJson({ config: supportedConfig, meta: fields })) {
 		throw new Error("Invalid State Flow runtime configuration or counters");
 	}
 }
 
-export function createSessionRuntime(snapshot: Snapshot, cwd: string, sessionId: string, lineage: readonly TransitionBoundary[], publication: SessionRuntime["meta"]["publication"] = "unconfirmed"): SessionRuntime {
+export function createSessionRuntime(
+	snapshot: Snapshot,
+	cwd: string,
+	sessionId: string,
+	lineage: readonly TransitionBoundary[],
+	publication: SessionRuntime["meta"]["publication"] = "unconfirmed",
+	artifacts: ArtifactProvenanceRegistry = {},
+): SessionRuntime {
 	const { durableBase: _base, pendingPublication: _publication, ...fields } = snapshot.meta;
 	const runtime: SessionRuntime = {
 		config: structuredClone(snapshot.config),
@@ -92,6 +108,7 @@ export function createSessionRuntime(snapshot: Snapshot, cwd: string, sessionId:
 			version: 1,
 			identity: { cwd: resolve(cwd), sessionId },
 			lineage: structuredClone([...lineage]),
+			...(Object.keys(artifacts).length === 0 ? {} : { artifacts: structuredClone(artifacts) }),
 			revision: "self",
 			publication,
 		},
@@ -115,17 +132,18 @@ export function parseSessionRuntime(config: string | undefined, meta: string | u
 		throw new Error("State Flow session runtime contains invalid JSON");
 	}
 	validateSessionRuntime(runtime, cwd, sessionId);
-	return runtime;
+	return { config: { enabled: runtime.config.enabled }, meta: runtime.meta };
 }
 
-export function resolveSessionRuntime(runtime: SessionRuntime, revision: string): { snapshot: Snapshot; lineage: TransitionBoundary[]; publicationTarget: string } {
+export function resolveSessionRuntime(runtime: SessionRuntime, revision: string): { snapshot: Snapshot; lineage: TransitionBoundary[]; publicationTarget: string; artifacts: ArtifactProvenanceRegistry } {
 	validateSessionRuntime(runtime, runtime.meta.identity.cwd, runtime.meta.identity.sessionId);
 	if (!isExactRevision(revision) || runtime.meta.publication !== "unconfirmed") throw new Error("Runtime self reference requires its exact Git revision and Git publication provenance");
-	const { version: _version, identity: _identity, lineage, revision: _self, temporalRevision: _temporal, publication: _intent, ...fields } = runtime.meta;
+	const { version: _version, identity: _identity, lineage, revision: _self, temporalRevision: _temporal, publication: _intent, artifacts, ...fields } = runtime.meta;
 	return {
 		snapshot: { config: structuredClone(runtime.config), meta: { ...structuredClone(fields), durableBase: revision } },
 		lineage: structuredClone(lineage),
 		publicationTarget: revision,
+		artifacts: structuredClone(artifacts ?? {}),
 	};
 }
 
@@ -160,11 +178,11 @@ function restoredStep(value: unknown): number {
 		: 0;
 }
 
-function restoredValidation(value: unknown): ValidationFeedback | undefined {
+function restoredValidation(value: unknown): LegacyValidationFeedback | undefined {
 	if (!isObject(value)
 		|| !Number.isSafeInteger(value.attempt as number)
 		|| (value.attempt as number) < 0
-		|| (value.attempt as number) > MAX_VALIDATION_RETRIES
+		|| (value.attempt as number) > MAX_LEGACY_VALIDATION_ATTEMPT
 		|| typeof value.error !== "string"
 		|| typeof value.instruction !== "string") return undefined;
 	return {
@@ -172,14 +190,6 @@ function restoredValidation(value: unknown): ValidationFeedback | undefined {
 		error: value.error,
 		instruction: value.instruction,
 	};
-}
-
-function restoredTransitionWindow(value: unknown): number {
-	return Number.isSafeInteger(value)
-		&& (value as number) >= 0
-		&& (value as number) <= RECENT_TRANSITION_LIMIT
-		? value as number
-		: RECENT_TRANSITION_LIMIT;
 }
 
 function restoredPendingPublication(value: unknown): PendingPublicationState | undefined {
@@ -219,11 +229,10 @@ function restoredMeta(value: unknown, legacy: JsonObject = {}): SnapshotMeta {
 function envelope(
 	enabled: boolean,
 	meta: SnapshotMeta,
-	transitionWindow = RECENT_TRANSITION_LIMIT,
 	legacySession?: LegacySessionMigration,
 ): Snapshot {
 	return {
-		config: { enabled, transitionWindow },
+		config: { enabled },
 		meta,
 		...(legacySession === undefined ? {} : { legacySession }),
 	};
@@ -284,17 +293,15 @@ export function migrationFailure(data: JsonObject, error: string): Snapshot {
 		error,
 		instruction: "Start a fresh State Flow episode; null is reserved for patch deletion.",
 	};
-	const config = isObject(data.config) ? data.config : data;
-	return envelope(false, meta, restoredTransitionWindow(config.transitionWindow));
+	return envelope(false, meta);
 }
 
 function migratedSnapshot(
 	enabled: boolean,
 	meta: SnapshotMeta,
-	transitionWindow: number,
 	state: MaterializedState,
 ): Snapshot {
-	return envelope(enabled, meta, transitionWindow, {
+	return envelope(enabled, meta, {
 		state: migrateLegacySkillCompilations(state),
 	});
 }
@@ -305,16 +312,15 @@ export function migrateSnapshot(value: unknown): Snapshot {
 	const config = isEnvelope && isObject(value.config) ? value.config : value;
 	const meta = restoredMeta(isEnvelope ? value.meta : undefined, value);
 	const enabled = config.enabled === true;
-	const transitionWindow = restoredTransitionWindow(config.transitionWindow);
 	if (isMaterializedState(value.state)) {
 		if (!isJsonValue(value.state)) return migrationFailure(value, "Restored state contains non-JSON data");
 		if (containsNull(value.state)) return migrationFailure(value, "Restored state contains null data");
-		return migratedSnapshot(enabled, meta, transitionWindow, structuredClone(value.state));
+		return migratedSnapshot(enabled, meta, structuredClone(value.state));
 	}
 	if (isLegacyThreePartState(value.state)) {
 		if (!isJsonValue(value.state)) return migrationFailure(value, "Restored state contains non-JSON data");
 		if (containsNull(value.state)) return migrationFailure(value, "Restored state contains null data");
-		return migratedSnapshot(enabled, meta, transitionWindow, {
+		return migratedSnapshot(enabled, meta, {
 			artifacts: {},
 			...structuredClone(value.state),
 		});
@@ -322,7 +328,7 @@ export function migrateSnapshot(value: unknown): Snapshot {
 	if (isLegacyTwoPartState(value.state)) {
 		if (!isJsonValue(value.state)) return migrationFailure(value, "Restored state contains non-JSON data");
 		if (containsNull(value.state)) return migrationFailure(value, "Restored state contains null data");
-		return migratedSnapshot(enabled, meta, transitionWindow, {
+		return migratedSnapshot(enabled, meta, {
 			artifacts: {},
 			contract: structuredClone(value.state.contract),
 			working: structuredClone(value.state.working),
@@ -352,9 +358,9 @@ export function migrateSnapshot(value: unknown): Snapshot {
 		}
 		const legacyState = legacyPatch === undefined ? legacyBasis : applyPatch(legacyBasis, legacyPatch);
 		if (containsNull(legacyState)) return migrationFailure(value, "Legacy state contains null data");
-		return migratedSnapshot(enabled, meta, transitionWindow, {
+		return migratedSnapshot(enabled, meta, {
 			artifacts: {}, contract: {}, working: structuredClone(legacyState), response: "",
 		});
 	}
-	return envelope(enabled, meta, transitionWindow);
+	return envelope(enabled, meta);
 }

@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { planLegacyStorageMigration } from "../lib/migration.ts";
+import { hasLegacyStateSources, planLegacyStorageMigration } from "../lib/migration.ts";
 import { cwdScopePaths, parseScopeStream, sessionScopePaths, writeOwnedFileUpdates } from "../lib/durable.ts";
 import { emptyState } from "../lib/state.ts";
 
@@ -13,6 +13,20 @@ function fixture(t: { after: (callback: () => void) => void }) {
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	return { root, cwd: join(root, "project"), session: "test-session" };
 }
+
+test("canonical initialization skips full migration planning unless a predecessor snapshot name exists", (t) => {
+	const { root, cwd, session } = fixture(t);
+	assert.equal(hasLegacyStateSources(cwd, session, root), false);
+	const cwdState = cwdScopePaths(cwd, root).state;
+	mkdirSync(dirname(cwdState), { recursive: true });
+	writeFileSync(cwdState, JSON.stringify(emptyState()));
+	assert.equal(hasLegacyStateSources(cwd, session, root), true);
+	rmSync(cwdState);
+	const sessionState = sessionScopePaths(cwd, session, root).state;
+	mkdirSync(dirname(sessionState), { recursive: true });
+	writeFileSync(sessionState, JSON.stringify(emptyState()));
+	assert.equal(hasLegacyStateSources(cwd, session, root), true);
+});
 
 test("migration anchors exact current materializations and never replays explanatory journals", (t) => {
 	const { root, cwd, session } = fixture(t);

@@ -22,20 +22,8 @@ export function stopEpisode(snapshot: Snapshot): Snapshot {
 }
 
 /** Apply one user-run boundary while preserving checkpoint-owned runtime state. */
-export function prepareRun(snapshot: Snapshot, prompt: string, isRetry: boolean): boolean {
-	if (snapshot.meta.specification === undefined) {
-		snapshot.meta.specification = prompt;
-		return true;
-	}
-	if (isRetry) return false;
+export function prepareRun(snapshot: Snapshot, prompt: string): boolean {
 	snapshot.meta.specification = prompt;
-	snapshot.meta.validation = undefined;
-	return true;
-}
-
-/** Clear only transient validation metadata; never disable or reset the episode. */
-export function abandonValidation(snapshot: Snapshot): boolean {
-	if (snapshot.meta.validation === undefined) return false;
 	snapshot.meta.validation = undefined;
 	return true;
 }

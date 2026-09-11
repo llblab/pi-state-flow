@@ -2,20 +2,20 @@ import { execFile } from "node:child_process";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { assistantToolCallCount, finalizedAssistantResponse, parseTerminalPatch, stateFlowProtocol, stripStateComments } from "./terminal.ts";
-import { currentRunTrajectory, runtimeContextMessage, VALIDATION_MESSAGE_TYPE, withoutPrivateValidation } from "./context.ts";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { assistantToolCallCount, finalizedAssistantResponse, stateFlowProtocol } from "./terminal.ts";
+import { createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, runtimeContextMessage, VALIDATION_MESSAGE_TYPE, withoutPrivateValidation, type PassiveContinuation } from "./context.ts";
 import { ArtifactReadTracker } from "./acquisition.ts";
 import { loadStateFlowConfig } from "./config.ts";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { SkillReadTracker } from "./skills.ts";
 import { emptySnapshot, migrationFailure, persistableSnapshot, type Snapshot } from "./snapshot.ts";
 import { inspectSnapshotRevision, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
-import { emptyState, overlayStates, type MaterializedState, type ScopePatch, type ScopedStates, type StateScope } from "./state.ts";
-import { commitScopedTransition, stageScopedPatch, stageScopedTransition, type StagedScopedTransition } from "./transition.ts";
-import { MAX_VALIDATION_RETRIES, nextValidation } from "./validation.ts";
+import { emptyState, overlayStates, projectStateForModel, type MaterializedState, type ScopePatch, type ScopedStates, type StateScope } from "./state.ts";
+import { commitScopedTransition, stageScopedPatch, stageScopedTransition, validateUnchangedResolution, type StagedScopedTransition } from "./transition.ts";
 import { discoverSnapshotData, hasPriorConversation, isNewSession, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
 import { compactStatus, detailedStatus, STATUS_KEY, type PendingPublicationDiagnostic, type StatusDiagnostics } from "./status.ts";
-import { abandonValidation, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
+import { prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
 import { recoverSnapshot } from "./recovery.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
 import { resolveRemotePublicationPolicy, serializeRemotePublicationPolicyDocument } from "./publication.ts";
@@ -23,13 +23,15 @@ import { coalescePublicationTarget, createPublicationQueue, type PublicationQueu
 import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePath, removePublicationQueue, savePublicationQueue } from "./publication.ts";
 import { runPublicationWorker } from "./publication.ts";
 import { getKnowledgeRoot, GlobalMarkdownDiscovery } from "./discovery.ts";
+import { isObject, sameJson } from "./json.ts";
 import {
 	cwdScopeKey,
 	resolveSessionAddress,
 	sessionScopeKey,
 	type SessionAddress,
 } from "./durable.ts";
-import { projectRecentTransitionsWithLimit } from "./history.ts";
+import { projectRecentTransitionsWithLimit, RECENT_TRANSITION_LIMIT } from "./history.ts";
+import { appendStateFlowDiagnostic, projectDiagnosticContent, stateFlowLogPath, type StateFlowDiagnosticCategory } from "./logging.ts";
 import { isGitCommitAncestor, pushGitCommit, resolveGitPushDestination } from "./git.ts";
 import {
 	ORDINARY_ARTIFACT_COMPILER,
@@ -46,15 +48,27 @@ export interface StateFlowExtensionOptions {
 
 export const PATCH_STATE_TOOL_NAME = "patch_state";
 export const READ_STATE_TOOL_NAME = "read_state";
+const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
+
+/** Keep a failed tool invocation visually separated from its rendered error without changing error semantics. */
+function separatedFailure(error: unknown): Error {
+	const message = error instanceof Error ? error.message : String(error);
+	return new Error(`\n${message}`, error instanceof Error ? { cause: error } : undefined);
+}
 
 export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowExtensionOptions = {}): void {
-	const config = loadStateFlowConfig(options.agentDir);
+	const agentDir = options.agentDir ?? getAgentDir();
+	const config = loadStateFlowConfig(agentDir);
 	let snapshot: Snapshot = emptySnapshot();
 	let scopeStates: ScopedStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
 	let branchHasSnapshot = false;
 	let branchStartsWithoutRuntime = false;
-	let stagedFinal: StagedScopedTransition | undefined;
-	let retryQueued = false;
+	let stateResolutionSatisfied = false;
+	let terminalDraftIntercepted = false;
+	let responseAwaitingReconciliation = false;
+	let passiveContinuation: PassiveContinuation | undefined;
+	let bootstrapContinuation: PassiveContinuation | undefined;
+	let artifactRefreshPending = false;
 	let runAnchorTimestamp: number | undefined;
 	let runtime: TemporalRuntime | undefined;
 	let activeContext: ExtensionContext | undefined;
@@ -65,8 +79,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	const repositoryRoot = resolve(options.repositoryRoot ?? config.directory);
 	const skillReads = new SkillReadTracker();
 	const artifactReads = new ArtifactReadTracker();
-	const globalMarkdown = new GlobalMarkdownDiscovery(options.knowledgeRoot ?? getKnowledgeRoot(options.agentDir));
+	const globalMarkdown = new GlobalMarkdownDiscovery(options.knowledgeRoot ?? getKnowledgeRoot(agentDir));
 	let artifactInvalidations: ArtifactInvalidationRequest[] = [];
+	let loggingWarningReported = false;
 
 	function sessionAddress(ctx: ExtensionContext): SessionAddress {
 		return resolveSessionAddress(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getSessionId(), ctx.sessionManager.getHeader()?.timestamp);
@@ -78,7 +93,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	options.onRuntime?.({ read: (offset, scope) => {
 		if (!runtime) throw new Error("State Flow temporal runtime is unavailable");
-		return runtime.read(offset, scope);
+		return projectStateForModel(runtime.read(offset, scope));
 	} });
 
 	function persist(): void {
@@ -105,14 +120,39 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	}
 
 	function clearRunTransient(): void {
-		stagedFinal = undefined;
-		retryQueued = false;
+		stateResolutionSatisfied = false;
+		terminalDraftIntercepted = false;
+		responseAwaitingReconciliation = false;
 		runAnchorTimestamp = undefined;
 		skillReads.clear();
 		artifactReads.clear();
 	}
 
+	function passiveStopTimestamp(ctx: ExtensionContext): number | undefined {
+		for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
+			try {
+				if (entry?.type !== "custom" || entry.customType !== PASSIVE_STOP_ENTRY_TYPE) continue;
+				const at = (entry.data as { at?: unknown } | undefined)?.at;
+				if (typeof at === "number" && Number.isSafeInteger(at) && at >= 0) return at;
+			} catch {
+				// A hostile unrelated branch entry cannot manufacture or suppress a valid marker.
+			}
+		}
+		return undefined;
+	}
+
+	function retainsPhysicalSessionProjection(reason: unknown): boolean {
+		return reason === undefined || reason === "startup" || reason === "reload" || reason === "resume";
+	}
+
+	function deferArtifactRefresh(): void {
+		artifactInvalidations = [];
+		artifactReads.setCandidates([]);
+		artifactRefreshPending = true;
+	}
+
 	function refreshArtifactInvalidations(ctx: ExtensionContext): void {
+		artifactRefreshPending = false;
 		if (!snapshot.config.enabled) {
 			artifactInvalidations = [];
 			artifactReads.setCandidates([]);
@@ -124,6 +164,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				discovery.sources,
 				scopeStates.global.artifacts,
 				ORDINARY_ARTIFACT_COMPILER,
+				{},
+				runtime?.artifactProvenance("global") ?? {},
 			);
 			artifactInvalidations = structuredClone(plan.requiresCompilation);
 			if (plan.removed.length > 0) {
@@ -193,12 +235,34 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}
 	}
 
+	/** Accept an activation or lifecycle commit locally; turn-end policy queues it for the asynchronous worker. */
+	function recordPolicyPublication(publication: RuntimePublication | undefined, ctx: ExtensionContext): void {
+		if (!publication) return;
+		recordPublication(publication, ctx);
+		const mode = snapshot.meta.remotePublication?.mode ?? "transition";
+		const target = publication.commit ?? publication.revision;
+		if (mode !== "turn-end" || target === undefined || !/^[0-9a-f]{40,64}$/.test(target)) return;
+		turnPublicationTarget = target;
+		try {
+			enqueueTurnPublication();
+			launchPublicationWorker();
+		} catch (error) {
+			ctx.ui.notify(
+				`State Flow accepted the local commit; remote publication is deferred: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			);
+		}
+	}
+
 	function commitStage(stage: StagedScopedTransition, ctx: ExtensionContext, finalizeRun: boolean): boolean {
 		const acquiredArtifactPaths = new Set(artifactReads.successful.keys());
 		const committed = commitScopedTransition(snapshot, scopeStates, stage, (accepted, nextSnapshot) => {
 			if (!runtime?.view) throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
 			const mode = nextSnapshot.meta.remotePublication?.mode ?? "transition";
-			const publication = runtime.publish(nextSnapshot, accepted !== undefined, accepted, { pushRemote: mode === "transition" });
+			const publication = runtime.publish(nextSnapshot, accepted !== undefined, accepted, {
+				pushRemote: mode === "transition",
+				provenance: stage.provenanceUpdates,
+			});
 			if (publication?.commit && mode === "turn-end") turnPublicationTarget = publication.commit;
 			if (publication) recordPublication(publication, ctx);
 		}, runtime!.causalBasis(), { finalizeRun });
@@ -272,12 +336,31 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}).finally(() => {
 			activePublicationWorkers.delete(path);
 			lease.release();
-			if (loadPublicationQueue(path)?.status === "pending") launchPublicationWorker();
+			try {
+				if (loadPublicationQueue(path)?.status === "pending") launchPublicationWorker();
+			} catch {
+				// Malformed queue persistence stays inert until an explicit retry or repair.
+			}
 		});
 	}
 
 	function retryPendingPush(ctx: ExtensionContext): void {
 		if (pendingPublication === undefined || !runtime?.view) return;
+		const mode = snapshot.meta.remotePublication?.mode ?? "transition";
+		if (mode !== "transition") {
+			const target = pendingPublication.commit;
+			setPendingPublication(undefined);
+			if (mode === "turn-end") {
+				turnPublicationTarget = target;
+				try {
+					enqueueTurnPublication();
+					launchPublicationWorker();
+				} catch (error) {
+					ctx.ui.notify(`State Flow retained local state; asynchronous publication recovery is deferred: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				}
+			}
+			return;
+		}
 		const result = pushGitCommit(repositoryRoot, pendingPublication.commit);
 		if (result.status !== "pending") {
 			setPendingPublication(undefined);
@@ -314,6 +397,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					discovery.sources,
 					diagnosticStates.global.artifacts,
 					ORDINARY_ARTIFACT_COMPILER,
+					{},
+					runtime?.artifactProvenance("global") ?? {},
 				);
 				staleArtifacts = [
 					...plan.requiresCompilation.map(({ path, reason }) => ({ scope: "global" as const, path, reason })),
@@ -349,7 +434,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			...(artifactFreshnessError === undefined ? {} : { artifactFreshnessError }),
 			...(durableStateError === undefined ? {} : { durableStateError }),
 			...(pendingPublication === undefined ? {} : { pendingPublication }),
-			retryQueued,
 			...(publicationQueue === undefined ? {} : { publicationQueue }),
 			...(publicationQueueError === undefined ? {} : { publicationQueueError }),
 		};
@@ -357,6 +441,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	function restoreActiveBranch(ctx: ExtensionContext, sessionStartReason?: unknown): void {
 		clearRunTransient();
+		passiveContinuation = undefined;
+		bootstrapContinuation = undefined;
+		artifactInvalidations = [];
+		artifactReads.setCandidates([]);
+		artifactRefreshPending = false;
 		activeContext = ctx;
 		const session = sessionAddress(ctx);
 		runtime = new TemporalRuntime(ctx.cwd, session, repositoryRoot);
@@ -383,7 +472,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					if (snapshot.meta.durableBase !== selectedRevision) persist();
 				} else if (branchHasSnapshot && snapshot.config.enabled) {
 					const publication = runtime.initialize(snapshot, true);
-					if (publication) recordPublication(publication, ctx);
+					recordPolicyPublication(publication, ctx);
 					delete snapshot.legacySession;
 				}
 				installScopeStates();
@@ -394,7 +483,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				);
 				runtime.prepare();
 				const initialization = runtime.initialize(snapshot, true);
-				if (initialization) recordPublication(initialization, ctx);
+				recordPolicyPublication(initialization, ctx);
 				if (!runtime.view) snapshot = emptySnapshot();
 				installScopeStates();
 				if (snapshot.config.enabled) {
@@ -432,47 +521,52 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		if (!snapshot.config.enabled && snapshot.meta.validation?.attempt === 0) {
 			ctx.ui.notify(`State Flow restored disabled: ${snapshot.meta.validation.error}`, "error");
 		}
+		if (retainsPhysicalSessionProjection(sessionStartReason) && runtime?.view) {
+			const stoppedAt = passiveStopTimestamp(ctx);
+			if (stoppedAt !== undefined) {
+				const continuation = createPassiveContinuation(
+					projectStateForModel(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)),
+					stoppedAt,
+				);
+				if (!snapshot.config.enabled) passiveContinuation = continuation;
+				else if (snapshot.meta.bootstrap) bootstrapContinuation = continuation;
+			}
+		}
+		if (snapshot.config.enabled) deferArtifactRefresh();
 		syncStateFlowTools();
 		updateUi(ctx);
 	}
 
-	function abandonRun(ctx: ExtensionContext): void {
-		const changed = abandonValidation(snapshot);
-		clearRunTransient();
-		if (changed) persist();
-		updateUi(ctx);
-	}
-
-	function queueTerminalRegeneration(error: string, ctx: ExtensionContext): void {
-		const decision = nextValidation(snapshot.meta.validation, error);
-		if (decision.kind === "retry") {
-			snapshot.meta.validation = decision.feedback;
-			persist();
-			retryQueued = true;
-			pi.sendMessage({
-				customType: VALIDATION_MESSAGE_TYPE,
-				content: `State Flow rejected the terminal response (attempt ${decision.feedback.attempt}/${MAX_VALIDATION_RETRIES}). ${decision.feedback.instruction}`,
-				display: false,
-			}, { deliverAs: "steer", triggerTurn: true });
-			return;
+	function recordDiagnostic(error: string, category: StateFlowDiagnosticCategory, ctx: ExtensionContext, content?: unknown): void {
+		if (!config.logging) return;
+		try {
+			const path = stateFlowLogPath(agentDir);
+			const fromRepository = relative(repositoryRoot, path);
+			if (fromRepository === "" || (!isAbsolute(fromRepository) && fromRepository !== ".." && !fromRepository.startsWith(`..${sep}`))) {
+				throw new Error("diagnostic path overlaps the State Flow repository");
+			}
+			appendStateFlowDiagnostic(path, {
+				at: new Date().toISOString(),
+				sessionId: sessionAddress(ctx).id,
+				cwd: resolve(ctx.cwd),
+				category,
+				error,
+				...(content === undefined ? {} : { content: projectDiagnosticContent(content) }),
+			});
+		} catch (failure) {
+			if (loggingWarningReported) return;
+			loggingWarningReported = true;
+			ctx.ui.notify(`State Flow could not write diagnostics: ${failure instanceof Error ? failure.message : String(failure)}`, "warning");
 		}
-		retryQueued = false;
-		snapshot.meta.validation = undefined;
-		skillReads.clear();
-		artifactReads.clear();
-		persist();
-		ctx.ui.notify(`State Flow remains enabled after ${MAX_VALIDATION_RETRIES} automatic regeneration attempts; the last committed state was preserved: ${decision.error}`, "error");
 	}
 
-	function rejectTerminal(message: { role: "assistant"; content?: unknown }, error: string, ctx: ExtensionContext) {
-		queueTerminalRegeneration(error, ctx);
-		return {
-			message: {
-				...message,
-				role: "assistant" as const,
-				content: [],
-			},
-		};
+	function continueForResolution(): void {
+		terminalDraftIntercepted = true;
+		pi.sendMessage({
+			customType: VALIDATION_MESSAGE_TYPE,
+			content: "Before completing this turn, resolve State Flow. Call patch_state with durable semantic changes, or call patch_state with {\"unchanged\":true} if no state update is required. Then provide the final answer normally.",
+			display: false,
+		}, { deliverAs: "steer", triggerTurn: true });
 	}
 
 	pi.registerTool({
@@ -485,51 +579,74 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			scope: Type.Optional(StringEnum(["effective", "global", "cwd", "session"] as const, { description: "Projection at that same boundary; defaults to effective" })),
 		}, { additionalProperties: false }),
 		async execute(_toolCallId, params, signal) {
-			if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
-			if (signal?.aborted) throw new Error("State Flow read was aborted");
-			if (!runtime?.view) throw new Error("State Flow temporal runtime is unavailable");
-			const { offset = 0, scope = "effective" } = params;
-			const state = runtime.read(offset, scope === "effective" ? undefined : scope);
-			const boundary = runtime.view.lineage.at(-1 - offset)!;
-			return {
-				content: [{ type: "text", text: JSON.stringify({ offset, scope, boundary, state }) }],
-				details: { offset, scope, transitionId: boundary.id },
-			};
+			try {
+				if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
+				if (signal?.aborted) throw new Error("State Flow read was aborted");
+				if (!runtime?.view) throw new Error("State Flow temporal runtime is unavailable");
+				const { offset = 0, scope = "effective" } = params;
+				const state = runtime.read(offset, scope === "effective" ? undefined : scope);
+				const boundary = runtime.view.lineage.at(-1 - offset)!;
+				return {
+					content: [{ type: "text", text: `\n${JSON.stringify({ offset, scope, boundary, state: projectStateForModel(state) })}` }],
+					details: { offset, scope, transitionId: boundary.id },
+				};
+			} catch (error) {
+				throw separatedFailure(error);
+			}
 		},
 	});
 
 	pi.registerTool({
 		name: PATCH_STATE_TOOL_NAME,
 		label: "Patch State",
-		description: "Materialize established future-relevant semantic state at a session, CWD, or global barrier, including a necessary write-and-verify step during explicitly requested curation. Do not use for scratchpad, narration, routine progress, or speculative churn. This call must be the only State Flow barrier in its assistant response; sibling tool calls are blocked and reconsidered after rematerialization.",
-		promptSnippet: "Materialize established future-relevant state as an immediate inference barrier",
+		description: "The sole State Flow semantic mutation protocol. Use exactly one form: PATCH {scope, patch} to materialize established future-relevant state, or UNCHANGED {unchanged:true} after explicitly deciding no durable update is needed. Never combine unchanged with scope or patch. This call must be the only State Flow barrier in its assistant response; sibling tool calls are reconsidered after rematerialization.",
+		promptSnippet: "PATCH {scope, patch} or UNCHANGED {unchanged:true}",
 		promptGuidelines: [
-			"Use patch_state when established future-relevant information would face meaningful loss or recovery risk if delayed until terminal reconciliation, or for a necessary write-and-verify step in explicitly requested curation.",
-			"Call patch_state alone in an assistant response; choose subsequent actions only after its compact acknowledgement and rematerialized State Flow context.",
+			"Use patch_state for every durable semantic change. Before a final answer, resolve State Flow with PATCH {scope, patch} or UNCHANGED {unchanged:true}.",
+			"Call patch_state alone in an assistant response; choose subsequent actions only after its acknowledgement and rematerialized State Flow context.",
 		],
 		executionMode: "sequential",
+		// Type.Union/Type.Literal schemas are not portable across Pi's Google-compatible tool adapters.
+		// Field descriptions expose the discriminated forms while runtime validation preserves exclusivity.
 		parameters: Type.Object({
-			scope: StringEnum(["session", "cwd", "global"] as const),
-			patch: Type.Record(Type.String(), Type.Unknown()),
+			scope: Type.Optional(StringEnum(["session", "cwd", "global"] as const, { description: "PATCH form only: required with patch; forbidden with unchanged" })),
+			patch: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "PATCH form only: required with scope; forbidden with unchanged" })),
+			unchanged: Type.Optional(Type.Boolean({ description: "UNCHANGED form only: set exactly true and omit scope and patch" })),
 		}, { additionalProperties: false }),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
-			if (signal?.aborted) throw new Error("State Flow patch was aborted before materialization");
-			const transition = { scope: params.scope as StateScope, patch: params.patch as ScopePatch };
-			const stage = stageScopedPatch(
-				scopeStates,
-				transition,
-				skillReads.successful.values(),
-				runtime!.causalBasis(),
-				artifactReads.successful.values(),
-			);
-			commitStage(stage, ctx, false);
-			updateUi(ctx);
-			const publication = pendingPublication === undefined ? "" : "; durable publication pending";
-			return {
-				content: [{ type: "text", text: `\nState materialized at ${params.scope} scope${publication}.` }],
-				details: { scope: params.scope, step: snapshot.meta.step },
-			};
+			try {
+				if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
+				if (signal?.aborted) throw new Error("State Flow patch was aborted before materialization");
+				if (!isObject(params)) throw new Error("patch_state requires an object in exactly one supported form");
+				const keys = Object.keys(params).sort();
+				if (params.unchanged === true) {
+					if (keys.length !== 1 || keys[0] !== "unchanged") throw new Error('patch_state {"unchanged":true} cannot include any other field');
+					validateUnchangedResolution(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
+					stateResolutionSatisfied = true;
+					terminalDraftIntercepted = false;
+					return { content: [{ type: "text", text: "\nState resolution acknowledged unchanged." }], details: { unchanged: true } };
+				}
+				if (keys.length !== 2 || keys[0] !== "patch" || keys[1] !== "scope"
+					|| params.scope === undefined || !isObject(params.patch)) {
+					throw new Error("patch_state requires exactly scope and patch, or {\"unchanged\":true}");
+				}
+				if (Object.keys(params.patch).length === 0) throw new Error("An empty semantic patch is not an unchanged acknowledgement; use {\"unchanged\":true}");
+				const transition = { scope: params.scope as StateScope, patch: params.patch as ScopePatch };
+				const stage = stageScopedPatch(scopeStates, transition, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
+				const semanticChange = (["global", "cwd", "session"] as const).some((scope) => !sameJson(scopeStates[scope], stage.nextStates[scope]));
+				const provenanceChange = Object.values(stage.provenanceUpdates).some((updates) => Object.keys(updates).length > 0);
+				if (!semanticChange && !provenanceChange) throw new Error('patch_state PATCH must materially update state or required provenance; use {"unchanged":true} instead');
+				commitStage(stage, ctx, false);
+				stateResolutionSatisfied = true;
+				terminalDraftIntercepted = false;
+				updateUi(ctx);
+				const publication = pendingPublication === undefined ? "" : "; durable publication pending";
+				return { content: [{ type: "text", text: `\nState materialized at ${params.scope} scope${publication}.` }], details: { scope: params.scope, step: snapshot.meta.step } };
+			} catch (error) {
+				stateResolutionSatisfied = false;
+				recordDiagnostic(error instanceof Error ? error.message : String(error), /concurrently|advanced/.test(String(error)) ? "publication-conflict" : "invalid-patch", ctx);
+				throw separatedFailure(error);
+			}
 		},
 	});
 
@@ -538,6 +655,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		handler: async (_args, ctx) => {
 			if (!activeContext) restoreActiveBranch(ctx);
 			const previousSnapshot = structuredClone(snapshot);
+			const previousPassiveContinuation = passiveContinuation;
+			const previousBootstrapContinuation = bootstrapContinuation;
+			const previousArtifactRefreshPending = artifactRefreshPending;
+			const previousArtifactInvalidations = structuredClone(artifactInvalidations);
 			try {
 				if (!runtime?.view && !snapshot.meta.durableBase && !branchStartsWithoutRuntime) {
 					throw new Error("Selected branch revision is unavailable; restore its original Git history before starting State Flow");
@@ -547,7 +668,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				runtime ??= createRuntime(ctx);
 				if (branchStartsWithoutRuntime) runtime.prepare();
 				const bootstrap = (!branchHasSnapshot || !snapshot.config.enabled)
-					&& hasPriorConversation(branch);
+					&& (hasPriorConversation(branch) || previousPassiveContinuation !== undefined);
 				if (!runtime.view && snapshot.meta.durableBase) {
 					snapshot = runtime.restore(snapshot.meta.durableBase, snapshot);
 					setPendingPublication(snapshot.meta.pendingPublication);
@@ -566,11 +687,15 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				const publication = runtime.view
 					? runtime.promote(snapshot) ?? runtime.publish(snapshot)
 					: runtime.initialize(snapshot, true, undefined, branchStartsWithoutRuntime);
-				if (publication) recordPublication(publication, ctx);
+				recordPolicyPublication(publication, ctx);
 				installScopeStates();
 				delete snapshot.legacySession;
 				clearRunTransient();
-				refreshArtifactInvalidations(ctx);
+				passiveContinuation = undefined;
+				bootstrapContinuation = snapshot.meta.bootstrap
+					? previousPassiveContinuation ?? previousBootstrapContinuation
+					: undefined;
+				deferArtifactRefresh();
 				syncStateFlowTools();
 				persist();
 				updateUi(ctx);
@@ -582,6 +707,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				);
 			} catch (error) {
 				snapshot = previousSnapshot;
+				passiveContinuation = previousPassiveContinuation;
+				bootstrapContinuation = previousBootstrapContinuation;
+				artifactRefreshPending = previousArtifactRefreshPending;
+				artifactInvalidations = previousArtifactInvalidations;
+				artifactReads.setCandidates(artifactInvalidations);
 				syncStateFlowTools();
 				ctx.ui.notify(
 					`State Flow could not initialize CWD state: ${error instanceof Error ? error.message : String(error)}`,
@@ -608,6 +738,15 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				selected = createRuntime(ctx);
 				current = selected.restore(snapshot.meta.durableBase, snapshot);
 			}
+			const stoppedAt = Date.now();
+			const exitStates = selected?.view ? selected.states() : undefined;
+			const exitHandoff = current.config.enabled && exitStates
+				? createPassiveContinuation(
+					projectStateForModel(overlayStates(exitStates.global, exitStates.cwd, exitStates.session)),
+					stoppedAt,
+				)
+				: undefined;
+			const retainedHandoff = exitHandoff ?? (!current.config.enabled ? passiveContinuation : undefined);
 			const stopped = stopEpisode(current);
 			const publication = selected?.view ? selected.publish(stopped) : undefined;
 			if (selected !== runtime) {
@@ -615,24 +754,32 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				installScopeStates();
 			}
 			snapshot = stopped;
-			if (publication) recordPublication(publication, ctx);
+			recordPolicyPublication(publication, ctx);
 			branchHasSnapshot = true;
 			clearRunTransient();
+			passiveContinuation = retainedHandoff;
+			bootstrapContinuation = undefined;
+			artifactInvalidations = [];
+			artifactReads.setCandidates([]);
+			artifactRefreshPending = false;
+			if (exitHandoff) pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, { at: stoppedAt });
 			syncStateFlowTools();
 			persist();
 			updateUi(ctx);
 		},
 	});
 
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", (event, ctx) => {
 		if (!snapshot.config.enabled) return;
-		if (!retryQueued) {
-			skillReads.clear();
-			artifactReads.clear();
-		}
-		const rotatesRun = snapshot.meta.specification !== undefined && !retryQueued;
-		if (rotatesRun) rehydrationPhase = "step";
-		if (prepareRun(snapshot, event.prompt, retryQueued)) {
+		skillReads.clear();
+		artifactReads.clear();
+		if (artifactRefreshPending) refreshArtifactInvalidations(ctx);
+		stateResolutionSatisfied = false;
+		terminalDraftIntercepted = false;
+		responseAwaitingReconciliation = false;
+		const rotatesRun = snapshot.meta.specification !== undefined;
+		if (rotatesRun && rehydrationPhase !== "new-bootstrap" && rehydrationPhase !== "resume-bootstrap") rehydrationPhase = "step";
+		if (prepareRun(snapshot, event.prompt)) {
 			if (rotatesRun) runAnchorTimestamp = undefined;
 			persist();
 		}
@@ -642,16 +789,23 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	});
 
 	pi.on("context", (event) => {
+		if (passiveContinuation) {
+			return { messages: passiveContinuationMessages(event.messages as AgentMessage[], passiveContinuation) };
+		}
 		if (!snapshot.config.enabled || snapshot.meta.specification === undefined) return;
-		const effectiveState = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
+		const effectiveState = projectStateForModel(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session));
+		const invalidations = artifactInvalidations.map(({ path, reason }) => ({ path, reason }));
 		const recentTransitions = projectRecentTransitionsWithLimit(
-			snapshot.config.transitionWindow,
+			RECENT_TRANSITION_LIMIT,
 			runtime?.recent() ?? [],
 		);
 		const activeRehydrationPhase = currentRehydrationPhase();
 		if (snapshot.meta.bootstrap) {
-			const messages = withoutPrivateValidation(event.messages as AgentMessage[]);
-			return { messages: [runtimeContextMessage(snapshot, effectiveState, recentTransitions, artifactInvalidations, activeRehydrationPhase), ...messages] };
+			const sourceMessages = bootstrapContinuation
+				? passiveContinuationMessages(event.messages as AgentMessage[], bootstrapContinuation)
+				: event.messages as AgentMessage[];
+			const messages = withoutPrivateValidation(sourceMessages);
+			return { messages: [runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, terminalDraftIntercepted), ...messages] };
 		}
 		const trajectory = currentRunTrajectory(
 			event.messages as AgentMessage[],
@@ -661,7 +815,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		runAnchorTimestamp = trajectory.anchorTimestamp;
 		return {
 			messages: [
-				runtimeContextMessage(snapshot, effectiveState, recentTransitions, artifactInvalidations, activeRehydrationPhase),
+				runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, terminalDraftIntercepted),
 				...trajectory.messages,
 			],
 		};
@@ -699,76 +853,78 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	pi.on("tool_execution_end", (event) => {
 		if (!snapshot.config.enabled) return;
+		if (event.toolName === PATCH_STATE_TOOL_NAME && event.isError) stateResolutionSatisfied = false;
 		skillReads.recordEnd(event.toolCallId, event.toolName, event.isError);
 		artifactReads.recordEnd(event.toolCallId, event.toolName, event.isError);
 	});
 
 	pi.on("message_end", (event, ctx): any => {
 		if (!snapshot.config.enabled || event.message.role !== "assistant") return;
-		stagedFinal = undefined;
 		const message = event.message as unknown as { role: "assistant"; stopReason?: string; content?: unknown };
-		if (message.stopReason === "aborted") {
-			abandonRun(ctx);
+		if (message.stopReason === "aborted" || assistantToolCallCount(message.content) > 0 || message.stopReason === "toolUse") {
+			responseAwaitingReconciliation = false;
 			return;
 		}
 		if (message.stopReason === "length" || message.stopReason === "error") {
-			return rejectTerminal(message, `Assistant response ended with ${message.stopReason}`, ctx);
+			responseAwaitingReconciliation = false;
+			recordDiagnostic(`Assistant response ended with ${message.stopReason}`, "finalization", ctx, message.content);
+			return;
 		}
-		if (assistantToolCallCount(message.content) > 0 || message.stopReason === "toolUse") {
-			retryQueued = snapshot.meta.validation !== undefined;
-			const cleaned = stripStateComments(message.content);
-			return cleaned.changed
-				? { message: { ...message, role: "assistant" as const, content: cleaned.content } }
-				: undefined;
+		if (!stateResolutionSatisfied) {
+			responseAwaitingReconciliation = false;
+			terminalDraftIntercepted = true;
+			recordDiagnostic("Terminal draft intercepted before State Flow resolution", "terminal-pending", ctx, message.content);
+			continueForResolution();
+			return { message: { ...message, role: "assistant" as const, content: [] } };
 		}
 		try {
-			const parsed = parseTerminalPatch(message.content);
-			stagedFinal = stageScopedTransition(
-				scopeStates,
-				parsed.transition,
-				skillReads.successful.values(),
-				runtime!.causalBasis(),
-				artifactReads.successful.values(),
-			);
-			retryQueued = false;
-			return { message: { ...message, role: "assistant" as const, content: parsed.responseContent } };
+			validateUnchangedResolution(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
 		} catch (error) {
-			return rejectTerminal(message, error instanceof Error ? error.message : String(error), ctx);
+			stateResolutionSatisfied = false;
+			responseAwaitingReconciliation = false;
+			terminalDraftIntercepted = true;
+			recordDiagnostic(error instanceof Error ? error.message : String(error), "terminal-pending", ctx, message.content);
+			continueForResolution();
+			return { message: { ...message, role: "assistant" as const, content: [] } };
 		}
+		responseAwaitingReconciliation = true;
 	});
 
 	pi.on("turn_end", (event, ctx) => {
-		if (!snapshot.config.enabled || !stagedFinal) {
+		if (!snapshot.config.enabled || !responseAwaitingReconciliation) {
 			updateUi(ctx);
 			return;
 		}
 		try {
-			stagedFinal.nextStates.session.response = finalizedAssistantResponse(event.message);
-			commitStage(stagedFinal, ctx, true);
+			const response = finalizedAssistantResponse(event.message);
+			const stage = stageScopedTransition(scopeStates, { transitions: [], response }, [], runtime!.causalBasis());
+			commitStage(stage, ctx, true);
+			bootstrapContinuation = undefined;
+			rehydrationPhase = "step";
 			enqueueTurnPublication();
 			if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 		} catch (error) {
-			queueTerminalRegeneration(error instanceof Error ? error.message : String(error), ctx);
+			recordDiagnostic(error instanceof Error ? error.message : String(error), "finalization", ctx);
+			ctx.ui.notify(`State Flow could not reconcile the final response: ${error instanceof Error ? error.message : String(error)}`, "error");
+		} finally {
+			responseAwaitingReconciliation = false;
+			terminalDraftIntercepted = false;
 		}
-		stagedFinal = undefined;
 		updateUi(ctx);
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
-		if (snapshot.config.enabled && retryQueued) abandonRun(ctx);
+	pi.on("agent_settled", (_event, _ctx) => {
 		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 	});
 
 	pi.on("session_start", (event, ctx) => {
 		rehydrationPhase = event.reason === "resume" ? "resume-bootstrap" : "new-bootstrap";
 		restoreActiveBranch(ctx, event.reason);
-		refreshArtifactInvalidations(ctx);
 		retryPendingPush(ctx);
 		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 		updateUi(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
 		restoreActiveBranch(ctx);
-		refreshArtifactInvalidations(ctx);
 	});
 }

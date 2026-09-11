@@ -6,8 +6,12 @@ import {
 	isArtifactHash,
 	isArtifactMetadata,
 	isArtifactRegistry,
+	parseArtifactProvenanceRegistry,
 	planArtifactInvalidation,
+	projectArtifactForModel,
 	selectArtifactsByTags,
+	serializeArtifactProvenanceRegistry,
+	updateArtifactProvenance,
 	updateArtifactRegistry,
 	validateArtifactMetadata,
 	validateArtifactRegistry,
@@ -63,7 +67,9 @@ test("validates path-keyed registries without inventing artifact IDs", () => {
 	assert.equal(isArtifactRegistry(registry), true);
 	assert.doesNotThrow(() => validateArtifactRegistry(registry));
 	assert.equal(isArtifactRegistry({ "": metadata() }), false);
-	assert.equal(isArtifactRegistry({ "/knowledge/a.md": { description: "Incomplete" } }), false);
+	// Semantic-only entries are usable; missing runtime provenance degrades freshness evidence, not state.
+	assert.equal(isArtifactRegistry({ "/knowledge/a.md": { description: "Semantic only" } }), true);
+	assert.equal(isArtifactRegistry({ "/knowledge/a.md": { description: "" } }), false);
 });
 
 test("selects artifacts by validated tags without authorizing source acquisition", () => {
@@ -94,7 +100,7 @@ test("classifies every freshness signal without source-body acquisition", () => 
 	assert.deepEqual(classifyArtifactFreshness(source, undefined, "artifact-v1"), {
 		kind: "requires-compilation", reason: "new",
 	});
-	assert.deepEqual(classifyArtifactFreshness(source, { description: "broken" }, "artifact-v1"), {
+	assert.deepEqual(classifyArtifactFreshness(source, { description: "broken", hash: "sha256:invalid" }, "artifact-v1"), {
 		kind: "requires-compilation", reason: "invalid-metadata",
 	});
 	assert.deepEqual(classifyArtifactFreshness(source, metadata({ hash: `sha256:${"b".repeat(64)}` }), "artifact-v1"), {
@@ -107,6 +113,49 @@ test("classifies every freshness signal without source-body acquisition", () => 
 		kind: "requires-compilation", reason: "explicit-refresh",
 	});
 	assert.deepEqual(classifyArtifactFreshness(source, metadata(), "artifact-v1"), { kind: "fresh" });
+});
+
+test("derives freshness capabilities from retained runtime provenance", () => {
+	const source = { path: "/knowledge/a.md", hash };
+	const semanticOnly = { description: "Semantic only" };
+	// Absent provenance is unavailable evidence: the artifact stays usable rather than corrupt.
+	assert.deepEqual(classifyArtifactFreshness(source, semanticOnly, "artifact-v1"), { kind: "fresh" });
+	assert.deepEqual(classifyArtifactFreshness(source, semanticOnly, "artifact-v1", false, { sourceHash: hash, compilerRevision: "artifact-v1" }), { kind: "fresh" });
+	assert.deepEqual(classifyArtifactFreshness(source, semanticOnly, "artifact-v1", false, { sourceHash: `sha256:${"b".repeat(64)}` }), {
+		kind: "requires-compilation", reason: "source-changed",
+	});
+	assert.deepEqual(classifyArtifactFreshness(source, semanticOnly, "artifact-v1", false, { compilerRevision: "artifact-v2" }), {
+		kind: "requires-compilation", reason: "compiler-changed",
+	});
+	// Malformed present evidence fails closed only for the capability that depends on it.
+	assert.deepEqual(classifyArtifactFreshness(source, semanticOnly, "artifact-v1", false, { sourceHash: 42 }), {
+		kind: "requires-compilation", reason: "invalid-metadata",
+	});
+	assert.deepEqual(classifyArtifactFreshness(source, semanticOnly, "artifact-v1", false, { compilerRevision: "" }), {
+		kind: "requires-compilation", reason: "invalid-metadata",
+	});
+	assert.deepEqual(classifyArtifactFreshness(source, metadata(), "artifact-v1", false, { malformed: true }), {
+		kind: "requires-compilation", reason: "invalid-metadata",
+	});
+});
+
+test("parses, serializes, and projects retained provenance evidence", () => {
+	const registry = parseArtifactProvenanceRegistry({
+		"/knowledge/a.md": { sourceHash: hash, compilerRevision: "artifact-v1", compiledAt: "2026-03-12T12:00:00.000Z" },
+		"/knowledge/b.md": { sourceHash: 42, unknown: true },
+		"/knowledge/c.md": { compilerRevision: "artifact-v1" },
+	});
+	assert.deepEqual(registry["/knowledge/a.md"], { sourceHash: hash, compilerRevision: "artifact-v1", compiledAt: "2026-03-12T12:00:00.000Z" });
+	assert.deepEqual(registry["/knowledge/b.md"], { malformed: true });
+	assert.deepEqual(registry["/knowledge/c.md"], { compilerRevision: "artifact-v1" });
+	assert.deepEqual(serializeArtifactProvenanceRegistry(registry), {
+		"/knowledge/a.md": { sourceHash: hash, compilerRevision: "artifact-v1", compiledAt: "2026-03-12T12:00:00.000Z" },
+		"/knowledge/c.md": { compilerRevision: "artifact-v1" },
+	});
+	assert.deepEqual(projectArtifactForModel({
+		description: "A", hash, compiler: "artifact-v1", compiled_at: "2026-01-01", source_hash_verified: false,
+		sourceHash: hash, compilerRevision: "artifact-v2", compiledAt: "2026-02-02", compilation: { route: "a" },
+	}), { description: "A", compilation: { route: "a" } });
 });
 
 test("plans only stale acquisitions and deterministic removals", () => {
@@ -149,7 +198,7 @@ test("applies compiled metadata and removals as one immutable registry update", 
 		"/knowledge/keep.md": metadata({ description: "Keep" }),
 	};
 	const source = { path: "/knowledge/new.md", hash: `sha256:${"b".repeat(64)}` };
-	const next = updateArtifactRegistry(prior, [{
+	const compiled = [{
 		source,
 		compiler: "artifact-v2",
 		output: {
@@ -158,17 +207,18 @@ test("applies compiled metadata and removals as one immutable registry update", 
 			compilation: { route: "new" },
 			future_policy: true,
 		},
-	}], ["/knowledge/old.md"]);
+	}];
+	const next = updateArtifactRegistry(prior, compiled, ["/knowledge/old.md"]);
 	assert.deepEqual(next, {
 		"/knowledge/keep.md": metadata({ description: "Keep" }),
 		[source.path]: {
 			description: "New routing metadata",
-			compiled_at: "2026-03-12T12:00:00.000Z",
 			compilation: { route: "new" },
 			future_policy: true,
-			hash: source.hash,
-			compiler: "artifact-v2",
 		},
+	});
+	assert.deepEqual(updateArtifactProvenance({}, compiled), {
+		[source.path]: { sourceHash: source.hash, compilerRevision: "artifact-v2", compiledAt: "2026-03-12T12:00:00.000Z" },
 	});
 	assert.deepEqual(prior, {
 		"/knowledge/old.md": metadata(),
@@ -183,5 +233,11 @@ test("rejects an invalid atomic registry cohort without mutating prior state", (
 		compiler: "artifact-v1",
 		output: { description: "Bad", hash } as any,
 	}], ["/knowledge/keep.md"]), /cannot set runtime-owned/);
+	for (const field of ["sourceHash", "compilerRevision", "compiledAt", "source_hash_verified"]) {
+		assert.throws(() => updateArtifactRegistry(prior, [{
+			source: { path: "/knowledge/bad.md", hash }, compiler: "artifact-v1",
+			output: { description: "Bad", [field]: "forged" } as any,
+		}]), /cannot set runtime-owned provenance fields/);
+	}
 	assert.deepEqual(prior, { "/knowledge/keep.md": metadata() });
 });

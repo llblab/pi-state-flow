@@ -5,10 +5,11 @@ import { createHash } from "node:crypto";
 import { closeSync, lstatSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import {
-	assertOwnedFileUpdates, captureTemporalFileBases, parseScopeStream, restoreDurableFileBases,
-	sessionRuntimePaths, temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
+	assertOwnedFileUpdates, captureTemporalFileBases, parseScopeProvenance, parseScopeStream, restoreDurableFileBases,
+	serializeScopeProvenance, sessionRuntimePaths, temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
 	type DurableFileBase, type OwnedFileUpdate,
 } from "./durable.ts";
+import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { hashJson, sameJson } from "./json.ts";
 import { RevisionUnavailableError, isFileRevision, parseSessionRuntime, serializeSessionRuntime, type FileRevision, type SessionRuntime } from "./snapshot.ts";
 import { planLegacyStorageMigration } from "./migration.ts";
@@ -74,6 +75,7 @@ export function assertTemporalFileBase(expected: TemporalFileBase, current: Temp
 export function planTemporalPublication(
 	cwd: string, sessionId: string, view: TemporalState, scopes: readonly StateScope[],
 	current: TemporalFileBase, root: string, runtime?: SessionRuntime, runtimeOnly = false, sessionKey = sessionId,
+	provenance?: Readonly<Record<StateScope, ArtifactProvenanceRegistry>>,
 ): { updates: OwnedFileUpdate[]; changedScopes: StateScope[] } {
 	const candidates = temporalStateFileUpdates(cwd, sessionId, view, scopes, root, sessionKey);
 	const files = new Map(current.files.map((file) => [file.path, file]));
@@ -86,6 +88,18 @@ export function planTemporalPublication(
 		if (runtimeOnly || (previous !== undefined && sameJson(previous, view.scopes[scope]))) continue;
 		if (!scopes.includes(scope)) throw new Error(`Temporal scope update omitted a changed stream: ${scope}`);
 		changedScopes.push(scope);
+	}
+	const provenanceUpdates: OwnedFileUpdate[] = [];
+	if (provenance !== undefined) {
+		for (const scope of ["global", "cwd"] as const) {
+			const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
+			const registry = provenance[scope];
+			const currentFile = files.get(paths.meta)!;
+			if (Object.keys(registry).length === 0 && currentFile.identity === "missing") continue;
+			if (!sameJson(parseScopeProvenance(currentFile.content, paths.meta), registry)) {
+				provenanceUpdates.push({ path: paths.meta, content: serializeScopeProvenance(registry) });
+			}
+		}
 	}
 	const runtimePaths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
 	const previousRuntime = parseSessionRuntime(files.get(runtimePaths.config)!.content, files.get(runtimePaths.meta)!.content, cwd, sessionId);
@@ -102,7 +116,7 @@ export function planTemporalPublication(
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		return [paths.checkpoint, paths.patches];
 	}));
-	return { updates: [...candidates.filter(({ path }) => changedPaths.has(path)), ...runtimeUpdates], changedScopes };
+	return { updates: [...candidates.filter(({ path }) => changedPaths.has(path)), ...provenanceUpdates, ...runtimeUpdates], changedScopes };
 }
 
 /** The accepted basis comes from prepared outputs, never a post-publication worktree reread. */
@@ -137,7 +151,12 @@ function decodeFileCohort(cwd: string, sessionId: string, root: string, base: Te
 	if (!runtime || runtime.meta.publication !== "files") throw new Error("File-only recovery requires file publication provenance, not a Git self reference");
 	const view = { scopes, lineage: runtime.meta.lineage };
 	validateTemporalState(view);
-	return { runtime, view };
+	const provenance: Record<StateScope, ArtifactProvenanceRegistry> = {
+		global: parseScopeProvenance(files.get(temporalScopePaths(cwd, sessionId, "global", root, sessionKey).meta), temporalScopePaths(cwd, sessionId, "global", root, sessionKey).meta),
+		cwd: parseScopeProvenance(files.get(temporalScopePaths(cwd, sessionId, "cwd", root, sessionKey).meta), temporalScopePaths(cwd, sessionId, "cwd", root, sessionKey).meta),
+		session: parseArtifactProvenanceRegistry(runtime.meta.artifacts, "State Flow session artifact provenance"),
+	};
+	return { runtime, view, provenance };
 }
 
 export function captureTemporalFileBase(cwd: string, sessionId: string, root: string, sessionKey = sessionId): TemporalFileBase {
@@ -158,12 +177,13 @@ export function loadTemporalFileRevision(cwd: string, sessionId: string, root: s
 export function publishTemporalStateToFiles(
 	cwd: string, sessionId: string, view: TemporalState, scopes: readonly StateScope[],
 	base: TemporalFileBase, root: string, runtime: SessionRuntime, sessionKey = sessionId,
+	provenance?: Readonly<Record<StateScope, ArtifactProvenanceRegistry>>,
 ): { base: TemporalFileBase; revision: FileRevision; changed: boolean } {
 	return withStoragePublicationLock(root, (locked) => {
 		if (runtime.meta.publication !== "files") throw new Error("File publication requires explicit file provenance");
 		const current = { files: captureTemporalFileBases(cwd, sessionId, locked, sessionKey) };
 		assertTemporalFileBase(base, current);
-		const { updates } = planTemporalPublication(cwd, sessionId, view, scopes, current, locked, runtime, false, sessionKey);
+		const { updates } = planTemporalPublication(cwd, sessionId, view, scopes, current, locked, runtime, false, sessionKey, provenance);
 		const next = { files: temporalFileReceipts(current, updates) };
 		decodeFileCohort(cwd, sessionId, locked, next, sessionKey);
 		const revision = fileRevision(next, locked);

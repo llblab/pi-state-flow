@@ -1,8 +1,10 @@
 import {
+	compileArtifact,
 	ORDINARY_ARTIFACT_COMPILER,
 	validateArtifactMetadata,
 	validateArtifactRegistry,
-	type ArtifactMetadata,
+	type ArtifactCompilerOutput,
+	type ArtifactProvenance,
 } from "./artifact.ts";
 import type { SuccessfulArtifactRead } from "./acquisition.ts";
 import { createAcceptedTransition, type AcceptedTransition } from "./history.ts";
@@ -24,6 +26,8 @@ import type {
 export interface StagedScopedTransition {
 	nextStates: ScopedStates;
 	stateHashes: Record<StateScope, string>;
+	/** Fresh runtime-owned provenance for artifacts compiled in this transition. */
+	provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>>;
 	causalBasis: string;
 	committed: boolean;
 }
@@ -35,27 +39,26 @@ function compileReadArtifacts(
 	nextState: StateDocument,
 	patch: Pick<StatePatch, "artifacts">,
 	successfulArtifactReads: Iterable<SuccessfulArtifactRead>,
+	provenance: Record<string, ArtifactProvenance>,
 ): void {
 	for (const read of successfulArtifactReads) {
 		const output = patch.artifacts[read.path];
 		if (!isObject(output)) {
 			throw new Error(`Every successfully read invalidated artifact must have a global compiler output at artifacts[exact candidate path]; missing: ${read.path}`);
 		}
-		if (Object.hasOwn(output, "hash") || Object.hasOwn(output, "compiler")) {
-			throw new Error(`Artifact compiler output at ${read.path} cannot set runtime-owned hash or compiler fields`);
-		}
-		const metadata = {
-			...structuredClone(output),
-			hash: read.hash,
+		const compiled = compileArtifact({
+			source: { path: read.path, hash: read.hash },
 			compiler: ORDINARY_ARTIFACT_COMPILER,
-		} as ArtifactMetadata;
-		validateArtifactMetadata(metadata, read.path);
+			output: output as ArtifactCompilerOutput,
+		});
+		validateArtifactMetadata(compiled.semantic, read.path);
 		Object.defineProperty(nextState.artifacts, read.path, {
-			value: metadata,
+			value: compiled.semantic,
 			enumerable: true,
 			configurable: true,
 			writable: true,
 		});
+		provenance[read.path] = compiled.provenance;
 	}
 }
 
@@ -63,6 +66,7 @@ function compileReadSkills(
 	nextState: StateDocument,
 	patch: Pick<StatePatch, "artifacts">,
 	successfulSkillReads: Iterable<SuccessfulSkillRead>,
+	provenance: Record<string, ArtifactProvenance>,
 ): void {
 	for (const read of successfulSkillReads) {
 		if (read.hash === undefined) {
@@ -84,20 +88,20 @@ function compileReadSkills(
 		if (!isObject(output.compilation) || Object.keys(output.compilation).length === 0) {
 			throw new Error(`Skill artifact compiler output at ${read.path} must have a non-empty compilation object`);
 		}
-		const metadata = {
-			...structuredClone(output),
-			hash: read.hash,
+		const compiled = compileArtifact({
+			source: { path: read.path, hash: read.hash },
 			compiler: SKILL_ARTIFACT_COMPILER,
-			kind: "skill",
-		} as ArtifactMetadata;
-		validateArtifactMetadata(metadata, read.path);
+			output: { ...structuredClone(output), kind: "skill" } as ArtifactCompilerOutput,
+		});
+		validateArtifactMetadata(compiled.semantic, read.path);
 		Object.defineProperty(nextState.artifacts, read.path, {
-			value: metadata,
+			value: compiled.semantic,
 			enumerable: true,
 			configurable: true,
 			writable: true,
 		});
-		if (!hasCompiledSkillArtifact(nextState.artifacts, read.path, read.hash)) {
+		provenance[read.path] = compiled.provenance;
+		if (!hasCompiledSkillArtifact(nextState.artifacts, provenance[read.path], read.path, read.hash)) {
 			throw new Error(`Skill artifact compilation at ${read.path} is not locally materialized for its executed source identity`);
 		}
 	}
@@ -146,7 +150,7 @@ function stageScopedSemanticTransition(
 	successfulSkillReads: Iterable<SuccessfulSkillRead>,
 	causalBasis: string,
 	successfulArtifactReads: Iterable<SuccessfulArtifactRead>,
-	terminalResponse?: string,
+	acceptedResponse?: string,
 ): StagedScopedTransition {
 	if (!Array.isArray(transition.transitions)) throw new Error("State Flow transitions must be an array");
 	const patches = new Map<StateScope, ScopePatch>();
@@ -164,20 +168,22 @@ function stageScopedSemanticTransition(
 
 	const cwdPatch = patches.get("cwd") ?? {};
 	const nextStates = structuredClone(currentStates);
+	const provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>> = { global: {}, cwd: {}, session: {} };
 	for (const scope of SCOPES) {
 		const authored = patches.get(scope) ?? {};
-		const response = scope === "session" && terminalResponse !== undefined
-			? terminalResponse
+		const response = scope === "session" && acceptedResponse !== undefined
+			? acceptedResponse
 			: currentStates[scope].response;
 		const patch = completePatch(authored, response);
 		const nextState = applyPatch(structuredClone(currentStates[scope]), patch) as MaterializedState;
-		compileReadArtifacts(nextState, { artifacts: scope === "global" ? authored.artifacts ?? {} : {} }, scope === "global" ? successfulArtifactReads : []);
-		compileReadSkills(nextState, { artifacts: scope === "cwd" ? cwdPatch.artifacts ?? {} : {} }, scope === "cwd" ? successfulSkillReads : []);
+		compileReadArtifacts(nextState, { artifacts: scope === "global" ? authored.artifacts ?? {} : {} }, scope === "global" ? successfulArtifactReads : [], provenanceUpdates.global);
+		compileReadSkills(nextState, { artifacts: scope === "cwd" ? cwdPatch.artifacts ?? {} : {} }, scope === "cwd" ? successfulSkillReads : [], provenanceUpdates.cwd);
 		validateMaterializedTransition(nextState);
 		nextStates[scope] = nextState;
 	}
 	return {
 		nextStates,
+		provenanceUpdates,
 		stateHashes: {
 			global: hashJson(currentStates.global),
 			cwd: hashJson(currentStates.cwd),
@@ -186,6 +192,22 @@ function stageScopedSemanticTransition(
 		causalBasis,
 		committed: false,
 	};
+}
+
+/** Validate that explicit unchanged resolution has no pending acquisition/compilation obligation. */
+export function validateUnchangedResolution(
+	currentStates: ScopedStates,
+	successfulSkillReads: Iterable<SuccessfulSkillRead>,
+	causalBasis: string,
+	successfulArtifactReads: Iterable<SuccessfulArtifactRead> = [],
+): void {
+	stageScopedSemanticTransition(
+		currentStates,
+		{ transitions: [] },
+		successfulSkillReads,
+		causalBasis,
+		successfulArtifactReads,
+	);
 }
 
 /** Stage one intermediate state barrier without changing the finalized response. */
@@ -213,7 +235,7 @@ export function stageScopedTransition(
 	successfulArtifactReads: Iterable<SuccessfulArtifactRead> = [],
 ): StagedScopedTransition {
 	if (typeof transition.response !== "string" || transition.response.trim().length === 0) {
-		throw new Error("Terminal State Flow response body must be non-empty");
+		throw new Error("Accepted State Flow response body must be non-empty");
 	}
 	return stageScopedSemanticTransition(
 		currentStates,
@@ -227,7 +249,7 @@ export function stageScopedTransition(
 
 /** Commit one accepted transition; durable publication receives all changed scopes as one cohort. */
 export interface CommitScopedTransitionOptions {
-	/** Terminal reconciliation finalizes bootstrap and validation lifecycle state. */
+	/** Runtime response reconciliation finalizes bootstrap lifecycle state. */
 	finalizeRun?: boolean;
 }
 
@@ -240,10 +262,10 @@ export function commitScopedTransition(
 	options: CommitScopedTransitionOptions = {},
 ): boolean {
 	if (stage.committed) return false;
-	if (causalBasis !== stage.causalBasis) throw new Error("State Flow causal basis changed after response validation; regenerate the terminal response");
+	if (causalBasis !== stage.causalBasis) throw new Error("State Flow causal basis changed before response reconciliation; rematerialize state before retrying");
 	for (const scope of SCOPES) {
 		if (hashJson(states[scope]) !== stage.stateHashes[scope]) {
-			throw new Error(`State Flow ${scope} scope changed after response validation; regenerate the terminal response`);
+			throw new Error(`State Flow ${scope} scope changed before response reconciliation; rematerialize state before retrying`);
 		}
 	}
 	// The finalized response may differ from message_end after chained handlers.

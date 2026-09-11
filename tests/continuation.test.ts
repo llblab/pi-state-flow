@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
 	buildContinuationCandidates,
 	discoverNativeSessionHeaders,
@@ -165,7 +165,10 @@ test("inspects exact Git-backed State Flow provenance without changing repositor
 	const f = await realPiFixture(t, { autoStart: true });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
-	f.faux.setResponses([fauxAssistantMessage("Git provenance established.")]);
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Git provenance established."),
+	]);
 	await session.prompt("Establish continuation provenance");
 	const header = readNativeSessionHeader(session.sessionManager.getSessionFile()!);
 	const beforeHead = execFileSync("git", ["-C", f.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
@@ -184,7 +187,10 @@ test("inspects exact file-only provenance and fails malformed runtime closed", a
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	try {
-		f.faux.setResponses([fauxAssistantMessage("File provenance established.")]);
+		f.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("patch_state", { unchanged: true }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("File provenance established."),
+		]);
 		await session.prompt("Establish file continuation provenance");
 	} finally {
 		process.env.PATH = originalPath;

@@ -3,8 +3,9 @@ import childProcess, { execFileSync } from "node:child_process";
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test, { type TestContext } from "node:test";
+import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
 import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { adoptFileStateToGit, captureTemporalGitBase, loadTemporalRevision, publishTemporalStateToGit } from "../lib/git.ts";
 import { hashJson } from "../lib/json.ts";
@@ -101,6 +102,39 @@ test("file cohorts persist sparse hot history, terminal responses, and config-on
 		childProcess.spawnSync = spawn;
 		syncBuiltinESMExports();
 	}
+});
+
+test("file cohorts persist scope provenance beside semantic state and reload it exactly", (t) => {
+	const f = fixture(t);
+	const artifactPath = join(f.parent, "knowledge", "a.md");
+	mkdirSync(dirname(artifactPath), { recursive: true });
+	writeFileSync(artifactPath, "guidance\n");
+	const sourceHash = hashArtifactSource("guidance\n");
+	f.view = advanceTemporalState(f.view, [{ scope: "global", patch: { artifacts: { [artifactPath]: { description: "Guidance" } } } }], "T1");
+	f.snapshot.meta.step = 1;
+	const provenance = {
+		global: { [artifactPath]: { sourceHash, compilerRevision: ORDINARY_ARTIFACT_COMPILER } },
+		cwd: {},
+		session: {},
+	};
+	f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files", provenance.session);
+	const first = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime, f.sessionId, provenance);
+	const loaded = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, first.revision);
+	assert.deepEqual(loaded.provenance, provenance);
+	const globalMeta = temporalScopePaths(f.cwd, f.sessionId, "global", f.root).meta;
+	assert.deepEqual(JSON.parse(readFileSync(globalMeta, "utf8")), { version: 1, artifacts: provenance.global });
+	assert.equal(existsSync(temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root).meta), false);
+	// A provenance-only change is still one durable cohort without a semantic transition.
+	const refreshed = {
+		global: { [artifactPath]: { sourceHash: hashArtifactSource("guidance two\n"), compilerRevision: ORDINARY_ARTIFACT_COMPILER } },
+		cwd: {},
+		session: {},
+	};
+	const second = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], first.base, f.root, f.runtime, f.sessionId, refreshed);
+	assert.equal(second.changed, true);
+	assert.notEqual(second.revision, first.revision);
+	assert.deepEqual(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, second.revision).provenance, refreshed);
+	assert.deepEqual(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, second.revision).view, f.view);
 });
 
 test("file references bind exact bytes, complete runtime identities and lineage, never Git pointers", (t) => {
@@ -248,7 +282,7 @@ test("Git adoption captures full file cohorts over unborn or stale HEAD and roll
 		if (oldHead) assert.equal(git("rev-parse", "HEAD"), oldHead);
 		else assert.throws(() => git("rev-parse", "--verify", "HEAD"));
 		const adopted = adoptFileStateToGit(f.cwd, f.sessionId, f.root, p.revision, f.snapshot);
-		assert.equal(adopted.push.status, "local");
+		assert.equal(adopted.push?.status, "local");
 		assert.match(adopted.revision, /^[0-9a-f]{40}$/);
 		assert.deepEqual(adopted.view, f.view);
 		const cold = loadTemporalRevision(f.cwd, f.sessionId, f.root, adopted.revision);
@@ -259,10 +293,14 @@ test("Git adoption captures full file cohorts over unborn or stale HEAD and roll
 			assert.deepEqual(readFileSync(file.path), file.bytes);
 			assert.deepEqual(execFileSync("git", ["-C", f.root, "show", `${adopted.revision}:${relative(f.root, file.path)}`]), file.bytes);
 		}
-		assert.equal(git("ls-tree", "-r", "--name-only", adopted.revision).split("\n").length, 8);
+		const tree = git("ls-tree", "-r", "--name-only", adopted.revision).split("\n");
+		for (const file of scopeFiles) assert.ok(tree.includes(relative(f.root, file.path)));
+		assert.ok(tree.includes("notes.md"));
 		assert.equal(readFileSync(join(f.root, "notes.md"), "utf8"), "unrelated notes");
+		assert.equal(git("status", "--porcelain=v1"), "");
 		if (indexBefore !== undefined) {
-			assert.equal(git("diff", "--cached", "--binary"), indexBefore);
+			assert.ok(tree.includes("staged.txt"));
+			assert.equal(git("show", `${adopted.revision}:staged.txt`), "unstaged bytes");
 			assert.equal(readFileSync(join(f.root, "staged.txt"), "utf8"), "unstaged bytes");
 		}
 		assert.throws(() => adoptFileStateToGit(f.cwd, f.sessionId, f.root, p.revision, f.snapshot), /unavailable/);

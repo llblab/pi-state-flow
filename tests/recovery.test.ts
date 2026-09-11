@@ -7,10 +7,10 @@ import { writeGlobalState, writeCwdState, writeSessionState } from "./legacy-fix
 import { emptyState } from "../lib/state.ts";
 import { recoverSnapshot } from "../lib/recovery.ts";
 import { RevisionUnavailableError } from "../lib/snapshot.ts";
-import { commitTerminal, harness, start, terminalComment, toolAssistant, user } from "./harness.ts";
+import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
 test("malformed pointer syntax falls back instead of silently selecting ordinary mode", () => {
-	const previous = { config: { enabled: true, transitionWindow: 3 }, meta: { step: 7 } };
+	const previous = { config: { enabled: true }, meta: { step: 7 } };
 	for (const candidate of [undefined, {}, { revision: "HEAD" }, { revision: "a".repeat(41) }, { disabled: false }, { revision: "a".repeat(40), meta: {} },
 		{ config: null }, { config: [] }, { config: { enabled: "true" } }, { enabled: null },
 		{ config: { enabled: true }, meta: null }, { enabled: true, durableBase: "HEAD" },
@@ -24,7 +24,7 @@ test("malformed pointer syntax falls back instead of silently selecting ordinary
 test("well-shaped pointers with missing or invalid immutable runtime data fall back on the selected branch", async () => {
 	const h = harness();
 	await start(h, "Selected specification");
-	commitTerminal(h, {}, { selected: "valid" }, "Valid");
+	await commitTerminal(h, {}, { selected: "valid" }, "Valid");
 	const validBranch = structuredClone(h.entries);
 	const paths = sessionRuntimePaths(h.ctx.cwd, "harness-session", h.repositoryRoot);
 	const pair = temporalScopePaths(h.ctx.cwd, "harness-session", "session", h.repositoryRoot);
@@ -34,7 +34,7 @@ test("well-shaped pointers with missing or invalid immutable runtime data fall b
 	const corruptions = [
 		() => { rmSync(paths.config); rmSync(paths.meta); },
 		() => rmSync(paths.config),
-		() => writeFileSync(paths.config, '{"enabled":true,"transitionWindow":8}'),
+		() => writeFileSync(paths.config, '{"enabled":true,"unexpected":true}'),
 		() => writeFileSync(paths.meta, JSON.stringify({ ...meta, identity: { ...meta.identity, sessionId: "other" } })),
 		() => writeFileSync(paths.meta, JSON.stringify({ ...meta, version: 2 })),
 		() => writeFileSync(paths.meta, JSON.stringify({ ...meta, lineage: [] })),
@@ -84,7 +84,7 @@ test("a bare pointer to legacy Git snapshots cannot manufacture runtime config o
 });
 
 test("valid pointer recovery never mistakes durable disabled retry metadata for a migration failure", () => {
-	const snapshot = { config: { enabled: false, transitionWindow: 0 }, meta: {
+	const snapshot = { config: { enabled: false }, meta: {
 		step: 7, durableBase: "a".repeat(40), validation: { attempt: 0, error: "retained", instruction: "retry" },
 	} };
 	const recovered = recoverSnapshot([{ revision: "a".repeat(40) }], () => snapshot);

@@ -37,7 +37,7 @@ import { applyPatch, type JsonObject } from "../lib/json.ts";
 import type { RecentScopePatch } from "../lib/history.ts";
 import { createSessionRuntime, emptySnapshot, resolveSessionRuntime, serializeSessionRuntime } from "../lib/snapshot.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
-import { harness, scopedTerminalComment, start } from "./harness.ts";
+import { harness, start } from "./harness.ts";
 
 function run(repository: string, ...args: string[]): string {
 	return execFileSync("git", ["-C", repository, ...args], { encoding: "utf8" }).trim();
@@ -292,7 +292,6 @@ test("temporal Git writer preserves all hot states through sparse folding and co
 	writeFileSync(join(repository, "staged.txt"), "unrelated staging\n");
 	run(repository, "add", "staged.txt");
 	writeFileSync(join(repository, "dirty.txt"), "unrelated dirty file\n");
-	const staged = run(repository, "diff", "--cached", "--name-status");
 	for (let index = 1; index <= 10; index++) {
 		const changes: RecentScopePatch[] = [{ scope: "session", patch: { response: `Answer ${index}` } }];
 		if (index % 2 === 0) changes.push({ scope: "cwd", patch: { working: { project: index } } });
@@ -309,7 +308,8 @@ test("temporal Git writer preserves all hot states through sparse folding and co
 			return [paths.checkpoint, paths.patches].map((path) => path.slice(repository.length + 1));
 		}));
 		for (const path of run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!).split("\n")) {
-			assert.ok(allowed.has(path), `unchanged scope or unrelated file was committed: ${path}`);
+			const completeDelta = index === 1 && (path === "staged.txt" || path === "dirty.txt");
+			assert.ok(completeDelta || allowed.has(path), `unchanged scope or unexpected file was committed: ${path}`);
 		}
 		const loaded: TemporalState = { lineage: view.lineage, scopes: {
 			global: loadScopeStream(cwd, session, "global", repository)!,
@@ -327,7 +327,8 @@ test("temporal Git writer preserves all hot states through sparse folding and co
 	const restored: TemporalState = { lineage: origin.lineage, scopes: { global: cold.scopes.global!, cwd: cold.scopes.cwd!, session: cold.scopes.session! } };
 	assert.deepEqual(readTemporalState(restored), emptyState());
 	assert.deepEqual({ head: run(repository, "rev-parse", "HEAD"), status: run(repository, "status", "--short") }, before);
-	assert.equal(run(repository, "diff", "--cached", "--name-status"), staged);
+	assert.equal(run(repository, "status", "--short"), "");
+	assert.equal(run(repository, "diff", "--cached", "--name-status"), "");
 	const noOp = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], base, repository);
 	assert.equal(noOp.commit, undefined);
 	assert.equal(run(repository, "rev-parse", "HEAD"), before.head);
@@ -472,18 +473,14 @@ test("the extension accepts a local durable commit without regenerating on push 
 	const h = harness();
 	await start(h, "Persist durable state");
 	run(h.repositoryRoot, "remote", "set-url", "origin", join(h.repositoryRoot, "missing.git"));
-	const terminal = {
-		role: "assistant",
-		stopReason: "stop",
-		content: [{
-			type: "text",
-			text: `${scopedTerminalComment([{ scope: "cwd", patch: { working: { accepted: true } } }])}\n\nAccepted.`,
-		}],
-	};
-	const accepted = h.handlers.get("message_end")!({ message: terminal }, h.ctx);
-	h.handlers.get("turn_end")!({ message: accepted.message }, h.ctx);
+	await h.tools.get("patch_state")!.execute("accept", {
+		scope: "cwd", patch: { working: { accepted: true } },
+	}, undefined, undefined, h.ctx);
+	const terminal = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted." }] };
+	assert.equal(h.handlers.get("message_end")!({ message: terminal }, h.ctx), undefined);
+	h.handlers.get("turn_end")!({ message: terminal }, h.ctx);
 
-	assert.equal(h.resolveSnapshot().meta.step, 1);
+	assert.equal(h.resolveSnapshot().meta.step, 2);
 	assert.deepEqual(h.entries.at(-1)!.data, { revision: run(h.repositoryRoot, "rev-parse", "HEAD") });
 	assert.equal(h.sentMessages.length, 0);
 	assert.doesNotMatch(h.notifications.at(-1)!, /push is pending/i);
@@ -508,7 +505,6 @@ test("migrates all three current snapshots in one isolated commit without losing
 	writeFileSync(join(repository, "staged.txt"), "staged\n");
 	run(repository, "add", "staged.txt");
 	writeFileSync(join(repository, "dirty.txt"), "dirty\n");
-	const staging = run(repository, "diff", "--cached", "--name-status");
 	const publication = migrateLegacyStorageToGit(cwd, sessionId, repository);
 	assert.deepEqual(publication.scopes, ["global", "cwd", "session"]);
 	assert.equal(publication.push?.status, "pushed");
@@ -528,10 +524,14 @@ test("migrates all three current snapshots in one isolated commit without losing
 		assert.deepEqual(JSON.parse(run(repository, "show", `${publication.commit}:${checkpoint.slice(repository.length + 1)}`)), JSON.parse(source));
 	}
 	assert.equal(origins.size, 1);
-	assert.equal(run(repository, "diff", "--cached", "--name-status"), staging);
+	assert.equal(run(repository, "status", "--porcelain=v1"), "");
 	assert.equal(readFileSync(join(repository, "dirty.txt"), "utf8"), "dirty\n");
 	const changed = run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!);
-	assert.doesNotMatch(changed, /README\.md|staged\.txt|dirty\.txt/);
+	assert.doesNotMatch(changed, /README\.md/);
+	assert.match(changed, /staged\.txt/);
+	assert.match(changed, /dirty\.txt/);
+	assert.equal(run(repository, "show", `${publication.commit}:staged.txt`), "staged");
+	assert.equal(run(repository, "show", `${publication.commit}:dirty.txt`), "dirty");
 	assert.deepEqual(migrateLegacyStorageToGit(cwd, sessionId, repository), { scopes: [] });
 	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
 });
@@ -676,4 +676,61 @@ test("migration push failure retains one accepted commit and retry never repeats
 	run(repository, "remote", "set-url", "origin", remote);
 	assert.equal(pushGitCommit(repository, publication.commit!).status, "pushed");
 	assert.equal(run(remote, "rev-parse", "refs/heads/main"), publication.commit);
+});
+
+test("State Flow commits capture the complete non-ignored worktree delta and keep the caller index clean", (t) => {
+	const { repository, cwd } = fixture(t, true);
+	const session = "delta-session";
+	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
+	// Tracked history for an old session in this CWD and for an unrelated old CWD project.
+	publishTemporalStateToGit(cwd, "old-session", view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, "old-session", repository), repository);
+	const oldCwd = join(dirname(repository), "old-project");
+	publishTemporalStateToGit(oldCwd, "old-session", view, ["global", "cwd", "session"], captureTemporalGitBase(oldCwd, "old-session", repository), repository);
+	publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository);
+
+	// Manual directory deletions, a tracked edit, a new non-ignored file, and an ignored file.
+	const oldSessionDirectory = temporalScopePaths(cwd, "old-session", "session", repository).directory;
+	const oldCwdDirectory = temporalScopePaths(oldCwd, "old-session", "cwd", repository).directory;
+	rmSync(oldSessionDirectory, { recursive: true, force: true });
+	rmSync(oldCwdDirectory, { recursive: true, force: true });
+	writeFileSync(join(repository, "README.md"), "edited\n");
+	writeFileSync(join(repository, "notes.md"), "new notes\n");
+	writeFileSync(join(repository, ".gitignore"), "ignored.txt\n");
+	writeFileSync(join(repository, "ignored.txt"), "ignored\n");
+
+	const next = advanceTemporalState(view, [{ scope: "session", patch: { working: { delta: "committed" } } }], "T1");
+	const publication = publishTemporalStateToGit(cwd, session, next, ["session"], captureTemporalGitBase(cwd, session, repository), repository);
+	assert.ok(publication.commit);
+	assert.equal(publication.push?.status, "pushed");
+	const changed = run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!).split("\n");
+	assert.ok(changed.includes("README.md"));
+	assert.ok(changed.includes("notes.md"));
+	assert.ok(changed.includes(".gitignore"));
+	assert.ok(!changed.includes("ignored.txt"));
+	const tree = run(repository, "ls-tree", "-r", "--name-only", publication.commit!).split("\n");
+	assert.ok(!tree.some((path) => path.startsWith(relative(repository, oldSessionDirectory)) || path.startsWith(relative(repository, oldCwdDirectory))));
+	assert.equal(run(repository, "show", `${publication.commit}:README.md`), "edited");
+	assert.equal(run(repository, "show", `${publication.commit}:notes.md`), "new notes");
+	assert.equal(run(repository, "status", "--porcelain=v1"), "");
+
+	// A stale active base stays a fail-closed write conflict and changes nothing.
+	const stale = captureTemporalGitBase(cwd, session, repository);
+	const active = temporalScopePaths(cwd, session, "session", repository).checkpoint;
+	const activeBefore = readFileSync(active, "utf8");
+	writeFileSync(active, `${activeBefore}\n`);
+	const conflictView = advanceTemporalState(next, [{ scope: "session", patch: { working: { delta: "conflict" } } }], "T2");
+	assert.throws(() => publishTemporalStateToGit(cwd, session, conflictView, ["session"], stale, repository), /changed concurrently/);
+	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
+	writeFileSync(active, activeBefore);
+
+	// A failed caller-index synchronization rolls the commit back and preserves the user worktree.
+	const failureBase = captureTemporalGitBase(cwd, session, repository);
+	writeFileSync(join(repository, "README.md"), "user edit during failure\n");
+	writeFileSync(join(repository, ".git", "index.lock"), "held by another writer\n");
+	assert.throws(() => publishTemporalStateToGit(cwd, session, conflictView, ["session"], failureBase, repository), /index\.lock/);
+	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
+	assert.equal(readFileSync(join(repository, "README.md"), "utf8"), "user edit during failure\n");
+	assert.equal(readFileSync(join(repository, ".git", "index.lock"), "utf8"), "held by another writer\n");
+	rmSync(join(repository, ".git", "index.lock"));
+	assert.equal(run(repository, "status", "--porcelain=v1"), "M README.md");
 });

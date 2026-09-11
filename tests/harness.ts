@@ -125,40 +125,47 @@ export function toolAssistant(id: string, name = "read", args: unknown = { path:
 	};
 }
 
-export function scopedTerminalComment(transitions: unknown[]): string {
-	return `<!-- state_flow ${JSON.stringify({ transitions })} -->`;
-}
-
-export function terminalComment(contract: unknown, working: unknown, artifacts: unknown = {}): string {
-	const transitions = [
-		{ scope: "session", patch: { contract, working } },
-		...(typeof artifacts === "object" && artifacts !== null && Object.keys(artifacts).length > 0
-			? [{ scope: "cwd", patch: { artifacts } }]
-			: []),
-	];
-	return scopedTerminalComment(transitions);
-}
-
 export async function start(h: ReturnType<typeof harness>, prompt = "Inspect README") {
 	await h.commands.get("state-flow-start")!.handler("", h.ctx);
 	return h.handlers.get("before_agent_start")!({ prompt, systemPrompt: "base" }, h.ctx);
 }
 
-export function commitTerminal(
+export async function commitScopedTerminal(
+	h: ReturnType<typeof harness>,
+	transitions: Array<{ scope: "session" | "cwd" | "global"; patch: unknown }>,
+	prose = "Done",
+) {
+	if (transitions.length === 0) {
+		await h.tools.get("patch_state")!.execute("terminal-unchanged", { unchanged: true }, undefined, undefined, h.ctx);
+	} else for (const transition of transitions) {
+		await h.tools.get("patch_state")!.execute(`terminal-${transition.scope}`, transition, undefined, undefined, h.ctx);
+	}
+	const message = {
+		role: "assistant" as const,
+		stopReason: "stop",
+		content: [{ type: "text", text: prose }],
+	};
+	const result = h.handlers.get("message_end")!({ message }, h.ctx) ?? { message };
+	h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
+	return result;
+}
+
+export async function commitTerminal(
 	h: ReturnType<typeof harness>,
 	contract: unknown,
 	working: unknown,
 	prose = "Done",
 	artifacts: unknown = {},
 ) {
-	const result = h.handlers.get("message_end")!({
-		message: {
-			role: "assistant",
-			stopReason: "stop",
-			content: [{ type: "text", text: `${terminalComment(contract, working, artifacts)}\n\n${prose}` }],
-		},
-	}, h.ctx);
-	h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
-	return result;
+	const transitions: Array<{ scope: "session" | "cwd" | "global"; patch: any }> = [];
+	if (typeof artifacts === "object" && artifacts !== null && Object.keys(artifacts).length > 0) {
+		transitions.push({ scope: "cwd", patch: { artifacts } });
+	}
+	const sessionPatch = {
+		...(typeof contract === "object" && contract !== null && Object.keys(contract).length > 0 ? { contract } : {}),
+		...(typeof working === "object" && working !== null && Object.keys(working).length > 0 ? { working } : {}),
+	};
+	if (Object.keys(sessionPatch).length > 0) transitions.push({ scope: "session", patch: sessionPatch });
+	return await commitScopedTerminal(h, transitions, prose);
 }
 
