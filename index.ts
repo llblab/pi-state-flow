@@ -189,7 +189,6 @@ export {
   buildStateFlowSectionView,
   createStateFlowTelegramAdapter,
   formatStateFlowSectionLabel,
-  formatStateFlowStatusLine,
   loadStateFlowTelegramModules,
   STATE_FLOW_TELEGRAM_ID,
   type StateFlowTelegramAdapter,
@@ -202,8 +201,6 @@ export {
   type StateFlowTelegramSectionContext,
   type StateFlowTelegramSectionModule,
   type StateFlowTelegramSnapshot,
-  type StateFlowTelegramStatusLine,
-  type StateFlowTelegramStatusModule,
   type StateFlowTelegramView
 } from "./lib/telegram.ts";
 export { advanceTemporalState, readTemporalState, type TemporalState } from "./lib/temporal.ts";

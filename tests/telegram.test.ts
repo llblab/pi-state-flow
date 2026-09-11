@@ -4,13 +4,11 @@ import {
 	buildStateFlowSectionView,
 	createStateFlowTelegramAdapter,
 	formatStateFlowSectionLabel,
-	formatStateFlowStatusLine,
 	type StateFlowTelegramCallbackContext,
 	type StateFlowTelegramModules,
 	type StateFlowTelegramPort,
 	type StateFlowTelegramSectionContext,
 	type StateFlowTelegramSnapshot,
-	type StateFlowTelegramStatusLine,
 	type StateFlowTelegramView,
 } from "../lib/telegram.ts";
 import { harness } from "./harness.ts";
@@ -49,18 +47,11 @@ function fakePort(initial: StateFlowTelegramSnapshot, options: { canStartNow?: b
 }
 
 function fakeModules(failingSections = false) {
-	const statusProviders: Array<{ id: string; provider: (ctx: { activeModel?: unknown }) => StateFlowTelegramStatusLine | undefined }> = [];
 	type FakeSection = Parameters<NonNullable<StateFlowTelegramModules["sections"]>["registerTelegramSection"]>[0];
 	const sections: FakeSection[] = [];
 	const disposed: string[] = [];
 	let sectionAttempts = 0;
 	const modules: StateFlowTelegramModules = {
-		status: {
-			registerTelegramStatusLineProvider(provider, options) {
-				statusProviders.push({ id: options.id, provider });
-				return () => disposed.push(`status:${options.id}`);
-			},
-		},
 		sections: {
 			registerTelegramSection(section) {
 				sectionAttempts += 1;
@@ -70,7 +61,7 @@ function fakeModules(failingSections = false) {
 			},
 		},
 	};
-	return { modules, statusProviders, sections, disposed };
+	return { modules, sections, disposed };
 }
 
 function sectionContext(action: string) {
@@ -89,13 +80,6 @@ function sectionContext(action: string) {
 	} as StateFlowTelegramCallbackContext;
 	return { context, edits, notices };
 }
-
-test("status line mirrors the terminal step value and hides while disabled", () => {
-	assert.equal(formatStateFlowStatusLine(snapshot()), undefined);
-	assert.deepEqual(formatStateFlowStatusLine(snapshot({ enabled: true, step: 34 })), { label: "State Flow", value: "#34" });
-	assert.deepEqual(formatStateFlowStatusLine(snapshot({ enabled: true, step: 8, bootstrap: true })), { label: "State Flow", value: "#8" });
-	assert.equal(formatStateFlowStatusLine(snapshot({ startPending: true })), undefined);
-});
 
 test("section label carries the live step value and no status word", () => {
 	assert.equal(formatStateFlowSectionLabel(snapshot()), "⚫️ State Flow");
@@ -124,27 +108,23 @@ test("section view swaps actions with enablement and pending start", () => {
 	assert.match(pending.text, /pending until the current turn settles/);
 });
 
-test("adapter registers both surfaces once and disposes idempotently", async () => {
-	const { modules, statusProviders, sections, disposed } = fakeModules();
+test("adapter registers the section once and disposes idempotently", async () => {
+	const { modules, sections, disposed } = fakeModules();
 	const { port } = fakePort(snapshot({ enabled: true, step: 2 }));
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	assert.equal(await adapter.ensure(), true);
-	assert.equal(statusProviders.length, 1);
 	assert.equal(sections.length, 1);
-	assert.equal(statusProviders[0].id, "@llblab/pi-state-flow");
-	assert.deepEqual(statusProviders[0].provider({}), { label: "State Flow", value: "#2" });
+	assert.equal(sections[0].id, "@llblab/pi-state-flow");
 	assert.equal(await adapter.ensure(), true);
-	assert.equal(statusProviders.length, 1);
 	assert.equal(sections.length, 1);
 	adapter.dispose();
-	assert.deepEqual(disposed, ["status:@llblab/pi-state-flow", "section:@llblab/pi-state-flow"]);
+	assert.deepEqual(disposed, ["section:@llblab/pi-state-flow"]);
 	assert.equal(await adapter.ensure(), true);
-	assert.equal(statusProviders.length, 2);
 	assert.equal(sections.length, 2);
 });
 
 test("adapter fails open without a transport and retries a not-ready registry", async () => {
-	const { modules, statusProviders, sections } = fakeModules(true);
+	const { modules, sections } = fakeModules(true);
 	const { port } = fakePort(snapshot());
 	let available = false;
 	const adapter = createStateFlowTelegramAdapter({
@@ -155,10 +135,9 @@ test("adapter fails open without a transport and retries a not-ready registry", 
 		},
 	});
 	assert.equal(await adapter.ensure(), false);
-	assert.equal(statusProviders.length, 0);
+	assert.equal(sections.length, 0);
 	available = true;
-	assert.equal(await adapter.ensure(), true);
-	assert.equal(statusProviders.length, 1);
+	assert.equal(await adapter.ensure(), false);
 	assert.equal(sections.length, 0);
 	assert.equal(await adapter.ensure(), true);
 	assert.equal(sections.length, 1);

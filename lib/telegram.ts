@@ -1,13 +1,9 @@
-// Domain: optional pi-telegram presentation adapter for State Flow status and branch controls.
+// Domain: optional pi-telegram presentation adapter for the State Flow main-menu section.
 //
 // This is a leaf adapter. Core semantics, storage, and inference never depend on it; when
 // pi-telegram is absent or its registry is not ready, registration fails open and retries.
 
 export const STATE_FLOW_TELEGRAM_ID = "@llblab/pi-state-flow";
-const STATUS_IMPORT_SPECIFIERS = [
-	"@llblab/pi-telegram/status",
-	new URL("../../pi-telegram/api/status.ts", import.meta.url).href,
-];
 const SECTIONS_IMPORT_SPECIFIERS = [
 	"@llblab/pi-telegram/sections",
 	new URL("../../pi-telegram/api/sections.ts", import.meta.url).href,
@@ -18,11 +14,6 @@ export interface StateFlowTelegramSnapshot {
 	step: number;
 	bootstrap: boolean;
 	startPending: boolean;
-}
-
-export interface StateFlowTelegramStatusLine {
-	label: string;
-	value: string;
 }
 
 export interface StateFlowTelegramButton {
@@ -47,13 +38,6 @@ export interface StateFlowTelegramCallbackContext extends StateFlowTelegramSecti
 	payload: string;
 }
 
-export interface StateFlowTelegramStatusModule {
-	registerTelegramStatusLineProvider(
-		provider: (ctx: { activeModel?: unknown }) => StateFlowTelegramStatusLine | undefined,
-		options: { id: string },
-	): () => void;
-}
-
 export interface StateFlowTelegramSectionModule {
 	registerTelegramSection(section: {
 		id: string;
@@ -65,7 +49,6 @@ export interface StateFlowTelegramSectionModule {
 }
 
 export interface StateFlowTelegramModules {
-	status?: StateFlowTelegramStatusModule;
 	sections?: StateFlowTelegramSectionModule;
 }
 
@@ -88,12 +71,6 @@ export interface StateFlowTelegramPort {
 export interface StateFlowTelegramAdapter {
 	ensure(): Promise<boolean>;
 	dispose(): void;
-}
-
-/** The Status screen mirrors the terminal status line: key plus step value, hidden while State Flow is off. */
-export function formatStateFlowStatusLine(snapshot: StateFlowTelegramSnapshot): StateFlowTelegramStatusLine | undefined {
-	if (!snapshot.enabled) return undefined;
-	return { label: "State Flow", value: `#${snapshot.step}` };
 }
 
 /** Main-menu section label doubles as the live status value; the disabled row carries no status text. */
@@ -176,17 +153,12 @@ async function importTelegramModule<TModule>(
 
 /** Default loader; injectable so tests and embedded hosts can control transport presence. */
 export async function loadStateFlowTelegramModules(): Promise<StateFlowTelegramModules> {
-	const status = await importTelegramModule<StateFlowTelegramStatusModule>(
-		STATUS_IMPORT_SPECIFIERS,
-		(module): module is StateFlowTelegramStatusModule =>
-			typeof (module as StateFlowTelegramStatusModule | undefined)?.registerTelegramStatusLineProvider === "function",
-	);
 	const sections = await importTelegramModule<StateFlowTelegramSectionModule>(
 		SECTIONS_IMPORT_SPECIFIERS,
 		(module): module is StateFlowTelegramSectionModule =>
 			typeof (module as StateFlowTelegramSectionModule | undefined)?.registerTelegramSection === "function",
 	);
-	return { ...(status === undefined ? {} : { status }), ...(sections === undefined ? {} : { sections }) };
+	return { ...(sections === undefined ? {} : { sections }) };
 }
 
 export function createStateFlowTelegramAdapter(options: {
@@ -195,7 +167,6 @@ export function createStateFlowTelegramAdapter(options: {
 }): StateFlowTelegramAdapter {
 	const load = options.load ?? loadStateFlowTelegramModules;
 	let generation = 0;
-	let statusRegistered = false;
 	let sectionRegistered = false;
 	let registration: Promise<boolean> | undefined;
 	const disposers: Array<() => void> = [];
@@ -210,22 +181,6 @@ export function createStateFlowTelegramAdapter(options: {
 		}
 		// A shutdown during loading must not leave a registration behind.
 		if (epoch !== generation) return false;
-		if (!statusRegistered && modules.status) {
-			try {
-				const dispose = modules.status.registerTelegramStatusLineProvider(
-					() => formatStateFlowStatusLine(options.port.snapshot()),
-					{ id: STATE_FLOW_TELEGRAM_ID },
-				);
-				if (epoch === generation) {
-					disposers.push(dispose);
-					statusRegistered = true;
-				} else {
-					dispose();
-				}
-			} catch {
-				// Registry not initialized yet; the next ensure retries.
-			}
-		}
 		if (!sectionRegistered && modules.sections) {
 			try {
 				const dispose = modules.sections.registerTelegramSection(buildStateFlowTelegramSection(options.port));
@@ -239,12 +194,12 @@ export function createStateFlowTelegramAdapter(options: {
 				// Registry not initialized yet; the next ensure retries.
 			}
 		}
-		return statusRegistered || sectionRegistered;
+		return sectionRegistered;
 	};
 
 	return {
 		async ensure(): Promise<boolean> {
-			if (statusRegistered && sectionRegistered) return true;
+			if (sectionRegistered) return true;
 			registration ??= register().finally(() => {
 				registration = undefined;
 			});
@@ -259,7 +214,6 @@ export function createStateFlowTelegramAdapter(options: {
 					// Disposal is best-effort; pi-telegram owns its registry lifetime.
 				}
 			}
-			statusRegistered = false;
 			sectionRegistered = false;
 		},
 	};

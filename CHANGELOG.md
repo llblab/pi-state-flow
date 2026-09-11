@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.9.2: Single Telegram surface
+
+- `Interop`: State Flow now appears on Telegram exactly once. The inline main-menu section button before Settings carries the live status (`🌀 State Flow: #N`, `⚫️ State Flow` while off) and opens the existing start/stop submenu; the duplicated Status-screen row is removed, so the same value no longer renders in two places. Fail-open registration and shutdown disposal are unchanged.
+
 ## 0.9.1: Status text mirrors the terminal line
 
 - `Interop`: The `pi-telegram` surfaces now copy the compact terminal status instead of decorating it. The Status screen shows the terminal value itself (`State Flow: #N`) and hides entirely while State Flow is off; the main-menu button shows `🌀 State Flow: #N` or a plain `⚫️ State Flow` without on/off, starting, bootstrap, or separator text.
