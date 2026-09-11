@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## Unreleased
+
+- `Resolution`: A terminal draft is never discarded. The first two ineligible completions are still intercepted and steered; when the three-attempt budget is exhausted the draft is accepted as the runtime-owned response with one bounded warning and a finalization diagnostic. The same budget now governs an eligible draft whose final validation fails after a later acquisition, so a persistently unmet obligation can neither loop steering nor lose the answer.
+
 ## 0.8.0: Atomic cohorts and final eligibility
 
 - `Protocol`: Replaced the single-scope PATCH and UNCHANGED forms with one canonical `patch_state({global?, cwd?, session?, final?})` call. Supplied scopes validate against one causal basis and publish as one atomic transition with a single identity, temporal boundary, durable cohort, and inference barrier; unknown fields, `final:false`, empty scopes, and material no-ops fail closed.

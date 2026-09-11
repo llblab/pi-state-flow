@@ -234,6 +234,25 @@ test("real Pi resolution continuation accepts patch_state after an intercepted d
 	assert.notEqual(session.getLastAssistantText(), "Unresolved draft.");
 });
 
+test("real Pi accepts an unresolved final draft after the bounded resolution steering", async (t) => {
+	const fixture = await realPiFixture(t, { tokensPerSecond: 2_000 });
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+	await session.prompt("/state-flow-start");
+
+	fixture.notifications.length = 0;
+	fixture.faux.setResponses([
+		fauxAssistantMessage("Unresolved draft one."),
+		fauxAssistantMessage("Unresolved draft two."),
+		fauxAssistantMessage("Final answer after the resolution budget."),
+	]);
+	await session.prompt("Exhaust the resolution budget");
+	assert.equal(fixture.faux.state.callCount, 3);
+	assert.equal(session.getLastAssistantText(), "Final answer after the resolution budget.");
+	assert.equal(durableSession(fixture, session).response, "Final answer after the resolution budget.");
+	assert.equal(fixture.notifications.filter((message) => /accepted the final draft after 3 terminal attempts/.test(message)).length, 1);
+});
+
 test("real Pi patch diagnostics are opt-in and accepted answers are not logged", async (t) => {
 	const fixture = await realPiFixture(t);
 	const logPath = join(fixture.agentDir, "tmp", "state-flow", "logs.jsonl");

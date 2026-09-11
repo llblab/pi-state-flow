@@ -13,6 +13,7 @@ import {
 	SkillReadTracker,
 	skillPathFromRead,
 } from "../lib/skills.ts";
+import { MAX_RESOLUTION_ATTEMPTS } from "../lib/extension.ts";
 import { commitTerminal, harness, start } from "./harness.ts";
 
 const skillRoot = mkdtempSync(join(tmpdir(), "pi-state-flow-skills-"));
@@ -274,6 +275,26 @@ test("a Skill acquired after terminal eligibility still blocks turn_end until co
 	assert.equal(h.handlers.get("message_end")!({ message: final }, h.ctx), undefined);
 	h.handlers.get("turn_end")!({ message: final }, h.ctx);
 	assert.equal(h.readState().response, "Complete.");
+});
+
+test("a late Skill obligation that outlives the resolution budget accepts the draft", async () => {
+	const h = harness();
+	await start(h);
+	await h.tools.get("patch_state")!.execute(
+		"early-resolution", { session: { working: { inspected: true } }, final: true }, undefined, undefined, h.ctx,
+	);
+	const source = skillFile("late-exhaustion");
+	recordRead(h, source);
+	for (let attempt = 1; attempt < MAX_RESOLUTION_ATTEMPTS; attempt++) {
+		const intercepted = h.handlers.get("message_end")!({ message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `Draft ${attempt}.` }] } }, h.ctx);
+		assert.deepEqual(intercepted.message.content, []);
+	}
+	assert.equal(h.readState().response, "");
+	const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted after the budget." }] };
+	assert.equal(h.handlers.get("message_end")!({ message: final }, h.ctx), undefined);
+	assert.equal(h.notifications.filter((message) => /accepted the final draft after 3 terminal attempts/.test(message)).length, 1);
+	h.handlers.get("turn_end")!({ message: final }, h.ctx);
+	assert.equal(h.readState().response, "Accepted after the budget.");
 });
 
 test("final-only resolution cannot bypass a successful Skill compilation obligation", async () => {

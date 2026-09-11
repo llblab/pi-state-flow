@@ -588,6 +588,20 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}, { deliverAs: "steer", triggerTurn: true });
 	}
 
+	/** Accept a terminal draft once the resolution budget is exhausted; a user-visible answer is never discarded. */
+	function acceptUnresolvedDraft(ctx: ExtensionContext, message: { content?: unknown }): void {
+		terminalDraftIntercepted = false;
+		responseAwaitingReconciliation = true;
+		if (resolutionFailureReported) return;
+		resolutionFailureReported = true;
+		recordDiagnostic(`Terminal draft accepted after the resolution budget was exhausted (attempt ${resolutionAttempts}/${MAX_RESOLUTION_ATTEMPTS})`, "finalization", ctx, {
+			content: message.content,
+			resolutionAttempt: resolutionAttempts,
+			terminalEligible,
+		});
+		ctx.ui.notify(`State Flow accepted the final draft after ${MAX_RESOLUTION_ATTEMPTS} terminal attempts; unresolved state obligations may remain.`, "warning");
+	}
+
 	pi.registerTool({
 		name: READ_STATE_TOOL_NAME,
 		label: "Read State",
@@ -906,30 +920,34 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			return;
 		}
 		if (!terminalEligible) {
-			responseAwaitingReconciliation = false;
-			terminalDraftIntercepted = true;
 			resolutionAttempts = Math.min(MAX_RESOLUTION_ATTEMPTS, resolutionAttempts + 1);
-			recordDiagnostic(`Terminal draft intercepted before State Flow eligibility (attempt ${resolutionAttempts}/${MAX_RESOLUTION_ATTEMPTS})`, "terminal-pending", ctx, {
-				content: message.content,
-				resolutionAttempt: resolutionAttempts,
-				terminalEligible,
-			});
 			if (resolutionAttempts < MAX_RESOLUTION_ATTEMPTS) {
+				responseAwaitingReconciliation = false;
+				terminalDraftIntercepted = true;
+				recordDiagnostic(`Terminal draft intercepted before State Flow eligibility (attempt ${resolutionAttempts}/${MAX_RESOLUTION_ATTEMPTS})`, "terminal-pending", ctx, {
+					content: message.content,
+					resolutionAttempt: resolutionAttempts,
+					terminalEligible,
+				});
 				continueForResolution();
-			} else if (!resolutionFailureReported) {
-				resolutionFailureReported = true;
-				ctx.ui.notify(`State Flow could not obtain final:true after ${MAX_RESOLUTION_ATTEMPTS} terminal attempts; committed state was preserved and no draft was accepted.`, "error");
+				return { message: { ...message, role: "assistant" as const, content: [] } };
 			}
-			return { message: { ...message, role: "assistant" as const, content: [] } };
+			acceptUnresolvedDraft(ctx, message);
+			return;
 		}
 		try {
 			validateFinalEligibility(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
 		} catch (error) {
-			responseAwaitingReconciliation = false;
-			terminalDraftIntercepted = true;
-			recordDiagnostic(error instanceof Error ? error.message : String(error), "terminal-pending", ctx, { content: message.content, terminalEligible });
-			continueForResolution();
-			return { message: { ...message, role: "assistant" as const, content: [] } };
+			resolutionAttempts = Math.min(MAX_RESOLUTION_ATTEMPTS, resolutionAttempts + 1);
+			if (resolutionAttempts < MAX_RESOLUTION_ATTEMPTS) {
+				responseAwaitingReconciliation = false;
+				terminalDraftIntercepted = true;
+				recordDiagnostic(error instanceof Error ? error.message : String(error), "terminal-pending", ctx, { content: message.content, terminalEligible, resolutionAttempt: resolutionAttempts });
+				continueForResolution();
+				return { message: { ...message, role: "assistant" as const, content: [] } };
+			}
+			acceptUnresolvedDraft(ctx, message);
+			return;
 		}
 		responseAwaitingReconciliation = true;
 	});

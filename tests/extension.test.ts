@@ -387,7 +387,7 @@ test("an unresolved terminal draft is intercepted, then final-only resolution pe
 	assert.equal(h.readState().response, "Final answer.");
 });
 
-test("resolution steering stops after three terminal attempts without accepting a draft", async () => {
+test("an unresolved terminal draft is accepted after the bounded resolution steering", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Bound resolution attempts");
 	await assert.rejects(
@@ -395,19 +395,20 @@ test("resolution steering stops after three terminal attempts without accepting 
 		/final must be exactly true/,
 	);
 	assert.equal(h.sentMessages.length, 0, "failed patch calls do not consume terminal attempts");
-	for (let attempt = 1; attempt <= MAX_RESOLUTION_ATTEMPTS; attempt++) {
+	for (let attempt = 1; attempt < MAX_RESOLUTION_ATTEMPTS; attempt++) {
 		const intercepted = h.handlers.get("message_end")!({ message: finalMessage(`Draft ${attempt}`) }, h.ctx);
 		assert.deepEqual(intercepted.message.content, []);
-		assert.equal(h.sentMessages.length, Math.min(attempt, MAX_RESOLUTION_ATTEMPTS - 1));
+		assert.equal(h.sentMessages.length, attempt);
 	}
-	assert.equal(h.notifications.filter((message) => /could not obtain final:true after 3 terminal attempts/.test(message)).length, 1);
-	const fourth = h.handlers.get("message_end")!({ message: finalMessage("Draft 4") }, h.ctx);
-	assert.deepEqual(fourth.message.content, []);
-	assert.equal(h.sentMessages.length, MAX_RESOLUTION_ATTEMPTS - 1);
-	assert.equal(h.notifications.filter((message) => /could not obtain final:true/.test(message)).length, 1);
-	assert.equal(h.activeTools.includes("patch_state"), true);
-	assert.equal(h.resolveSnapshot().meta.step, 0);
 	assert.equal(h.readState().response, "");
+	const accepted = h.handlers.get("message_end")!({ message: finalMessage("Final draft") }, h.ctx);
+	assert.equal(accepted, undefined, "the exhausted budget accepts the draft instead of discarding it");
+	assert.equal(h.sentMessages.length, MAX_RESOLUTION_ATTEMPTS - 1, "the accepted draft needs no further steering");
+	assert.equal(h.notifications.filter((message) => /accepted the final draft after 3 terminal attempts/.test(message)).length, 1);
+	assert.equal(h.activeTools.includes("patch_state"), true);
+	h.handlers.get("turn_end")!({ message: finalMessage("Final draft") }, h.ctx);
+	assert.equal(h.readState().response, "Final draft");
+	assert.equal(h.resolveSnapshot().meta.step, 1);
 });
 
 test("resolution-attempt count resets with the next enabled iteration", async () => {
