@@ -90,16 +90,15 @@ export interface StateFlowTelegramAdapter {
 	dispose(): void;
 }
 
-/** The Status screen mirrors the terminal status identity: hidden while State Flow is off. */
+/** The Status screen mirrors the terminal status line: key plus step value, hidden while State Flow is off. */
 export function formatStateFlowStatusLine(snapshot: StateFlowTelegramSnapshot): StateFlowTelegramStatusLine | undefined {
-	if (!snapshot.enabled) return snapshot.startPending ? { label: "State Flow", value: "starting…" } : undefined;
-	return { label: "State Flow", value: snapshot.bootstrap ? "bootstrap" : `on · step #${snapshot.step}` };
+	if (!snapshot.enabled) return undefined;
+	return { label: "State Flow", value: `#${snapshot.step}` };
 }
 
-/** Main-menu section label doubles as the live status text. */
+/** Main-menu section label doubles as the live status value; the disabled row carries no status text. */
 export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string {
-	if (!snapshot.enabled) return snapshot.startPending ? "🌀 State Flow: starting…" : "⚫️ State Flow: off";
-	return snapshot.bootstrap ? "🌀 State Flow: bootstrap" : `🌀 State Flow: #${snapshot.step}`;
+	return snapshot.enabled ? `🌀 State Flow: #${snapshot.step}` : "⚫️ State Flow";
 }
 
 export function buildStateFlowSectionView(

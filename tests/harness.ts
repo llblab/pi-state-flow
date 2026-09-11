@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stateFlowExtension from "../index.ts";
@@ -11,6 +11,23 @@ import type { MaterializedState, StateScope } from "../lib/state.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
 
 export type Handler = (...args: any[]) => any;
+
+// Test fixtures must not outlive the process: runaway mkdtemp dirs exhaust the
+// default /tmp inode table and later runs fail with ENOSPC.
+const fixtureRoots: string[] = [];
+process.once("exit", () => {
+	for (const root of fixtureRoots) {
+		try {
+			rmSync(root, { recursive: true, force: true });
+		} catch {
+			// Best-effort cleanup; exiting must not fail on a stale fixture.
+		}
+	}
+});
+function trackFixtureRoot(root: string): string {
+	fixtureRoots.push(root);
+	return root;
+}
 
 export interface HarnessOptions {
 	agentDir?: string;
@@ -67,7 +84,7 @@ export function harness(options: HarnessOptions = {}) {
 			},
 		},
 	};
-	const fixtureRoot = options.repositoryRoot ?? mkdtempSync(join(tmpdir(), "state-flow-harness-"));
+	const fixtureRoot = options.repositoryRoot ?? trackFixtureRoot(mkdtempSync(join(tmpdir(), "state-flow-harness-")));
 	const agentDir = options.agentDir ?? (options.useDefaultKnowledgeRoot ? getAgentDir() : join(fixtureRoot, "agent"));
 	if (options.autoStart !== undefined || options.remotePublication !== undefined) {
 		mkdirSync(agentDir, { recursive: true });
@@ -88,7 +105,7 @@ export function harness(options: HarnessOptions = {}) {
 		}
 		const remotes = execFileSync("git", ["-C", repositoryRoot, "remote"], { encoding: "utf8" }).trim();
 		if (remotes.length === 0) {
-			const remote = mkdtempSync(join(tmpdir(), "state-flow-harness-remote-"));
+			const remote = trackFixtureRoot(mkdtempSync(join(tmpdir(), "state-flow-harness-remote-")));
 			execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" });
 			execFileSync("git", ["-C", repositoryRoot, "remote", "add", "origin", remote]);
 			execFileSync("git", ["-C", repositoryRoot, "push", "-u", "origin", "main"], { stdio: "ignore" });

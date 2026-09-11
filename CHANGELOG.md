@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.9.1: Status text mirrors the terminal line
+
+- `Interop`: The `pi-telegram` surfaces now copy the compact terminal status instead of decorating it. The Status screen shows the terminal value itself (`State Flow: #N`) and hides entirely while State Flow is off; the main-menu button shows `🌀 State Flow: #N` or a plain `⚫️ State Flow` without on/off, starting, bootstrap, or separator text.
+- `Testing`: The shared test harness removes its temporary fixture repositories at process exit; runaway fixtures previously exhausted the `/tmp` inode table and made later runs fail with ENOSPC.
+
 ## 0.9.0: Telegram status surface
 
 - `Interop`: Added an optional fail-open `pi-telegram` presentation adapter. With the transport installed, the status screen shows `State Flow: on · step #N` while enabled, and the inline main menu places a `🌀 State Flow: #N` or `⚫️ State Flow: off` section button directly before Settings.

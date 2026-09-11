@@ -90,18 +90,18 @@ function sectionContext(action: string) {
 	return { context, edits, notices };
 }
 
-test("status line mirrors terminal identity and hides a plainly disabled state", () => {
+test("status line mirrors the terminal step value and hides while disabled", () => {
 	assert.equal(formatStateFlowStatusLine(snapshot()), undefined);
-	assert.deepEqual(formatStateFlowStatusLine(snapshot({ enabled: true, step: 34 })), { label: "State Flow", value: "on · step #34" });
-	assert.deepEqual(formatStateFlowStatusLine(snapshot({ enabled: true, bootstrap: true })), { label: "State Flow", value: "bootstrap" });
-	assert.deepEqual(formatStateFlowStatusLine(snapshot({ startPending: true })), { label: "State Flow", value: "starting…" });
+	assert.deepEqual(formatStateFlowStatusLine(snapshot({ enabled: true, step: 34 })), { label: "State Flow", value: "#34" });
+	assert.deepEqual(formatStateFlowStatusLine(snapshot({ enabled: true, step: 8, bootstrap: true })), { label: "State Flow", value: "#8" });
+	assert.equal(formatStateFlowStatusLine(snapshot({ startPending: true })), undefined);
 });
 
-test("section label carries the live status text", () => {
-	assert.equal(formatStateFlowSectionLabel(snapshot()), "⚫️ State Flow: off");
+test("section label carries the live step value and no status word", () => {
+	assert.equal(formatStateFlowSectionLabel(snapshot()), "⚫️ State Flow");
 	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, step: 7 })), "🌀 State Flow: #7");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, bootstrap: true })), "🌀 State Flow: bootstrap");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ startPending: true })), "🌀 State Flow: starting…");
+	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, step: 7, bootstrap: true })), "🌀 State Flow: #7");
+	assert.equal(formatStateFlowSectionLabel(snapshot({ startPending: true })), "⚫️ State Flow");
 });
 
 test("section view swaps actions with enablement and pending start", () => {
@@ -132,7 +132,7 @@ test("adapter registers both surfaces once and disposes idempotently", async () 
 	assert.equal(statusProviders.length, 1);
 	assert.equal(sections.length, 1);
 	assert.equal(statusProviders[0].id, "@llblab/pi-state-flow");
-	assert.deepEqual(statusProviders[0].provider({}), { label: "State Flow", value: "on · step #2" });
+	assert.deepEqual(statusProviders[0].provider({}), { label: "State Flow", value: "#2" });
 	assert.equal(await adapter.ensure(), true);
 	assert.equal(statusProviders.length, 1);
 	assert.equal(sections.length, 1);
@@ -235,10 +235,10 @@ test("render and dynamic label always read the live snapshot", async () => {
 	await adapter.ensure();
 	const section = sections[0];
 	const renderContext = { callbackData: (action: string) => `cb:${action}` } as StateFlowTelegramSectionContext;
-	assert.equal(section.getLabel!(), "⚫️ State Flow: off");
+	assert.equal(section.getLabel!(), "⚫️ State Flow");
 	assert.match((await section.render(renderContext)).text, /State Flow is disabled on this session branch/);
 	await port.deferStart();
-	assert.equal(section.getLabel!(), "🌀 State Flow: starting…");
+	assert.equal(section.getLabel!(), "⚫️ State Flow");
 });
 
 test("section controls drive the same branch lifecycle as the commands", async () => {
