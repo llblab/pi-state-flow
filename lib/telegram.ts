@@ -73,34 +73,28 @@ export interface StateFlowTelegramAdapter {
 	dispose(): void;
 }
 
-/** Main-menu section label doubles as the live status value; the disabled row carries no status text. */
+/** Main-menu section label doubles as the live status value: the spiral identity is constant, the value is not. */
 export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string {
-	return snapshot.enabled ? `🌀 State Flow: #${snapshot.step}` : "⚫️ State Flow";
+	return snapshot.enabled ? `🌀 State Flow: #${snapshot.step}` : "🌀 State Flow: off";
 }
 
+/** Short help under the state line: what State Flow is and why its action button exists. */
+const STATE_FLOW_SECTION_HELP =
+	"Durable memory for this conversation: State Flow records the latest accepted state after every turn, so a new session resumes from the last committed point. Start it to keep memory live on this branch, stop it to pause.";
+
+/** The submenu header repeats the button's state line; the single action matches the current state. */
 export function buildStateFlowSectionView(
 	snapshot: StateFlowTelegramSnapshot,
 	callbackData: (action: string) => string,
 ): StateFlowTelegramView {
-	const lines = ["<b>🌀 State Flow</b>", ""];
-	if (snapshot.enabled) {
-		lines.push("Status: <b>enabled</b>", `State iteration: <code>#${snapshot.step}</code>`);
-		if (snapshot.bootstrap) lines.push("Bootstrap run: the next completed run migrates active context into state.");
-	} else if (snapshot.startPending) {
-		lines.push("Status: <b>off</b>", "Start is pending until the current turn settles.");
-	} else {
-		lines.push("Status: <b>off</b>", "State Flow is disabled on this session branch.");
-	}
-	const buttons: StateFlowTelegramButton[] = [];
-	if (snapshot.startPending) {
-		buttons.push({ text: "✖️ Cancel start", callback_data: callbackData("cancel") });
-	} else if (snapshot.enabled) {
-		buttons.push({ text: "⏹ Stop", callback_data: callbackData("stop") });
-	} else {
-		buttons.push({ text: "▶️ Start", callback_data: callbackData("start") });
-	}
-	buttons.push({ text: "🔄 Refresh", callback_data: callbackData("refresh") });
-	return { text: lines.join("\n"), parseMode: "html", replyMarkup: { inline_keyboard: [buttons] } };
+	const action: StateFlowTelegramButton = snapshot.enabled
+		? { text: "⏹ Stop", callback_data: callbackData("stop") }
+		: { text: "▶️ Start", callback_data: callbackData("start") };
+	return {
+		text: [`<b>${formatStateFlowSectionLabel(snapshot)}</b>`, "", STATE_FLOW_SECTION_HELP].join("\n"),
+		parseMode: "html",
+		replyMarkup: { inline_keyboard: [[action]] },
+	};
 }
 
 function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
@@ -111,6 +105,7 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
 		render: (ctx: StateFlowTelegramSectionContext) =>
 			buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action)),
 		handleCallback: async (ctx: StateFlowTelegramCallbackContext) => {
+			// cancel/refresh remain routable for keyboards sent by earlier versions; 0.9.4 presents only the state action.
 			if (ctx.action !== "start" && ctx.action !== "stop" && ctx.action !== "cancel" && ctx.action !== "refresh") return "pass" as const;
 			let notice: string | undefined;
 			try {

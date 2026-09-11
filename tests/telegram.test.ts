@@ -81,31 +81,24 @@ function sectionContext(action: string) {
 	return { context, edits, notices };
 }
 
-test("section label carries the live step value and no status word", () => {
-	assert.equal(formatStateFlowSectionLabel(snapshot()), "⚫️ State Flow");
+test("section label always carries the spiral identity and the live state value", () => {
+	assert.equal(formatStateFlowSectionLabel(snapshot()), "🌀 State Flow: off");
 	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, step: 7 })), "🌀 State Flow: #7");
 	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, step: 7, bootstrap: true })), "🌀 State Flow: #7");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ startPending: true })), "⚫️ State Flow");
+	assert.equal(formatStateFlowSectionLabel(snapshot({ startPending: true })), "🌀 State Flow: off");
 });
 
-test("section view swaps actions with enablement and pending start", () => {
+test("section view repeats the state line with one lifecycle button and no refresh or cancel", () => {
 	const off = buildStateFlowSectionView(snapshot(), (action) => `cb:${action}`);
-	assert.deepEqual(off.replyMarkup?.inline_keyboard[0].map(({ text, callback_data }) => [text, callback_data]), [
-		["▶️ Start", "cb:start"],
-		["🔄 Refresh", "cb:refresh"],
-	]);
+	assert.match(off.text, /^<b>🌀 State Flow: off<\/b>/);
+	assert.match(off.text, /Durable memory for this conversation/);
+	assert.deepEqual(off.replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "cb:start" }]]);
 	const on = buildStateFlowSectionView(snapshot({ enabled: true, step: 3 }), (action) => `cb:${action}`);
-	assert.deepEqual(on.replyMarkup?.inline_keyboard[0].map(({ text, callback_data }) => [text, callback_data]), [
-		["⏹ Stop", "cb:stop"],
-		["🔄 Refresh", "cb:refresh"],
-	]);
-	assert.match(on.text, /State iteration: <code>#3<\/code>/);
+	assert.match(on.text, /^<b>🌀 State Flow: #3<\/b>/);
+	assert.deepEqual(on.replyMarkup?.inline_keyboard, [[{ text: "⏹ Stop", callback_data: "cb:stop" }]]);
 	const pending = buildStateFlowSectionView(snapshot({ startPending: true }), (action) => `cb:${action}`);
-	assert.deepEqual(pending.replyMarkup?.inline_keyboard[0].map(({ text, callback_data }) => [text, callback_data]), [
-		["✖️ Cancel start", "cb:cancel"],
-		["🔄 Refresh", "cb:refresh"],
-	]);
-	assert.match(pending.text, /pending until the current turn settles/);
+	assert.match(pending.text, /^<b>🌀 State Flow: off<\/b>/);
+	assert.deepEqual(pending.replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "cb:start" }]]);
 });
 
 test("adapter registers the section once and disposes idempotently", async () => {
@@ -153,7 +146,7 @@ test("start applies immediately when idle and edits the refreshed view", async (
 	assert.deepEqual(calls, ["start"]);
 	assert.deepEqual(notices, ["State Flow enabled"]);
 	assert.equal(edits.length, 1);
-	assert.match(edits[0].text, /Status: <b>enabled<\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: #1<\/b>/);
 });
 
 test("start defers while a run is active and reports a pending intent", async () => {
@@ -165,10 +158,11 @@ test("start defers while a run is active and reports a pending intent", async ()
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(calls, ["deferStart"]);
 	assert.deepEqual(notices, ["State Flow will start after the current turn"]);
-	assert.match(edits[0].replyMarkup!.inline_keyboard[0][0].text, /Cancel start/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: off<\/b>/);
+	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "section:0:start" }]]);
 });
 
-test("stop, cancel, and refresh route without inventing state changes", async () => {
+test("stop routes while legacy cancel/refresh actions stay harmless", async () => {
 	const { modules, sections } = fakeModules();
 	const { port, calls, read } = fakePort(snapshot({ enabled: true, step: 5 }));
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
@@ -204,7 +198,7 @@ test("start failure surfaces the control message without corrupting the menu", a
 	const { context, edits, notices } = sectionContext("start");
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(notices, ["Selected branch revision is unavailable"]);
-	assert.match(edits[0].text, /Status: <b>off<\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: off<\/b>/);
 });
 
 test("render and dynamic label always read the live snapshot", async () => {
@@ -214,10 +208,10 @@ test("render and dynamic label always read the live snapshot", async () => {
 	await adapter.ensure();
 	const section = sections[0];
 	const renderContext = { callbackData: (action: string) => `cb:${action}` } as StateFlowTelegramSectionContext;
-	assert.equal(section.getLabel!(), "⚫️ State Flow");
-	assert.match((await section.render(renderContext)).text, /State Flow is disabled on this session branch/);
+	assert.equal(section.getLabel!(), "🌀 State Flow: off");
+	assert.match((await section.render(renderContext)).text, /Durable memory for this conversation/);
 	await port.deferStart();
-	assert.equal(section.getLabel!(), "⚫️ State Flow");
+	assert.equal(section.getLabel!(), "🌀 State Flow: off");
 });
 
 test("section controls drive the same branch lifecycle as the commands", async () => {

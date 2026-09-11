@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.9.4: Telegram submenu mirrors the status line
+
+- `Interop`: The section button always carries the spiral identity and the live value — `🌀 State Flow: off` while disabled, `🌀 State Flow: #N` while enabled; the black-circle variant is gone.
+- `Interop`: The submenu header repeats that same state line and follows it with a short explanation of what State Flow is; the only action is one wide `Start` or `Stop` button, with the transport's `⬆️ Main menu` row above it. Refresh and Cancel start are no longer presented, the verbose status block was removed, and their callbacks stay routable for keyboards from earlier versions.
+
 ## 0.9.3: Publication queue lineage-rewrite hotfix
 
 - `Publication`: Retarget a queued target orphaned by a journal reset or re-initialization to the live lineage and keep publishing, instead of failing every `turn_end` with "Publication queue targets diverge"; the retired commit stays in local Git history.
