@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.9.3: Publication queue lineage-rewrite hotfix
+
+- `Publication`: Retarget a queued target orphaned by a journal reset or re-initialization to the live lineage and keep publishing, instead of failing every `turn_end` with "Publication queue targets diverge"; the retired commit stays in local Git history.
+- `Diagnostics`: Record the retired target in opt-in diagnostics and report a deferred remote publication accurately instead of claiming the final response could not be reconciled.
+
 ## 0.9.2: Single Telegram surface
 
 - `Interop`: State Flow now appears on Telegram exactly once. The inline main-menu section button before Settings carries the live status (`🌀 State Flow: #N`, `⚫️ State Flow` while off) and opens the existing start/stop submenu; the duplicated Status-screen row is removed, so the same value no longer renders in two places. Fail-open registration and shutdown disposal are unchanged.

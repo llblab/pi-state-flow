@@ -252,7 +252,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		if (mode !== "turn-end" || target === undefined || !/^[0-9a-f]{40,64}$/.test(target)) return;
 		turnPublicationTarget = target;
 		try {
-			enqueueTurnPublication();
+			enqueueTurnPublication(ctx);
 			launchPublicationWorker();
 		} catch (error) {
 			ctx.ui.notify(
@@ -288,7 +288,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return true;
 	}
 
-	function enqueueTurnPublication(): void {
+	function enqueueTurnPublication(ctx: ExtensionContext): void {
 		const target = turnPublicationTarget;
 		turnPublicationTarget = undefined;
 		if (!target) return;
@@ -297,7 +297,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		const path = publicationQueuePath(destination);
 		const previous = loadPublicationQueue(path);
 		const next = previous
-			? coalescePublicationTarget(previous, destination, target, (ancestor, descendant) => isGitCommitAncestor(repositoryRoot, ancestor, descendant))
+			? coalescePublicationTarget(previous, destination, target, (ancestor, descendant) => isGitCommitAncestor(repositoryRoot, ancestor, descendant), {
+				onDivergedLineage: (dropped) => recordDiagnostic(
+					`Retired publication queue target ${dropped.target} after a journal lineage rewrite; retargeting to ${target}`,
+					"publication-conflict", ctx,
+				),
+			})
 			: createPublicationQueue(destination, target);
 		savePublicationQueue(path, next, previous);
 	}
@@ -365,7 +370,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			if (mode === "turn-end") {
 				turnPublicationTarget = target;
 				try {
-					enqueueTurnPublication();
+					enqueueTurnPublication(ctx);
 					launchPublicationWorker();
 				} catch (error) {
 					ctx.ui.notify(`State Flow retained local state; asynchronous publication recovery is deferred: ${error instanceof Error ? error.message : String(error)}`, "warning");
@@ -1035,17 +1040,21 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			updateUi(ctx);
 			return;
 		}
+		let responseCommitted = false;
 		try {
 			const response = finalizedAssistantResponse(event.message);
 			const stage = stageScopedTransition(scopeStates, { transitions: [], response }, [], runtime!.causalBasis());
 			commitStage(stage, ctx, true);
+			responseCommitted = true;
 			bootstrapContinuation = undefined;
 			rehydrationPhase = "step";
-			enqueueTurnPublication();
+			enqueueTurnPublication(ctx);
 			if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 		} catch (error) {
 			recordDiagnostic(error instanceof Error ? error.message : String(error), "finalization", ctx);
-			ctx.ui.notify(`State Flow could not reconcile the final response: ${error instanceof Error ? error.message : String(error)}`, "error");
+			ctx.ui.notify(responseCommitted
+				? `State Flow committed the final response; remote publication is deferred: ${error instanceof Error ? error.message : String(error)}`
+				: `State Flow could not reconcile the final response: ${error instanceof Error ? error.message : String(error)}`, "error");
 		} finally {
 			responseAwaitingReconciliation = false;
 		}

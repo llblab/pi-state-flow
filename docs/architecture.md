@@ -132,7 +132,7 @@ The persisted `remotePublication` policy is:
 
 A destination is identified by canonical Git common directory, remote and full ref. Queue files live beneath the Git common directory and are not semantic history.
 
-The queue uses exact commit targets, strict versioned JSON, symlink-safe atomic writes, CAS receipts and exclusive writer locks. A proven descendant may supersede an older target; divergent targets and changed destinations fail closed.
+The queue uses exact commit targets, strict versioned JSON, symlink-safe atomic writes, CAS receipts and exclusive writer locks. A proven descendant may supersede an older target; a journal lineage rewrite retargets the live commit and records the retired target, while changed destinations fail closed.
 
 After accepted response reconciliation, an asynchronous non-interactive worker pushes the newest target. Queue failure never rolls back semantic state or regenerates an answer. Failed and interrupted attempts remain retryable across restart. Destination-scoped worker leases prevent cross-process overlap, preserve live owners, recover proven-dead owners and use exact release tokens. Confirmation removes only the exact completed target; a newer descendant remains queued.
 

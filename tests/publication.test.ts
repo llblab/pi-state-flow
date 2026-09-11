@@ -80,7 +80,20 @@ test("coalesces only same-destination descendants and preserves newest targets",
 	assert.equal(coalescePublicationTarget(second, destination, a, isAncestor).target, b);
 	assert.equal(coalescePublicationTarget(second, destination, b, isAncestor).target, b);
 	assert.throws(() => coalescePublicationTarget(second, { ...destination, remote: "backup" }, c, isAncestor), /destination changed/);
-	assert.throws(() => coalescePublicationTarget(second, destination, "d".repeat(40), isAncestor), /diverge/);
+});
+
+test("retargets a rewritten journal lineage instead of wedging publication", () => {
+	const confirmed = confirmPublicationTarget(
+		coalescePublicationTarget(beginPublicationAttempt(createPublicationQueue(destination, a)), destination, b, isAncestor),
+		a, isAncestor,
+	)!;
+	assert.equal(confirmed.confirmed, a);
+	const selfHeals: string[] = [];
+	const healed = coalescePublicationTarget(confirmed, destination, "d".repeat(40), isAncestor, {
+		onDivergedLineage: (previous) => selfHeals.push(previous.target),
+	});
+	assert.deepEqual(selfHeals, [b]);
+	assert.deepEqual(healed, { version: 1, destination: structuredClone(destination), target: "d".repeat(40), status: "pending", attempt: 0 });
 });
 
 test("recovers interrupted attempts and confirms only exact covered targets", () => {

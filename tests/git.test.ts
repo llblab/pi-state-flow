@@ -29,7 +29,9 @@ import {
 	pushGitCommit,
 	initializeGitRepository,
 	isGitCommitAncestor,
+	resolveGitPushDestination,
 } from "../lib/git.ts";
+import { createPublicationQueue, loadPublicationQueue, publicationQueuePath, removePublicationQueue, savePublicationQueue } from "../lib/publication.ts";
 import { writeCwdState, writeGlobalState, writeSessionState } from "./legacy-fixture.ts";
 import { emptyState, type ScopedStates } from "../lib/state.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState, type ScopeStream, type TemporalState } from "../lib/temporal.ts";
@@ -487,6 +489,24 @@ test("the extension accepts a local durable commit without regenerating on push 
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /Remote publication policy: turn-end/);
 	assert.match(h.notifications.at(-1)!, /"accepted": true/);
+});
+
+test("retargets a queue orphaned by a journal lineage rewrite without failing turn_end", async (t) => {
+	const h = harness();
+	await start(h, "Persist durable state");
+	const destination = resolveGitPushDestination(h.repositoryRoot)!;
+	const orphan = run(h.repositoryRoot, "commit-tree", run(h.repositoryRoot, "rev-parse", "HEAD^{tree}"), "-m", "orphaned journal lineage");
+	const path = publicationQueuePath(destination);
+	const existing = loadPublicationQueue(path);
+	if (existing) removePublicationQueue(path, existing);
+	savePublicationQueue(path, createPublicationQueue(destination, orphan));
+	await h.tools.get("patch_state")!.execute("terminal", { cwd: { working: { accepted: true } }, final: true }, undefined, undefined, h.ctx);
+	const message = { role: "assistant" as const, stopReason: "stop", content: [{ type: "text", text: "Accepted." }] };
+	const result = h.handlers.get("message_end")!({ message }, h.ctx) ?? { message };
+	h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
+
+	assert.equal(h.notifications.some((notice) => /could not reconcile/i.test(notice)), false);
+	assert.equal(loadPublicationQueue(path)?.target, run(h.repositoryRoot, "rev-parse", "HEAD"));
 });
 
 test("migrates all three current snapshots in one isolated commit without losing semantic or cold history", (t) => {

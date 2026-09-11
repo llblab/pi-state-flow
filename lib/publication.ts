@@ -81,13 +81,26 @@ export function createPublicationQueue(destination: RemotePublicationDestination
 	return { version: 1, destination: structuredClone(destination), target, status: "pending", attempt: 0 };
 }
 
-export function coalescePublicationTarget(state: PublicationQueueState, destination: RemotePublicationDestination, target: string, isAncestor: CommitAncestor): PublicationQueueState {
+export interface PublicationCoalesceObserver {
+	/** Called with the retired record when a journal lineage rewrite orphans its target. */
+	onDivergedLineage?: (previous: PublicationQueueState) => void;
+}
+
+export function coalescePublicationTarget(state: PublicationQueueState, destination: RemotePublicationDestination, target: string, isAncestor: CommitAncestor, observer?: PublicationCoalesceObserver): PublicationQueueState {
 	validatePublicationQueue(state);
 	if (!COMMIT.test(target)) throw new Error("Publication queue target must be an exact commit");
 	if (remotePublicationDestinationKey(state.destination) !== remotePublicationDestinationKey(destination)) throw new Error("Publication queue destination changed");
 	if (target === state.target || isAncestor(target, state.target)) return structuredClone(state);
-	if (!isAncestor(state.target, target)) throw new Error("Publication queue targets diverge");
-	return { ...structuredClone(state), target, status: "pending", attempt: 0, error: undefined };
+	const previous = structuredClone(state);
+	if (!isAncestor(state.target, target)) {
+		// A reset or re-initialized journal rewrites the lineage. The queued commit can never
+		// fast-forward the remote again, so retarget the live lineage instead of wedging every
+		// later turn-end; the retired commit stays in the local Git object store.
+		observer?.onDivergedLineage?.(previous);
+		const { confirmed: _confirmed, error: _error, ...live } = previous;
+		return { ...live, target, status: "pending", attempt: 0 };
+	}
+	return { ...previous, target, status: "pending", attempt: 0, error: undefined };
 }
 
 export function parsePublicationQueue(content: string): PublicationQueueState {
