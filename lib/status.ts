@@ -57,16 +57,11 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 		diagnostics.recent,
 	);
 	const available = diagnostics.temporal !== undefined && diagnostics.durableStateError === undefined;
-	const materialized = !available ? undefined : {
-		global: diagnostics.scopeStates.global,
-		cwd: diagnostics.scopeStates.cwd,
-		session: diagnostics.scopeStates.session,
-		effective: overlayStates(
-			diagnostics.scopeStates.global,
-			diagnostics.scopeStates.cwd,
-			diagnostics.scopeStates.session,
-		),
-	};
+	const materialized = !available ? undefined : overlayStates(
+		diagnostics.scopeStates.global,
+		diagnostics.scopeStates.cwd,
+		diagnostics.scopeStates.session,
+	);
 	const stateJson = materialized === undefined ? undefined : JSON.stringify(materialized, null, 2);
 	const freshnessError = diagnostics.artifactFreshnessError ?? (available ? undefined : "temporal global artifact registry is unavailable");
 	const stale = freshnessError === undefined
@@ -124,7 +119,7 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 		`Publication: ${publication}`,
 		...staleLines,
 		...(stateJson === undefined
-			? ["Materialized states: unavailable (global/CWD/session/effective)"]
-			: [`Materialized states (${Buffer.byteLength(stateJson, "utf8")} bytes; global/CWD/session Git-backed, effective overlay):`, "", stateJson]),
+			? ["Effective memory: unavailable"]
+			: [`Effective memory (${Buffer.byteLength(stateJson, "utf8")} JSON bytes; global → CWD → session overlay):`, "", stateJson]),
 	].join("\n");
 }

@@ -14,6 +14,7 @@
   "include": [
     "index.ts",
     "lib/*.ts",
+    "benchmarks/*.ts",
     "tests/*.ts"
   ]
 }

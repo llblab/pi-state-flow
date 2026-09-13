@@ -351,5 +351,5 @@ test("rejects model attempts to forge runtime-owned Skill freshness fields", asy
 	const source = skillFile("forged");
 	recordRead(h, source);
 	const forged = { ...compilerOutput(), hash: hashArtifactSource("forged") };
-	await assert.rejects(patchCwdArtifacts(h, { [source]: forged }), /cannot set runtime-owned hash or compiler/);
+	await assert.rejects(patchCwdArtifacts(h, { [source]: forged }), /cannot set runtime-owned provenance/);
 });

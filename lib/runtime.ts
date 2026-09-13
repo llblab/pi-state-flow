@@ -16,6 +16,12 @@ const SCOPES = ["global", "cwd", "session"] as const;
 const SHARED_SCOPES = ["global", "cwd"] as const;
 export type RuntimePublication = ReturnType<typeof publishTemporalStateToGit> & { revision?: string };
 
+interface SessionCopy {
+	stream: ScopeStream;
+	provenance: ArtifactProvenanceRegistry;
+	backend: "git" | "files";
+}
+
 function emptyProvenance(): Record<StateScope, ArtifactProvenanceRegistry> {
 	return { global: {}, cwd: {}, session: {} };
 }
@@ -33,10 +39,14 @@ function targetScopeConflict(scopes: readonly StateScope[]): Error {
 	return new Error(`State Flow cannot publish the ${labels.join(" and ")} patches because the live ${labels.join(" and ")} states advanced after this transition's selected basis. Refresh or reconcile the target scopes before retrying.`);
 }
 
+export class MissingSessionRuntimeError extends Error {
+	constructor() { super("Linked State Flow revision has no session runtime"); }
+}
+
 /** Immutable target validation is independent of acquiring the live publication basis. */
 export function inspectRuntimeRevision(cwd: string, sessionId: string, root: string, revision: string, sessionKey = sessionId) {
 	const loaded = loadTemporalRevision(cwd, sessionId, root, revision, sessionKey);
-	if (!loaded.runtime) throw new Error("Linked State Flow revision has no session runtime");
+	if (!loaded.runtime) throw new MissingSessionRuntimeError();
 	const resolved = resolveSessionRuntime(loaded.runtime.document, loaded.runtime.revision);
 	if (!loaded.scopes.global || !loaded.scopes.cwd || !loaded.scopes.session) throw new Error("Incomplete temporal scope cohort");
 	const view = { lineage: resolved.lineage, scopes: { global: loaded.scopes.global, cwd: loaded.scopes.cwd, session: loaded.scopes.session } };
@@ -138,8 +148,66 @@ export class TemporalRuntime {
 		return result;
 	}
 
-	restore(revision: string, legacySnapshot?: Snapshot): Snapshot {
+	/** Validate selection without installing state; only a matching immutable Git inspection is reusable. */
+	prepareRestore(revision: string, legacySnapshot?: Snapshot): { snapshot: Snapshot; restore: () => Snapshot } {
 		const inspected = inspectSnapshotRevision(this.cwd, this.sessionId, this.root, revision, legacySnapshot, this.sessionKey);
+		const selected = inspected.snapshot.meta.durableBase ?? revision;
+		let consumed = false;
+		return {
+			snapshot: structuredClone(inspected.snapshot),
+			restore: () => {
+				if (consumed) throw new Error("Prepared State Flow restore was already consumed");
+				consumed = true;
+				// File cohorts can expire; legacy migration and owner redirection keep their fresh-read path.
+				return inspected.temporal && selected === revision
+					? this.restoreInspected(revision, inspected)
+					: this.restore(selected, inspected.snapshot);
+			},
+		};
+	}
+
+	/** Copy only a proven source session stream; shared streams come from the child's fresh live basis. */
+	prepareFork(source: SessionAddress, revision: string): { snapshot: Snapshot; fork: () => { snapshot: Snapshot; publication: RuntimePublication } } {
+		const parent = Object.freeze({ ...source });
+		if (parent.id === this.sessionId || parent.key === this.sessionKey) throw new Error("State Flow fork requires a distinct session identity and key");
+		const inspect = () => inspectSnapshotRevision(this.cwd, parent.id, this.root, revision, undefined, parent.key);
+		const inspected = inspect();
+		const snapshot: Snapshot = {
+			config: structuredClone(inspected.snapshot.config),
+			meta: {
+				step: 0,
+				...(inspected.snapshot.meta.bootstrap === undefined ? {} : { bootstrap: inspected.snapshot.meta.bootstrap }),
+				...(inspected.snapshot.meta.remotePublication === undefined ? {} : { remotePublication: structuredClone(inspected.snapshot.meta.remotePublication) }),
+			},
+		};
+		let consumed = false;
+		return {
+			snapshot: { ...structuredClone(snapshot), meta: { ...structuredClone(snapshot.meta), durableBase: revision } },
+			fork: () => {
+				if (consumed) throw new Error("Prepared State Flow fork was already consumed");
+				consumed = true;
+				if (this.view) throw new Error("State Flow fork target already has session storage");
+				// Unlike immutable Git input, a file-only source must still match its complete cohort.
+				const current = inspected.file ? inspect() : inspected;
+				const selected = current.temporal ?? current.file;
+				if (!selected) throw new Error("State Flow fork requires a temporal session stream");
+				const publication = this.initializeOrigin(snapshot, { allowCreateCwd: false, copy: {
+					stream: selected.view.scopes.session,
+					provenance: selected.provenance.session,
+					backend: current.file ? "files" : "git",
+				} });
+				const ownedRevision = publication?.revision ?? publication?.commit;
+				if (!publication || !ownedRevision) throw new Error("State Flow fork requires existing shared scope storage");
+				return { snapshot: { ...structuredClone(snapshot), meta: { ...structuredClone(snapshot.meta), durableBase: ownedRevision } }, publication };
+			},
+		};
+	}
+
+	restore(revision: string, legacySnapshot?: Snapshot): Snapshot {
+		return this.restoreInspected(revision, inspectSnapshotRevision(this.cwd, this.sessionId, this.root, revision, legacySnapshot, this.sessionKey));
+	}
+
+	private restoreInspected(revision: string, inspected: ReturnType<typeof inspectSnapshotRevision>): Snapshot {
 		if (inspected.file) {
 			const savedRuntime = hashJson(createSessionRuntime(inspected.snapshot, this.cwd, this.sessionId, inspected.file.view.lineage, "files", inspected.file.provenance.session));
 			this.view = inspected.file.view;
@@ -205,16 +273,26 @@ export class TemporalRuntime {
 	}
 
 	initialize(snapshot: Snapshot, allowCreateCwd: boolean, expectedShared?: Pick<ScopedStates, "global" | "cwd">, newSessionOrigin = false): RuntimePublication | undefined {
+		return this.initializeOrigin(snapshot, { allowCreateCwd, expectedShared, newSessionOrigin });
+	}
+
+	private initializeOrigin(snapshot: Snapshot, options: {
+		allowCreateCwd: boolean;
+		expectedShared?: Pick<ScopedStates, "global" | "cwd">;
+		newSessionOrigin?: boolean;
+		copy?: SessionCopy;
+	}): RuntimePublication | undefined {
+		const { allowCreateCwd, expectedShared, newSessionOrigin = false, copy } = options;
 		const hasCwd = hasCwdMaterialization(this.cwd, this.root);
 		if (!allowCreateCwd && !hasCwd) return undefined;
-		const backend = this.backend ?? (detectGitCapability() === "git" && lstatSync(join(this.root, ".git"), { throwIfNoEntry: false }) ? "git" : "files");
-		if (backend === "git") {
+		const backend = copy?.backend ?? this.backend ?? (detectGitCapability() === "git" && lstatSync(join(this.root, ".git"), { throwIfNoEntry: false }) ? "git" : "files");
+		if (!copy && backend === "git") {
 			if (!hasCwd) migrateHashedCwdAtHead(this.cwd, this.root);
 			if (hasLegacyStateSources(this.cwd, this.sessionId, this.root, this.sessionKey)) {
 				migrateLegacyStorageToGit(this.cwd, this.sessionId, this.root, this.sessionKey);
 			}
 		}
-		else {
+		else if (!copy) {
 			if (allowCreateCwd) initializeFileStore(this.root);
 			if (hasLegacyStateSources(this.cwd, this.sessionId, this.root, this.sessionKey)) {
 				migrateLegacyStorageToFiles(this.cwd, this.sessionId, this.root, this.sessionKey);
@@ -222,6 +300,15 @@ export class TemporalRuntime {
 		}
 		const base: TemporalGitBase = backend === "git" ? captureTemporalGitBase(this.cwd, this.sessionId, this.root, this.sessionKey) : captureTemporalFileBase(this.cwd, this.sessionId, this.root, this.sessionKey);
 		const files = new Map(base.files.map((file) => [file.path, file.content]));
+		if (copy) {
+			const session = temporalScopePaths(this.cwd, this.sessionId, "session", this.root, this.sessionKey);
+			const owned = [session.checkpoint, session.patches, session.meta, join(session.directory, "config.json"), join(session.directory, "state.json")];
+			const occupied = owned.some((path) => files.get(path) !== undefined);
+			const historical = !occupied && backend === "git" && base.head ? loadTemporalRevision(this.cwd, this.sessionId, this.root, base.head, this.sessionKey) : undefined;
+			if (occupied || historical?.runtime || historical?.scopes.session) {
+				throw new Error("State Flow fork target already has session storage");
+			}
+		}
 		if (SCOPES.some((scope) => {
 			const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
 			return files.get(join(paths.directory, "state.json")) !== undefined;
@@ -231,11 +318,13 @@ export class TemporalRuntime {
 			return [scope, parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope, scope === "cwd" ? this.cwd : undefined)];
 		})) as Record<StateScope, TemporalState["scopes"][StateScope] | undefined>;
 		if (!streams.cwd && !allowCreateCwd) return undefined;
+		if (copy && !streams.global) throw new Error("State Flow fork requires existing shared scope storage");
 		const paths = sessionRuntimePaths(this.cwd, this.sessionId, this.root, this.sessionKey);
 		const existingRuntime = parseSessionRuntime(files.get(paths.config), files.get(paths.meta), this.cwd, this.sessionId);
 		if (existingRuntime && !snapshot.legacySession && !newSessionOrigin) throw new Error("Existing session runtime requires a branch revision pointer");
 		// Explicit start before any branch runtime is a new origin, never inheritance of a later session layer.
 		if (snapshot.legacySession || newSessionOrigin) streams.session = undefined;
+		if (copy) streams.session = copy.stream;
 		const fresh = createTemporalState({ global: emptyState(), cwd: emptyState(), session: snapshot.legacySession?.state ?? emptyState() }, randomUUID());
 		const candidate = new TemporalRuntime(this.cwd, this.session, this.root);
 		candidate.backend = backend;
@@ -246,18 +335,31 @@ export class TemporalRuntime {
 		candidate.provenanceByScope = {
 			global: parseScopeProvenance(files.get(globalMeta), globalMeta),
 			cwd: parseScopeProvenance(files.get(cwdMeta), cwdMeta),
-			session: streams.session === undefined ? {} : parseArtifactProvenanceRegistry(existingRuntime?.meta.artifacts, "State Flow session artifact provenance"),
+			session: copy ? structuredClone(copy.provenance) : streams.session === undefined ? {} : parseArtifactProvenanceRegistry(existingRuntime?.meta.artifacts, "State Flow session artifact provenance"),
 		};
 		if (expectedShared && (["global", "cwd"] as const).some((scope) => !sameJson(candidate.read(0, scope), expectedShared[scope]))) {
 			throw new Error("Legacy branch shared scopes diverged from the selected revision; migration cannot overwrite them");
 		}
-		const publication = candidate.publish(snapshot, true);
+		const publication = copy ? candidate.publishForkOrigin(snapshot) : candidate.publish(snapshot, true);
 		this.view = candidate.view;
 		this.base = candidate.base;
 		this.backend = backend;
 		this.provenanceByScope = structuredClone(candidate.provenanceByScope);
 		this.semanticRevision = candidate.semanticRevision;
 		this.savedRuntime = candidate.savedRuntime;
+		return publication;
+	}
+
+	/** Initial copy owns only the new session files, without pruning or rewriting shared provenance. */
+	private publishForkOrigin(snapshot: Snapshot): RuntimePublication {
+		const runtime = createSessionRuntime(snapshot, this.cwd, this.sessionId, this.view!.lineage, this.backend === "files" ? "files" : "unconfirmed", this.provenanceByScope.session);
+		const result = this.backend === "files"
+			? publishTemporalStateToFiles(this.cwd, this.sessionId, this.view!, ["session"], this.base!, this.root, runtime, this.sessionKey, this.provenanceByScope)
+			: publishTemporalStateToGit(this.cwd, this.sessionId, this.view!, ["session"], this.base!, this.root, runtime, this.sessionKey, (snapshot.meta.remotePublication?.mode ?? "transition") === "transition", this.provenanceByScope);
+		const publication: RuntimePublication = result;
+		this.base = publication.base;
+		this.semanticRevision = publication.revision ?? publication.commit;
+		this.savedRuntime = hashJson(runtime);
 		return publication;
 	}
 

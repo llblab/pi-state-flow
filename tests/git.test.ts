@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import childProcess, { execFileSync } from "node:child_process";
+import { EventEmitter, getEventListeners } from "node:events";
+import { PassThrough } from "node:stream";
 import fs, { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
 	cwdPatchesPath,
@@ -27,6 +29,7 @@ import {
 	publishTemporalStateToGit,
 	migrateLegacyStorageToGit,
 	pushGitCommit,
+	pushGitTarget,
 	initializeGitRepository,
 	isGitCommitAncestor,
 	resolveGitPushDestination,
@@ -40,6 +43,7 @@ import type { RecentScopePatch } from "../lib/history.ts";
 import { createSessionRuntime, emptySnapshot, resolveSessionRuntime, serializeSessionRuntime } from "../lib/snapshot.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import { harness, start } from "./harness.ts";
+import { interceptGitPushes } from "./push-fixture.ts";
 
 function run(repository: string, ...args: string[]): string {
 	return execFileSync("git", ["-C", repository, ...args], { encoding: "utf8" }).trim();
@@ -70,6 +74,74 @@ function fixture(t: TestContext, temporal = false): { repository: string; remote
 	if (!temporal) writeCwdState(cwd, emptyState(), repository);
 	return { repository, remote, cwd };
 }
+
+test("asynchronous push uses an exact target, preserves remote fast-forward protection, and rejects cancelled or symbolic targets", { timeout: 20_000 }, async (t) => {
+	const { repository, remote } = fixture(t, true);
+	const first = run(repository, "rev-parse", "HEAD");
+	run(repository, "commit", "--allow-empty", "-m", "next push");
+	const target = run(repository, "rev-parse", "HEAD");
+	const destination = resolveGitPushDestination(repository)!;
+	await pushGitTarget(repository, destination, target);
+	assert.equal(run(remote, "rev-parse", destination.ref), target);
+	await assert.rejects(pushGitTarget(repository, destination, first), /Git push failed/);
+	assert.equal(run(remote, "rev-parse", destination.ref), target);
+	const pushes = interceptGitPushes(t);
+	for (const invalid of ["HEAD", [target], [[target]], { toString: () => target }]) {
+		await assert.rejects(pushGitTarget(repository, destination, invalid as any), /exact commit/);
+	}
+	await assert.rejects(pushGitTarget(repository, destination, target, AbortSignal.abort()), /aborted/);
+	assert.equal(pushes.length, 0);
+});
+
+test("asynchronous push hard-kills a blocked child at the 15000ms budget and removes its abort listener", { timeout: 10_000 }, async (t) => {
+	const { repository } = fixture(t, true);
+	const destination = resolveGitPushDestination(repository)!;
+	const target = run(repository, "rev-parse", "HEAD");
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const pushes = interceptGitPushes(t);
+	const controller = new AbortController();
+	const finished = assert.rejects(pushGitTarget(repository, destination, target, controller.signal), /timed out after 15000ms/);
+	await pushes[0].ready;
+	t.mock.timers.tick(14_999);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(pushes[0].child.signalCode, null);
+	assert.equal(pushes[0].child.exitCode, null);
+	t.mock.timers.tick(1);
+	await finished;
+	assert.equal(pushes[0].child.signalCode, "SIGKILL");
+	assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+	controller.abort();
+	t.mock.timers.tick(15_000);
+	assert.equal(pushes.length, 1);
+});
+
+test("asynchronous push bounds an inherited diagnostic pipe that remains open after child exit", { timeout: 5_000 }, async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const stderr = new PassThrough();
+	const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null, stderr });
+	stderr.once("close", () => child.emit("close", 0, null));
+	t.mock.method(childProcess, "spawn", (() => child) as unknown as typeof childProcess.spawn);
+	syncBuiltinESMExports();
+	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); stderr.destroy(); });
+	const finished = assert.rejects(pushGitTarget("/unused", { remote: "origin", ref: "refs/heads/main" }, "a".repeat(40)), /timed out after 15000ms/);
+	child.exitCode = 0;
+	child.emit("exit", 0, null);
+	assert.equal(stderr.destroyed, false);
+	t.mock.timers.tick(15_000);
+	await finished;
+	assert.equal(stderr.destroyed, true);
+});
+
+test("asynchronous push rejects spawn failure without waiting for a nonexistent child's exit", { timeout: 5_000 }, async (t) => {
+	const spawn = childProcess.spawn;
+	t.mock.method(childProcess, "spawn", ((_command: any, _args: any, options: any) =>
+		spawn("/state-flow-missing-test-executable", [], options)) as typeof spawn);
+	syncBuiltinESMExports();
+	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+	const controller = new AbortController();
+	await assert.rejects(pushGitTarget("/unused", { remote: "origin", ref: "refs/heads/main" }, "a".repeat(40), controller.signal), /ENOENT/);
+	assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+});
 
 test("inspects exact Git ancestry without moving HEAD or the worktree", (t) => {
 	const { repository } = fixture(t, true);
@@ -403,6 +475,151 @@ test("semantic runtime publication binds lineage and recovers the existing publi
 	assert.equal(noOp.commit, undefined);
 });
 
+test("large Git-backed checkpoint, tail and runtime blobs survive cold reads and later publication", (t) => {
+	const { repository, cwd } = fixture(t, true);
+	const session = "large-blobs";
+	const payload = "λ🧭".repeat(196_608);
+	assert.ok(payload.length < 1024 * 1024 && Buffer.byteLength(payload) > 1024 * 1024);
+	const states = { global: emptyState(), cwd: emptyState(), session: { ...emptyState(), working: { payload } } };
+	const origin = createTemporalState(states, "large-origin");
+	const snapshot = emptySnapshot(true);
+	const first = publishTemporalStateToGit(cwd, session, origin, ["global", "cwd", "session"],
+		captureTemporalGitBase(cwd, session, repository), repository, createSessionRuntime(snapshot, cwd, session, origin.lineage), session, false);
+	assert.deepEqual(loadTemporalRevision(cwd, session, repository, first.commit!).scopes, origin.scopes);
+	const next = advanceTemporalState(origin, [{ scope: "session", patch: { working: { extra: payload } } }], "large-tail");
+	snapshot.meta.step = 1;
+	const second = publishTemporalStateToGit(cwd, session, next, ["session"], first.base, repository,
+		createSessionRuntime(snapshot, cwd, session, next.lineage), session, false);
+	assert.deepEqual(loadTemporalRevision(cwd, session, repository, second.commit!).scopes, next.scopes);
+	snapshot.config.enabled = false;
+	snapshot.meta.specification = payload;
+	const stoppedRuntime = createSessionRuntime(snapshot, cwd, session, next.lineage);
+	stoppedRuntime.meta.temporalRevision = second.commit;
+	const stopped = publishTemporalStateToGit(cwd, session, next, [], second.base, repository, stoppedRuntime, session, false);
+	const before = captureTemporalGitBase(cwd, session, repository);
+	const restored = loadTemporalRevision(cwd, session, repository, stopped.commit!);
+	assert.deepEqual(restored.scopes, next.scopes);
+	assert.equal(restored.runtime!.document.meta.specification, payload);
+	assert.equal(restored.runtime!.document.config.enabled, false);
+	assert.equal(restored.runtime!.document.meta.step, 1);
+	assert.deepEqual(loadTemporalRevision(cwd, session, repository, first.commit!).scopes, origin.scopes);
+	assert.deepEqual(captureTemporalGitBase(cwd, session, repository), before, "cold inspection must not move the branch or rewrite live files");
+});
+
+test("historical reads batch exact literal paths without inspecting unused fallback blobs", { skip: process.platform === "win32" }, (t) => {
+	const { repository, cwd } = fixture(t, true);
+	const literalCwd = `${cwd}/literal[*?]\tline\nnext`;
+	const session = "literal-paths";
+	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "literal-origin");
+	const runtime = createSessionRuntime(emptySnapshot(true), literalCwd, session, view.lineage);
+	const first = publishTemporalStateToGit(literalCwd, session, view, ["global", "cwd", "session"],
+		captureTemporalGitBase(literalCwd, session, repository), repository, runtime, session, false);
+	const unused = legacyTemporalScopePaths(literalCwd, session, "cwd", repository).checkpoint;
+	const blob = run(repository, "rev-parse", `${first.commit}:checkpoint.json`);
+	run(repository, "update-index", "--add", "--cacheinfo", `120000,${blob},${relative(repository, unused)}`);
+	run(repository, "commit", "-m", "unused legacy symlink");
+	const revision = run(repository, "rev-parse", "HEAD");
+	const spawn = childProcess.spawnSync;
+	const trees = new Map<string, number>();
+	const blobs = new Map<string, number>();
+	t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
+		const argv = args[1] as string[];
+		if (args[0] === "git" && argv[1] === repository) {
+			if (argv[2] === "ls-tree") trees.set(argv[4], (trees.get(argv[4]) ?? 0) + 1);
+			if (argv[2] === "show") blobs.set(argv[3], (blobs.get(argv[3]) ?? 0) + 1);
+		}
+		const result = spawn(...args);
+		if (args[0] === "git" && argv[2] === "ls-tree" && argv[4] === revision) {
+			const listing = String(result.stdout);
+			const unusedEntry = listing.split("\0").find((entry) => entry.endsWith(`\t${relative(repository, unused)}`));
+			// Even ambiguous metadata for an unused fallback cannot become authority over the selected canonical files.
+			if (unusedEntry) return { ...result, stdout: listing + unusedEntry + "\0" };
+		}
+		return result;
+	}) as typeof spawn);
+	syncBuiltinESMExports();
+	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+	const literal = process.env.GIT_LITERAL_PATHSPECS;
+	process.env.GIT_LITERAL_PATHSPECS = "1";
+	t.after(() => {
+		if (literal === undefined) delete process.env.GIT_LITERAL_PATHSPECS;
+		else process.env.GIT_LITERAL_PATHSPECS = literal;
+	});
+	const loaded = loadTemporalRevision(literalCwd, session, repository, revision);
+	assert.deepEqual(loaded.scopes, view.scopes);
+	assert.equal(loaded.runtime!.revision, first.commit);
+	assert.deepEqual([...trees.keys()].sort(), [revision, first.commit!].sort());
+	for (const count of trees.values()) assert.equal(count, 1, "One bounded tree query per immutable revision");
+	for (const [path, count] of blobs) {
+		assert.equal(count, 1, `Duplicate blob read: ${path}`);
+		assert.equal(path.endsWith(relative(repository, unused)), false, "Unused legacy symlink must stay uninspected");
+		assert.equal(path.endsWith("README.md"), false);
+	}
+	assert.equal(run(repository, "rev-parse", "HEAD"), revision);
+});
+
+test("historical tree catalogs reject incomplete, malformed, and duplicate records without changing selected files", (t) => {
+	const { repository, cwd } = fixture(t, true);
+	const session = "tree-catalog-validation";
+	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
+	const runtime = createSessionRuntime(emptySnapshot(true), cwd, session, view.lineage);
+	const published = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"],
+		captureTemporalGitBase(cwd, session, repository), repository, runtime, session, false);
+	const before = captureTemporalGitBase(cwd, session, repository);
+	const spawn = childProcess.spawnSync;
+	let corrupt: (listing: string) => string = (listing) => listing;
+	t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
+		const result = spawn(...args);
+		const argv = args[1] as string[];
+		return args[0] === "git" && argv[2] === "ls-tree" ? { ...result, stdout: corrupt(String(result.stdout)) } : result;
+	}) as typeof spawn);
+	syncBuiltinESMExports();
+	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+	for (const variant of [
+		(listing: string) => listing.slice(0, -1),
+		(listing: string) => listing.replace("\t", " "),
+		(listing: string) => listing + listing.slice(0, listing.indexOf("\0") + 1),
+	]) {
+		corrupt = variant;
+		assert.throws(() => loadTemporalRevision(cwd, session, repository, published.commit!), /Historical Git tree/);
+		assert.deepEqual(captureTemporalGitBase(cwd, session, repository), before);
+	}
+});
+
+test("publication anchors selected streams with one tree query and never reuses a previous revision's modes", (t) => {
+	const { repository, cwd } = fixture(t, true);
+	const session = "tree-catalog-publication";
+	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
+	const snapshot = emptySnapshot(true);
+	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"],
+		captureTemporalGitBase(cwd, session, repository), repository, createSessionRuntime(snapshot, cwd, session, view.lineage), session, false);
+	const next = advanceTemporalState(view, [{ scope: "session", patch: { response: "Next" } }], "next");
+	snapshot.meta.step = 1;
+	const spawn = childProcess.spawnSync;
+	const trees: string[] = [];
+	t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
+		const argv = args[1] as string[];
+		if (args[0] === "git" && argv[2] === "ls-tree") trees.push(argv[4]);
+		return spawn(...args);
+	}) as typeof spawn);
+	syncBuiltinESMExports();
+	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+	const second = publishTemporalStateToGit(cwd, session, next, ["session"], first.base, repository,
+		createSessionRuntime(snapshot, cwd, session, next.lineage), session, false);
+	assert.deepEqual(trees, [first.commit]);
+	const blob = run(repository, "rev-parse", `${second.commit}:checkpoint.json`);
+	run(repository, "update-index", "--cacheinfo", `120000,${blob},checkpoint.json`);
+	run(repository, "commit", "-m", "changed mode at a later HEAD");
+	const current = captureTemporalGitBase(cwd, session, repository);
+	const third = advanceTemporalState(next, [{ scope: "session", patch: { response: "Third" } }], "third");
+	snapshot.meta.step = 2;
+	trees.length = 0;
+	assert.throws(() => publishTemporalStateToGit(cwd, session, third, ["session"], current, repository,
+		createSessionRuntime(snapshot, cwd, session, third.lineage), session, false), /not a regular blob/);
+	assert.deepEqual(trees, [current.head]);
+	assert.deepEqual(captureTemporalGitBase(cwd, session, repository), current);
+});
+
 test("historical temporal reads reject symlink modes even when their blob contains valid checkpoint JSON", (t) => {
 	const { repository, cwd } = fixture(t, true);
 	const session = "temporal-history-mode";
@@ -696,6 +913,110 @@ test("migration push failure retains one accepted commit and retry never repeats
 	run(repository, "remote", "set-url", "origin", remote);
 	assert.equal(pushGitCommit(repository, publication.commit!).status, "pushed");
 	assert.equal(run(remote, "rev-parse", "refs/heads/main"), publication.commit);
+});
+
+for (const [label, suffix] of [["ordinary", "plain"], ["literal", "literal[*?],\" quoted\tline\nnext"]] as const) {
+	test(`prepared Git cohorts use one index update with exact bytes and ${label} paths`, { skip: label === "literal" && process.platform === "win32" }, (t) => {
+		const { repository, cwd } = fixture(t, true);
+		const selectedCwd = join(cwd, suffix);
+		const session = "index-cohort";
+		const view = createTemporalState({ global: { ...emptyState(), working: { payload: "α 🧭\r\n\t\"\u0000" } }, cwd: emptyState(), session: emptyState() }, "index-origin");
+		const runtime = createSessionRuntime(emptySnapshot(true), selectedCwd, session, view.lineage);
+		// Prepared owned outputs must be overlaid even when ordinary worktree staging ignores them.
+		writeFileSync(join(repository, ".gitignore"), "*.json\n*.jsonl\nignored.txt\n");
+		writeFileSync(join(repository, "ignored.txt"), "not committed\n");
+		writeFileSync(join(repository, "README.md"), "staged version\n");
+		run(repository, "add", "README.md");
+		writeFileSync(join(repository, "README.md"), "current worktree version\n");
+		const spawn = childProcess.spawnSync;
+		let indexUpdates = 0;
+		const preparedInputs: string[] = [];
+		const privateIndexes = new Set<string>();
+		t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
+			const argv = args[1] as string[];
+			const options = args[2] as childProcess.SpawnSyncOptions;
+			if (args[0] === "git" && argv[1] === repository) {
+				if (argv[2] === "update-index") indexUpdates++;
+				if (argv[2] === "hash-object") preparedInputs.push(String(options.input));
+				if (options.env?.GIT_INDEX_FILE) privateIndexes.add(options.env.GIT_INDEX_FILE);
+			}
+			return spawn(...args);
+		}) as typeof spawn);
+		syncBuiltinESMExports();
+		t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+		const publication = publishTemporalStateToGit(selectedCwd, session, view, ["global", "cwd", "session"],
+			captureTemporalGitBase(selectedCwd, session, repository), repository, runtime, session, false);
+		assert.ok(publication.commit);
+		if (process.env.GIT_DEFAULT_HASH === "sha256") assert.match(publication.commit, /^[0-9a-f]{64}$/);
+		const files = publication.base.files.filter((file) => file.identity !== "missing");
+		const names = files.map((file) => relative(repository, file.path).split(sep).join("/"));
+		for (const [index, file] of files.entries()) {
+			assert.deepEqual(execFileSync("git", ["-C", repository, "show", `${publication.commit}:${names[index]}`]), Buffer.from(file.content!));
+		}
+		const tree = execFileSync("git", ["-C", repository, "ls-tree", "-rz", "--name-only", publication.commit], { encoding: "utf8" });
+		assert.deepEqual(tree.split("\0").filter(Boolean).sort(), [...names, "README.md", ".gitignore"].sort());
+		assert.deepEqual(preparedInputs.sort(), files.map((file) => file.content!).sort());
+		assert.equal(run(repository, "show", `${publication.commit}:README.md`), "current worktree version");
+		assert.equal(run(repository, "status", "--porcelain=v1"), "");
+		assert.equal(privateIndexes.size, 1);
+		for (const path of privateIndexes) assert.equal(existsSync(dirname(path)), false);
+		assert.deepEqual(loadTemporalRevision(selectedCwd, session, repository, publication.commit).scopes, view.scopes);
+		assert.equal(indexUpdates, 1, "One native index update for all prepared blobs, not one per file");
+	});
+}
+
+test("a malformed batch after valid index records rolls back exact files and caller index, then retries once", (t) => {
+	const { repository, cwd } = fixture(t, true);
+	const session = "failed-index-cohort";
+	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "index-origin");
+	const snapshot = emptySnapshot(true);
+	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"],
+		captureTemporalGitBase(cwd, session, repository), repository, createSessionRuntime(snapshot, cwd, session, view.lineage), session, false);
+	writeFileSync(join(repository, "staged.bin"), Buffer.from([0xff, 0x00, 0x0a]));
+	run(repository, "add", "staged.bin");
+	writeFileSync(join(repository, "README.md"), "retained unstaged edit\n");
+	const before = captureTemporalGitBase(cwd, session, repository);
+	const callerIndex = readFileSync(join(repository, ".git", "index"));
+	const next = advanceTemporalState(view, [{ scope: "session", patch: { response: "Retried once" } }], "next");
+	snapshot.meta.step = 1;
+	const runtime = createSessionRuntime(snapshot, cwd, session, next.lineage);
+	const spawn = childProcess.spawnSync;
+	let corrupt = true;
+	let injected = false;
+	let refUpdates = 0;
+	const privateIndexes = new Set<string>();
+	t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
+		const argv = args[1] as string[];
+		const options = args[2] as childProcess.SpawnSyncOptions;
+		if (args[0] === "git" && argv[1] === repository) {
+			if (argv[2] === "update-ref") refUpdates++;
+			if (options.env?.GIT_INDEX_FILE) privateIndexes.add(options.env.GIT_INDEX_FILE);
+			if (corrupt && argv[2] === "update-index" && argv.includes("--index-info")) {
+				injected = true;
+				assert.ok(String(options.input).split("\0").filter(Boolean).length > 1);
+				return spawn(args[0], argv, { ...options, input: `${options.input}not-an-index-record\0` });
+			}
+		}
+		return spawn(...args);
+	}) as typeof spawn);
+	syncBuiltinESMExports();
+	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+	const publish = () => publishTemporalStateToGit(cwd, session, next, ["session"], before, repository, runtime, session, false);
+	assert.throws(publish, /malformed index info/);
+	assert.equal(injected, true);
+	assert.equal(refUpdates, 0);
+	assert.deepEqual(captureTemporalGitBase(cwd, session, repository), before);
+	assert.deepEqual(readFileSync(join(repository, ".git", "index")), callerIndex);
+	assert.deepEqual(readFileSync(join(repository, "staged.bin")), Buffer.from([0xff, 0x00, 0x0a]));
+	assert.equal(readFileSync(join(repository, "README.md"), "utf8"), "retained unstaged edit\n");
+	for (const path of privateIndexes) assert.equal(existsSync(dirname(path)), false);
+	corrupt = false;
+	const retried = publish();
+	assert.equal(run(repository, "rev-parse", `${retried.commit}^`), first.commit);
+	assert.deepEqual(loadTemporalRevision(cwd, session, repository, retried.commit!).scopes, next.scopes);
+	assert.equal(refUpdates, 1);
+	assert.equal(run(repository, "status", "--porcelain=v1"), "");
+	for (const path of privateIndexes) assert.equal(existsSync(dirname(path)), false);
 });
 
 test("State Flow commits capture the complete non-ignored worktree delta and keep the caller index clean", (t) => {

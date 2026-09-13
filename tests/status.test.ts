@@ -42,7 +42,7 @@ test("renders compact status only while enabled", () => {
 	assert.equal(compactStatus({ ...snapshot, config: { enabled: false } }, colorize), undefined);
 });
 
-test("distinguishes branch, durable scopes, session state, and the effective overlay", () => {
+test("distinguishes branch diagnostics and renders only effective memory as JSON", () => {
 	const output = detailedStatus(snapshot, diagnostics());
 	assert.match(output, /^State Flow diagnostics — config\.enabled=true; branch mode=active/);
 	assert.match(output, /Repository: \/tmp\/knowledge/);
@@ -57,10 +57,18 @@ test("distinguishes branch, durable scopes, session state, and the effective ove
 	assert.match(output, /Artifacts: global 0; CWD 0; session 0; stale 0/);
 	assert.match(output, /Recent transitions: global 0; CWD 0; session 0; active 0/);
 	assert.match(output, /Publication: idle/);
-	assert.match(output, /Materialized states \(\d+ bytes; global\/CWD\/session Git-backed, effective overlay\):\n\n\{/);
-	assert.match(output, /"shared": true/);
-	assert.match(output, /"project": true/);
-	assert.match(output, /"response": "Done"/);
+	const marker = output.match(/Effective memory \(\d+ JSON bytes; global → CWD → session overlay\):\n\n/);
+	assert.ok(marker?.index !== undefined);
+	const memory = JSON.parse(output.slice(marker.index + marker[0].length));
+	assert.deepEqual(memory, {
+		artifacts: {},
+		contract: { shared: true },
+		working: { project: true },
+		response: "Done",
+	});
+	assert.equal(Object.hasOwn(memory, "global"), false);
+	assert.equal(Object.hasOwn(memory, "cwd"), false);
+	assert.equal(Object.hasOwn(memory, "session"), false);
 });
 
 test("summarizes memory ownership, scopes, and promotion recovery without requiring an external schema", () => {
@@ -139,9 +147,9 @@ test("unavailable temporal state is not represented as empty materialization or 
 	const output = h.notifications.at(-1)!;
 	assert.match(output, /Temporal materialization unavailable/);
 	assert.match(output, /Hot history: unavailable/);
+	assert.match(output, /Effective memory: unavailable/);
 	assert.match(output, /Retained patch tails: unavailable/);
 	assert.match(output, /Artifacts: global unknown; CWD unknown; session unknown; stale unknown/);
-	assert.match(output, /Materialized states: unavailable \(global\/CWD\/session\/effective\)/);
 	assert.doesNotMatch(output, /"artifacts"|"working"|Hot history: offsets/);
 	assert.equal(execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }), before);
 	assert.equal(h.entries.length, 0);

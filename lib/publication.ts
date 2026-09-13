@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, parse, resolve, sep } from "node:path";
 
 
@@ -62,7 +62,9 @@ export function remotePublicationDestinationKey(destination: RemotePublicationDe
 	return JSON.stringify([resolve(destination.gitCommonDir), destination.remote, destination.ref]);
 }
 
-const COMMIT = /^[0-9a-f]{40,64}$/;
+function isCommit(value: unknown): value is string {
+	return typeof value === "string" && /^[0-9a-f]{40,64}$/.test(value);
+}
 export type PublicationQueueStatus = "pending" | "pushing" | "failed";
 export interface PublicationQueueState {
 	version: 1;
@@ -76,7 +78,7 @@ export interface PublicationQueueState {
 export type CommitAncestor = (ancestor: string, descendant: string) => boolean;
 
 export function createPublicationQueue(destination: RemotePublicationDestination, target: string): PublicationQueueState {
-	if (!COMMIT.test(target)) throw new Error("Publication queue target must be an exact commit");
+	if (!isCommit(target)) throw new Error("Publication queue target must be an exact commit");
 	remotePublicationDestinationKey(destination);
 	return { version: 1, destination: structuredClone(destination), target, status: "pending", attempt: 0 };
 }
@@ -88,7 +90,7 @@ export interface PublicationCoalesceObserver {
 
 export function coalescePublicationTarget(state: PublicationQueueState, destination: RemotePublicationDestination, target: string, isAncestor: CommitAncestor, observer?: PublicationCoalesceObserver): PublicationQueueState {
 	validatePublicationQueue(state);
-	if (!COMMIT.test(target)) throw new Error("Publication queue target must be an exact commit");
+	if (!isCommit(target)) throw new Error("Publication queue target must be an exact commit");
 	if (remotePublicationDestinationKey(state.destination) !== remotePublicationDestinationKey(destination)) throw new Error("Publication queue destination changed");
 	if (target === state.target || isAncestor(target, state.target)) return structuredClone(state);
 	const previous = structuredClone(state);
@@ -129,7 +131,7 @@ export function failPublicationAttempt(state: PublicationQueueState, error: stri
 
 export function confirmPublicationTarget(state: PublicationQueueState, pushed: string, isAncestor: CommitAncestor): PublicationQueueState | undefined {
 	validatePublicationQueue(state);
-	if (!COMMIT.test(pushed)) throw new Error("Confirmed publication target must be an exact commit");
+	if (!isCommit(pushed)) throw new Error("Confirmed publication target must be an exact commit");
 	if (pushed === state.target) return undefined;
 	if (!isAncestor(pushed, state.target)) throw new Error("Publication confirmation does not cover the queued lineage");
 	return { ...structuredClone(state), confirmed: pushed, status: "pending", error: undefined };
@@ -146,11 +148,11 @@ export function recoverPublicationQueue(state: PublicationQueueState): Publicati
 export function validatePublicationQueue(value: unknown): asserts value is PublicationQueueState {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid publication queue document");
 	const v = value as Record<string, unknown>;
-	if (v.version !== 1 || !COMMIT.test(String(v.target)) || !Number.isSafeInteger(v.attempt) || (v.attempt as number) < 0
+	if (v.version !== 1 || !isCommit(v.target) || !Number.isSafeInteger(v.attempt) || (v.attempt as number) < 0
 		|| (v.status !== "pending" && v.status !== "pushing" && v.status !== "failed")
 		|| typeof v.destination !== "object" || v.destination === null) throw new Error("Invalid publication queue document");
 	remotePublicationDestinationKey(v.destination as unknown as RemotePublicationDestination);
-	if (v.confirmed !== undefined && !COMMIT.test(String(v.confirmed))) throw new Error("Invalid publication queue document");
+	if (v.confirmed !== undefined && !isCommit(v.confirmed)) throw new Error("Invalid publication queue document");
 	if (v.error !== undefined && (typeof v.error !== "string" || !v.error.trim())) throw new Error("Invalid publication queue document");
 	const allowed = new Set(["version", "destination", "target", "confirmed", "status", "attempt", "error"]);
 	if (Object.keys(v).some((key) => !allowed.has(key))) throw new Error("Invalid publication queue document");
@@ -181,6 +183,43 @@ export interface PublicationWorkerLease {
 	release(): void;
 }
 
+interface WorkerLeaseDocument {
+	version: 1;
+	pid: number;
+	token: string;
+	startedAt: string;
+}
+
+function readWorkerLease(path: string): WorkerLeaseDocument | undefined {
+	assertNoSymlinkAncestors(dirname(path));
+	const stat = lstatSync(path, { throwIfNoEntry: false });
+	if (!stat) return undefined;
+	if (!stat.isFile()) throw new Error("Publication worker lease path must be a regular file");
+	let descriptor: number;
+	try { descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; // A live owner may have released it.
+		throw error;
+	}
+	try {
+		if (!fstatSync(descriptor).isFile()) throw new Error("Publication worker lease path must be a regular file");
+		const source = readFileSync(descriptor, "utf8");
+		let value: unknown;
+		try { value = JSON.parse(source); } catch { throw new Error("Publication worker lease is malformed"); }
+		if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Publication worker lease is malformed");
+		const record = value as Record<string, unknown>;
+		if (Object.keys(record).sort().join(",") !== "pid,startedAt,token,version" || record.version !== 1
+			|| !Number.isSafeInteger(record.pid) || (record.pid as number) <= 0 || (record.pid as number) > 2147483647
+			|| typeof record.token !== "string" || !record.token.trim() || record.token !== record.token.trim()
+			|| typeof record.startedAt !== "string" || !Number.isFinite(Date.parse(record.startedAt))) {
+			throw new Error("Publication worker lease is malformed");
+		}
+		return record as unknown as WorkerLeaseDocument;
+	} finally {
+		closeSync(descriptor);
+	}
+}
+
 function processAlive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; }
 	catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
@@ -191,28 +230,42 @@ export function acquirePublicationWorkerLease(queuePath: string): PublicationWor
 	assertNoSymlinkAncestors(dirname(path));
 	const token = randomUUID();
 	const document = `${JSON.stringify({ version: 1, pid: process.pid, token, startedAt: new Date().toISOString() })}\n`;
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			writeFileSync(path, document, { flag: "wx", mode: 0o600 });
-			return {
-				path, token,
-				release() {
-					let current: unknown;
-					try { current = JSON.parse(readFileSync(path, "utf8")); } catch { return; }
-					if (typeof current === "object" && current !== null && (current as { token?: unknown }).token === token) rmSync(path, { force: true });
-				},
-			};
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			let current: unknown;
-			try { current = JSON.parse(readFileSync(path, "utf8")); } catch { throw new Error("Publication worker lease is malformed"); }
-			const pid = typeof current === "object" && current !== null ? (current as { pid?: unknown }).pid : undefined;
-			if (!Number.isSafeInteger(pid) || (pid as number) <= 0) throw new Error("Publication worker lease is malformed");
-			if (processAlive(pid as number)) return undefined;
-			rmSync(path, { force: true });
+	const create = (): PublicationWorkerLease | undefined => {
+		try { writeFileSync(path, document, { flag: "wx", mode: 0o600 }); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+			throw error;
 		}
+		return { path, token, release() {
+			let current: WorkerLeaseDocument | undefined;
+			try { current = readWorkerLease(path); } catch { return; }
+			// A live owner cannot be reclaimed, so release need not wait for queue writers.
+			if (current?.pid === process.pid && current.token === token) rmSync(path, { force: true });
+		} };
+	};
+	const lease = create();
+	if (lease) return lease;
+	const current = readWorkerLease(path);
+	if (!current) return create();
+	if (processAlive(current.pid)) return undefined;
+	// Only reclamation needs the existing queue writer gate; exclusive creation protects fresh claims.
+	const gate = `${resolve(queuePath)}.lock`;
+	assertNoSymlinkAncestors(dirname(gate));
+	let descriptor: number;
+	try { descriptor = openSync(gate, "wx", 0o600); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+		throw error;
 	}
-	return undefined;
+	try {
+		const owner = readWorkerLease(path);
+		if (owner && processAlive(owner.pid)) return undefined;
+		if (owner) rmSync(path, { force: true });
+		return create(); // A fresh claimant may win the gap; never remove its replacement.
+	} finally {
+		closeSync(descriptor);
+		rmSync(gate, { force: true });
+	}
 }
 
 export function loadPublicationQueue(path: string): PublicationQueueState | undefined {

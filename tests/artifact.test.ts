@@ -170,7 +170,7 @@ test("plans only stale acquisitions and deterministic removals", () => {
 			"/knowledge/removed.md": metadata(),
 		},
 		"artifact-v1",
-		{ explicitRefresh: new Set([unchanged.path]) },
+		{ explicitRefresh: new Set([unchanged.path]), removed: ["/knowledge/removed.md"] },
 	);
 	assert.deepEqual(plan, {
 		fresh: [],
@@ -181,6 +181,17 @@ test("plans only stale acquisitions and deterministic removals", () => {
 		],
 		removed: ["/knowledge/removed.md"],
 	});
+});
+
+test("partial candidate sets never imply removals without explicit owner evidence", () => {
+	const source = { path: "/knowledge/keep.md", hash };
+	const registry = { [source.path]: metadata(), "/knowledge/gone.md": metadata(), "/external/data.txt": metadata() };
+	assert.deepEqual(planArtifactInvalidation([source], registry, "artifact-v1").removed, []);
+	assert.deepEqual(planArtifactInvalidation([source], registry, "artifact-v1", {
+		removed: ["/knowledge/gone.md", "/unknown.md", "/knowledge/gone.md"],
+	}).removed, ["/knowledge/gone.md"]);
+	assert.throws(() => planArtifactInvalidation([source], registry, "artifact-v1", { removed: [source.path] }), /both present and removed/);
+	assert.throws(() => planArtifactInvalidation([], registry, "artifact-v1", { removed: [""] }), /non-empty/);
 });
 
 test("a compiler revision bump invalidates unchanged sources deterministically", () => {

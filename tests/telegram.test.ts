@@ -246,6 +246,6 @@ test("section controls drive the same branch lifecycle as the commands", async (
 	assert.equal(h.resolveSnapshot().config.enabled, true);
 	assert.equal(await sections[0].handleCallback!(control("stop")), "handled");
 	assert.equal(h.resolveSnapshot().config.enabled, false);
-	h.handlers.get("session_shutdown")!();
+	await h.handlers.get("session_shutdown")!({ reason: "quit" }, h.ctx);
 	assert.deepEqual(disposed, ["@llblab/pi-state-flow"]);
 });

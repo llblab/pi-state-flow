@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -125,6 +128,36 @@ test("strict queue documents reject corrupt targets, counters, and unknown field
 	}
 });
 
+test("queue commit boundaries reject non-string values without coercion or side effects", async (t) => {
+	const valid = createPublicationQueue(destination, a);
+	const root = mkdtempSync(join(tmpdir(), "state-flow-queue-types-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const path = join(root, "queue.json");
+	for (const value of [[a], [[a]], { toString: () => a }]) {
+		let ancestryCalls = 0;
+		const unusedAncestry = () => { ancestryCalls += 1; return true; };
+		assert.throws(() => createPublicationQueue(destination, value as any), /exact commit/);
+		assert.throws(() => coalescePublicationTarget(valid, destination, value as any, unusedAncestry), /exact commit/);
+		assert.throws(() => confirmPublicationTarget(valid, value as any, unusedAncestry), /exact commit/);
+		assert.equal(ancestryCalls, 0);
+		for (const field of ["target", "confirmed"] as const) {
+			const invalid = { ...valid, [field]: value };
+			assert.throws(() => validatePublicationQueue(invalid), /Invalid publication queue/);
+			assert.throws(() => parsePublicationQueue(JSON.stringify(invalid)), /Invalid publication queue/);
+			assert.throws(() => serializePublicationQueue(invalid as any), /Invalid publication queue/);
+			writeFileSync(path, JSON.stringify(invalid));
+			const bytes = readFileSync(path);
+			assert.throws(() => loadPublicationQueue(path), /Invalid publication queue/);
+			assert.throws(() => savePublicationQueue(path, valid), /Invalid publication queue/);
+			let pushes = 0;
+			await assert.rejects(runPublicationWorker(invalid as any, async () => { pushes += 1; }, () => valid, unusedAncestry), /Invalid publication queue/);
+			assert.equal(pushes, 0);
+			assert.deepEqual(readFileSync(path), bytes);
+		}
+	}
+	assert.deepEqual(parsePublicationQueue(serializePublicationQueue({ ...valid, confirmed: b })), { ...valid, confirmed: b });
+});
+
 test("atomically persists and reloads a restart-safe queue document", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-queue-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -136,23 +169,154 @@ test("atomically persists and reloads a restart-safe queue document", (t) => {
 	assert.equal(readFileSync(path, "utf8").endsWith("\n"), true);
 });
 
-test("leases one cross-process worker and recovers only proven dead owners", (t) => {
+test("worker leases protect live and malformed owners while recovering a valid dead owner", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-worker-lease-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const queue = join(root, "queue.json");
 	const first = acquirePublicationWorkerLease(queue)!;
 	assert.ok(first);
 	assert.equal(acquirePublicationWorkerLease(queue), undefined);
+	const dead = { ...JSON.parse(readFileSync(first.path, "utf8")), pid: 2147483647 };
 	first.release();
 	const second = acquirePublicationWorkerLease(queue)!;
+	first.release();
+	assert.equal(JSON.parse(readFileSync(second.path, "utf8")).token, second.token);
 	second.release();
-	writeFileSync(`${queue}.worker.lock`, JSON.stringify({ version: 1, pid: 2147483647, token: "dead" }));
+	writeFileSync(`${queue}.worker.lock`, JSON.stringify(dead));
 	const recovered = acquirePublicationWorkerLease(queue)!;
 	assert.ok(recovered);
 	recovered.release();
-	writeFileSync(`${queue}.worker.lock`, "{broken");
-	assert.throws(() => acquirePublicationWorkerLease(queue), /malformed/);
-	assert.equal(readFileSync(`${queue}.worker.lock`, "utf8"), "{broken");
+	for (const content of [
+		"{broken", JSON.stringify({ pid: dead.pid }), JSON.stringify({ ...dead, version: 2 }),
+		JSON.stringify({ ...dead, token: "" }), JSON.stringify({ ...dead, startedAt: "invalid" }),
+		JSON.stringify({ ...dead, extra: true }), JSON.stringify({ ...dead, pid: 2147483648 }),
+	]) {
+		writeFileSync(`${queue}.worker.lock`, content);
+		assert.throws(() => acquirePublicationWorkerLease(queue), /malformed/);
+		assert.equal(readFileSync(`${queue}.worker.lock`, "utf8"), content);
+	}
+});
+
+test("two processes cannot both reclaim the same dead worker lease", { timeout: 20_000 }, async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-lease-race-"));
+	const queue = join(root, "queue.json");
+	const workers: Array<{ child: ChildProcessWithoutNullStreams; closed: Promise<number | null> }> = [];
+	t.after(async () => {
+		for (const { child } of workers) {
+			if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+			child.stdin.destroy();
+		}
+		await Promise.all(workers.map(({ closed }) => closed));
+		rmSync(root, { recursive: true, force: true });
+	});
+	function startWorker(mode: "seed" | "claim", owner = 0, pauseAt = "dead") {
+		const child = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./publication-worker.ts", import.meta.url)), queue, mode, String(owner), pauseAt], { stdio: "pipe" });
+		let stderr = "";
+		child.stderr.on("data", (data) => { stderr += data.toString(); });
+		child.on("error", (error) => { stderr += error.message; });
+		const closed = new Promise<number | null>((resolve) => child.once("close", resolve));
+		workers.push({ child, closed });
+		const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+		return {
+			child, closed,
+			async next() {
+				const line = await lines.next();
+				assert.equal(line.done, false, `Lease fixture exited before its next event: ${stderr}`);
+				return JSON.parse(line.value!);
+			},
+			proceed() { child.stdin.write("c"); },
+		};
+	}
+	const seedWorker = startWorker("seed");
+	const seed = await seedWorker.next();
+	assert.equal(seed.granted, true);
+	assert.equal(await seedWorker.closed, 0);
+	const first = startWorker("claim", seed.pid);
+	assert.deepEqual(await first.next(), { event: "observed-dead", pid: first.child.pid, owner: seed.pid });
+	const second = startWorker("claim", seed.pid);
+	let contender = await second.next();
+	assert.ok(contender.event === "observed-dead" || contender.event === "result");
+	first.proceed();
+	const granted = await first.next();
+	assert.equal(granted.granted, true);
+	assert.equal(JSON.parse(readFileSync(`${queue}.worker.lock`, "utf8")).token, granted.token);
+	if (contender.event === "observed-dead") {
+		assert.equal(contender.owner, seed.pid);
+		second.proceed();
+		contender = await second.next();
+	}
+	assert.equal(contender.granted, false, `Both contenders received a lease: ${JSON.stringify({ first: granted, second: contender })}`);
+	assert.equal(JSON.parse(readFileSync(`${queue}.worker.lock`, "utf8")).token, granted.token);
+	assert.equal(await second.closed, 0);
+	const liveContender = startWorker("claim", seed.pid);
+	assert.equal((await liveContender.next()).granted, false, "a live foreign PID remains protected after the claim gate is released");
+	assert.equal(await liveContender.closed, 0);
+	first.proceed();
+	assert.equal((await first.next()).event, "released");
+	assert.equal(await first.closed, 0);
+	assert.equal(existsSync(`${queue}.worker.lock`), false);
+	// Exclusive creation may legitimately win after dead-record removal, even while its gate is held.
+	const nextSeedWorker = startWorker("seed");
+	const nextSeed = await nextSeedWorker.next();
+	assert.equal(await nextSeedWorker.closed, 0);
+	const reclaiming = startWorker("claim", nextSeed.pid, "removed");
+	assert.equal((await reclaiming.next()).event, "removed");
+	const fresh = startWorker("claim", nextSeed.pid);
+	const freshResult = await fresh.next();
+	assert.equal(freshResult.granted, true);
+	reclaiming.proceed();
+	assert.equal((await reclaiming.next()).granted, false);
+	assert.equal(await reclaiming.closed, 0);
+	assert.equal(JSON.parse(readFileSync(`${queue}.worker.lock`, "utf8")).token, freshResult.token);
+	fresh.proceed();
+	assert.equal((await fresh.next()).event, "released");
+	assert.equal(await fresh.closed, 0);
+	assert.equal(existsSync(`${queue}.worker.lock`), false);
+	assert.equal(existsSync(`${queue}.lock`), false);
+});
+
+test("dead lease reclamation respects the queue writer gate without blocking fresh claims or release", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-lease-gate-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const queue = join(root, "queue.json");
+	const lease = acquirePublicationWorkerLease(queue)!;
+	const dead = JSON.stringify({ ...JSON.parse(readFileSync(lease.path, "utf8")), pid: 2147483647 });
+	assert.equal(existsSync(`${queue}.lock`), false, "the claim gate is not held during the push lifetime");
+	writeFileSync(`${queue}.lock`, "occupied");
+	lease.release();
+	assert.equal(existsSync(lease.path), false);
+	const fresh = acquirePublicationWorkerLease(queue)!;
+	assert.ok(fresh, "exclusive creation already protects a fresh claim");
+	fresh.release();
+	writeFileSync(lease.path, dead);
+	assert.equal(acquirePublicationWorkerLease(queue), undefined);
+	assert.equal(readFileSync(lease.path, "utf8"), dead);
+	assert.equal(readFileSync(`${queue}.lock`, "utf8"), "occupied");
+	rmSync(`${queue}.lock`);
+	acquirePublicationWorkerLease(queue)!.release();
+});
+
+test("lease acquisition and release preserve symlinks and foreign replacements", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-lease-path-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const queue = join(root, "queue.json");
+	const lease = acquirePublicationWorkerLease(queue)!;
+	const original = readFileSync(lease.path, "utf8");
+	const outside = join(root, "outside.json");
+	lease.release();
+	writeFileSync(outside, JSON.stringify({ ...JSON.parse(original), pid: 2147483647 }));
+	symlinkSync(outside, lease.path);
+	assert.throws(() => acquirePublicationWorkerLease(queue), /regular file/);
+	assert.equal(lstatSync(lease.path).isSymbolicLink(), true);
+	writeFileSync(outside, original);
+	lease.release();
+	assert.equal(lstatSync(lease.path).isSymbolicLink(), true);
+	assert.equal(readFileSync(outside, "utf8"), original);
+	rmSync(lease.path);
+	const replacement = JSON.stringify({ ...JSON.parse(original), pid: 2147483647 });
+	writeFileSync(lease.path, replacement);
+	lease.release();
+	assert.equal(readFileSync(lease.path, "utf8"), replacement, "release cannot act as reclamation of another PID, even with a copied token");
 });
 
 test("serializes writers and rejects stale compare-and-swap receipts", (t) => {

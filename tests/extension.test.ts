@@ -5,12 +5,101 @@ import test from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStorageKey, temporalScopePaths } from "../lib/durable.ts";
 import { getKnowledgeRoot } from "../lib/discovery.ts";
 import { hashArtifactSource } from "../lib/artifact.ts";
 import { MAX_FALLBACK_ATTEMPTS } from "../lib/extension.ts";
+import { resolveGitPushDestination } from "../lib/git.ts";
+import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePath, savePublicationQueue } from "../lib/publication.ts";
+import { interceptGitPushes } from "./push-fixture.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
+
+test("push timeout preserves the exact failed target without a retry loop, then a later activation can recover it", { timeout: 10_000 }, async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const pushes = interceptGitPushes(t);
+	const h = harness({ remotePublication: "turn-end" });
+	await start(h);
+	assert.equal(pushes.length, 1);
+	await pushes[0].ready;
+	const path = publicationQueuePath(resolveGitPushDestination(h.repositoryRoot)!);
+	const before = loadPublicationQueue(path)!;
+	const selected = h.resolveSnapshot();
+	t.mock.timers.tick(15_000);
+	await pushes[0].closed;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	const failed = loadPublicationQueue(path)!;
+	assert.equal(failed.target, before.target);
+	assert.equal(failed.status, "failed");
+	assert.equal(failed.attempt, 1);
+	assert.match(failed.error!, /timed out after 15000ms/);
+	assert.equal(existsSync(`${path}.worker.lock`), false);
+	assert.equal(pushes.length, 1);
+	assert.deepEqual(h.resolveSnapshot(), selected);
+	h.handlers.get("agent_settled")!({}, h.ctx);
+	assert.equal(pushes.length, 2);
+	await pushes[1].ready;
+	assert.equal(pushes[1].requested.args.at(-1), `${before.target}:${before.destination.ref}`);
+	pushes[1].child.stdin.end("0");
+	await pushes[1].closed;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(loadPublicationQueue(path), undefined);
+	assert.equal(existsSync(`${path}.worker.lock`), false);
+	assert.deepEqual(h.resolveSnapshot(), selected);
+	await h.handlers.get("session_shutdown")!({ reason: "quit" }, h.ctx);
+});
+
+test("shutdown waits at most 2000ms, retains an unconfirmed live lease, and fences late completion and relaunch", { timeout: 15_000, skip: process.platform === "win32" }, async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const pushes = interceptGitPushes(t);
+	const h = harness({ remotePublication: "turn-end" });
+	await start(h);
+	const first = pushes[0];
+	await first.ready;
+	const path = publicationQueuePath(resolveGitPushDestination(h.repositoryRoot)!);
+	const leaseBytes = readFileSync(`${path}.worker.lock`);
+	const before = loadPublicationQueue(path)!;
+	execFileSync("git", ["-C", h.repositoryRoot, "commit", "--allow-empty", "-m", "newer pending target"]);
+	const target = execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+	savePublicationQueue(path, { ...before, target }, before);
+	const queueBytes = readFileSync(path);
+	const kill = process.kill.bind(process);
+	// Simulate rejected termination for only this owned child; lease liveness probes still use the OS.
+	t.mock.method(process, "kill", ((pid: number, signal?: string | number) => {
+		if (pid === -first.child.pid! && signal === "SIGKILL") throw Object.assign(new Error("Synthetic kill refusal"), { code: "EPERM" });
+		return kill(pid, signal);
+	}) as typeof process.kill);
+	const shutdown = h.handlers.get("session_shutdown")!({ reason: "reload" }, h.ctx) as Promise<void>;
+	assert.equal(h.handlers.get("session_shutdown")!({ reason: "reload" }, h.ctx), shutdown);
+	let settled = false;
+	void shutdown.then(() => { settled = true; });
+	t.mock.timers.tick(1999);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(settled, false);
+	t.mock.timers.tick(1);
+	await shutdown;
+	assert.equal(settled, true);
+	assert.match(h.notifications.at(-1)!, /unconfirmed after 2000ms/);
+	assert.equal(first.child.exitCode, null);
+	assert.equal(first.child.signalCode, null);
+	assert.deepEqual(readFileSync(`${path}.worker.lock`), leaseBytes);
+	assert.equal(acquirePublicationWorkerLease(path), undefined);
+	assert.deepEqual(readFileSync(path), queueBytes);
+	h.handlers.get("agent_settled")!({}, h.ctx);
+	assert.equal(pushes.length, 1);
+	first.child.stdin.end("0"); // A late successful exit is still not permission for the old generation to acknowledge the queue.
+	await first.closed;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(first.child.exitCode, 0);
+	assert.equal(pushes.length, 1, "Late cleanup must never launch another push from the disposed generation");
+	assert.deepEqual(readFileSync(path), queueBytes);
+	assert.equal(existsSync(`${path}.worker.lock`), false);
+	const replacement = acquirePublicationWorkerLease(path);
+	assert.ok(replacement);
+	replacement.release();
+});
 
 test("fresh explicit start is local-only; ordinary startup/status and old pointers never create storage", async (t) => {
 	const agentDir = mkdtempSync(join(tmpdir(), "state-flow-fresh-"));
@@ -342,6 +431,73 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 	assert.match(gate({ toolCallId: "patch-2", toolName: "patch_state", input: {} }, h.ctx).reason, /exactly one/);
 });
 
+test("tool preflight walks only the selected native suffix for matching calls, without rebuilding a branch", async (t) => {
+	const h = harness({ remotePublication: "off" });
+	await start(h);
+	const gate = h.handlers.get("tool_call")!;
+	const observations: Array<{ pastRuns: number; branchEntries: number; visited: string[]; expected: string[] }> = [];
+	for (const pastRuns of [0, 200]) {
+		const manager = SessionManager.inMemory(h.ctx.cwd);
+		for (let run = 0; run < pastRuns; run++) {
+			manager.appendMessage(user(`Old request ${run}`, run * 2));
+			manager.appendMessage(fauxAssistantMessage(`Old answer ${run}`));
+		}
+		const assistant = manager.appendMessage(fauxAssistantMessage([
+			fauxToolCall("read", { path: "not-executed.txt" }, { id: "read-1" }),
+			fauxToolCall("patch_state", { final: true }, { id: "patch-1" }),
+		], { stopReason: "toolUse" }));
+		const custom = manager.appendCustomEntry("foreign-context", { retained: true });
+		const result = manager.appendMessage({ role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "Blocked sibling" }], isError: true, timestamp: Date.now() });
+		const selected = manager.appendCustomEntry("foreign-after-result", { retained: true });
+		const abandoned = manager.appendMessage(fauxAssistantMessage([
+			fauxToolCall("patch_state", { final: true }, { id: "patch-1" }),
+			fauxToolCall("patch_state", { final: true }, { id: "patch-2" }),
+		], { stopReason: "toolUse" }));
+		manager.branch(selected);
+		const before = structuredClone(manager.getEntries());
+		const branch = manager.getBranch.bind(manager);
+		const leaf = manager.getLeafEntry.bind(manager);
+		const entry = manager.getEntry.bind(manager);
+		let branchEntries = 0;
+		let visited: string[] = [];
+		t.mock.method(manager, "getBranch", (...args: Parameters<typeof branch>) => {
+			const path = branch(...args);
+			branchEntries += path.length;
+			return path;
+		});
+		t.mock.method(manager, "getLeafEntry", () => {
+			const value = leaf();
+			if (value) visited.push(value.id);
+			return value;
+		});
+		t.mock.method(manager, "getEntry", (id: string) => {
+			visited.push(id);
+			return entry(id);
+		});
+		const ctx = { ...h.ctx, sessionManager: manager };
+		for (const [toolCallId, toolName] of [["read-1", "read"], ["patch-1", "patch_state"]]) {
+			branchEntries = 0;
+			visited = [];
+			const rejection = gate({ toolCallId, toolName, input: {} }, ctx);
+			if (toolName === "read") assert.match(rejection.reason, /barrier/);
+			else assert.equal(rejection, undefined);
+			observations.push({ pastRuns, branchEntries, visited, expected: [selected, result, custom, assistant] });
+		}
+		manager.branch(abandoned);
+		branchEntries = 0;
+		visited = [];
+		assert.match(gate({ toolCallId: "patch-1", toolName: "patch_state", input: {} }, ctx).reason, /exactly one/);
+		observations.push({ pastRuns, branchEntries, visited, expected: [abandoned] });
+		visited = [];
+		assert.equal(gate({ toolCallId: "missing", toolName: "read", input: {} }, ctx), undefined);
+		assert.equal(manager.getLeafId(), abandoned);
+		assert.deepEqual(manager.getEntries(), before, "preflight must preserve the complete native tree, including the unselected branch");
+	}
+	assert.deepEqual(observations.map(({ pastRuns, branchEntries }) => ({ pastRuns, branchEntries })),
+		[0, 0, 0, 200, 200, 200].map((pastRuns) => ({ pastRuns, branchEntries: 0 })), "preflight must not rebuild completed native history");
+	for (const { visited, expected } of observations) assert.deepEqual(visited, expected, "stop at the nearest matching assistant without a stale branch/batch cache");
+});
+
 test("patch_state tolerates shared-scope drift while preserving the session layer", async () => {
 	const a = harness({ remotePublication: "off" });
 	await start(a, "Session A");
@@ -610,6 +766,27 @@ test("reload, startup, resume, and tree restoration preserve only the same physi
 	for (const reason of ["new", "fork"]) {
 		h.handlers.get("session_start")!({ reason }, h.ctx);
 		assert.equal(h.handlers.get("context")!({ messages: [user("Continue", Date.now() + 1_000)] }, h.ctx), undefined);
+	}
+});
+
+test("idle Stop does not retain the last run anchor and legacy markers keep their cutoff on reload", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Completed request");
+	h.handlers.get("message_end")!({ message: user("Completed request", 1) }, h.ctx);
+	await commitTerminal(h, {}, { done: true }, "Completed answer");
+	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
+	const marker = h.entries.find((entry) => entry.customType === "state-flow-passive-stop")!;
+	assert.deepEqual(marker.data, { at: marker.data.at });
+	for (const data of [{ at: marker.data.at }, { at: marker.data.at, from: -1 }]) {
+		marker.data = data;
+		h.handlers.get("session_start")!({ reason: "reload" }, h.ctx);
+		const projected = h.handlers.get("context")!({ messages: [
+			user("Malformed older timestamp", -1),
+			user("Completed request", 1),
+			user("Later request", marker.data.at + 1),
+		] }, h.ctx);
+		assert.equal(projected.messages.length, 2);
+		assert.equal(projected.messages[1].content[0].text, "Later request");
 	}
 });
 

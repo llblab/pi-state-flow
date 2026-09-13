@@ -336,7 +336,7 @@ test("disables restoration of non-JSON materialized state", async () => {
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /config\.enabled=false; branch mode=inactive/);
 	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #3/);
-	assert.match(h.notifications.at(-1)!, /Materialized states: unavailable/);
+	assert.match(h.notifications.at(-1)!, /Effective memory: unavailable/);
 	assert.doesNotMatch(h.notifications.at(-1)!, /"response":/);
 });
 test("does not reinterpret a malformed materialized state as legacy working memory", () => {

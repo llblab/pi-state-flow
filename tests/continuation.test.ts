@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -138,6 +138,22 @@ test("reads only the native header contract and does not parse transcript bodies
 	const header = readNativeSessionHeader(file);
 	assert.equal(header.id, "one");
 	assert.equal(header.cwd, f.root);
+	assert.deepEqual(readFileSync(file), before);
+});
+
+test("native header reads reject non-regular files and symlinked parent locators", { skip: process.platform === "win32" }, (t) => {
+	const f = fixture(t);
+	const file = join(f.sessions, "parent.jsonl");
+	writeSession(file, "parent", f.root);
+	const before = readFileSync(file);
+	const alias = join(f.root, "alias.jsonl");
+	const directory = join(f.root, "alias-dir");
+	symlinkSync(file, alias);
+	symlinkSync(f.sessions, directory, "dir");
+	for (const path of [f.sessions, alias, join(directory, "parent.jsonl")]) assert.throws(() => readNativeSessionHeader(path), /regular canonical file/);
+	const fifo = join(f.sessions, "fifo.jsonl");
+	execFileSync("mkfifo", [fifo]);
+	assert.throws(() => readNativeSessionHeader(fifo), /regular canonical file/);
 	assert.deepEqual(readFileSync(file), before);
 });
 

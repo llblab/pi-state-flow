@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { loadScopeStream, resolveSessionAddress, sessionRuntimePaths } from "./durable.ts";
 import { loadTemporalRevision } from "./git.ts";
@@ -156,8 +156,10 @@ export interface ContinuationCandidateProvenance {
 }
 
 function readFirstLine(path: string): string {
-	const fd = openSync(path, "r");
+	if (realpathSync(path) !== path || !lstatSync(path).isFile()) throw new Error("Native Pi session header requires a regular canonical file");
+	const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
 	try {
+		if (!fstatSync(fd).isFile()) throw new Error("Native Pi session header requires a regular file");
 		const bytes: number[] = [];
 		const byte = Buffer.allocUnsafe(1);
 		while (bytes.length <= MAX_SESSION_HEADER_BYTES) {

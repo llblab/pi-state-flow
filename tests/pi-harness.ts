@@ -5,13 +5,17 @@ import { join } from "node:path";
 import type { TestContext } from "node:test";
 import {
 	createAgentSession,
+	createAgentSessionRuntime,
 	DefaultResourceLoader,
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
 	type AgentSession,
+	type AgentSessionRuntime,
+	type CreateAgentSessionRuntimeResult,
+	type SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { fauxProvider, type FauxProviderHandle } from "@earendil-works/pi-ai";
+import { fauxProvider, InMemoryCredentialStore, type FauxProviderHandle } from "@earendil-works/pi-ai";
 import stateFlowExtension from "../index.ts";
 import type { MaterializedState, StateScope } from "../lib/state.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
@@ -37,6 +41,7 @@ export interface RealPiFixture {
 	notifications: string[];
 	statuses: Array<string | undefined>;
 	readState(session: AgentSession, offset?: number, scope?: StateScope): MaterializedState;
+	createRuntime(reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSessionRuntime>;
 	createSession(reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSession>;
 	createSessionAt(cwd: string, reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSession>;
 }
@@ -46,6 +51,9 @@ export async function realPiFixture(t: TestContext, options: {
 	initializeRepository?: boolean;
 	autoStart?: boolean;
 	remotePublication?: "off" | "turn-end" | "transition";
+	stateFlow?: boolean;
+	contextWindow?: number;
+	compaction?: { enabled: boolean; keepRecentTokens: number; reserveTokens?: number };
 } = {}): Promise<RealPiFixture> {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-real-pi-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -71,24 +79,25 @@ export async function realPiFixture(t: TestContext, options: {
 		git(repositoryRoot, "push", "-u", "origin", "main");
 	}
 
-	const modelRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
 	const faux = fauxProvider({
 		provider: `state-flow-integration-${process.pid}-${Math.random().toString(16).slice(2)}`,
 		...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }),
+		...(options.contextWindow === undefined ? {} : { models: [{ id: "state-flow-test", contextWindow: options.contextWindow, maxTokens: Math.max(1, Math.floor(options.contextWindow / 4)) }] }),
 	});
 	modelRuntime.registerNativeProvider(faux.provider);
 	const notifications: string[] = [];
 	const statuses: Array<string | undefined> = [];
 	const accessors = new Map<string, { read(offset?: number, scope?: StateScope): MaterializedState }>();
 
-	async function createSessionAt(
+	async function createSessionResult(
 		sessionCwd: string,
-		reason: "startup" | "new" | "resume" = "startup",
-		manager = SessionManager.create(sessionCwd, sessionDir),
-	): Promise<AgentSession> {
+		manager: SessionManager,
+		sessionStartEvent: SessionStartEvent,
+	): Promise<CreateAgentSessionRuntimeResult> {
 		mkdirSync(sessionCwd, { recursive: true });
 		const settingsManager = SettingsManager.inMemory({
-			compaction: { enabled: false, keepRecentTokens: 1 },
+			compaction: options.compaction ?? { enabled: false, keepRecentTokens: 1 },
 			retry: { enabled: false },
 		});
 		const resourceLoader = new DefaultResourceLoader({
@@ -100,7 +109,7 @@ export async function realPiFixture(t: TestContext, options: {
 			noPromptTemplates: true,
 			noThemes: true,
 			noContextFiles: true,
-			extensionFactories: [{
+			extensionFactories: options.stateFlow === false ? [] : [{
 				name: "state-flow-integration",
 				factory: (pi) => stateFlowExtension(pi, { agentDir, repositoryRoot, knowledgeRoot: join(agentDir, "knowledge"), onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
 			}],
@@ -109,7 +118,7 @@ export async function realPiFixture(t: TestContext, options: {
 		if (resourceLoader.getExtensions().errors.length > 0) {
 			throw new Error(`Could not load State Flow integration extension: ${JSON.stringify(resourceLoader.getExtensions().errors)}`);
 		}
-		const { session } = await createAgentSession({
+		const result = await createAgentSession({
 			cwd: sessionCwd,
 			agentDir,
 			model: faux.getModel(),
@@ -117,9 +126,10 @@ export async function realPiFixture(t: TestContext, options: {
 			resourceLoader,
 			settingsManager,
 			sessionManager: manager,
-			sessionStartEvent: { type: "session_start", reason },
-			tools: ["read", "patch_state", "read_state"],
+			sessionStartEvent,
+			tools: options.stateFlow === false ? ["read"] : ["read", "patch_state", "read_state"],
 		});
+		const { session } = result;
 		await session.bindExtensions({
 			mode: "json",
 			uiContext: {
@@ -132,7 +142,26 @@ export async function realPiFixture(t: TestContext, options: {
 			root: repositoryRoot,
 			sessionKey: resolveSessionAddress(session.sessionManager.getSessionFile(), session.sessionManager.getSessionId(), session.sessionManager.getHeader()?.timestamp).key,
 		});
-		return session;
+		return {
+			...result,
+			services: { cwd: sessionCwd, agentDir, modelRuntime, settingsManager, resourceLoader, diagnostics: [] },
+			diagnostics: [],
+		};
+	}
+
+	async function createSessionAt(
+		sessionCwd: string,
+		reason: "startup" | "new" | "resume" = "startup",
+		manager = SessionManager.create(sessionCwd, sessionDir),
+	): Promise<AgentSession> {
+		return (await createSessionResult(sessionCwd, manager, { type: "session_start", reason })).session;
+	}
+
+	function createRuntime(reason: "startup" | "new" | "resume" = "startup", manager = SessionManager.create(cwd, sessionDir)): Promise<AgentSessionRuntime> {
+		return createAgentSessionRuntime(
+			({ cwd: sessionCwd, sessionManager, sessionStartEvent }) => createSessionResult(sessionCwd, sessionManager, sessionStartEvent ?? { type: "session_start", reason }),
+			{ cwd, agentDir, sessionManager: manager, sessionStartEvent: { type: "session_start", reason } },
+		);
 	}
 
 	function createSession(reason: "startup" | "new" | "resume" = "startup", manager?: SessionManager): Promise<AgentSession> {
@@ -150,6 +179,7 @@ export async function realPiFixture(t: TestContext, options: {
 		modelRuntime,
 		notifications,
 		statuses,
+		createRuntime,
 		createSession,
 		createSessionAt,
 		readState: (session, offset, scope) => accessors.get(session.sessionManager.getSessionId())!.read(offset, scope),

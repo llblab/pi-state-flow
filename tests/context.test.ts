@@ -5,10 +5,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { currentRunTrajectory, runtimeContextMessage, withoutPrivateValidation } from "../lib/context.ts";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, runtimeContextMessage, withoutPrivateValidation } from "../lib/context.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { startEpisode } from "../lib/episode.ts";
-import { emptyState } from "../lib/state.ts";
+import { emptyState, type MaterializedState } from "../lib/state.ts";
 import { commitScopedTerminal, commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
 const message = (role: string, text: string, timestamp: number, customType?: string) => ({
@@ -40,17 +41,105 @@ test("ordinary context derives compact lineage from cached runtime without Git q
 	}
 });
 
+test("enabled context projects the complete overlay once in ordinary and bootstrap runs", async (t) => {
+	const observations: Array<{ bootstrap: boolean; bytes: number; copies: number }> = [];
+	for (const bootstrap of [false, true]) for (const bytes of [8192, 1048576]) {
+		const h = harness({ remotePublication: "off" });
+		if (bootstrap) h.entries.push({ type: "message", message: user("Existing request", 1) });
+		await start(h, "Current request");
+		await h.tools.get("patch_state")!.execute("seed-context", {
+			global: { contract: { globalContext: true } },
+			cwd: { contract: { cwdContext: true } },
+			session: { working: { contextPayload: "x".repeat(bytes) }, artifacts: {
+				"/context/source": { description: "Retained route", compilation: { decision: "Keep semantic metadata" } },
+			} }, final: true,
+		}, undefined, undefined, h.ctx);
+		const state = h.readState();
+		const snapshot = h.resolveSnapshot();
+		assert.equal(snapshot.meta.bootstrap === true, bootstrap);
+		const entries = structuredClone(h.entries);
+		const persistent = message("custom", "policy", 0, "foreign-policy");
+		const old = user("Existing request", 1);
+		const current = user("Current request", 2);
+		const messages = [persistent, old, current, message("custom", "retry", 3, "state-flow-validation")];
+		const originalMessages = structuredClone(messages);
+		const clone = globalThis.structuredClone;
+		let copies = 0;
+		const observedClone = t.mock.method(globalThis, "structuredClone", <T>(value: T, options?: Parameters<typeof clone>[1]): T => {
+			const candidate = value as Partial<MaterializedState> | null | undefined;
+			if (candidate?.contract?.globalContext === true && candidate.contract.cwdContext === true
+				&& typeof candidate.working?.contextPayload === "string") copies++;
+			return clone(value, options);
+		});
+		let projected;
+		try { projected = h.handlers.get("context")!({ messages }); }
+		finally { observedClone.mock.restore(); }
+		const text = projected.messages[0].content[0].text as string;
+		const context = JSON.parse(text.slice(text.indexOf("\n") + 1));
+		assert.deepEqual(context.state, state);
+		assert.deepEqual(projected.messages.slice(1), bootstrap ? [persistent, old, current] : [persistent, current]);
+		context.state.working.contextPayload = "caller mutation";
+		assert.deepEqual(h.readState(), state);
+		assert.deepEqual(h.resolveSnapshot(), snapshot);
+		assert.deepEqual(h.entries, entries);
+		assert.deepEqual(messages, originalMessages);
+		observations.push({ bootstrap, bytes, copies });
+	}
+	assert.deepEqual(observations, [false, true].flatMap((bootstrap) => [8192, 1048576].map((bytes) => ({ bootstrap, bytes, copies: 1 }))));
+});
+
+test("current run trajectory allocates no arrays of discarded ordinary history", () => {
+	const observations: Array<{ pairs: number; allocatedLengths: number[]; retained: number }> = [];
+	for (const pairs of [0, 200]) {
+		const persistent = message("custom", "policy", 0, "foreign-policy");
+		const privateFeedback = message("custom", "retry", 1, "state-flow-validation");
+		const prefix = [persistent, privateFeedback];
+		for (let index = 0; index < pairs; index++) prefix.push(user(`Old request ${index}`, index + 2), message("assistant", `Old answer ${index}`, index + 2));
+		const current = user("Current request", 1000);
+		const call = toolAssistant("current-read");
+		const result = { role: "toolResult", toolCallId: "current-read", toolName: "read", content: [{ type: "text", text: "Current evidence" }], timestamp: 1001 } as AgentMessage;
+		const foreign = message("custom", "current policy", 1002, "foreign-current");
+		const steering = user("Refinement", 1003);
+		const messages: AgentMessage[] = [...prefix, current, call as AgentMessage, result, foreign, privateFeedback, steering];
+		const original = structuredClone(messages);
+		const allocated: AgentMessage[][] = [];
+		// Observe source-derived slice/filter arrays without replacing global Array methods.
+		class ObservedMessages extends Array<AgentMessage> {
+			constructor(length: number) { super(length); allocated.push(this); }
+		}
+		Object.defineProperty(messages, "constructor", { value: { [Symbol.species]: ObservedMessages } });
+		const trajectory = currentRunTrajectory(messages, "Current request", current.timestamp);
+		const expected = [persistent, current, call, result, foreign, steering];
+		assert.deepEqual([...trajectory.messages], expected);
+		assert.ok(trajectory.messages.every((item, index) => item === expected[index]), "retained native messages must keep identity and order");
+		assert.equal(trajectory.anchorTimestamp, current.timestamp);
+		assert.deepEqual([...messages], original);
+		observations.push({ pairs, allocatedLengths: allocated.map((items) => items.length), retained: expected.length });
+	}
+	assert.ok(observations.every(({ allocatedLengths, retained }) => allocatedLengths.reduce((sum, length) => sum + length, 0) <= retained), JSON.stringify(observations));
+});
+
 test("projects the current run and persistent non-private custom context", () => {
 	const persistent = message("custom", "policy", 1, "policy");
 	const privateFeedback = message("custom", "retry", 4, "state-flow-validation");
-	const result = currentRunTrajectory([
-		persistent,
-		message("user", "old", 2),
-		message("user", "current", 3),
-		privateFeedback,
-	], "current", undefined);
-	assert.deepEqual(result.messages, [persistent, message("user", "current", 3)]);
-	assert.equal(result.anchorTimestamp, 3);
+	const first = user("current", 3);
+	const later = user("current", 5);
+	const steering = user("refinement", 6);
+	const messages = [persistent, user("old", 2), first, privateFeedback, later, steering];
+	for (const [specification, anchor, expected, timestamp] of [
+		["current", 3, [persistent, first, later, steering], 3],
+		["current", undefined, [persistent, later, steering], 5],
+		["current", 99, [persistent, later, steering], 5],
+		["missing", 3, [persistent, steering], 6],
+	] as const) {
+		const result = currentRunTrajectory(messages, specification, anchor);
+		assert.deepEqual(result.messages, expected);
+		assert.equal(result.anchorTimestamp, timestamp);
+	}
+	const noUser = [privateFeedback, persistent, message("assistant", "retained", 7)];
+	assert.deepEqual(currentRunTrajectory(noUser, "missing", undefined), { messages: noUser.slice(1) });
+	assert.deepEqual(currentRunTrajectory([], "missing", undefined), { messages: [] });
+	assert.deepEqual(currentRunTrajectory([first, user("", 8)], "", undefined), { messages: [user("", 8)], anchorTimestamp: 8 });
 });
 
 test("builds runtime context as synthetic user data without system-prompt interpolation", () => {
@@ -82,6 +171,31 @@ test("removes only private State Flow validation messages", () => {
 	const validation = message("custom", "retry", 1, "state-flow-validation");
 	const other = message("custom", "policy", 2, "policy");
 	assert.deepEqual(withoutPrivateValidation([validation, other]), [other]);
+});
+
+test("passive projection retains the active run, later results, steering, and foreign context without private feedback or completed history", () => {
+	const persistent = message("custom", "Persistent policy", 1, "foreign-policy");
+	const active = message("user", "Active request", 10);
+	const call = toolAssistant("pending");
+	const foreign = message("custom", "Current policy", 11, "foreign-current");
+	const feedback = message("custom", "Retired finalization", 12, "state-flow-validation");
+	const result = { role: "toolResult", toolCallId: "pending", toolName: "read", content: [{ type: "text", text: "Late result" }], timestamp: 21 } as any;
+	const steering = message("user", "Refinement", 22);
+	const continuation = createPassiveContinuation(emptyState(), 20, active.timestamp);
+	const prefix = [persistent, message("user", "Completed request", 2), message("assistant", "Completed answer", 3)];
+	assert.deepEqual(passiveContinuationMessages([...prefix, active, foreign, call], continuation), [continuation.handoff, persistent, active, foreign, call]);
+	assert.deepEqual(passiveContinuationMessages([...prefix, active, foreign, feedback, call, result, steering], continuation), [continuation.handoff, persistent, active, foreign, call, result, steering]);
+	assert.deepEqual(passiveContinuationMessages([persistent, steering], continuation), [continuation.handoff, persistent, steering], "a missing active anchor must not resurrect a completed prefix");
+});
+
+test("idle and legacy passive cutoffs retain only later conversation plus foreign custom context", () => {
+	const persistent = message("custom", "Persistent policy", 1, "foreign-policy");
+	const feedback = message("custom", "Retired finalization", 21, "state-flow-validation");
+	const later = message("user", "Later request", 22);
+	const continuation = createPassiveContinuation(emptyState(), 20);
+	const prefix = [persistent, message("user", "Completed request", 2), message("assistant", "Completed answer", 3)];
+	assert.deepEqual(passiveContinuationMessages(prefix, continuation), [continuation.handoff, persistent]);
+	assert.deepEqual(passiveContinuationMessages([...prefix, later, feedback], continuation), [continuation.handoff, persistent, later]);
 });
 
 test("keeps existing context for one bootstrap run and commits its terminal handoff", async () => {

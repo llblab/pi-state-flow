@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve, sep } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
 	assertOwnedFileUpdates,
 	captureOwnedFileBases,
@@ -52,12 +52,13 @@ export interface GitPushResult {
 function git(
 	repositoryRoot: string,
 	args: readonly string[],
-	options: { allowFailure?: boolean; env?: NodeJS.ProcessEnv; input?: string } = {},
+	options: { allowFailure?: boolean; env?: NodeJS.ProcessEnv; input?: string; maxBuffer?: number } = {},
 ): GitResult {
 	const result = spawnSync("git", ["-C", repositoryRoot, ...args], {
 		encoding: "utf8",
 		timeout: GIT_TIMEOUT_MS,
 		input: options.input,
+		...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
 		env: {
 			...process.env,
 			GIT_TERMINAL_PROMPT: "0",
@@ -142,24 +143,49 @@ function currentBranchRef(repositoryRoot: string): string {
 	return result.stdout.trim();
 }
 
-function revisionFile(
-	repositoryRoot: string,
-	revision: string,
-	path: string,
-): DurableFileBase {
-	const relativePath = relativeOwnedPath(path, repositoryRoot);
-	const object = `${revision}:${relativePath}`;
-	const entry = git(repositoryRoot, ["ls-tree", "-z", revision, "--", relativePath]).stdout;
-	if (entry.length === 0) return { path, identity: "missing" };
-	if (!/^100(?:644|755) blob [0-9a-f]+\t/.test(entry)) {
-		throw new Error(`Historical State Flow file is not a regular blob: ${path}`);
+/** One exact-path tree query per immutable revision; inspect only blobs the caller actually selects. */
+function revisionFileReader(repositoryRoot: string, revision: string, paths: readonly string[]): (path: string) => DurableFileBase {
+	const relativePaths = new Map(paths.map((path) => [path, relativeOwnedPath(path, repositoryRoot)]));
+	if (relativePaths.size === 0) throw new Error("Git revision reader requires owned paths");
+	const selected = new Set(relativePaths.values());
+	const listing = git(repositoryRoot, ["ls-tree", "-z", revision, "--", ...selected], { env: {
+		GIT_LITERAL_PATHSPECS: "1", GIT_GLOB_PATHSPECS: "0", GIT_NOGLOB_PATHSPECS: "0", GIT_ICASE_PATHSPECS: "0",
+	} }).stdout;
+	if (listing.length > 0 && !listing.endsWith("\0")) throw new Error("Historical Git tree listing is incomplete");
+	const entries = new Map<string, string | null>();
+	for (const entry of listing.split("\0").filter(Boolean)) {
+		const separator = entry.indexOf("\t");
+		if (separator < 0) throw new Error("Historical Git tree listing is malformed");
+		const path = entry.slice(separator + 1);
+		if (!selected.has(path)) continue;
+		entries.set(path, entries.has(path) ? null : entry.slice(0, separator));
 	}
-	const content = git(repositoryRoot, ["show", object]).stdout;
-	return {
-		path,
-		identity: `sha256:${createHash("sha256").update(content).digest("hex")}`,
-		content,
+	const files = new Map<string, DurableFileBase>();
+	return (path) => {
+		const relativePath = relativePaths.get(path);
+		if (relativePath === undefined) throw new Error(`Git revision reader did not select path: ${path}`);
+		const cached = files.get(path);
+		if (cached) return cached;
+		const entry = entries.get(relativePath);
+		if (entry === null) throw new Error(`Historical Git tree has duplicate path: ${relativePath}`);
+		if (entry === undefined) {
+			const missing: DurableFileBase = { path, identity: "missing" };
+			files.set(path, missing);
+			return missing;
+		}
+		if (!/^100(?:644|755) blob [0-9a-f]+$/.test(entry)) {
+			throw new Error(`Historical State Flow file is not a regular blob: ${path}`);
+		}
+		// Selected state/runtime blobs have no semantic byte cap; Node's default pipe budget is only 1 MiB.
+		const content = git(repositoryRoot, ["show", `${revision}:${relativePath}`], { maxBuffer: Infinity }).stdout;
+		const file: DurableFileBase = { path, identity: `sha256:${createHash("sha256").update(content).digest("hex")}`, content };
+		files.set(path, file);
+		return file;
 	};
+}
+
+function revisionFile(repositoryRoot: string, revision: string, path: string): DurableFileBase {
+	return revisionFileReader(repositoryRoot, revision, [path])(path);
 }
 
 function assertReadableRevision(root: string, revision: string): void {
@@ -192,29 +218,41 @@ function captureTemporalBaseUnderLock(cwd: string, sessionId: string, root: stri
 	return { head: currentHead(root), files: captureTemporalFileBases(cwd, sessionId, root, sessionKey) };
 }
 
-function revisionScopeFiles(root: string, revision: string, cwd: string, sessionId: string, sessionKey: string, scope: StateScope) {
-	const read = (paths: ReturnType<typeof temporalScopePaths>) => ({
+function revisionScopeFiles(read: (path: string) => DurableFileBase, paths: ReturnType<typeof temporalScopePaths>) {
+	return {
 		paths,
-		checkpoint: revisionFile(root, revision, paths.checkpoint),
-		patches: revisionFile(root, revision, paths.patches),
-		legacy: revisionFile(root, revision, resolve(paths.directory, "state.json")),
-		meta: revisionFile(root, revision, paths.meta),
-	});
-	const canonical = read(temporalScopePaths(cwd, sessionId, scope, root, sessionKey));
-	if (scope === "global" || [canonical.checkpoint, canonical.patches, canonical.legacy].some(({ identity }) => identity !== "missing")) return { ...canonical, legacyLayout: false };
-	return { ...read(legacyTemporalScopePaths(cwd, sessionId, scope, root)), legacyLayout: true };
+		checkpoint: read(paths.checkpoint),
+		patches: read(paths.patches),
+		legacy: read(resolve(paths.directory, "state.json")),
+		meta: read(paths.meta),
+	};
 }
 
 /** Cold scope-stream reconstruction; pre-0.4 hashed paths remain read-only revision input. */
 export function loadTemporalRevision(cwd: string, sessionId: string, repositoryRoot: string, revision: string, sessionKey = sessionId): TemporalRevisionLoad {
 	const root = assertRepositoryRoot(repositoryRoot);
 	assertReadableRevision(root, revision);
+	const scopePaths = (["global", "cwd", "session"] as const).map((scope) => ({
+		scope,
+		canonical: temporalScopePaths(cwd, sessionId, scope, root, sessionKey),
+		legacy: scope === "global" ? undefined : legacyTemporalScopePaths(cwd, sessionId, scope, root),
+	}));
+	const canonicalRuntime = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
+	const legacyRuntime = legacySessionRuntimePaths(cwd, sessionId, root);
+	const readFile = revisionFileReader(root, revision, [
+		...scopePaths.flatMap(({ canonical, legacy }) => legacy ? [canonical, legacy] : [canonical])
+			.flatMap((paths) => [paths.checkpoint, paths.patches, resolve(paths.directory, "state.json"), paths.meta]),
+		canonicalRuntime.config, canonicalRuntime.meta, legacyRuntime.config, legacyRuntime.meta,
+	]);
 	const files: DurableFileBase[] = [];
 	const scopes = {} as Record<StateScope, ScopeStream | undefined>;
 	const provenance: Record<StateScope, ArtifactProvenanceRegistry> = { global: {}, cwd: {}, session: {} };
 	let legacyLayout = false;
-	for (const scope of ["global", "cwd", "session"] as const) {
-		const selected = revisionScopeFiles(root, revision, cwd, sessionId, sessionKey, scope);
+	for (const { scope, canonical, legacy } of scopePaths) {
+		let selected = { ...revisionScopeFiles(readFile, canonical), legacyLayout: false };
+		if (legacy && [selected.checkpoint, selected.patches, selected.legacy].every(({ identity }) => identity === "missing")) {
+			selected = { ...revisionScopeFiles(readFile, legacy), legacyLayout: true };
+		}
 		if (selected.legacy.identity !== "missing") throw new Error("Historical legacy storage requires explicit migration interpretation");
 		legacyLayout ||= selected.legacyLayout;
 		files.push(selected.checkpoint, selected.patches, selected.legacy, ...(scope === "session" ? [] : [selected.meta]));
@@ -223,11 +261,11 @@ export function loadTemporalRevision(cwd: string, sessionId: string, repositoryR
 			scope === "cwd" && !selected.legacyLayout ? cwd : undefined);
 	}
 	const readRuntime = (paths: ReturnType<typeof sessionRuntimePaths>) => ({
-		paths, config: revisionFile(root, revision, paths.config), meta: revisionFile(root, revision, paths.meta),
+		paths, config: readFile(paths.config), meta: readFile(paths.meta),
 	});
-	let selectedRuntime = { ...readRuntime(sessionRuntimePaths(cwd, sessionId, root, sessionKey)), legacyLayout: false };
+	let selectedRuntime = { ...readRuntime(canonicalRuntime), legacyLayout: false };
 	if (selectedRuntime.config.identity === "missing" && selectedRuntime.meta.identity === "missing") {
-		selectedRuntime = { ...readRuntime(legacySessionRuntimePaths(cwd, sessionId, root)), legacyLayout: true };
+		selectedRuntime = { ...readRuntime(legacyRuntime), legacyLayout: true };
 	}
 	legacyLayout ||= selectedRuntime.legacyLayout;
 	const { paths: runtimePaths, config, meta } = selectedRuntime;
@@ -247,6 +285,7 @@ export function loadTemporalRevision(cwd: string, sessionId: string, repositoryR
 		}
 		const selected = loadTemporalRevision(cwd, sessionId, root, temporalRevision, sessionKey);
 		Object.assign(scopes, selected.scopes);
+		Object.assign(provenance, selected.provenance);
 	}
 	if (scopes.global === undefined || scopes.cwd === undefined || scopes.session === undefined) {
 		throw new Error("Session runtime has incomplete temporal scope storage");
@@ -430,6 +469,7 @@ function commitOwnedFiles(
 		// and manual deletions, while `.gitignore` stays authoritative for untracked files. The
 		// transient publication lock is ours, not repository content.
 		git(repositoryRoot, ["add", "-A", "--", ".", ":(exclude).state-flow-publication.lock"], { env });
+		const entries: string[] = [];
 		for (const update of updates) {
 			const relativePath = relativeOwnedPath(update.path, repositoryRoot);
 			if (update.content === undefined) {
@@ -437,8 +477,10 @@ function commitOwnedFiles(
 				continue;
 			}
 			const blob = git(repositoryRoot, ["hash-object", "-w", "--stdin"], { input: update.content }).stdout.trim();
-			git(repositoryRoot, ["update-index", "--add", "--cacheinfo", `100644,${blob},${relativePath}`], { env });
+			entries.push(`100644 ${blob}\t${relativePath}\0`);
 		}
+		// NUL framing preserves literal path characters while the blobs retain exact prepared bytes.
+		if (entries.length > 0) git(repositoryRoot, ["update-index", "-z", "--index-info"], { env, input: entries.join("") });
 		const tree = git(repositoryRoot, ["write-tree"], { env }).stdout.trim();
 		if (expectedHead !== undefined) {
 			const previousTree = git(repositoryRoot, ["rev-parse", `${expectedHead}^{tree}`]).stdout.trim();
@@ -559,20 +601,22 @@ function includeUncommittedCohort(cwd: string, sessionId: string, root: string, 
 	updates: OwnedFileUpdate[], changedScopes: StateScope[], scopes: readonly StateScope[], runtime: boolean, sessionKey = sessionId): void {
 	const targets = new Map(updates.map((update) => [update.path, update]));
 	const desired = (paths: string[]) => paths.map((path) => targets.get(path) ?? { path, content: current.files.find((file) => file.path === path)!.content });
-	const absentFromHead = (files: OwnedFileUpdate[]) => files.some(({ path, content }) => current.head === undefined || revisionFile(root, current.head, path).content !== content);
-	for (const scope of ["global", "cwd", "session"] as const) {
+	const pairs = (["global", "cwd", "session"] as const).map((scope) => {
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
-		const pair = desired([paths.checkpoint, paths.patches]);
+		return { scope, pair: desired([paths.checkpoint, paths.patches]) };
+	});
+	const runtimePaths = runtime ? sessionRuntimePaths(cwd, sessionId, root, sessionKey) : undefined;
+	const runtimePair = runtimePaths ? desired([runtimePaths.config, runtimePaths.meta]) : [];
+	const readFile = current.head === undefined ? undefined : revisionFileReader(root, current.head,
+		[...pairs.flatMap(({ pair }) => pair), ...runtimePair].map(({ path }) => path));
+	const absentFromHead = (files: OwnedFileUpdate[]) => files.some(({ path, content }) => readFile === undefined || readFile(path).content !== content);
+	for (const { scope, pair } of pairs) {
 		if (!absentFromHead(pair)) continue;
 		if (!scopes.includes(scope)) throw new Error(`Temporal scope update omitted an uncommitted stream: ${scope}`);
 		for (const update of pair) targets.set(update.path, update);
 		if (!changedScopes.includes(scope)) changedScopes.push(scope);
 	}
-	if (runtime) {
-		const paths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
-		const pair = desired([paths.config, paths.meta]);
-		if (absentFromHead(pair)) for (const update of pair) targets.set(update.path, update);
-	}
+	if (absentFromHead(runtimePair)) for (const update of runtimePair) targets.set(update.path, update);
 	updates.splice(0, updates.length, ...targets.values());
 }
 
@@ -655,6 +699,62 @@ export function isGitCommitAncestor(repositoryRoot: string, ancestor: string, de
 	if (result.status === 0) return true;
 	if (result.status === 1) return false;
 	throw new Error(`Cannot inspect Git commit ancestry: ${result.stderr || `exit ${result.status}`}`);
+}
+
+/** Own one non-interactive exact-target push; cancellation is not confirmation of child exit. */
+export function pushGitTarget(
+	repositoryRoot: string,
+	destination: { remote: string; ref: string },
+	commit: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	if (typeof commit !== "string" || !/^[0-9a-f]{40,64}$/.test(commit)) return Promise.reject(new Error("Git push target must be an exact commit"));
+	if (signal?.aborted) return Promise.reject(new Error("Git push aborted"));
+	return new Promise<void>((resolve, reject) => {
+		const child = spawn("git", ["-C", repositoryRoot, "push", "--", destination.remote, `${commit}:${destination.ref}`], {
+			detached: process.platform !== "win32", // Own the POSIX group, not a detached daemon; retain the child handle.
+			stdio: ["ignore", "ignore", "pipe"],
+			windowsHide: true,
+			env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
+		});
+		let stderr = "";
+		let failure: Error | undefined;
+		let settled = false;
+		function terminate(error: Error): void {
+			failure ??= error;
+			if (child.exitCode !== null || child.signalCode !== null) {
+				child.stderr?.destroy(); // Do not wait indefinitely for an outliving helper's inherited pipe.
+				return;
+			}
+			if (!child.pid) return;
+			try {
+				if (process.platform === "win32") child.kill("SIGKILL");
+				else process.kill(-child.pid, "SIGKILL");
+			} catch {
+				// No exit proof: keep the promise and caller's lease outstanding, even if signalling fails.
+			}
+		}
+		const abort = () => terminate(new Error("Git push aborted"));
+		const timeout = setTimeout(() => terminate(new Error(`Git push timed out after ${GIT_TIMEOUT_MS}ms`)), GIT_TIMEOUT_MS);
+		function finish(error?: Error): void {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", abort);
+			if (error) reject(error);
+			else resolve();
+		}
+		child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-1000); });
+		child.on("error", (error) => {
+			failure ??= error;
+			if (!child.pid) finish(error); // Spawn failure owns no live process; kill errors do not prove exit.
+		});
+		child.once("exit", () => { if (failure) child.stderr?.destroy(); });
+		child.once("close", (code, endedBy) => finish(failure ?? (code === 0 ? undefined
+			: new Error(`Git push failed (${endedBy ?? code}): ${stderr.trim() || "no diagnostic output"}`))));
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
+	});
 }
 
 export function pushGitCommit(repositoryRoot: string, commit: string): GitPushResult {

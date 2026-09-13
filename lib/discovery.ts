@@ -12,6 +12,7 @@ export interface ArtifactSourceCandidate extends ArtifactSourceIdentity {
 export interface GlobalMarkdownDiscoveryResult {
 	sources: ArtifactSourceCandidate[];
 	removed: string[];
+	unavailable?: string;
 }
 
 export function getKnowledgeRoot(agentDir = getAgentDir()): string {
@@ -96,7 +97,20 @@ export function discoverGlobalMarkdownSources(knowledgeRoot = getKnowledgeRoot()
 	return sources.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
 }
 
-/** Session-lifetime index that makes source removals explicit on each initialization refresh. */
+/** Prove absence inside the current source root without following excluded symlink components. */
+function missingOwnedMarkdown(root: string, path: string): boolean {
+	if (!isAbsolute(path) || path !== resolve(path) || path === root || !isInside(root, path) || !path.endsWith(".md")) return false;
+	let candidate = root;
+	for (const segment of relative(root, path).split(sep)) {
+		candidate = join(candidate, segment);
+		const metadata = lstatSync(candidate, { throwIfNoEntry: false });
+		if (metadata === undefined) return true;
+		if (metadata.isSymbolicLink() || !metadata.isDirectory()) return false;
+	}
+	return false;
+}
+
+/** Source-owner discovery; retained paths let restart/status re-observe removals until publication. */
 export class GlobalMarkdownDiscovery {
 	readonly knowledgeRoot: string;
 	#knownPaths = new Set<string>();
@@ -105,11 +119,13 @@ export class GlobalMarkdownDiscovery {
 		this.knowledgeRoot = resolve(knowledgeRoot);
 	}
 
-	refresh(): GlobalMarkdownDiscoveryResult {
-		const sources = discoverGlobalMarkdownSources(this.knowledgeRoot);
+	refresh(retainedPaths: Iterable<string> = this.#knownPaths): GlobalMarkdownDiscoveryResult {
+		const root = canonicalExistingPath(this.knowledgeRoot);
+		if (root === undefined) return { sources: [], removed: [], unavailable: `Knowledge root is unavailable: ${this.knowledgeRoot}` };
+		const sources = discoverGlobalMarkdownSources(root);
 		const currentPaths = new Set(sources.map((source) => source.path));
-		const removed = [...this.#knownPaths]
-			.filter((path) => !currentPaths.has(path))
+		const removed = [...new Set(retainedPaths)]
+			.filter((path) => !currentPaths.has(path) && missingOwnedMarkdown(root, path))
 			.sort();
 		this.#knownPaths = currentPaths;
 		return { sources, removed };

@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+import fs, { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
-import { TemporalRuntime } from "../lib/runtime.ts";
-import { sessionRuntimePaths, temporalScopePaths, sessionPatchesPath } from "../lib/durable.ts";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { inspectRuntimeRevision, TemporalRuntime } from "../lib/runtime.ts";
+import type { ArtifactProvenanceRegistry } from "../lib/artifact.ts";
+import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths, sessionPatchesPath, serializeScopeProvenance } from "../lib/durable.ts";
 import { writeCwdState, writeGlobalState, writeSessionState } from "./legacy-fixture.ts";
 import { createSessionRuntime, emptySnapshot, isFileRevision, parsePiCheckpoint, persistableSnapshot, type Snapshot } from "../lib/snapshot.ts";
 import { withStoragePublicationLock } from "../lib/storage.ts";
@@ -13,7 +18,7 @@ import { captureTemporalGitBase, publishTemporalStateToGit } from "../lib/git.ts
 import { emptyState, type StateScope } from "../lib/state.ts";
 import type { JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
-import { validateTemporalState } from "../lib/temporal.ts";
+import { readTemporalState, validateTemporalState } from "../lib/temporal.ts";
 import { commitScopedTransition, stageAtomicScopePatches } from "../lib/transition.ts";
 import { commitScopedTerminal, commitTerminal, harness, start } from "./harness.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
@@ -25,6 +30,219 @@ test("runtime keeps native session storage identity paired and detached from cal
 	address.key = "mutated";
 	assert.equal(runtime.sessionId, "session-id");
 	assert.equal(runtime.sessionKey, "timestamp_session-id");
+});
+
+test("fork copies only the selected session stream and provenance into a fresh owner over live shared scopes", (t) => {
+	const f = driftFixture(t);
+	const parent = restoreSessionA(f);
+	const before = parent.runtime.states();
+	const after = structuredClone(before);
+	const provenance = Object.fromEntries((["global", "cwd", "session"] as const).map((scope) => {
+		const path = `/sources/${scope}.md`;
+		after[scope].artifacts[path] = { description: `${scope} routing` };
+		return [scope, { [path]: { sourceHash: `sha256:${"a".repeat(64)}`, compilerRevision: "fixture-v1" } }];
+	}));
+	parent.snapshot.meta.specification = "Parent request, not a child run";
+	parent.snapshot.meta.step++;
+	parent.runtime.publish(parent.snapshot, true, createAcceptedTransition(before, after, "fork-artifacts"), { provenance });
+	let selectedRevision = "";
+	for (let index = 0; index < 5; index++) selectedRevision = publishScopedPatch(parent.runtime, parent.snapshot, "session", { counter: index }, `fork-seed-${index}`)!.commit!;
+	const selected = structuredClone(parent.runtime.view!.scopes.session);
+	assert.equal(selected.patches.length, 7);
+	const sessionFiles = temporalScopePaths(f.cwd, "session-a", "session", f.root);
+	const sourceBytes = [sessionFiles.checkpoint, sessionFiles.patches].map((path) => readFileSync(path));
+	const child = new TemporalRuntime(f.cwd, "fork-child", f.root);
+	const source = { id: "session-a", key: "session-a" };
+	const prepared = child.prepareFork(source, selectedRevision);
+	assert.equal(child.view, undefined);
+	source.id = "caller-mutated";
+	prepared.snapshot.config.enabled = false;
+	prepared.snapshot.meta.step = 999;
+	// Advance both shared streams, their provenance and the parent's private future after preparation.
+	const live = parent.runtime.states();
+	const future = structuredClone(live);
+	for (const scope of ["global", "cwd", "session"] as const) future[scope].working.future = scope;
+	parent.snapshot.meta.step++;
+	parent.runtime.publish(parent.snapshot, true, createAcceptedTransition(live, future, "parent-future"), {
+		provenance: { global: { "/sources/global.md": { sourceHash: `sha256:${"b".repeat(64)}`, compilerRevision: "fixture-v2" } }, cwd: { "/sources/cwd.md": { sourceHash: `sha256:${"b".repeat(64)}`, compilerRevision: "fixture-v2" } } },
+	});
+	// Forking must not even prune a valid but currently unreferenced shared provenance entry.
+	const globalMeta = temporalScopePaths(f.cwd, "session-a", "global", f.root).meta;
+	const registry = { ...parent.runtime.artifactProvenance("global"), "/sources/orphan.md": { sourceHash: `sha256:${"c".repeat(64)}`, compilerRevision: "fixture-v2" } };
+	writeFileSync(globalMeta, serializeScopeProvenance(registry));
+	execFileSync("git", ["-C", f.root, "add", "-A"]);
+	execFileSync("git", ["-C", f.root, "commit", "-m", "fixture provenance"]);
+	const protectedFiles = captureTemporalGitBase(f.cwd, "session-a", f.root).files;
+	const fork = prepared.fork();
+	assert.ok(fork.publication.commit);
+	assert.equal(fork.snapshot.meta.durableBase, fork.publication.commit);
+	assert.equal(fork.snapshot.config.enabled, true);
+	assert.equal(fork.snapshot.meta.step, 0);
+	assert.equal(fork.snapshot.meta.specification, undefined);
+	assert.deepEqual(child.view!.scopes.session, selected);
+	assert.deepEqual(child.artifactProvenance("session"), provenance.session);
+	assert.deepEqual(child.artifactProvenance("global"), registry);
+	assert.equal(child.artifactProvenance("cwd")["/sources/cwd.md"].compilerRevision, "fixture-v2");
+	assert.equal(child.read().working.future, "cwd");
+	assert.equal(child.read(0, "session").working.future, undefined);
+	assert.deepEqual(captureTemporalGitBase(f.cwd, "session-a", f.root).files, protectedFiles);
+	const copiedFiles = temporalScopePaths(f.cwd, child.sessionId, "session", f.root);
+	assert.deepEqual([copiedFiles.checkpoint, copiedFiles.patches].map((path) => readFileSync(path)), sourceBytes);
+	assert.equal(child.view!.lineage.length, 1);
+	assert.equal(child.view!.lineage[0].parent, null);
+	for (const scope of [undefined, "global", "cwd", "session"] as const) assert.throws(() => child.read(1, scope), /origin/);
+	assert.throws(() => prepared.fork(), /already consumed/);
+	const cold = new TemporalRuntime(f.cwd, child.sessionId, f.root);
+	assert.equal(cold.restore(fork.publication.commit!).meta.step, 0);
+	assert.deepEqual(cold.states(), child.states());
+	assert.deepEqual(cold.view, child.view);
+	const parentPrivate = [sessionFiles.checkpoint, sessionFiles.patches, sessionFiles.meta].map((path) => readFileSync(path));
+	const accepted = publishScopedPatch(child, fork.snapshot, "session", { childOnly: true }, "child-first")!;
+	assert.equal(child.read(1, "session").working.childOnly, undefined);
+	assert.equal(child.read().working.childOnly, true);
+	assert.equal(child.view!.lineage.length, 2);
+	assert.deepEqual([sessionFiles.checkpoint, sessionFiles.patches, sessionFiles.meta].map((path) => readFileSync(path)), parentPrivate);
+	cold.restore(accepted.commit!);
+	assert.deepEqual(cold.states(), child.states());
+});
+
+test("fork copy rejects aliases, occupied targets and unavailable sources without installing state", (t) => {
+	const f = driftFixture(t);
+	const source = { id: "session-a", key: "session-a" };
+	assert.throws(() => new TemporalRuntime(f.cwd, source, f.root).prepareFork(source, f.revision), /distinct/);
+	assert.throws(() => new TemporalRuntime(f.cwd, { id: "other", key: source.key }, f.root).prepareFork(source, f.revision), /distinct/);
+	const child = new TemporalRuntime(f.cwd, "fork-child", f.root);
+	assert.throws(() => child.prepareFork(source, "f".repeat(40)), /readable Git commit/);
+	assert.throws(() => child.prepareFork({ ...source, id: "wrong-owner" }, f.revision), /identity mismatch/);
+	const prepared = child.prepareFork(source, f.revision);
+	const occupant = new TemporalRuntime(f.cwd, child.sessionId, f.root);
+	occupant.initialize(emptySnapshot(true), true);
+	const before = captureTemporalGitBase(f.cwd, child.sessionId, f.root);
+	assert.throws(() => prepared.fork(), /already has session storage/);
+	assert.equal(child.view, undefined);
+	assert.deepEqual(captureTemporalGitBase(f.cwd, child.sessionId, f.root), before);
+	assert.throws(() => prepared.fork(), /already consumed/);
+	// Missing worktree files do not make an occupied HEAD namespace new again.
+	rmSync(temporalScopePaths(f.cwd, child.sessionId, "session", f.root).directory, { recursive: true });
+	const missing = captureTemporalGitBase(f.cwd, child.sessionId, f.root);
+	assert.throws(() => child.prepareFork({ id: "session-a", key: "session-a" }, f.revision).fork(), /already has session storage/);
+	assert.deepEqual(captureTemporalGitBase(f.cwd, child.sessionId, f.root), missing);
+});
+
+test("fork copy rechecks CAS after its fresh basis and preserves a concurrent shared edit", (t) => {
+	const f = driftFixture(t);
+	const child = new TemporalRuntime(f.cwd, "fork-child", f.root);
+	const prepared = child.prepareFork({ id: "session-a", key: "session-a" }, f.revision);
+	const lock = join(f.root, ".git", "state-flow-publication.lock");
+	const path = temporalScopePaths(f.cwd, "session-a", "global", f.root).checkpoint;
+	const concurrent = `${readFileSync(path, "utf8")} `;
+	const remove = fs.rmSync;
+	let injected = false;
+	const mock = t.mock.method(fs, "rmSync", (target: fs.PathLike, options?: fs.RmOptions) => {
+		remove(target, options);
+		if (String(target) === lock && !injected) {
+			injected = true;
+			writeFileSync(path, concurrent);
+		}
+	});
+	syncBuiltinESMExports();
+	try {
+		assert.throws(() => prepared.fork(), /changed concurrently/);
+		assert.equal(injected, true);
+		assert.equal(child.view, undefined);
+		assert.equal(readFileSync(path, "utf8"), concurrent);
+		assert.equal(existsSync(sessionRuntimePaths(f.cwd, child.sessionId, f.root).meta), false);
+		assert.equal(execFileSync("git", ["-C", f.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), f.revision);
+		assert.throws(() => prepared.fork(), /already consumed/);
+	} finally {
+		mock.mock.restore();
+		syncBuiltinESMExports();
+	}
+});
+
+test("file-only fork copies its exact session cohort and rejects a source that expires after preparation", (t) => {
+	const directory = mkdtempSync(join(tmpdir(), "state-flow-file-fork-"));
+	const path = process.env.PATH;
+	process.env.PATH = directory;
+	t.after(() => { if (path === undefined) delete process.env.PATH; else process.env.PATH = path; rmSync(directory, { recursive: true, force: true }); });
+	const root = join(directory, "store");
+	const cwd = join(directory, "project");
+	const parent = new TemporalRuntime(cwd, "file-parent", root);
+	parent.prepare();
+	const snapshot = emptySnapshot(true);
+	parent.initialize(snapshot, true);
+	const before = parent.states();
+	const after = structuredClone(before);
+	after.session.working.retained = true;
+	after.session.artifacts["/private.md"] = { description: "Private file routing" };
+	parent.publish(snapshot, true, createAcceptedTransition(before, after, "file-seed"), { provenance: { session: { "/private.md": { sourceHash: `sha256:${"a".repeat(64)}`, compilerRevision: "fixture-v1" } } } });
+	snapshot.config.enabled = false;
+	const stopped = parent.publish(snapshot)!;
+	assert.ok(isFileRevision(stopped.revision));
+	const source = { id: parent.sessionId, key: parent.sessionKey };
+	const child = new TemporalRuntime(cwd, "file-child", root);
+	const copied = child.prepareFork(source, stopped.revision!).fork();
+	assert.ok(isFileRevision(copied.snapshot.meta.durableBase));
+	assert.equal(copied.snapshot.config.enabled, false);
+	assert.deepEqual(child.view!.scopes.session, parent.view!.scopes.session);
+	assert.deepEqual(child.artifactProvenance("session"), parent.artifactProvenance("session"));
+	assert.equal(existsSync(join(root, ".git")), false);
+	const other = new TemporalRuntime(cwd, "file-other", root);
+	const expired = other.prepareFork(source, stopped.revision!);
+	publishScopedPatch(parent, snapshot, "session", { later: true }, "file-future");
+	assert.throws(() => expired.fork(), /file revision is unavailable/);
+	assert.equal(other.view, undefined);
+	assert.equal(existsSync(sessionRuntimePaths(cwd, other.sessionId, root).meta), false);
+	const cold = new TemporalRuntime(cwd, child.sessionId, root);
+	cold.restore(copied.snapshot.meta.durableBase!);
+	assert.deepEqual(cold.read(0, "session"), child.read(0, "session"));
+	assert.equal(cold.read(0, "session").working.later, undefined);
+});
+
+test("prepared Git restore is read-only, detached, single-use, and acquires a fresh live publication basis", (t) => {
+	const fixture = driftFixture(t);
+	const seeded = seedGlobalArtifact(fixture);
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const prepared = runtime.prepareRestore(seeded.revision);
+	const selected = structuredClone(prepared.snapshot);
+	assert.equal(runtime.view, undefined);
+	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), seeded.revision);
+	prepared.snapshot.config.enabled = false;
+	prepared.snapshot.meta.step = 999;
+	prepared.snapshot.meta.durableBase = "f".repeat(40);
+	const peer = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const peerSnapshot = peer.restore(seeded.revision);
+	const later = publishScopedPatch(peer, peerSnapshot, "session", { later: true }, "same-session-later")!;
+	const snapshot = prepared.restore();
+	assert.equal(snapshot.config.enabled, selected.config.enabled);
+	assert.equal(snapshot.meta.step, selected.meta.step);
+	assert.equal(snapshot.meta.durableBase, seeded.revision);
+	assert.equal(runtime.read().working.later, undefined);
+	assert.equal(runtime.artifactProvenance("global")[seeded.path].sourceHash, `sha256:${"a".repeat(64)}`);
+	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), later.commit);
+	// Same-session files advanced after inspection: a cached old publication basis would reject this.
+	const accepted = publishScopedPatch(runtime, snapshot, "session", { resumed: true }, "prepared-resume")!;
+	assert.ok(accepted.commit);
+	assert.equal(runtime.read().working.resumed, true);
+	assert.equal(runtime.read().working.later, undefined);
+	assert.throws(() => prepared.restore(), /already consumed/);
+	assert.equal(runtime.read().working.resumed, true);
+});
+
+test("prepared restore separates immutable validation from live exclusion and installs nothing after failure", (t) => {
+	const fixture = driftFixture(t);
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	withStoragePublicationLock(fixture.root, () => {
+		assert.throws(() => runtime.prepareRestore("f".repeat(40)), /not a readable Git commit/);
+		const prepared = runtime.prepareRestore(fixture.revision);
+		assert.equal(prepared.snapshot.config.enabled, true);
+		assert.equal(runtime.view, undefined);
+		assert.throws(() => prepared.restore(), /publication lock/);
+		assert.equal(runtime.view, undefined);
+		assert.throws(() => prepared.restore(), /already consumed/);
+	});
+	assert.equal(runtime.prepareRestore(fixture.revision).restore().meta.durableBase, fixture.revision);
+	assert.equal(runtime.read().working.sessionA, "retained");
 });
 
 test("runtime can retain an accepted local commit as a queue target without pushing", () => {
@@ -77,6 +295,11 @@ test("pointer round-trips preserve source-owned config, counters, and bootstrap 
 		assert.deepEqual(restored, expected);
 		assert.notEqual(restored.meta.durableBase, head);
 	}
+	const redirected = new TemporalRuntime(h.ctx.cwd, "roundtrip", h.repositoryRoot).prepareRestore(head);
+	assert.equal(redirected.snapshot.meta.durableBase, retained.at(-1)!.expected.meta.durableBase);
+	const normalized = redirected.restore();
+	delete normalized.meta.pendingPublication;
+	assert.deepEqual(normalized, retained.at(-1)!.expected);
 	assert.equal(git("rev-parse", "HEAD"), head);
 	assert.deepEqual(readFileSync(paths.meta), before);
 });
@@ -412,6 +635,9 @@ test("file runtime starts without Git, retains locked pointers, resumes stopped 
 	const pointer = h.entries.at(-1).data;
 	assert.deepEqual(Object.keys(pointer), ["revision"]);
 	assert.ok(isFileRevision(pointer.revision));
+	const pendingRuntime = new TemporalRuntime(h.ctx.cwd, "harness-session", root);
+	const pendingRestore = pendingRuntime.prepareRestore(pointer.revision);
+	assert.equal(pendingRuntime.view, undefined);
 	assert.deepEqual(parsePiCheckpoint(pointer), pointer);
 	assert.equal(h.resolveSnapshot().meta.pendingPublication, undefined);
 	assert.equal(h.readState().working.file, "first");
@@ -428,6 +654,8 @@ test("file runtime starts without Git, retains locked pointers, resumes stopped 
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	assert.equal(h.readState().working.file, "first");
 	await commitTerminal(h, {}, { file: "second" }, "Second answer");
+	assert.throws(() => pendingRestore.restore(), /unavailable/);
+	assert.equal(pendingRuntime.view, undefined, "An expired file cohort is never installed from a prepared read");
 	const semanticFiles = (["global", "cwd", "session"] as const).flatMap((scope) => {
 		const pair = temporalScopePaths(h.ctx.cwd, "harness-session", scope, root);
 		return [pair.checkpoint, pair.patches];
@@ -535,6 +763,122 @@ function publishScopedPatch(
 	after[scope].working = { ...after[scope].working, ...structuredClone(working) };
 	snapshot.meta.step += 1;
 	return runtime.publish(snapshot, true, createAcceptedTransition(before, after, id));
+}
+
+for (const sameCwd of [true, false]) for (const point of ["before-ref", "after-ref"] as const) {
+	test(`fatal publisher interruption preserves selected history and fails closed (${sameCwd ? "same" : "different"} CWD, ${point})`, { timeout: 30_000, skip: process.platform === "win32" }, async (t) => {
+		const f = driftFixture(t);
+		const survivor = restoreSessionA(f);
+		let selected = f.revision;
+		for (let step = 2; step <= 7; step++) selected = publishScopedPatch(survivor.runtime, survivor.snapshot, "session", { counter: step }, `survivor-${step}`)!.commit!;
+		const scopes = [undefined, "global", "cwd", "session"] as const;
+		const expected = Array.from({ length: 8 }, (_, offset) => scopes.map((scope) => survivor.runtime.read(offset, scope)));
+		const selectedView = structuredClone(survivor.runtime.view!);
+		const sessionDirectory = temporalScopePaths(f.cwd, "session-a", "session", f.root).directory;
+		const privateFiles = () => captureTemporalFileBases(f.cwd, "session-a", f.root).filter(({ path }) => path.startsWith(`${sessionDirectory}/`));
+		const privateBefore = privateFiles();
+		const peerCwd = sameCwd ? f.cwd : join(f.parent, "other-project");
+		const child = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./runtime-worker.ts", import.meta.url)), f.root, peerCwd, point], { detached: true, stdio: "pipe" });
+		const closed = once(child, "close");
+		void closed.catch(() => {});
+		let stderr = "";
+		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-4000); });
+		child.stdin.on("error", () => {});
+		const lines = createInterface({ input: child.stdout });
+		const replies = lines[Symbol.asyncIterator]();
+		let privateDirectory: string | undefined;
+		t.after(async () => {
+			if (child.pid && child.exitCode === null && child.signalCode === null) process.kill(-child.pid, "SIGKILL");
+			await closed;
+			lines.close();
+			if (privateDirectory) rmSync(privateDirectory, { recursive: true, force: true });
+			rmSync(f.parent, { recursive: true, force: true });
+		});
+		async function reply(event: string) {
+			const next = await replies.next();
+			if (next.done) await closed;
+			assert.equal(next.done, false, stderr || `publisher exited before ${event}: ${child.signalCode ?? child.exitCode}`);
+			const value = JSON.parse(next.value!);
+			assert.equal(value.event, event);
+			assert.equal(value.pid, child.pid);
+			return value;
+		}
+		const ready = await reply("ready");
+		assert.notEqual(ready.pid, process.pid);
+		assert.match(ready.revision, /^[0-9a-f]{40,64}$/);
+		const git = (...args: string[]) => execFileSync("git", ["-C", f.root, ...args], { encoding: "utf8" }).trim();
+		assert.equal(git("rev-parse", "HEAD"), ready.revision);
+		const acceptedPeer = inspectRuntimeRevision(peerCwd, "session-b-crash", f.root, ready.revision);
+		for (const scope of ["global", "cwd", "session"] as const) assert.equal(readTemporalState(acceptedPeer.view, 0, scope).working.peer, "accepted");
+		assert.deepEqual(privateFiles(), privateBefore);
+		const restored = new TemporalRuntime(f.cwd, "session-a", f.root);
+		const prepared = restored.prepareRestore(selected);
+		assert.equal(prepared.snapshot.meta.durableBase, selected);
+		const unrelated = join(f.root, "unrelated.txt");
+		writeFileSync(unrelated, "staged caller bytes\n");
+		git("add", "--", "unrelated.txt");
+		writeFileSync(unrelated, "unstaged caller bytes\n");
+		const callerIndex = readFileSync(join(f.root, ".git", "index"));
+		child.stdin.write("G");
+		const index = await reply("index");
+		assert.equal(basename(index.privateIndex), "index");
+		assert.equal(dirname(dirname(index.privateIndex)), resolve(tmpdir()));
+		assert.ok(basename(dirname(index.privateIndex)).startsWith("state-flow-index-"));
+		assert.equal(lstatSync(dirname(index.privateIndex)).isSymbolicLink(), false);
+		privateDirectory = dirname(index.privateIndex);
+		const paused = await reply("paused");
+		assert.equal(paused.point, point);
+		assert.equal(paused.privateIndex, index.privateIndex);
+		assert.equal(paused.ref, git("symbolic-ref", "HEAD"));
+		assert.equal(paused.previous, ready.revision);
+		assert.match(paused.commit, /^[0-9a-f]{40,64}$/);
+		const head = point === "before-ref" ? ready.revision : paused.commit;
+		assert.equal(git("rev-parse", "HEAD"), head);
+		git("merge-base", "--is-ancestor", ready.revision, paused.commit);
+		assert.equal(git("show", `${paused.commit}:unrelated.txt`), "unstaged caller bytes");
+		assert.deepEqual(readFileSync(join(f.root, ".git", "index")), callerIndex, "the interrupted private-index attempt cannot overwrite the caller index");
+		const locks = [join(f.root, ".state-flow-publication.lock"), join(f.root, ".git", "state-flow-publication.lock")];
+		for (const path of locks) assert.equal(readFileSync(path, "utf8"), `${child.pid}\n`);
+		const files = () => [...captureTemporalFileBases(f.cwd, "session-a", f.root), ...captureTemporalFileBases(peerCwd, "session-b-crash", f.root)]
+			.map((file) => ({ ...file, mode: lstatSync(file.path, { throwIfNoEntry: false })?.mode }));
+		const interruptedFiles = files();
+		assert.ok(interruptedFiles.some(({ content }) => content?.includes("unacknowledged")), "the fixture must reach actual owned-file publication");
+		assert.throws(() => prepared.restore(), /publication lock is unavailable/);
+		assert.equal(restored.view, undefined);
+		assert.throws(() => prepared.restore(), /already consumed/);
+		const before = survivor.runtime.states();
+		const after = structuredClone(before);
+		after.session.working.mustNotPublish = true;
+		const candidate = structuredClone(survivor.snapshot);
+		candidate.meta.step++;
+		const transition = createAcceptedTransition(before, after, "blocked-survivor")!;
+		assert.throws(() => survivor.runtime.publish(candidate, true, transition), /publication lock is unavailable/);
+		process.kill(-child.pid!, "SIGKILL");
+		const [code, signal] = await closed;
+		assert.equal(code, null);
+		assert.equal(signal, "SIGKILL");
+		assert.throws(() => process.kill(child.pid!, 0), { code: "ESRCH" });
+		for (const path of locks) assert.equal(readFileSync(path, "utf8"), `${child.pid}\n`, "fatal exit cannot silently release publication ownership");
+		assert.throws(() => survivor.runtime.publish(candidate, true, transition), /publication lock is unavailable/);
+		const retry = restored.prepareRestore(selected);
+		assert.equal(retry.snapshot.meta.durableBase, selected);
+		assert.throws(() => retry.restore(), /publication lock is unavailable/);
+		assert.equal(restored.view, undefined);
+		const cold = inspectRuntimeRevision(f.cwd, "session-a", f.root, selected);
+		assert.deepEqual(cold.view, selectedView);
+		for (let offset = 0; offset < 8; offset++) for (const [index, scope] of scopes.entries()) {
+			assert.deepEqual(survivor.runtime.read(offset, scope), expected[offset]![index]);
+			assert.deepEqual(readTemporalState(cold.view, offset, scope), expected[offset]![index]);
+		}
+		assert.deepEqual(inspectRuntimeRevision(peerCwd, "session-b-crash", f.root, ready.revision).view, acceptedPeer.view);
+		const attempted = inspectRuntimeRevision(peerCwd, "session-b-crash", f.root, paused.commit);
+		for (const scope of ["global", "cwd", "session"] as const) assert.equal(readTemporalState(attempted.view, 0, scope).working.peer, "unacknowledged");
+		assert.deepEqual(files(), interruptedFiles, "blocked writers and cold inspection must preserve the interrupted files and modes");
+		assert.deepEqual(privateFiles(), privateBefore, "the interrupted peer must not change another session's private files");
+		assert.deepEqual(readFileSync(join(f.root, ".git", "index")), callerIndex);
+		assert.equal(readFileSync(unrelated, "utf8"), "unstaged caller bytes\n");
+		assert.equal(git("rev-parse", "HEAD"), head);
+	});
 }
 
 function sharedBytes(root: string, cwd: string, scope: "global" | "cwd"): Buffer[] {
@@ -672,6 +1016,77 @@ test("a global patch fails precisely when the live global state advanced", (t) =
 		/cannot publish the global patch because the live global state advanced after this transition's selected basis/,
 	);
 	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), liveHead);
+});
+
+for (const resumeAfterAdvance of [false, true]) test(`runtime-only Stop preserves live shared provenance and selected cold evidence (${resumeAfterAdvance ? "resumed" : "running"} session)`, (t) => {
+	const fixture = driftFixture(t);
+	let { runtime, snapshot } = restoreSessionA(fixture);
+	const scopes: StateScope[] = ["global", "cwd", "session"];
+	const beforeSeed = runtime.states();
+	const seeded = structuredClone(beforeSeed);
+	const provenance: Record<StateScope, ArtifactProvenanceRegistry> = { global: {}, cwd: {}, session: {} };
+	for (const scope of scopes) {
+		const path = `/sources/${scope}.md`;
+		seeded[scope].artifacts[path] = { description: `${scope} at selected revision` };
+		provenance[scope][path] = { sourceHash: `sha256:${"a".repeat(64)}`, compilerRevision: "artifact-v1" };
+	}
+	snapshot.meta.step += 1;
+	const selected = runtime.publish(snapshot, true, createAcceptedTransition(beforeSeed, seeded), { pushRemote: false, provenance })!.commit!;
+	const selectedLineage = structuredClone(runtime.view!.lineage);
+	const selectedStep = snapshot.meta.step;
+	// The child publishes after A has selected its state, without sharing an in-process cache.
+	const childSource = `
+		import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
+		import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
+		import { createAcceptedTransition } from ${JSON.stringify(new URL("../lib/history.ts", import.meta.url).href)};
+		const [root, cwd] = process.argv.slice(1);
+		const runtime = new TemporalRuntime(cwd, "session-b-provenance", root);
+		const snapshot = emptySnapshot(true);
+		snapshot.meta.remotePublication = { version: 1, mode: "off" };
+		runtime.initialize(snapshot, true);
+		const before = runtime.states();
+		const after = structuredClone(before);
+		const provenance = { global: {}, cwd: {} };
+		for (const scope of ["global", "cwd"]) for (const suffix of ["", "-added"]) {
+			const path = "/sources/" + scope + suffix + ".md";
+			after[scope].artifacts[path] = { description: scope + suffix + " from independent publisher" };
+			provenance[scope][path] = { sourceHash: "sha256:" + "b".repeat(64), compilerRevision: "artifact-v2" };
+		}
+		snapshot.meta.step += 1;
+		const result = runtime.publish(snapshot, true, createAcceptedTransition(before, after), { pushRemote: false, provenance });
+		console.log(JSON.stringify({ pid: process.pid, revision: result.commit }));
+	`;
+	const child = JSON.parse(execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", childSource, fixture.root, fixture.cwd], { encoding: "utf8", timeout: 30_000 }));
+	assert.notEqual(child.pid, process.pid);
+	assert.match(child.revision, /^[0-9a-f]{40,64}$/);
+	if (resumeAfterAdvance) {
+		runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+		snapshot = runtime.restore(selected);
+	}
+	const sharedPaths = (["global", "cwd"] as const).flatMap((scope) => {
+		const paths = temporalScopePaths(fixture.cwd, "session-a", scope, fixture.root);
+		return [paths.checkpoint, paths.patches, paths.meta];
+	});
+	const sharedBefore = sharedPaths.map((path) => readFileSync(path));
+	snapshot.config.enabled = false;
+	const stopped = runtime.publish(snapshot)!.commit!;
+	assert.deepEqual(sharedPaths.map((path) => readFileSync(path)), sharedBefore, "Stop must not rewind another publisher's semantic files or provenance");
+	const paths = sessionRuntimePaths(fixture.cwd, "session-a", fixture.root);
+	const changed = execFileSync("git", ["-C", fixture.root, "diff-tree", "--no-commit-id", "--name-only", "-r", stopped], { encoding: "utf8" }).trim().split("\n").sort();
+	assert.deepEqual(changed, [paths.config, paths.meta].map((path) => relative(fixture.root, path).replaceAll("\\", "/")).sort());
+	const restored = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const stoppedSnapshot = restored.restore(stopped);
+	assert.equal(stoppedSnapshot.config.enabled, false);
+	assert.equal(stoppedSnapshot.meta.step, selectedStep);
+	assert.deepEqual(restored.states(), seeded);
+	assert.deepEqual(restored.view!.lineage, selectedLineage);
+	for (const scope of scopes) assert.deepEqual(restored.artifactProvenance(scope), provenance[scope], "cold provenance must belong to the same selected scopes, not the live stop commit");
+	const peer = new TemporalRuntime(fixture.cwd, "session-b-provenance", fixture.root);
+	peer.restore(child.revision);
+	for (const scope of ["global", "cwd"] as const) {
+		assert.equal(peer.artifactProvenance(scope)[`/sources/${scope}.md`]!.sourceHash, `sha256:${"b".repeat(64)}`);
+		assert.ok(peer.read(0, scope).artifacts[`/sources/${scope}-added.md`]);
+	}
 });
 
 test("a provenance-only write adopts drift in an untouched shared scope", (t) => {

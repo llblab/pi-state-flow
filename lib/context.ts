@@ -11,6 +11,7 @@ export const VALIDATION_MESSAGE_TYPE = "state-flow-validation";
 /** Bounded context retained after semantic State Flow is stopped in this physical session. */
 export interface PassiveContinuation {
 	startedAt: number;
+	activeRunStartedAt?: number;
 	handoff: AgentMessage;
 }
 
@@ -38,19 +39,23 @@ export function withoutPrivateValidation(messages: AgentMessage[]): AgentMessage
 	});
 }
 
-export function createPassiveContinuation(state: MaterializedState, startedAt = Date.now()): PassiveContinuation {
+export function createPassiveContinuation(state: MaterializedState, startedAt = Date.now(), activeRunStartedAt?: number): PassiveContinuation {
 	return {
 		startedAt,
-		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${canonicalJson({ state, continuation: "State Flow semantics are disabled; this bounded handoff replaces pre-stop history." })}`),
+		...(activeRunStartedAt === undefined ? {} : { activeRunStartedAt }),
+		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${canonicalJson({ state, continuation: "State Flow semantics are disabled; this handoff replaces completed history while retaining the active and post-stop trajectory." })}`),
 	};
 }
 
-/** Preserve the frozen handoff plus only messages produced after stop, never the older raw branch. */
+/** Keep the interrupted run through later results; an idle stop retains only later conversation. */
 export function passiveContinuationMessages(messages: AgentMessage[], continuation: PassiveContinuation): AgentMessage[] {
-	const start = messages.findIndex((message) => message.role === "user"
+	let start = continuation.activeRunStartedAt === undefined ? -1
+		: messages.findIndex((message) => message.role === "user" && message.timestamp === continuation.activeRunStartedAt);
+	if (start < 0) start = messages.findIndex((message) => message.role === "user"
 		&& typeof message.timestamp === "number"
 		&& message.timestamp >= continuation.startedAt);
-	return [continuation.handoff, ...(start < 0 ? [] : messages.slice(start))];
+	return [continuation.handoff, ...messages.filter((message, index) =>
+		message.role === "custom" ? message.customType !== VALIDATION_MESSAGE_TYPE : start >= 0 && index >= start)];
 }
 
 function projectRecentForModel(recent: RecentTransitionWindow): RecentTransitionWindow {
@@ -123,14 +128,9 @@ export function currentRunTrajectory(
 	if (start < 0 && messages.length === 0) return { messages: [] };
 	if (start < 0) start = 0;
 	const anchor = messages[start]?.role === "user" ? messages[start].timestamp : undefined;
-	const persistentCustom = withoutPrivateValidation(messages.slice(0, start)).filter((message) => {
-		return message.role === "custom";
-	});
 	return {
-		messages: [
-			...persistentCustom,
-			...withoutPrivateValidation(messages.slice(start)),
-		],
+		messages: messages.filter((message, index) => message.role === "custom"
+			? message.customType !== VALIDATION_MESSAGE_TYPE : index >= start),
 		...(typeof anchor === "number" ? { anchorTimestamp: anchor } : {}),
 	};
 }

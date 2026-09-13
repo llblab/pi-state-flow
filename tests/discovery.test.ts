@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -64,6 +64,52 @@ test("refresh reports additions through the current source set and removals expl
 		sources: [{ path: secondPath, hash: hashArtifactSource("second"), bytes: 6 }],
 		removed: [firstPath],
 	});
+});
+
+test("removal evidence is root-owned, non-consuming, and reconstructible from retained paths", (t) => {
+	const { root, cleanup } = fixture();
+	t.after(cleanup);
+	const outside = join(root, "..", "outside");
+	mkdirSync(outside);
+	const kept = join(root, "keep.md");
+	writeFileSync(kept, "keep");
+	const gone = join(root, "deleted-directory", "gone.md");
+	const preserved = [
+		join(outside, "external.md"), join(root, "data.txt"), join(root, "uppercase.MD"),
+		join(root, "linked-directory", "missing.md"), join(root, "linked.md"), join(root, "directory.md"),
+		"relative.md", `${root}/../outside/alias.md`,
+	];
+	symlinkSync(outside, join(root, "linked-directory"));
+	symlinkSync(join(outside, "absent.md"), join(root, "linked.md"));
+	mkdirSync(join(root, "directory.md"));
+	const retained = [kept, gone, ...preserved];
+	const discovery = new GlobalMarkdownDiscovery(root);
+	for (const owner of [discovery, discovery, new GlobalMarkdownDiscovery(root)]) {
+		assert.deepEqual(owner.refresh(retained).removed, [gone]);
+	}
+	renameSync(root, `${root}-unavailable`);
+	const unavailable = discovery.refresh(retained);
+	assert.deepEqual(unavailable.sources, []);
+	assert.deepEqual(unavailable.removed, [], "a missing whole root is not evidence to delete its compiled registry");
+	assert.match(unavailable.unavailable ?? "", /Knowledge root is unavailable/);
+	renameSync(`${root}-unavailable`, root);
+	assert.deepEqual(discovery.refresh(retained).removed, [gone]);
+});
+
+test("repointing a configured root does not remove artifacts belonging to its previous target", (t) => {
+	const { root, cleanup } = fixture();
+	t.after(cleanup);
+	const alias = join(root, "..", "alias");
+	const other = join(root, "..", "other");
+	mkdirSync(other);
+	const first = join(root, "first.md");
+	writeFileSync(first, "first");
+	symlinkSync(root, alias);
+	const discovery = new GlobalMarkdownDiscovery(alias);
+	assert.equal(discovery.refresh().sources[0]!.path, first);
+	rmSync(alias);
+	symlinkSync(other, alias);
+	assert.deepEqual(discovery.refresh(), { sources: [], removed: [] });
 });
 
 test("does not follow file or directory symlinks outside or inside the Knowledge root", (t) => {

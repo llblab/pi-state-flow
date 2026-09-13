@@ -90,7 +90,8 @@ export function planTemporalPublication(
 		changedScopes.push(scope);
 	}
 	const provenanceUpdates: OwnedFileUpdate[] = [];
-	if (provenance !== undefined) {
+	// Shared provenance belongs to its semantic scopes, not the session config being saved.
+	if (!runtimeOnly && provenance !== undefined) {
 		for (const scope of ["global", "cwd"] as const) {
 			const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 			const registry = provenance[scope];

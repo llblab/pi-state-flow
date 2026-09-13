@@ -1,6 +1,6 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.9.6",
+  "version": "0.10.0",
   "private": false,
   "description": "Incremental scoped state/context compiler for Pi, inspired by SKILL.state",
   "keywords": [
@@ -30,6 +30,7 @@
   "scripts": {
     "check": "node --experimental-strip-types -e \"await import('./index.ts')\"",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "benchmark": "node --experimental-strip-types benchmarks/benchmark.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm run typecheck && npm test && npm run check",
     "prepack": "npm run validate"
@@ -50,9 +51,9 @@
     "node": ">=22.19.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "^0.84.4",
-    "@earendil-works/pi-ai": "^0.84.4",
-    "@earendil-works/pi-coding-agent": "^0.84.4"
+    "@earendil-works/pi-agent-core": "^0.84.4 || ^0.85.1",
+    "@earendil-works/pi-ai": "^0.84.4 || ^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.84.4 || ^0.85.1"
   },
   "devDependencies": {
     "@types/node": "latest",

@@ -3,6 +3,7 @@ import {
 	ORDINARY_ARTIFACT_COMPILER,
 	validateArtifactMetadata,
 	validateArtifactRegistry,
+	validateModelArtifactPatch,
 	type ArtifactCompilerOutput,
 	type ArtifactProvenance,
 } from "./artifact.ts";
@@ -77,9 +78,6 @@ function compileReadSkills(
 		if (!isObject(output)) {
 			throw new Error(`Every successfully read Skill must have a CWD artifact compiler output at artifacts[exactReadPath]; missing: ${read.path}`);
 		}
-		if (Object.hasOwn(output, "hash") || Object.hasOwn(output, "compiler")) {
-			throw new Error(`Skill artifact compiler output at ${read.path} cannot set runtime-owned hash or compiler fields`);
-		}
 		if (typeof output.description !== "string" || output.description.trim().length === 0) {
 			throw new Error(`Skill artifact compiler output at ${read.path} must have a non-empty description`);
 		}
@@ -133,6 +131,7 @@ function validateScopePatch(scope: unknown, patch: unknown): asserts patch is Sc
 			throw new Error(`Scoped State Flow patch field ${key} must be a JSON object`);
 		}
 	}
+	if (isObject(patch.artifacts)) validateModelArtifactPatch(patch.artifacts);
 }
 
 function completePatch(patch: ScopePatch, response: string): StatePatch {

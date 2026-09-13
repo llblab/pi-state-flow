@@ -50,6 +50,7 @@ export function harness(options: HarnessOptions = {}) {
 	const commands = new Map<string, any>();
 	const entries: any[] = [];
 	const sentMessages: Array<{ message: unknown; options: unknown }> = [];
+	const compactRequests: any[] = [];
 	const tools = new Map<string, any>();
 	let activeTools = ["read", "bash"];
 	const pi = {
@@ -66,10 +67,16 @@ export function harness(options: HarnessOptions = {}) {
 	};
 	const notifications: string[] = [];
 	const statuses: Array<string | undefined> = [];
+	function branchEntry(index: number): any {
+		const entry = ctx.sessionManager.getBranch()[index];
+		return entry === undefined ? undefined : { ...entry, id: String(index), parentId: index === 0 ? null : String(index - 1) };
+	}
 	const ctx = {
 		cwd: options.cwd ?? "/tmp",
 		isProjectTrusted: () => false,
 		isIdle: () => true,
+		hasPendingMessages: () => false,
+		compact: (request: unknown) => { compactRequests.push(request); },
 		ui: {
 			theme: { fg: (color: string, text: string) => `<${color}>${text}</${color}>` },
 			setStatus(_key: string, value: string | undefined) { statuses.push(value); },
@@ -77,6 +84,9 @@ export function harness(options: HarnessOptions = {}) {
 		},
 		sessionManager: {
 			getBranch: () => entries,
+			buildContextEntries: () => entries.map((_entry, index) => branchEntry(index)),
+			getLeafEntry: (): any => branchEntry(ctx.sessionManager.getBranch().length - 1),
+			getEntry: (id: string): any => branchEntry(Number(id)),
 			getSessionId: () => options.sessionId ?? "harness-session",
 			getSessionFile: () => options.sessionFile,
 			getHeader: () => options.sessionTimestamp === undefined ? null : {
@@ -119,6 +129,7 @@ export function harness(options: HarnessOptions = {}) {
 		tools,
 		entries,
 		sentMessages,
+		compactRequests,
 		notifications,
 		statuses,
 		ctx,
@@ -133,7 +144,7 @@ export function harness(options: HarnessOptions = {}) {
 }
 
 export function user(text: string, timestamp: number) {
-	return { role: "user", content: [{ type: "text", text }], timestamp };
+	return { role: "user" as const, content: [{ type: "text" as const, text }], timestamp };
 }
 
 export function toolAssistant(id: string, name = "read", args: unknown = { path: "README.md" }) {

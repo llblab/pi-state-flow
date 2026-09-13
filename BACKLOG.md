@@ -1,6 +1,20 @@
 # BACKLOG
 
-Completed release work belongs in [CHANGELOG.md](CHANGELOG.md). No implementation item remains open for 0.9.0.
+Completed release work belongs in [CHANGELOG.md](CHANGELOG.md).
+
+## 0.10.0: Session performance and reliability
+
+- **Outcome:** Make State Flow complement Pi's native session lifecycle reliably and efficiently after long histories and while independent instances publish to the same store. The operator reports slowdown after resuming a large session with roughly 200 patches; concurrency is a hypothesis, not an established cause.
+- **Evolution:** Treat 0.10.0 as a maturation milestone: deepen reliability, usability, performance, consistency, and explanation of the existing concept. Admit adjacent maintenance only from concrete evidence; do not add features or change the product's core model.
+- **Execution:** Prefer inline implementation and review. If subagent delegation becomes necessary, use only the operator-requested "GPT-5.6 Luna" after verifying its exact available identity; no silent substitution. The coordinator owns review and integration. Existing deterministic benchmark processes may finish without launching more model actors.
+- **Convergence:** Reproduce and measure first, implement only evidenced corrections, validate each owned slice, then separately review the integrated candidate. Stop when the regressions below pass, before/after workload evidence explains the performance changes, and remaining host or environment limits are explicit. Preserve semantic history, source/runtime ownership, native trace, branch selection, and exact publication/CAS guarantees.
+- **Non-goals:** No new semantic mode, state-size cap, database, hidden session replacement, bulk migration, production-store repair, read-only global bootstrap, or Telegram analyzer. Preserve ordinary abort: accepted patches remain available for same-session continuation, with no new immediate remote-enqueue requirement. Test on synthetic sessions and temporary stores; do not inspect or mutate production conversation bodies or state repositories for this work. Publication remains outside preparation scope.
+
+### Release gate
+
+The [nine-invocation measurement series and interpretation](docs/performance.md#measurement-closure) are complete; no measurement is active. `/tmp/state-flow-final-controls-CzaHqM/final-series-receipts.json` binds the actual exits and complete captures. Preserve this evidence and refresh only claims invalidated by an admitted correction; source/workload changes must not silently inherit old timings. Original production slowdown attribution remains unproven, and production-store inspection is not authorized.
+
+The 0.10.0 candidate now includes native completed-history compaction and effective-only status JSON. Full 0.84.4 validation passes 426/426; affected policy/status/native lifecycle tests and typecheck pass on 0.85.1. The operator intentionally aligned package/lock versions to 0.10.0 and explicitly authorized commit, push and release. Release automation/remote CI and published artifacts remain the external acceptance gates.
 
 ## Candidate evolution
 

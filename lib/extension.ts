@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { randomUUID } from "node:crypto";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -10,8 +10,9 @@ import { loadStateFlowConfig } from "./config.ts";
 import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramLoader } from "./telegram.ts";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { SkillReadTracker } from "./skills.ts";
-import { emptySnapshot, migrationFailure, persistableSnapshot, type Snapshot } from "./snapshot.ts";
-import { inspectSnapshotRevision, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
+import { emptySnapshot, migrationFailure, persistableSnapshot, RevisionUnavailableError, type Snapshot } from "./snapshot.ts";
+import { readNativeSessionHeader } from "./continuation.ts";
+import { MissingSessionRuntimeError, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
 import { emptyState, overlayStates, projectStateForModel, type AtomicScopePatches, type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
 import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, validateFinalEligibility, type StagedScopedTransition } from "./transition.ts";
 import { discoverSnapshotData, hasPriorConversation, isNewSession, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
@@ -33,12 +34,13 @@ import {
 } from "./durable.ts";
 import { projectRecentTransitionsWithLimit, RECENT_TRANSITION_LIMIT } from "./history.ts";
 import { appendStateFlowDiagnostic, projectDiagnosticContent, stateFlowLogPath, type StateFlowDiagnosticCategory } from "./logging.ts";
-import { isGitCommitAncestor, pushGitCommit, resolveGitPushDestination } from "./git.ts";
+import { isGitCommitAncestor, pushGitCommit, pushGitTarget, resolveGitPushDestination } from "./git.ts";
 import {
 	ORDINARY_ARTIFACT_COMPILER,
 	planArtifactInvalidation,
 	type ArtifactInvalidationRequest,
 } from "./artifact.ts";
+import { planStateFlowCompaction, stateFlowCompactionResult, type StateFlowCompactionPlan } from "./compaction.ts";
 
 export interface StateFlowExtensionOptions {
 	agentDir?: string;
@@ -52,6 +54,7 @@ export const PATCH_STATE_TOOL_NAME = "patch_state";
 export const READ_STATE_TOOL_NAME = "read_state";
 export const MAX_FALLBACK_ATTEMPTS: number = 2;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
+const PUBLICATION_SHUTDOWN_WAIT_MS = 2_000;
 
 /** Keep a failed tool invocation visually separated from its rendered error without changing error semantics. */
 function separatedFailure(error: unknown): Error {
@@ -66,11 +69,17 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	let scopeStates: ScopedStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
 	let branchHasSnapshot = false;
 	let branchStartsWithoutRuntime = false;
+	let forkInitialization = false;
 	let terminalEligible = false;
 	let resolutionPending = false;
 	let fallbackAttempts = 0;
 	let fallbackFailureReported = false;
 	let responseAwaitingReconciliation = false;
+	let completedRunAccepted = false;
+	let compactionPlan: StateFlowCompactionPlan | undefined;
+	let compactionInFlight = false;
+	let compactionStopped = false;
+	const compactionMarker = `state-flow-boundary:${randomUUID()}`;
 	let passiveContinuation: PassiveContinuation | undefined;
 	let bootstrapContinuation: PassiveContinuation | undefined;
 	let artifactRefreshPending = false;
@@ -80,7 +89,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	let pendingPublication: PendingPublicationDiagnostic | undefined;
 	let rehydrationPhase: RehydrationPhase | undefined;
 	let turnPublicationTarget: string | undefined;
-	const activePublicationWorkers = new Set<string>();
+	const activePublicationWorkers = new Map<string, { controller: AbortController; done: Promise<void> }>();
+	let publicationStopped = false;
+	let publicationShutdown: Promise<void> | undefined;
 	const repositoryRoot = resolve(options.repositoryRoot ?? config.directory);
 	const skillReads = new SkillReadTracker();
 	const artifactReads = new ArtifactReadTracker();
@@ -131,17 +142,24 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		fallbackAttempts = 0;
 		fallbackFailureReported = false;
 		responseAwaitingReconciliation = false;
+		completedRunAccepted = false;
+		compactionPlan = undefined;
+		compactionInFlight = false;
 		runAnchorTimestamp = undefined;
 		skillReads.clear();
 		artifactReads.clear();
 	}
 
-	function passiveStopTimestamp(ctx: ExtensionContext): number | undefined {
+	function passiveStopBoundary(ctx: ExtensionContext): { at: number; from?: number } | undefined {
 		for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
 			try {
 				if (entry?.type !== "custom" || entry.customType !== PASSIVE_STOP_ENTRY_TYPE) continue;
-				const at = (entry.data as { at?: unknown } | undefined)?.at;
-				if (typeof at === "number" && Number.isSafeInteger(at) && at >= 0) return at;
+				const { at, from, reset, owner } = (entry.data as { at?: unknown; from?: unknown; reset?: unknown; owner?: unknown } | undefined) ?? {};
+				if (reset === true && owner === ctx.sessionManager.getSessionId()) return undefined;
+				if (typeof at === "number" && Number.isSafeInteger(at) && at >= 0) return {
+					at,
+					...(typeof from === "number" && Number.isSafeInteger(from) && from >= 0 ? { from } : {}),
+				};
 			} catch {
 				// A hostile unrelated branch entry cannot manufacture or suppress a valid marker.
 			}
@@ -167,12 +185,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			return;
 		}
 		try {
-			const discovery = globalMarkdown.refresh();
+			const discovery = globalMarkdown.refresh(Object.keys(scopeStates.global.artifacts));
 			const plan = planArtifactInvalidation(
 				discovery.sources,
 				scopeStates.global.artifacts,
 				ORDINARY_ARTIFACT_COMPILER,
-				{},
+				{ removed: discovery.removed },
 				runtime?.artifactProvenance("global") ?? {},
 			);
 			artifactInvalidations = structuredClone(plan.requiresCompilation);
@@ -211,9 +229,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	}
 
 	function assistantToolBatch(ctx: ExtensionContext, toolCallId: string): string[] | undefined {
-		const branch = ctx.sessionManager.getBranch();
-		for (let index = branch.length - 1; index >= 0; index--) {
-			const entry = branch[index] as { type?: unknown; message?: { role?: unknown; content?: unknown } };
+		for (let cursor = ctx.sessionManager.getLeafEntry(); cursor; cursor = cursor.parentId ? ctx.sessionManager.getEntry(cursor.parentId) : undefined) {
+			const entry = cursor as { type?: unknown; message?: { role?: unknown; content?: unknown } };
 			if (entry.type !== "message" || entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
 			const calls = entry.message.content.filter((block): block is { type: "toolCall"; id: string; name: string } => {
 				return typeof block === "object" && block !== null
@@ -308,6 +325,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	}
 
 	function launchPublicationWorker(): void {
+		if (publicationStopped) return;
 		let destination: ReturnType<typeof resolveGitPushDestination>;
 		try {
 			destination = resolveGitPushDestination(repositoryRoot);
@@ -328,17 +346,14 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			return;
 		}
 		if (!lease) return;
-		activePublicationWorkers.add(path);
-		void runPublicationWorker(
+		const controller = new AbortController();
+		const done = runPublicationWorker(
 			queued,
-			({ target }) => new Promise<void>((resolve, reject) => {
-				execFile("git", ["-C", repositoryRoot, "push", destination.remote, `${target}:${destination.ref}`], {
-					env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
-				}, (error) => error ? reject(error) : resolve());
-			}),
+			({ target }) => pushGitTarget(repositoryRoot, destination, target, controller.signal),
 			() => loadPublicationQueue(path) ?? queued,
 			(ancestor, descendant) => isGitCommitAncestor(repositoryRoot, ancestor, descendant),
 		).then((result) => {
+			if (publicationStopped) return; // Late outcomes belong to an unconfirmed queue, not the replacement generation.
 			const current = loadPublicationQueue(path);
 			if (!current) return;
 			if (result.next === undefined) {
@@ -352,13 +367,33 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			// Queue/CAS truth remains durable; status and a later activation expose retry.
 		}).finally(() => {
 			activePublicationWorkers.delete(path);
-			lease.release();
 			try {
-				if (loadPublicationQueue(path)?.status === "pending") launchPublicationWorker();
+				lease.release();
+				if (!publicationStopped && loadPublicationQueue(path)?.status === "pending") launchPublicationWorker();
 			} catch {
-				// Malformed queue persistence stays inert until an explicit retry or repair.
+				// Failed lease cleanup or malformed persistence stays inert until retry or repair.
 			}
 		});
+		activePublicationWorkers.set(path, { controller, done });
+	}
+
+	function shutdownPublicationWorkers(ctx: ExtensionContext): Promise<void> {
+		publicationStopped = true;
+		return publicationShutdown ??= (async () => {
+			const workers = [...activePublicationWorkers.values()];
+			for (const { controller } of workers) controller.abort();
+			if (workers.length === 0) return;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const completed = await Promise.race([
+					Promise.all(workers.map(({ done }) => done)).then(() => true),
+					new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), PUBLICATION_SHUTDOWN_WAIT_MS); }),
+				]);
+				if (!completed) ctx.ui.notify(`State Flow push cleanup is unconfirmed after ${PUBLICATION_SHUTDOWN_WAIT_MS}ms; worker leases remain held until child exit.`, "warning");
+			} finally {
+				clearTimeout(timeout);
+			}
+		})();
 	}
 
 	function retryPendingPush(ctx: ExtensionContext): void {
@@ -409,12 +444,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			artifactFreshnessError = "durable global artifact registry is unavailable";
 		} else {
 			try {
-				const discovery = globalMarkdown.refresh();
+				const discovery = globalMarkdown.refresh(Object.keys(diagnosticStates.global.artifacts));
+				artifactFreshnessError = discovery.unavailable;
 				const plan = planArtifactInvalidation(
 					discovery.sources,
 					diagnosticStates.global.artifacts,
 					ORDINARY_ARTIFACT_COMPILER,
-					{},
+					{ removed: discovery.removed },
 					runtime?.artifactProvenance("global") ?? {},
 				);
 				staleArtifacts = [
@@ -456,6 +492,34 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		};
 	}
 
+	function prepareBranchRestore(ctx: ExtensionContext, revision: string, legacy?: Snapshot): { snapshot: Snapshot; restore: () => Snapshot } {
+		if (!forkInitialization) {
+			try {
+				return runtime!.prepareRestore(revision, legacy);
+			} catch (error) {
+				if (error instanceof MissingSessionRuntimeError && typeof ctx.sessionManager.getHeader()?.parentSession === "string") {
+					throw new RevisionUnavailableError("State Flow checkpoint has no child-owned runtime; select a child checkpoint or resume the parent");
+				}
+				throw error;
+			}
+		}
+		const file = ctx.sessionManager.getHeader()?.parentSession;
+		if (typeof file !== "string" || !isAbsolute(file)) throw new Error("State Flow fork requires a persisted native parent session");
+		const parent = readNativeSessionHeader(file);
+		if (parent.cwd !== resolve(ctx.cwd)) throw new Error("State Flow fork parent CWD identity mismatch");
+		const source = resolveSessionAddress(parent.file, parent.id, parent.timestamp);
+		const prepared = runtime!.prepareFork(source, revision);
+		return { snapshot: prepared.snapshot, restore: () => {
+			const accepted = prepared.fork();
+			snapshot = accepted.snapshot;
+			recordPolicyPublication(accepted.publication, ctx);
+			// Copied Stop markers belong to the parent, including after a child reload/resume.
+			pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, { reset: true, owner: ctx.sessionManager.getSessionId() });
+			forkInitialization = false;
+			return snapshot;
+		} };
+	}
+
 	function restoreActiveBranch(ctx: ExtensionContext, sessionStartReason?: unknown): void {
 		clearRunTransient();
 		passiveContinuation = undefined;
@@ -471,11 +535,22 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		pendingPublication = undefined;
 		branchHasSnapshot = false;
 		branchStartsWithoutRuntime = false;
+		forkInitialization = sessionStartReason === "fork";
 		try {
 			const branch = ctx.sessionManager.getBranch();
 			const discovery = discoverSnapshotData(branch);
-			const recovery = recoverSnapshot(discovery.candidates, (revision, legacy) =>
-				inspectSnapshotRevision(ctx.cwd, session.id, repositoryRoot, revision, legacy, session.key).snapshot);
+			let restoreSelected: (() => Snapshot) | undefined;
+			const recovery = recoverSnapshot(discovery.candidates, (revision, legacy) => {
+				try {
+					const prepared = prepareBranchRestore(ctx, revision, legacy);
+					restoreSelected = prepared.restore;
+					return prepared.snapshot;
+				} catch (error) {
+					// A failed source proof never licenses an older/empty private copy.
+					if (forkInitialization) throw new RevisionUnavailableError(`Cannot copy State Flow fork source: ${error instanceof Error ? error.message : String(error)}`);
+					throw error;
+				}
+			});
 			branchStartsWithoutRuntime = recovery.disabledMarker === true
 				|| (discovery.candidates.length === 0 && discovery.errors.length === 0);
 			const skipped = discovery.errors.length + recovery.skipped.length;
@@ -486,7 +561,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				snapshot = recovery.snapshot;
 				if (branchHasSnapshot && snapshot.meta.durableBase) {
 					const selectedRevision = snapshot.meta.durableBase;
-					snapshot = runtime.restore(selectedRevision, snapshot);
+					snapshot = restoreSelected ? restoreSelected() : prepareBranchRestore(ctx, selectedRevision, snapshot).restore();
 					if (snapshot.meta.durableBase !== selectedRevision) persist();
 				} else if (branchHasSnapshot && snapshot.config.enabled) {
 					const publication = runtime.initialize(snapshot, true);
@@ -540,11 +615,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			ctx.ui.notify(`State Flow restored disabled: ${snapshot.meta.validation.error}`, "error");
 		}
 		if (retainsPhysicalSessionProjection(sessionStartReason) && runtime?.view) {
-			const stoppedAt = passiveStopTimestamp(ctx);
-			if (stoppedAt !== undefined) {
+			const boundary = passiveStopBoundary(ctx);
+			if (boundary !== undefined) {
 				const continuation = createPassiveContinuation(
 					projectStateForModel(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)),
-					stoppedAt,
+					boundary.at,
+					boundary.from,
 				);
 				if (!snapshot.config.enabled) passiveContinuation = continuation;
 				else if (snapshot.meta.bootstrap) bootstrapContinuation = continuation;
@@ -776,7 +852,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			const bootstrap = (!branchHasSnapshot || !snapshot.config.enabled)
 				&& (hasPriorConversation(branch) || previousPassiveContinuation !== undefined);
 			if (!runtime.view && snapshot.meta.durableBase) {
-				snapshot = runtime.restore(snapshot.meta.durableBase, snapshot);
+				snapshot = prepareBranchRestore(ctx, snapshot.meta.durableBase, snapshot).restore();
 				setPendingPublication(snapshot.meta.pendingPublication);
 				branchHasSnapshot = true;
 			}
@@ -855,6 +931,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			? createPassiveContinuation(
 				projectStateForModel(overlayStates(exitStates.global, exitStates.cwd, exitStates.session)),
 				stoppedAt,
+				ctx.isIdle() ? undefined : runAnchorTimestamp,
 			)
 			: undefined;
 		const retainedHandoff = exitHandoff ?? (!current.config.enabled ? passiveContinuation : undefined);
@@ -873,7 +950,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		artifactInvalidations = [];
 		artifactReads.setCandidates([]);
 		artifactRefreshPending = false;
-		if (exitHandoff) pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, { at: stoppedAt });
+		if (exitHandoff) pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, {
+			at: stoppedAt,
+			...(exitHandoff.activeRunStartedAt === undefined ? {} : { from: exitHandoff.activeRunStartedAt }),
+		});
 		syncStateFlowTools();
 		persist();
 		updateUi(ctx);
@@ -929,10 +1009,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		fallbackAttempts = 0;
 		fallbackFailureReported = false;
 		responseAwaitingReconciliation = false;
+		completedRunAccepted = false;
 		const rotatesRun = snapshot.meta.specification !== undefined;
 		if (rotatesRun && rehydrationPhase !== "new-bootstrap" && rehydrationPhase !== "resume-bootstrap") rehydrationPhase = "step";
 		if (prepareRun(snapshot, event.prompt)) {
-			if (rotatesRun) runAnchorTimestamp = undefined;
+			runAnchorTimestamp = undefined;
 			persist();
 		}
 		return {
@@ -945,7 +1026,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			return { messages: passiveContinuationMessages(event.messages as AgentMessage[], passiveContinuation) };
 		}
 		if (!snapshot.config.enabled || snapshot.meta.specification === undefined) return;
-		const effectiveState = projectStateForModel(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session));
+		const effectiveState = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
 		const invalidations = artifactInvalidations.map(({ path, reason }) => ({ path, reason }));
 		const recentTransitions = projectRecentTransitionsWithLimit(
 			RECENT_TRANSITION_LIMIT,
@@ -1010,7 +1091,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	});
 
 	pi.on("message_end", (event, ctx): any => {
-		if (!snapshot.config.enabled || event.message.role !== "assistant") return;
+		if (!snapshot.config.enabled) return;
+		// Capture the first native user boundary even during bootstrap; steering keeps that anchor.
+		if (event.message.role === "user" && runAnchorTimestamp === undefined) runAnchorTimestamp = event.message.timestamp;
+		if (event.message.role !== "assistant") return;
 		const message = event.message as unknown as { role: "assistant"; stopReason?: string; content?: unknown };
 		if (message.stopReason === "aborted" || assistantToolCallCount(message.content) > 0 || message.stopReason === "toolUse") {
 			responseAwaitingReconciliation = false;
@@ -1036,6 +1120,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	});
 
 	pi.on("turn_end", (event, ctx) => {
+		const wasBootstrap = snapshot.meta.bootstrap === true;
 		if (!snapshot.config.enabled || !responseAwaitingReconciliation) {
 			updateUi(ctx);
 			return;
@@ -1050,6 +1135,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			rehydrationPhase = "step";
 			enqueueTurnPublication(ctx);
 			if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
+			completedRunAccepted = !wasBootstrap;
 		} catch (error) {
 			recordDiagnostic(error instanceof Error ? error.message : String(error), "finalization", ctx);
 			ctx.ui.notify(responseCommitted
@@ -1061,12 +1147,32 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		updateUi(ctx);
 	});
 
+	pi.on("session_before_compact", (event) => {
+		if (!compactionPlan) return;
+		if (compactionStopped && event.reason === "manual" && event.customInstructions === compactionMarker) return { cancel: true };
+		const result = stateFlowCompactionResult(compactionPlan, compactionMarker, event);
+		if (result === undefined || "cancel" in result) return result;
+		return { compaction: result };
+	});
+
 	pi.on("agent_settled", (_event, ctx) => {
 		if (telegramStartPending && !snapshot.config.enabled) {
 			telegramStartPending = false;
 			startStateFlow(ctx);
 		}
 		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
+		if (!completedRunAccepted || compactionStopped || !snapshot.config.enabled || snapshot.meta.bootstrap || resolutionPending
+			|| compactionInFlight || !ctx.isIdle() || ctx.hasPendingMessages() || !snapshot.meta.durableBase) return;
+		completedRunAccepted = false;
+		const plan = planStateFlowCompaction(ctx.sessionManager.buildContextEntries(), snapshot.meta.durableBase, snapshot.meta.step);
+		if (!plan) return;
+		compactionPlan = plan;
+		compactionInFlight = true;
+		ctx.compact({
+			customInstructions: compactionMarker,
+			onComplete: () => { compactionPlan = undefined; compactionInFlight = false; },
+			onError: () => { compactionPlan = undefined; compactionInFlight = false; },
+		});
 	});
 
 	pi.on("session_start", (event, ctx) => {
@@ -1080,8 +1186,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	pi.on("session_tree", (_event, ctx) => {
 		restoreActiveBranch(ctx);
 	});
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (_event, ctx) => {
 		telegramStartPending = false;
+		compactionStopped = true;
+		completedRunAccepted = false;
 		telegram.dispose();
+		return shutdownPublicationWorkers(ctx);
 	});
 }

@@ -76,9 +76,11 @@ export interface ArtifactInvalidationPlan {
 export interface ArtifactInvalidationOptions {
 	/** Refresh every source, or only paths in the supplied set. */
 	explicitRefresh?: boolean | ReadonlySet<string>;
+	/** Explicit absence evidence supplied by the source owner, not inferred from a partial candidate set. */
+	removed?: readonly string[];
 }
 
-/** Compiler-owned fields before State Flow attaches trusted source freshness metadata. */
+/** Trusted compilation input; embedded timestamps are accepted here, but never in model patches. */
 export type ArtifactCompilerOutput = JsonObject & {
 	description: string;
 	compiled_at?: string;
@@ -327,8 +329,13 @@ export function planArtifactInvalidation(
 		if (freshness.kind === "fresh") fresh.push(identity);
 		else requiresCompilation.push({ ...identity, reason: freshness.reason });
 	}
-	const removed = Object.keys(registry).filter((path) => !seen.has(path)).sort();
-	return { fresh, requiresCompilation, removed };
+	if (options.removed !== undefined && !Array.isArray(options.removed)) throw new Error("Removed artifact paths must be an array");
+	const removed = [...new Set(options.removed ?? [])];
+	for (const path of removed) {
+		if (typeof path !== "string" || path.trim().length === 0) throw new Error("Removed artifact paths must be non-empty");
+		if (seen.has(path)) throw new Error(`Artifact source cannot be both present and removed: ${path}`);
+	}
+	return { fresh, requiresCompilation, removed: removed.filter((path) => Object.hasOwn(registry, path)).sort() };
 }
 
 /** Split one compiler output into model-visible semantics and runtime-owned provenance. */
@@ -411,6 +418,15 @@ export function updateArtifactRegistry(
 
 /** Runtime-owned artifact fields that never belong in ordinary model context. */
 const RUNTIME_ARTIFACT_FIELDS = [...MODEL_FORBIDDEN_PROVENANCE_FIELDS, "compiled_at"] as const;
+
+/** Validate authored fields only: legacy retained evidence stays readable but cannot be model-edited. */
+export function validateModelArtifactPatch(patch: JsonObject): void {
+	for (const [path, entry] of Object.entries(patch)) {
+		if (!isObject(entry)) continue; // Whole-artifact deletion and materialized shape belong to the transition owner.
+		const field = RUNTIME_ARTIFACT_FIELDS.find((field) => Object.hasOwn(entry, field));
+		if (field !== undefined) throw new Error(`Artifact patch at ${path} cannot set runtime-owned provenance field ${field}`);
+	}
+}
 
 /** Strip retained runtime bookkeeping from one model-visible artifact entry. */
 export function projectArtifactForModel(entry: unknown): unknown {

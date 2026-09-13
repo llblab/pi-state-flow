@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition } from "../lib/transition.ts";
+import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, validateFinalEligibility } from "../lib/transition.ts";
 import type { AcceptedTransition } from "../lib/history.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState } from "../lib/temporal.ts";
@@ -179,7 +179,7 @@ test("validates acquired artifact and Skill outputs before staging trusted fresh
 	const state = states();
 	const source = { path: "/knowledge/changed.md", hash: `sha256:${"b".repeat(64)}`, reason: "source-changed" as const };
 	const skill = { path: "/skills/demo/SKILL.md", hash: `sha256:${"a".repeat(64)}` };
-	assert.throws(() => stageAtomicScopePatches(state, { session: { artifacts: { "/a.md": { description: "Invalid hash", hash: "sha256:invalid" } } } }, [], "origin"), /sha256:<64 lowercase hex characters>/);
+	assert.throws(() => stageAtomicScopePatches(state, { session: { artifacts: { "/a.md": { description: "Invalid hash", hash: "sha256:invalid" } } } }, [], "origin"), /cannot set runtime-owned provenance field hash/);
 	assert.throws(() => stageScopedTransition(state, { transitions: [], response: "Missing" }, [], "origin", [source]), /global compiler output/);
 	assert.throws(() => stageAtomicScopePatches(state, { cwd: {} }, [skill], "origin"), /missing: \/skills\/demo\/SKILL\.md/);
 	const stage = stageAtomicScopePatches(state, {
@@ -194,6 +194,37 @@ test("validates acquired artifact and Skill outputs before staging trusted fresh
 		{ scope: "global", patch: { artifacts: { [source.path]: { description: "Forged", hash: source.hash } } } },
 	], response: "Rejected" }, [], "origin", [source]), /cannot set runtime-owned/);
 	assert.throws(() => stageAtomicScopePatches(state, { session: { contract: { compiled_skills: { legacy: true } } } }, [], "origin"), /contract\.compiled_skills is retired/);
+});
+
+test("every model scope rejects provenance writes and deletions without requiring an acquired source", () => {
+	const state = states();
+	const before = structuredClone(state);
+	const fields = {
+		hash: `sha256:${"a".repeat(64)}`, compiler: "artifact-v1", compiled_at: "2026-01-01",
+		sourceHash: `sha256:${"a".repeat(64)}`, compilerRevision: "artifact-v1", compiledAt: "2026-01-01", source_hash_verified: true,
+	};
+	for (const scope of ["global", "cwd", "session"] as const) for (const [field, value] of Object.entries(fields)) for (const authored of [value, null]) {
+		const patch = { artifacts: { "/source.md": { description: "Forged evidence", [field]: authored } } };
+		assert.throws(() => stageAtomicScopePatches(state, { [scope]: patch }, [], "origin"), /cannot set runtime-owned provenance/);
+		assert.throws(() => stageScopedTransition(state, { transitions: [{ scope, patch }], response: "Rejected" }, [], "origin"), /cannot set runtime-owned provenance/);
+	}
+	assert.deepEqual(state, before);
+});
+
+test("legacy provenance remains readable while semantic edits, nested metadata, and whole-artifact deletion stay valid", () => {
+	const state = states();
+	const legacy = { description: "Legacy routing", hash: `sha256:${"a".repeat(64)}`, compiler: "artifact-v1", compiled_at: "2026-01-01" };
+	for (const scope of ["global", "cwd", "session"] as const) state[scope].artifacts["/legacy.md"] = structuredClone(legacy);
+	assert.doesNotThrow(() => validateFinalEligibility(state, [], "origin"));
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const semantic = { description: "Edited routing", compilation: { hash: "domain data", compiler: "domain compiler" }, future_policy: { compiledAt: "semantic nested data" } };
+		const edited = stageAtomicScopePatches(state, { [scope]: { artifacts: { "/legacy.md": semantic } } }, [], "origin");
+		assert.deepEqual(edited.nextStates[scope].artifacts["/legacy.md"], { ...legacy, ...semantic });
+		assert.deepEqual(edited.provenanceUpdates, { global: {}, cwd: {}, session: {} });
+		const deleted = stageAtomicScopePatches(state, { [scope]: { artifacts: { "/legacy.md": null } } }, [], "origin");
+		assert.equal(deleted.nextStates[scope].artifacts["/legacy.md"], undefined);
+		assert.deepEqual(state[scope].artifacts["/legacy.md"], legacy);
+	}
 });
 
 test("session-only transitions persist only the current temporal session layer", async () => {
