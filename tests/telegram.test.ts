@@ -4,6 +4,7 @@ import {
 	buildStateFlowSectionView,
 	createStateFlowTelegramAdapter,
 	formatStateFlowSectionLabel,
+	renderStateFlowRichState,
 	type StateFlowTelegramCallbackContext,
 	type StateFlowTelegramModules,
 	type StateFlowTelegramPort,
@@ -22,6 +23,7 @@ function fakePort(initial: StateFlowTelegramSnapshot, options: { canStartNow?: b
 	const calls: string[] = [];
 	const port: StateFlowTelegramPort = {
 		snapshot: () => current,
+		state: () => ({ artifacts: {}, contract: {}, working: {}, response: "" }),
 		canStartNow: () => options.canStartNow ?? true,
 		start: () => {
 			calls.push("start");
@@ -64,21 +66,25 @@ function fakeModules(failingSections = false) {
 	return { modules, sections, disposed };
 }
 
-function sectionContext(action: string) {
+function sectionContext(action: string, payload = "") {
 	const edits: StateFlowTelegramView[] = [];
 	const notices: Array<string | undefined> = [];
+	const richMessages: unknown[] = [];
 	const context = {
 		action,
-		payload: "",
+		payload,
 		callbackData: (name: string) => `section:0:${name}`,
 		edit: async (view: StateFlowTelegramView) => {
 			edits.push(view);
+		},
+		openRich: async (message: unknown) => {
+			richMessages.push(message);
 		},
 		answerCallback: async (text?: string) => {
 			notices.push(text);
 		},
 	} as StateFlowTelegramCallbackContext;
-	return { context, edits, notices };
+	return { context, edits, notices, richMessages };
 }
 
 test("section label always carries the spiral identity and the live state value", () => {
@@ -94,13 +100,61 @@ test("section view repeats the state line with one lifecycle button and no refre
 		off.text,
 		"<b>🌀 State Flow: <code>off</code></b>\n\nRecords the latest accepted state after every turn, so a new session resumes from the last committed point.",
 	);
-	assert.deepEqual(off.replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "cb:start" }]]);
+	assert.deepEqual(off.replyMarkup?.inline_keyboard, [
+		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
+		[{ text: "▶️ Start", callback_data: "cb:start" }],
+	]);
 	const on = buildStateFlowSectionView(snapshot({ enabled: true, step: 3 }), (action) => `cb:${action}`);
 	assert.match(on.text, /^<b>🌀 State Flow: <code>#3<\/code><\/b>/);
-	assert.deepEqual(on.replyMarkup?.inline_keyboard, [[{ text: "⏹ Stop", callback_data: "cb:stop" }]]);
+	assert.deepEqual(on.replyMarkup?.inline_keyboard, [
+		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
+		[{ text: "⏹ Stop", callback_data: "cb:stop" }],
+	]);
 	const pending = buildStateFlowSectionView(snapshot({ startPending: true }), (action) => `cb:${action}`);
 	assert.match(pending.text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
-	assert.deepEqual(pending.replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "cb:start" }]]);
+	assert.deepEqual(pending.replyMarkup?.inline_keyboard, [
+		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
+		[{ text: "▶️ Start", callback_data: "cb:start" }],
+	]);
+});
+
+test("scope chooser opens exactly one selected native Rich state tree", async () => {
+	const state = { artifacts: { "/a": { description: "A" } }, contract: { rule: true }, working: {}, response: "Done" };
+	const { modules, sections } = fakeModules();
+	const { port } = fakePort(snapshot({ enabled: true }));
+	port.state = (scope) => ({ ...state, working: { scope } });
+	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
+	await adapter.ensure();
+	const chooser = sectionContext("show-state");
+	assert.equal(await sections[0].handleCallback!(chooser.context), "handled");
+	assert.equal(chooser.edits[0].text, "<b>👁 Show state:</b>");
+	assert.deepEqual(chooser.edits[0].replyMarkup?.inline_keyboard.map((row) => row.map((button) => button.text)), [["Global", "CWD"], ["Session", "Effective"]]);
+	const inspect = sectionContext("inspect", "effective");
+	assert.equal(await sections[0].handleCallback!(inspect.context), "handled");
+	assert.deepEqual(inspect.richMessages, [renderStateFlowRichState("effective", { ...state, working: { scope: "effective" } })]);
+	assert.equal(inspect.edits.length, 0);
+});
+
+test("Rich state rendering bounds unbounded semantic fields with explicit truncation", () => {
+	const message = renderStateFlowRichState("global", {
+		artifacts: { huge: "x".repeat(40_000) },
+		contract: { huge: "y".repeat(40_000) },
+		working: { huge: "z".repeat(40_000) },
+		response: "r".repeat(40_000),
+	});
+	const serialized = JSON.stringify(message);
+	assert.ok(serialized.length < 32_768);
+	assert.equal((serialized.match(/\\"truncated\\": true/g) ?? []).length, 4);
+	assert.equal((serialized.match(/omittedChars/g) ?? []).length, 4);
+	for (const hostile of ['"', "\\", "\n", "🌀"]) {
+		const hostileMessage = renderStateFlowRichState("effective", {
+			artifacts: { huge: hostile.repeat(40_000) },
+			contract: { huge: hostile.repeat(40_000) },
+			working: { huge: hostile.repeat(40_000) },
+			response: hostile.repeat(40_000),
+		});
+		assert.ok(JSON.stringify(hostileMessage).length < 32_768, JSON.stringify(hostile));
+	}
 });
 
 test("adapter registers the section once and disposes idempotently", async () => {
@@ -161,7 +215,10 @@ test("start defers while a run is active and reports a pending intent", async ()
 	assert.deepEqual(calls, ["deferStart"]);
 	assert.deepEqual(notices, ["State Flow will start after the current turn"]);
 	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
-	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard, [[{ text: "▶️ Start", callback_data: "section:0:start" }]]);
+	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard, [
+		[{ text: "👁 Show state", callback_data: "section:0:show-state" }],
+		[{ text: "▶️ Start", callback_data: "section:0:start" }],
+	]);
 });
 
 test("stop routes while legacy cancel/refresh actions stay harmless", async () => {
@@ -240,6 +297,7 @@ test("section controls drive the same branch lifecycle as the commands", async (
 		payload: "",
 		callbackData: (name: string) => `section:0:${name}`,
 		edit: async () => {},
+		openRich: async () => {},
 		answerCallback: async () => {},
 	});
 	assert.equal(await sections[0].handleCallback!(control("start")), "handled");

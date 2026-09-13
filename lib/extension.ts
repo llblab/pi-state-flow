@@ -1001,6 +1001,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				bootstrap: snapshot.meta.bootstrap === true,
 				startPending: telegramStartPending,
 			}),
+			state: (scope) => projectStateForModel(
+				scope === "effective"
+					? overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)
+					: scopeStates[scope],
+			),
 			canStartNow: () => activeContext === undefined || activeContext.isIdle(),
 			start: () => {
 				if (!activeContext) throw new Error("State Flow is not attached to an active session yet");

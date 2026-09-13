@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.11.0: Telegram state inspection
+
+- `Telegram inspection`: The State Flow submenu now offers `👁 Show state` with Global, CWD, Session, and Effective choices. Selecting one scope sends exactly that projected materialized slice as a standalone Telegram Native Rich Message whose semantic fields use collapsible `details` and JSON `pre` blocks; inspection is read-only and the optional adapter remains fail-open without a compatible pi-telegram membrane.
+
 ## 0.10.2: Token-guided compaction and patch resilience
 
 - `Compaction readiness`: Early State Flow compaction now uses Pi's public context-token estimate with a 24,000-token floor instead of serialized-entry bytes, skipping unknown or short contexts without invoking native compaction. Successful shortening retains the complete latest accepted user iteration rather than only its final answer, while durable state and append-only session history remain intact.

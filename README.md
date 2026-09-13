@@ -53,7 +53,7 @@ Continue working normally. The agent receives the state protocol and uses `patch
 
 State Flow is **opt-in**. Starting in an existing conversation keeps its active context for one migration run. To enable genuinely new sessions automatically, set `"autoStart": true` in the optional [configuration](docs/usage.md#configuration).
 
-With `pi-telegram` installed, its main menu also exposes the same Start/Stop controls.
+With a compatible `pi-telegram` installed, its main menu also exposes the same Start/Stop controls and a `👁 Show state` chooser for Global, CWD, Session, or Effective memory. Selecting one scope sends exactly that materialized slice as a standalone native Rich Message with collapsible semantic fields; inspection is read-only and does not create a State Flow transition.
 
 ## What carries forward
 

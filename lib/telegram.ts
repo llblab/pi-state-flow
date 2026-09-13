@@ -16,6 +16,24 @@ export interface StateFlowTelegramSnapshot {
 	startPending: boolean;
 }
 
+export type StateFlowTelegramScope = "global" | "cwd" | "session" | "effective";
+
+export interface StateFlowTelegramState {
+	artifacts: Record<string, unknown>;
+	contract: Record<string, unknown>;
+	working: Record<string, unknown>;
+	response: string;
+}
+
+export type StateFlowTelegramRichBlock =
+	| { type: "pre"; text: string; language?: string }
+	| { type: "details"; summary: string | { type: "bold" | "code"; text: string }; blocks: StateFlowTelegramRichBlock[]; is_open?: true };
+
+export interface StateFlowTelegramRichMessage {
+	blocks: StateFlowTelegramRichBlock[];
+	skip_entity_detection?: boolean;
+}
+
 export interface StateFlowTelegramButton {
 	text: string;
 	callback_data: string;
@@ -30,6 +48,7 @@ export interface StateFlowTelegramView {
 export interface StateFlowTelegramSectionContext {
 	callbackData(action: string, payload?: string): string;
 	edit(view: StateFlowTelegramView): Promise<void>;
+	openRich(message: StateFlowTelegramRichMessage): Promise<void>;
 	answerCallback(text?: string): Promise<void>;
 }
 
@@ -61,6 +80,7 @@ export interface StateFlowTelegramControlResult {
 
 export interface StateFlowTelegramPort {
 	snapshot(): StateFlowTelegramSnapshot;
+	state(scope: StateFlowTelegramScope): StateFlowTelegramState;
 	canStartNow(): boolean;
 	start(): StateFlowTelegramControlResult;
 	stop(): StateFlowTelegramControlResult;
@@ -103,8 +123,70 @@ export function buildStateFlowSectionView(
 	return {
 		text: [formatStateFlowSectionHeader(snapshot), "", STATE_FLOW_SECTION_HELP].join("\n"),
 		parseMode: "html",
-		replyMarkup: { inline_keyboard: [[action]] },
+		replyMarkup: { inline_keyboard: [
+			[{ text: "👁 Show state", callback_data: callbackData("show-state") }],
+			[action],
+		] },
 	};
+}
+
+export function buildStateFlowScopeChooser(callbackData: (action: string, payload?: string) => string): StateFlowTelegramView {
+	return {
+		text: "<b>👁 Show state:</b>",
+		parseMode: "html",
+		replyMarkup: { inline_keyboard: [
+			["global", "cwd"].map((scope) => ({ text: scope === "global" ? "Global" : "CWD", callback_data: callbackData("inspect", scope) })),
+			["session", "effective"].map((scope) => ({ text: scope === "session" ? "Session" : "Effective", callback_data: callbackData("inspect", scope) })),
+		] },
+	};
+}
+
+// The complete message serializes each preformatted field one additional time;
+// 3,000 leaves safe headroom for worst-case JSON escaping across all four fields.
+const STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS = 3_000;
+
+function renderStateFlowTelegramField(value: unknown): string {
+	const json = JSON.stringify(value, null, 2);
+	if (json.length <= STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS) return json;
+	let low = 0;
+	let high = json.length;
+	let rendered = "";
+	while (low <= high) {
+		const length = Math.floor((low + high) / 2);
+		const candidate = JSON.stringify({
+			truncated: true,
+			preview: json.slice(0, length),
+			omittedChars: json.length - length,
+		}, null, 2);
+		if (candidate.length <= STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS) {
+			rendered = candidate;
+			low = length + 1;
+		} else {
+			high = length - 1;
+		}
+	}
+	return rendered;
+}
+
+export function renderStateFlowRichState(scope: StateFlowTelegramScope, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
+	const title = scope === "cwd" ? "CWD" : `${scope[0].toUpperCase()}${scope.slice(1)}`;
+	const fields = ["artifacts", "contract", "working", "response"] as const;
+	return {
+		blocks: [{
+			type: "details",
+			summary: { type: "bold", text: title },
+			blocks: fields.map((field) => ({
+				type: "details",
+				summary: { type: "code", text: field },
+				blocks: [{ type: "pre", language: "json", text: renderStateFlowTelegramField(state[field]) }],
+			})),
+		}],
+		skip_entity_detection: true,
+	};
+}
+
+function isStateFlowTelegramScope(value: string): value is StateFlowTelegramScope {
+	return value === "global" || value === "cwd" || value === "session" || value === "effective";
 }
 
 function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
@@ -115,10 +197,21 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
 		render: (ctx: StateFlowTelegramSectionContext) =>
 			buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action)),
 		handleCallback: async (ctx: StateFlowTelegramCallbackContext) => {
-			// cancel/refresh remain routable for keyboards sent by earlier versions; 0.9.4 presents only the state action.
-			if (ctx.action !== "start" && ctx.action !== "stop" && ctx.action !== "cancel" && ctx.action !== "refresh") return "pass" as const;
+			// cancel/refresh remain routable for keyboards sent by earlier versions.
+			if (ctx.action !== "start" && ctx.action !== "stop" && ctx.action !== "cancel" && ctx.action !== "refresh" && ctx.action !== "show-state" && ctx.action !== "inspect") return "pass" as const;
 			let notice: string | undefined;
 			try {
+				if (ctx.action === "show-state") {
+					await ctx.answerCallback();
+					await ctx.edit(buildStateFlowScopeChooser((action, payload) => ctx.callbackData(action, payload)));
+					return "handled" as const;
+				}
+				if (ctx.action === "inspect") {
+					if (!isStateFlowTelegramScope(ctx.payload)) throw new Error("Unknown State Flow scope");
+					await ctx.openRich(renderStateFlowRichState(ctx.payload, port.state(ctx.payload)));
+					await ctx.answerCallback();
+					return "handled" as const;
+				}
 				if (ctx.action === "start") {
 					if (port.canStartNow()) notice = port.start().message;
 					else {
