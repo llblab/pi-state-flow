@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 0.10.2: Token-guided compaction and patch resilience
+
+- `Compaction readiness`: Early State Flow compaction now uses Pi's public context-token estimate with a 24,000-token floor instead of serialized-entry bytes, skipping unknown or short contexts without invoking native compaction. Successful shortening retains the complete latest accepted user iteration rather than only its final answer, while durable state and append-only session history remain intact.
+- `Patch resilience`: `patch_state` now quietly normalizes a bounded Boolean-like compatibility set for `final`. Explicit false can accompany an atomic semantic patch or stand alone as an inert non-terminal no-op without clearing eligibility, creating history, or producing an invalid-patch diagnostic; model-facing guidance still teaches only omission and `final:true`, and ambiguous values remain invalid.
+- `Memory stewardship`: Runtime guidance, tool prompts, project protocol, architecture/usage docs, and the bundled memory Skill now require narrowest-scope placement and touched-branch cleanup on ordinary handoffs, plus one bounded ownership/obsolescence reconciliation when a feature, release, campaign, project, or active version changes. Scope migration remains targeted, verified, non-background, and destination-first.
+
 ## 0.10.1: Filesystem self-healing and graceful degradation
 
 - `Shared scopes`: A wholly absent live global/CWD checkpoint-tail pair is now distinct from partial storage. Untouched publication adopts empty current reality at a fresh origin and transactionally materializes the canonical pair without resurrecting selected values; a patch targeting the disappeared scope fails precisely for reinference. Git/file backends retain publication locks, CAS, full cold history and concurrent-writer exclusion.

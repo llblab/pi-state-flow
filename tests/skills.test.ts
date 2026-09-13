@@ -49,9 +49,10 @@ test("discovers the packaged optional memory-curation Skill without diagnostics"
 	assert.deepEqual(result.diagnostics, []);
 	assert.equal(result.skills.length, 1);
 	assert.equal(result.skills[0].name, "state-flow-memory");
-	assert.match(result.skills[0].description, /explicit memory curation.*not for routine turns/);
+	assert.match(result.skills[0].description, /phase-boundary reconciliation required by the State Flow runtime contract/);
+	assert.match(result.skills[0].description, /not for unrelated routine turns or background maintenance/);
 	const body = readFileSync(result.skills[0].filePath, "utf8");
-	assert.match(body, /Use this Skill only for one bounded, explicit maintenance request/);
+	assert.match(body, /either an explicit curation request or a feature, release, campaign, project, or active-version phase boundary/);
 	assert.match(body, /`reframe`: useful, but expressed with unsupported certainty, authority, or breadth/);
 	assert.match(body, /These are audit decisions, not required stored labels/);
 	assert.match(body, /fresh executor know what must still hold, what changed, what remains unresolved, and how to continue/);
@@ -61,6 +62,9 @@ test("discovers the packaged optional memory-curation Skill without diagnostics"
 	assert.match(body, /Simultaneously pending CWD and global acquisitions must be compiled together in one atomic `patch_state` call/);
 	assert.match(body, /Write and verify the destination before deleting the source/);
 	assert.match(body, /Do not combine destination creation and source deletion merely because multi-scope publication is atomic/);
+	assert.match(body, /completed feature, release, campaign, project switch, or active-version change/);
+	assert.match(body, /Global is limited to established cross-project, user, or environment knowledge/);
+	assert.match(body, /inspect only the targeted global, CWD, or session projections with `read_state`/);
 	assert.match(body, /stored claim of acceptance is not verification/);
 	assert.match(body, /Never delete the only accepted copy/);
 	assert.match(body, /Removing a secret from active state does not erase prior offsets, Git history, or external copies/);

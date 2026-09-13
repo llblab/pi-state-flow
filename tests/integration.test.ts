@@ -668,7 +668,7 @@ test("real Pi compacts accepted State Flow history without another model call an
 	assert.equal((compaction.details as any).step, latestSnapshot(session).meta.step);
 	const active = session.sessionManager.buildContextEntries();
 	assert.ok(active.length < all.length);
-	assert.equal(active.some((entry) => entry.type === "message" && entry.message.role === "user" && JSON.stringify(entry.message).includes("LONG-COMPLETED-REQUEST")), false);
+	assert.equal(active.some((entry) => entry.type === "message" && entry.message.role === "user" && JSON.stringify(entry.message).includes("LONG-COMPLETED-REQUEST")), true, "the complete latest accepted iteration remains active");
 	assert.equal(active.some((entry) => entry.type === "message" && entry.message.role === "assistant" && JSON.stringify(entry.message).includes("Accepted before compaction")), true);
 	assert.equal(all.some((entry) => entry.type === "message" && entry.message.role === "user" && JSON.stringify(entry.message).includes("LONG-COMPLETED-REQUEST")), true, "full append-only history remains inspectable");
 	assert.equal(readFileSync(file, "utf8").trimEnd().split("\n").length, all.length + 1, "JSONL retains its header and every native entry");
@@ -871,7 +871,7 @@ test("real Pi keeps the preserved answer after the fallback budget", async (t) =
 	assert.equal(fixture.notifications.filter((message) => /no final:true patch arrived after 2 fallback turns/.test(message)).length, 1);
 });
 
-test("real Pi patch diagnostics are opt-in and accepted answers are not logged", async (t) => {
+test("real Pi patch diagnostics omit accepted false degradation and accepted answers", async (t) => {
 	const fixture = await realPiFixture(t);
 	const logPath = join(fixture.agentDir, "tmp", "state-flow", "logs.jsonl");
 	const disabled = await fixture.createSession();
@@ -887,25 +887,19 @@ test("real Pi patch diagnostics are opt-in and accepted answers are not logged",
 	await logged.prompt("/state-flow-start");
 	fixture.faux.setResponses([
 		fauxAssistantMessage("Logged unresolved draft."),
-		fauxAssistantMessage(fauxToolCall("patch_state", { final: false }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { cwd: { working: { explicitFalse: "accepted" } }, final: " FALSE " }), { stopReason: "toolUse" }),
 		...sessionResponses({ working: { loggedRun: "accepted" } }, "Accepted."),
 	]);
-	await logged.prompt("Recover from invalid patch arguments");
+	await logged.prompt("Recover through non-terminal patch degradation");
 	const records = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-	assert.equal(records.length, 3);
+	assert.equal(records.some((record) => record.category === "invalid-patch"), false);
 	assert.equal(records[0].category, "terminal-pending");
 	assert.deepEqual(records[0].content, [{ type: "text", text: "Logged unresolved draft." }]);
 	assert.equal(records[0].resolutionAttempt, 0);
 	assert.equal(records[0].terminalEligible, false);
-	assert.equal(records[1].category, "invalid-patch");
-	assert.match(records[1].error, /final must be exactly true/);
-	assert.deepEqual(records[1].input, { final: false });
-	assert.equal(records[1].tool, "patch_state");
-	assert.equal(typeof records[1].toolCallId, "string");
-	assert.equal(records[1].terminalEligible, false);
-	assert.equal(records[2].category, "finalization");
-	assert.deepEqual(records[2].content, [{ type: "text", text: "Accepted." }]);
-	assert.equal(records[2].terminalEligible, true);
+	assert.equal(records.at(-1).category, "finalization");
+	assert.equal(records.at(-1).terminalEligible, true);
+	assert.equal(loadCwdState(fixture.cwd, fixture.repositoryRoot)!.working.explicitFalse, "accepted");
 	assert.equal(durableSession(fixture, logged).working.loggedRun, "accepted");
 	assert.equal(durableSession(fixture, logged).response, "Logged unresolved draft.");
 });
@@ -919,7 +913,7 @@ test("real Pi diagnostic write failure leaves resolution and accepted state unto
 	writeFileSync(join(fixture.agentDir, "tmp"), "blocked");
 	const beforeFailure = fixture.notifications.length;
 	fixture.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("patch_state", { final: false }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("patch_state", { session: {} }), { stopReason: "toolUse" }),
 		...sessionResponses({ working: { ioFailureRun: "recovered" } }, "Recovered despite diagnostics."),
 	]);
 	await session.prompt("Recover while diagnostics cannot be written");

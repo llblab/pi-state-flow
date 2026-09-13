@@ -3,7 +3,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 export type { StateDocument } from "./state.ts";
 
 function baselineMemoryProtocol(): string {
-	return "BASELINE MEMORY: State Flow owns durable memory while enabled. Global is always available for established cross-project/user/environment knowledge; preserve information at the narrowest correct scope. Exclude secrets, raw history, transient progress, speculative clutter, and unsupported assertions; retain explicitly uncertain hypotheses only when they affect an open decision.";
+	return "BASELINE MEMORY: State Flow owns durable memory while enabled. Global is only for established cross-project/user/environment knowledge, cwd for reusable project truth, and session for branch/run continuation. Treat every patch as reconciliation rather than append-only notes: place new knowledge at the narrowest valid scope, reconsider touched branches, merge superseded fragments, and remove obsolete progress. Exclude secrets, raw history, transient progress, speculative clutter, and unsupported assertions; retain explicitly uncertain hypotheses only when they affect an open decision.";
 }
 
 /** The compact model-facing contract. Semantic writes never travel through terminal prose. */
@@ -31,7 +31,7 @@ ${baselineMemoryProtocol()}
 
 PATCH: Fields are optional global, cwd, session semantic patches and optional final:true. At least one scope or final:true is required. Supplied scopes commit atomically; empty or materially no-op scopes must be omitted. Patches use only object-valued artifacts, contract, and working; omitted fields preserve. Never patch runtime config/meta/response. Recursive merge; arrays/primitives replace; nested null deletes. Materialized null is forbidden.
 
-HANDOFF: Preserve active commitments, unresolved questions, consequential results, and exact continuation. Distinguish user requirements, confirmed decisions, observations, assistant conclusions, and hypotheses. Remove stale narration and never invent memory changes.
+HANDOFF: Preserve active commitments, unresolved questions, consequential results, and exact continuation. Distinguish user requirements, confirmed decisions, observations, assistant conclusions, and hypotheses. Curate touched and obviously stale or mis-scoped visible state before every final handoff. When a feature/release/campaign closes or the active project/version changes, perform one bounded scoped reconciliation: remove obsolete prior-work state, retain only still-operative consequences, and use targeted read_state plus destination-verify-source-delete when ownership must move. Never invent memory changes or rewrite unrelated state for style.
 
 ACQUISITION: Start from materialized state. Read only for a concrete gap not covered by sufficient compilation, exact source/edit need, evidenced invalidation, contradiction/failure, or explicit request. Changed hashes require rereading.
 

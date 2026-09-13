@@ -42,6 +42,7 @@ export interface HarnessOptions {
 	sessionId?: string;
 	sessionFile?: string;
 	sessionTimestamp?: string;
+	contextTokens?: number | null;
 	telegram?: { load?: StateFlowTelegramLoader };
 }
 
@@ -76,6 +77,7 @@ export function harness(options: HarnessOptions = {}) {
 		isProjectTrusted: () => false,
 		isIdle: () => true,
 		hasPendingMessages: () => false,
+		getContextUsage: () => ({ tokens: options.contextTokens === undefined ? 24_000 : options.contextTokens, contextWindow: 1_000_000, percent: 2.4 }),
 		compact: (request: unknown) => { compactRequests.push(request); },
 		ui: {
 			theme: { fg: (color: string, text: string) => `<${color}>${text}</${color}>` },

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { assistantToolCallCount, finalizedAssistantResponse, stateFlowProtocol } from "./terminal.ts";
+import { assistantToolCallCount, finalizedAssistantResponse, stateFlowProtocol } from "./protocol.ts";
 import { createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, runtimeContextMessage, VALIDATION_MESSAGE_TYPE, withoutPrivateValidation, type PassiveContinuation } from "./context.ts";
 import { ArtifactReadTracker } from "./acquisition.ts";
 import { loadStateFlowConfig } from "./config.ts";
@@ -12,7 +12,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { SkillReadTracker } from "./skills.ts";
 import { emptySnapshot, migrationFailure, persistableSnapshot, RevisionUnavailableError, type Snapshot } from "./snapshot.ts";
 import { readNativeSessionHeader } from "./continuation.ts";
-import { MissingSessionRuntimeError, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
+import { MissingSessionRuntimeError, SharedScopeRemovalConflictError, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
 import { emptyState, overlayStates, projectStateForModel, type AtomicScopePatches, type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
 import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, validateFinalEligibility, type StagedScopedTransition } from "./transition.ts";
 import { discoverSnapshotData, hasPriorConversation, isNewSession, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
@@ -40,7 +40,7 @@ import {
 	planArtifactInvalidation,
 	type ArtifactInvalidationRequest,
 } from "./artifact.ts";
-import { planStateFlowCompaction, stateFlowCompactionResult, type StateFlowCompactionPlan } from "./compaction.ts";
+import { planStateFlowCompaction, shouldRequestStateFlowCompaction, stateFlowCompactionResult, type StateFlowCompactionPlan } from "./compaction.ts";
 
 export interface StateFlowExtensionOptions {
 	agentDir?: string;
@@ -55,6 +55,20 @@ export const READ_STATE_TOOL_NAME = "read_state";
 export const MAX_FALLBACK_ATTEMPTS: number = 2;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 const PUBLICATION_SHUTDOWN_WAIT_MS = 2_000;
+
+/** Normalize a bounded compatibility superset without advertising aliases in the model-facing contract. */
+export function normalizePatchStateArguments(args: unknown): any {
+	if (!isObject(args) || !Object.hasOwn(args, "final")) return args;
+	const value = args.final;
+	let final: boolean;
+	if (typeof value === "boolean") final = value;
+	else if (value === 1) final = true;
+	else if (value === 0) final = false;
+	else if (typeof value === "string" && value.trim().toLowerCase() === "true") final = true;
+	else if (typeof value === "string" && value.trim().toLowerCase() === "false") final = false;
+	else return args;
+	return { ...args, final };
+}
 
 /** Keep a failed tool invocation visually separated from its rendered error without changing error semantics. */
 function separatedFailure(error: unknown): Error {
@@ -281,16 +295,22 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	function commitStage(stage: StagedScopedTransition, ctx: ExtensionContext, finalizeRun: boolean): boolean {
 		const acquiredArtifactPaths = new Set(artifactReads.successful.keys());
-		const committed = commitScopedTransition(snapshot, scopeStates, stage, (accepted, nextSnapshot) => {
-			if (!runtime?.view) throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
-			const mode = nextSnapshot.meta.remotePublication?.mode ?? "transition";
-			const publication = runtime.publish(nextSnapshot, accepted !== undefined, accepted, {
-				pushRemote: mode === "transition",
-				provenance: stage.provenanceUpdates,
-			});
-			if (publication?.commit && mode === "turn-end") turnPublicationTarget = publication.commit;
-			if (publication) recordPublication(publication, ctx);
-		}, runtime!.causalBasis(), { finalizeRun });
+		let committed: boolean;
+		try {
+			committed = commitScopedTransition(snapshot, scopeStates, stage, (accepted, nextSnapshot) => {
+				if (!runtime?.view) throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
+				const mode = nextSnapshot.meta.remotePublication?.mode ?? "transition";
+				const publication = runtime.publish(nextSnapshot, accepted !== undefined, accepted, {
+					pushRemote: mode === "transition",
+					provenance: stage.provenanceUpdates,
+				});
+				if (publication?.commit && mode === "turn-end") turnPublicationTarget = publication.commit;
+				if (publication) recordPublication(publication, ctx);
+			}, runtime!.causalBasis(), { finalizeRun });
+		} catch (error) {
+			if (error instanceof SharedScopeRemovalConflictError) installScopeStates();
+			throw error;
+		}
 		if (!committed) return false;
 		installScopeStates();
 		// A preserved primary response commits mid-run; pending acquisition obligations must
@@ -773,6 +793,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		promptSnippet: "Atomically patch global/cwd/session; final:true permits a later turn_end",
 		promptGuidelines: [
 			"Use patch_state for durable semantic changes. Before a final answer, make the iteration terminal-eligible with final:true, optionally alongside atomic global/cwd/session patches.",
+			"Use patch_state as reconciliation, not append-only notes: place new knowledge at the narrowest valid scope and remove superseded or completed state from touched branches.",
 			"Call patch_state alone in an assistant response; after its acknowledgement, further reasoning, tools, and later patch_state calls remain allowed.",
 		],
 		executionMode: "sequential",
@@ -782,6 +803,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			session: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Optional session semantic patch" })),
 			final: Type.Optional(Type.Boolean({ description: "Set exactly true to permit this iteration to finish at a later turn_end" })),
 		}, { additionalProperties: false }),
+		prepareArguments: normalizePatchStateArguments,
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			try {
 				if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
@@ -791,7 +813,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				for (const key of Object.keys(params)) {
 					if (!allowed.has(key)) throw new Error(`patch_state does not accept field ${key}`);
 				}
-				if (Object.hasOwn(params, "final") && params.final !== true) throw new Error("patch_state final must be exactly true when supplied");
+				if (Object.hasOwn(params, "final") && typeof params.final !== "boolean") throw new Error("patch_state final must be a Boolean when supplied");
 				const patches: AtomicScopePatches = {};
 				for (const scope of ["global", "cwd", "session"] as const) {
 					if (!Object.hasOwn(params, scope)) continue;
@@ -802,6 +824,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				}
 				const scopes = Object.keys(patches) as StateScope[];
 				if (scopes.length === 0) {
+					if (params.final === false) {
+						return { content: [{ type: "text", text: "\nState unchanged; iteration remains non-terminal." }], details: { final: false } };
+					}
 					if (params.final !== true) throw new Error('patch_state requires at least one scope patch or {"final":true}');
 					validateFinalEligibility(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
 					terminalEligible = true;
@@ -1162,7 +1187,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}
 		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 		if (!completedRunAccepted || compactionStopped || !snapshot.config.enabled || snapshot.meta.bootstrap || resolutionPending
-			|| compactionInFlight || !ctx.isIdle() || ctx.hasPendingMessages() || !snapshot.meta.durableBase) return;
+			|| compactionInFlight || !ctx.isIdle() || ctx.hasPendingMessages() || !snapshot.meta.durableBase
+			|| !shouldRequestStateFlowCompaction(ctx.getContextUsage())) return;
 		completedRunAccepted = false;
 		const plan = planStateFlowCompaction(ctx.sessionManager.buildContextEntries(), snapshot.meta.durableBase, snapshot.meta.step);
 		if (!plan) return;

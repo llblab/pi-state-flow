@@ -39,13 +39,22 @@ function targetScopeConflict(scopes: readonly StateScope[]): Error {
 	return new Error(`State Flow cannot publish the ${labels.join(" and ")} patches because the live ${labels.join(" and ")} states advanced after this transition's selected basis. Refresh or reconcile the target scopes before retrying.`);
 }
 
+/** A targeted removed scope was deliberately adopted as empty before refusing the stale semantic patch. */
+export class SharedScopeRemovalConflictError extends Error {
+	readonly scopes: readonly StateScope[];
+	constructor(scopes: readonly StateScope[]) {
+		const labels = scopes.map(scopeLabel);
+		super(labels.length === 1
+			? `State Flow cannot publish the ${labels[0]} patch because the live ${labels[0]} scope was removed after this transition's selected basis. Refresh or reconcile the target scope before retrying.`
+			: `State Flow cannot publish the ${labels.join(" and ")} patches because the live ${labels.join(" and ")} scopes were removed after this transition's selected basis. Refresh or reconcile the target scopes before retrying.`);
+		this.name = "SharedScopeRemovalConflictError";
+		this.scopes = Object.freeze([...scopes]);
+	}
+}
+
 /** Disappearance invalidates a selected write target even though untouched scopes can adopt empty reality. */
 function removedTargetScopeConflict(scopes: readonly StateScope[]): Error {
-	const labels = scopes.map(scopeLabel);
-	if (labels.length === 1) {
-		return new Error(`State Flow cannot publish the ${labels[0]} patch because the live ${labels[0]} scope was removed after this transition's selected basis. Refresh or reconcile the target scope before retrying.`);
-	}
-	return new Error(`State Flow cannot publish the ${labels.join(" and ")} patches because the live ${labels.join(" and ")} scopes were removed after this transition's selected basis. Refresh or reconcile the target scopes before retrying.`);
+	return new SharedScopeRemovalConflictError(scopes);
 }
 
 function freshEmptyScopeStream(scope: StateScope, origin: string): ScopeStream {

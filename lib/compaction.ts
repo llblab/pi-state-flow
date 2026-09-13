@@ -1,7 +1,8 @@
 import type { CompactionResult } from "@earendil-works/pi-coding-agent";
 
 export const STATE_FLOW_COMPACTION_SUMMARY = "State Flow accepted the completed work before this boundary. Current memory is restored from its durable revision and projected separately; use the retained native entries for subsequent work.";
-export const STATE_FLOW_COMPACTION_MIN_ACTIVE_BYTES = 80_000;
+/** A modest margin above Pi's default 20k retained suffix absorbs estimation drift. */
+export const STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS = 24_000;
 
 export interface StateFlowCompactionDetails {
 	version: 1;
@@ -29,7 +30,13 @@ function stateFlowEntry(entry: ActiveEntry): boolean {
 		&& entry.customType.startsWith("state-flow-");
 }
 
-/** Select one completed native boundary without hiding foreign extension context. */
+export function shouldRequestStateFlowCompaction(usage: { tokens: number | null } | undefined): boolean {
+	return typeof usage?.tokens === "number"
+		&& Number.isFinite(usage.tokens)
+		&& usage.tokens >= STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS;
+}
+
+/** Retain the complete latest accepted user iteration without hiding foreign extension context. */
 export function planStateFlowCompaction(
 	entries: readonly ActiveEntry[],
 	revision: string,
@@ -37,12 +44,12 @@ export function planStateFlowCompaction(
 ): StateFlowCompactionPlan | undefined {
 	if (!/^[0-9a-f]{40,64}$/.test(revision) && !/^file:[0-9a-f]{64}$/.test(revision)) return undefined;
 	if (!Number.isSafeInteger(step) || step < 0 || entries.length === 0) return undefined;
-	if (Buffer.byteLength(JSON.stringify(entries), "utf8") < STATE_FLOW_COMPACTION_MIN_ACTIVE_BYTES) return undefined;
-	const keep = entries.findLastIndex((entry) => entry.type === "message"
-		&& entry.message?.role === "assistant"
-		&& entry.message.stopReason !== "aborted"
-		&& entry.message.stopReason !== "error"
-		&& entry.message.stopReason !== "length");
+	const terminal = entries.findLastIndex((entry) => entry.type === "message" && entry.message?.role === "assistant");
+	if (terminal < 0 || entries[terminal]?.message?.stopReason === "aborted"
+		|| entries[terminal]?.message?.stopReason === "error"
+		|| entries[terminal]?.message?.stopReason === "length") return undefined;
+	let keep = terminal;
+	while (keep >= 0 && !(entries[keep]?.type === "message" && entries[keep]?.message?.role === "user")) keep--;
 	if (keep < 0) return undefined;
 	if (entries.slice(0, keep).some((entry) => entry.type === "custom" && !stateFlowEntry(entry))) return undefined;
 	const firstKeptEntryId = entries[keep]?.id;

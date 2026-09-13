@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { finalizedAssistantResponse, stateFlowProtocol } from "../lib/terminal.ts";
+import { finalizedAssistantResponse, stateFlowProtocol } from "../lib/protocol.ts";
 
 test("protocol names patch_state as the sole semantic mutation mechanism", () => {
 	const protocol = stateFlowProtocol(false);
@@ -11,6 +11,10 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.doesNotMatch(protocol, /unchanged/i);
 	assert.doesNotMatch(protocol, /state_flow/);
 	assert.doesNotMatch(protocol, /terminal reconciliation/i);
+	assert.doesNotMatch(protocol, /final:false|false-like|truthy|falsy/i);
+	assert.match(protocol, /every patch as reconciliation rather than append-only notes/);
+	assert.match(protocol, /feature\/release\/campaign closes or the active project\/version changes/);
+	assert.match(protocol, /destination-verify-source-delete/);
 });
 
 test("bootstrap protocol retains the migration obligation through patch_state", () => {

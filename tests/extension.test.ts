@@ -10,7 +10,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStorageKey, temporalScopePaths } from "../lib/durable.ts";
 import { getKnowledgeRoot } from "../lib/discovery.ts";
 import { hashArtifactSource } from "../lib/artifact.ts";
-import { MAX_FALLBACK_ATTEMPTS } from "../lib/extension.ts";
+import { MAX_FALLBACK_ATTEMPTS, normalizePatchStateArguments } from "../lib/extension.ts";
 import { resolveGitPushDestination } from "../lib/git.ts";
 import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePath, savePublicationQueue } from "../lib/publication.ts";
 import { interceptGitPushes } from "./push-fixture.ts";
@@ -550,11 +550,9 @@ test("a primary draft without eligibility is preserved as the response and final
 test("the preserved answer stands after two fallback turns without final:true", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Bound fallback attempts");
-	await assert.rejects(
-		h.tools.get("patch_state")!.execute("invalid", { final: false }, undefined, undefined, h.ctx),
-		/final must be exactly true/,
-	);
-	assert.equal(h.sentMessages.length, 0, "failed patch calls do not consume fallback attempts");
+	const nonTerminal = await h.tools.get("patch_state")!.execute("non-terminal", { final: false }, undefined, undefined, h.ctx);
+	assert.deepEqual(nonTerminal.details, { final: false });
+	assert.equal(h.sentMessages.length, 0, "an inert non-terminal call does not start fallback resolution");
 	const primary = h.handlers.get("message_end")!({ message: finalMessage("Primary answer.") }, h.ctx);
 	assert.equal(primary, undefined);
 	h.handlers.get("turn_end")!({ message: finalMessage("Primary answer.") }, h.ctx);
@@ -632,7 +630,7 @@ test("length and provider-error endings never become accepted responses", async 
 	}
 });
 
-test("accepts only canonical atomic scope patches and final:true", async () => {
+test("accepts canonical atomic scope patches plus an inert false compatibility call", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Resolve me");
 	const execute = (input: unknown) => h.tools.get("patch_state")!.execute("invalid", input, undefined, undefined, h.ctx);
@@ -640,13 +638,14 @@ test("accepts only canonical atomic scope patches and final:true", async () => {
 		null,
 		[],
 		{},
-		{ final: false },
 		{ unchanged: true },
 		{ scope: "session", patch: { working: { value: true } } },
 		{ session: {} },
 		{ session: { working: { value: true } }, extra: "forbidden" },
 		{ global: null },
 	]) await assert.rejects(execute(input));
+	const nonTerminal = await execute({ final: false });
+	assert.deepEqual(nonTerminal.details, { final: false });
 
 	const primary = h.handlers.get("message_end")!({ message: finalMessage("Still unresolved.") }, h.ctx);
 	assert.equal(primary, undefined, "the unresolved draft is preserved instead of intercepted");
@@ -657,6 +656,41 @@ test("accepts only canonical atomic scope patches and final:true", async () => {
 	assert.deepEqual(fallback.message.content, [], "fallback messages stay out of the response");
 	h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
 	assert.equal(h.readState().response, "Still unresolved.");
+});
+
+test("bounded final aliases normalize without raw JavaScript truthiness", () => {
+	for (const value of [true, 1, "true", " TRUE "]) {
+		assert.deepEqual(normalizePatchStateArguments({ final: value }), { final: true });
+	}
+	for (const value of [false, 0, "false", " FALSE "]) {
+		assert.deepEqual(normalizePatchStateArguments({ final: value }), { final: false });
+	}
+	for (const value of [null, "yes", "", [], {}, 2]) {
+		assert.deepEqual(normalizePatchStateArguments({ final: value }), { final: value });
+	}
+	assert.equal(normalizePatchStateArguments(null), null);
+});
+
+test("a scoped final:false patch applies without latching or clearing terminal eligibility", async () => {
+	const h = harness({ remotePublication: "off" });
+	await start(h, "Non-terminal patch");
+	const beforeStep = h.resolveSnapshot().meta.step;
+	const first = await h.tools.get("patch_state")!.execute("false-patch", {
+		cwd: { working: { currentRelease: "0.10.2" } }, final: false,
+	}, undefined, undefined, h.ctx);
+	assert.deepEqual(first.details, { scopes: ["cwd"], final: false, step: beforeStep + 1 });
+	assert.equal(h.readState(0, "cwd").working.currentRelease, "0.10.2");
+	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Not eligible yet.") }, h.ctx), undefined);
+	assert.equal(h.sentMessages.length, 1);
+
+	const latched = harness({ remotePublication: "off" });
+	await start(latched, "Latched patch");
+	await latched.tools.get("patch_state")!.execute("latch", { final: true }, undefined, undefined, latched.ctx);
+	await latched.tools.get("patch_state")!.execute("false-after-latch", {
+		session: { working: { continued: true } }, final: false,
+	}, undefined, undefined, latched.ctx);
+	assert.equal(latched.handlers.get("message_end")!({ message: finalMessage("Still eligible.") }, latched.ctx), undefined);
+	assert.equal(latched.sentMessages.length, 0);
 });
 
 test("terminal eligibility remains latched through later tools, patches, and repeated final calls", async () => {
