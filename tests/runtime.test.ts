@@ -886,6 +886,139 @@ function sharedBytes(root: string, cwd: string, scope: "global" | "cwd"): Buffer
 	return [readFileSync(paths.checkpoint), readFileSync(paths.patches)];
 }
 
+function removeSharedPair(root: string, cwd: string, scope: "global" | "cwd"): void {
+	const paths = temporalScopePaths(cwd, "session-a", scope, root);
+	rmSync(paths.checkpoint);
+	rmSync(paths.patches);
+}
+
+for (const removedScope of ["global", "cwd"] as const) test(`a session patch adopts a wholly absent live ${removedScope} scope without resurrecting selected state`, (t) => {
+	const fixture = driftFixture(t);
+	const seeded = restoreSessionA(fixture);
+	const selected = publishScopedPatch(seeded.runtime, seeded.snapshot, removedScope, { must_not_resurrect: `old-${removedScope}-value` }, `seed-${removedScope}`)!.commit!;
+	const restored = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = restored.restore(selected);
+	removeSharedPair(fixture.root, fixture.cwd, removedScope);
+	const publication = publishScopedPatch(restored, snapshot, "session", { sessionPatch: "applied" }, `repair-${removedScope}`)!;
+	assert.ok(publication.commit);
+	assert.equal(restored.read(0, removedScope).working.must_not_resurrect, undefined);
+	assert.equal(restored.read().working.must_not_resurrect, undefined);
+	assert.equal(restored.read().working.sessionPatch, "applied");
+	const repairedPaths = temporalScopePaths(fixture.cwd, "session-a", removedScope, fixture.root);
+	assert.equal(existsSync(repairedPaths.checkpoint), true);
+	assert.equal(existsSync(repairedPaths.patches), true);
+	assert.equal(readTemporalState(inspectRuntimeRevision(fixture.cwd, "session-a", fixture.root, selected).view, 0, removedScope).working.must_not_resurrect, `old-${removedScope}-value`);
+});
+
+for (const removedScope of ["global", "cwd"] as const) test(`a ${removedScope} patch rejects disappearance once, refreshes its basis, and retries without partial publication`, (t) => {
+	const fixture = driftFixture(t);
+	const seeded = restoreSessionA(fixture);
+	const selected = publishScopedPatch(seeded.runtime, seeded.snapshot, removedScope, { selected: true }, `seed-target-${removedScope}`)!.commit!;
+	const restored = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = restored.restore(selected);
+	removeSharedPair(fixture.root, fixture.cwd, removedScope);
+	assert.throws(
+		() => publishScopedPatch(restored, snapshot, removedScope, { rejected: true }, `removed-target-${removedScope}`),
+		new RegExp(`cannot publish the ${removedScope === "cwd" ? "CWD" : "global"} patch because the live ${removedScope === "cwd" ? "CWD" : "global"} scope was removed`),
+	);
+	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), selected);
+	const paths = temporalScopePaths(fixture.cwd, "session-a", removedScope, fixture.root);
+	assert.equal(existsSync(paths.checkpoint), false);
+	assert.equal(existsSync(paths.patches), false);
+	assert.equal(restored.read(0, removedScope).working.selected, undefined, "the failed attempt refreshes the model-visible basis to empty");
+	assert.equal(restored.read(0, removedScope).working.rejected, undefined);
+	const retried = publishScopedPatch(restored, snapshot, removedScope, { acceptedAfterRefresh: true }, `retry-target-${removedScope}`)!;
+	assert.ok(retried.commit);
+	assert.equal(restored.read(0, removedScope).working.acceptedAfterRefresh, true);
+	assert.equal(existsSync(paths.checkpoint), true);
+	assert.equal(existsSync(paths.patches), true);
+	assert.equal(readTemporalState(inspectRuntimeRevision(fixture.cwd, "session-a", fixture.root, selected).view, 0, removedScope).working.selected, true);
+});
+
+test("shared-scope reconciliation rejects partial live presence instead of treating it as absence", (t) => {
+	const fixture = driftFixture(t);
+	const restored = restoreSessionA(fixture);
+	const paths = temporalScopePaths(fixture.cwd, "session-a", "cwd", fixture.root);
+	rmSync(paths.patches);
+	assert.throws(
+		() => publishScopedPatch(restored.runtime, restored.snapshot, "session", { rejected: true }, "partial-cwd"),
+		/State Flow cwd scope has an incomplete checkpoint\/tail pair/,
+	);
+	assert.equal(existsSync(paths.checkpoint), true);
+	assert.equal(existsSync(paths.patches), false);
+});
+
+test("an exact selected Git revision reconstructs a wholly absent live session cohort", (t) => {
+	const fixture = driftFixture(t);
+	const selected = fixture.revision;
+	const session = temporalScopePaths(fixture.cwd, "session-a", "session", fixture.root);
+	rmSync(session.directory, { recursive: true });
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = runtime.restore(selected);
+	assert.equal(runtime.read(0, "session").working.sessionA, "retained");
+	const publication = publishScopedPatch(runtime, snapshot, "session", { recovered: true }, "recover-selected-session")!;
+	assert.ok(publication.commit);
+	assert.equal(runtime.read(0, "session").working.sessionA, "retained");
+	assert.equal(runtime.read(0, "session").working.recovered, true);
+	const paths = sessionRuntimePaths(fixture.cwd, "session-a", fixture.root);
+	for (const path of [session.checkpoint, session.patches, paths.config, paths.meta]) assert.equal(existsSync(path), true);
+});
+
+test("file-only restore refuses a missing existing session when its exact cohort authority is gone", (t) => {
+	const parent = mkdtempSync(join(tmpdir(), "state-flow-file-session-loss-"));
+	t.after(() => rmSync(parent, { recursive: true, force: true }));
+	const root = join(parent, "store");
+	const cwd = join(parent, "project");
+	const path = process.env.PATH;
+	process.env.PATH = parent;
+	t.after(() => { process.env.PATH = path; });
+	const runtime = new TemporalRuntime(cwd, "session-a", root);
+	runtime.prepare();
+	const snapshot = emptySnapshot(true);
+	const initialized = runtime.initialize(snapshot, true)!;
+	const selected = publishScopedPatch(runtime, snapshot, "session", { retained: true }, "file-session-seed")?.revision ?? initialized.revision!;
+	const session = temporalScopePaths(cwd, "session-a", "session", root);
+	rmSync(session.directory, { recursive: true });
+	const restored = new TemporalRuntime(cwd, "session-a", root);
+	assert.throws(() => restored.restore(selected), /file revision is unavailable/);
+	assert.equal(restored.view, undefined);
+	assert.equal(existsSync(temporalScopePaths(cwd, "session-a", "global", root).checkpoint), true);
+	assert.equal(existsSync(temporalScopePaths(cwd, "session-a", "cwd", root).checkpoint), true);
+	assert.equal(existsSync(session.directory), false);
+});
+
+test("a partial live session cohort fails closed without regenerating missing authority", (t) => {
+	const fixture = driftFixture(t);
+	const session = temporalScopePaths(fixture.cwd, "session-a", "session", fixture.root);
+	rmSync(session.patches);
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = runtime.restore(fixture.revision);
+	assert.throws(
+		() => publishScopedPatch(runtime, snapshot, "session", { rejected: true }, "partial-session"),
+		/State Flow session scope has an incomplete checkpoint\/tail pair/,
+	);
+	const paths = sessionRuntimePaths(fixture.cwd, "session-a", fixture.root);
+	for (const path of [session.checkpoint, paths.config, paths.meta]) assert.equal(existsSync(path), true);
+	assert.equal(existsSync(session.patches), false);
+	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), fixture.revision);
+});
+
+for (const missingRuntimeFile of ["config", "meta"] as const) test(`a partial live session runtime missing ${missingRuntimeFile} fails closed without repair`, (t) => {
+	const fixture = driftFixture(t);
+	const paths = sessionRuntimePaths(fixture.cwd, "session-a", fixture.root);
+	rmSync(paths[missingRuntimeFile]);
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = runtime.restore(fixture.revision);
+	assert.throws(
+		() => publishScopedPatch(runtime, snapshot, "session", { rejected: true }, `partial-runtime-${missingRuntimeFile}`),
+		/Incomplete State Flow config\/meta pair/,
+	);
+	assert.equal(existsSync(paths[missingRuntimeFile]), false);
+	assert.equal(existsSync(paths[missingRuntimeFile === "config" ? "meta" : "config"]), true);
+	assert.equal(runtime.read(0, "session").working.rejected, undefined);
+	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), fixture.revision);
+});
+
 test("a session patch adopts an advanced live global scope without rewinding shared history", (t) => {
 	const fixture = driftFixture(t);
 	const liveHead = advanceShared(fixture, "global", "one");
@@ -962,6 +1095,62 @@ test("file-backed publication reconciles an untouched shared scope advanced by a
 	assert.equal(a.read().working.globalAdvanced, "file");
 	assert.equal(a.read().working.sessionA, "retained");
 	assert.equal(a.read().working.sessionPatch, "applied");
+});
+
+test("file-backed publication repairs a wholly absent untouched CWD pair without resurrecting it", (t) => {
+	const parent = mkdtempSync(join(tmpdir(), "state-flow-file-absence-"));
+	t.after(() => rmSync(parent, { recursive: true, force: true }));
+	const root = join(parent, "store");
+	const cwd = join(parent, "project");
+	const path = process.env.PATH;
+	process.env.PATH = parent;
+	t.after(() => { process.env.PATH = path; });
+	const runtime = new TemporalRuntime(cwd, "session-a", root);
+	runtime.prepare();
+	const snapshot = emptySnapshot(true);
+	runtime.initialize(snapshot, true);
+	publishScopedPatch(runtime, snapshot, "cwd", { must_not_resurrect: "old-file-value" }, "file-cwd-seed");
+	removeSharedPair(root, cwd, "cwd");
+	const publication = publishScopedPatch(runtime, snapshot, "session", { sessionPatch: "applied" }, "file-cwd-repair")!;
+	assert.ok(publication.revision);
+	assert.equal(runtime.read(0, "cwd").working.must_not_resurrect, undefined);
+	assert.equal(runtime.read().working.sessionPatch, "applied");
+	const paths = temporalScopePaths(cwd, "session-a", "cwd", root);
+	assert.equal(existsSync(paths.checkpoint), true);
+	assert.equal(existsSync(paths.patches), true);
+});
+
+test("missing shared provenance degrades freshness without blocking semantic publication", (t) => {
+	const fixture = driftFixture(t);
+	const seeded = seedGlobalArtifact(fixture);
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = runtime.restore(seeded.revision);
+	const paths = temporalScopePaths(fixture.cwd, "session-a", "global", fixture.root);
+	rmSync(paths.meta);
+	const publication = publishScopedPatch(runtime, snapshot, "session", { sessionPatch: "applied" }, "missing-provenance")!;
+	assert.ok(publication.commit);
+	assert.deepEqual(runtime.artifactProvenance("global"), {});
+	assert.ok(runtime.read(0, "global").artifacts[seeded.path]);
+	assert.equal(runtime.read().working.sessionPatch, "applied");
+	assert.equal(existsSync(paths.meta), false);
+});
+
+test("malformed shared provenance remains byte-exact and fails only the dependent publication", (t) => {
+	const fixture = driftFixture(t);
+	const seeded = seedGlobalArtifact(fixture);
+	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshot = runtime.restore(seeded.revision);
+	const paths = temporalScopePaths(fixture.cwd, "session-a", "global", fixture.root);
+	const malformed = "{malformed provenance\n";
+	writeFileSync(paths.meta, malformed);
+	assert.throws(
+		() => publishScopedPatch(runtime, snapshot, "session", { rejected: true }, "malformed-provenance"),
+		/State Flow provenance file contains invalid JSON/,
+	);
+	assert.equal(readFileSync(paths.meta, "utf8"), malformed);
+	assert.equal(runtime.read(0, "session").working.rejected, undefined);
+	assert.ok(runtime.read(0, "global").artifacts[seeded.path]);
+	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), seeded.revision);
 });
 
 test("a CWD patch adopts an advanced global scope while requiring its own basis", (t) => {
@@ -1148,6 +1337,55 @@ test("a multi-scope transition adopts an untouched shared scope and still writes
 	assert.equal(restored.runtime.read().working.globalAdvanced, "one");
 	assert.equal(restored.runtime.read().working.cwdPatch, "applied");
 	assert.equal(restored.runtime.read().working.sessionPatch, "applied");
+});
+
+test("two independent sessions encounter one absent shared repair basis without overwriting each other", (t) => {
+	const fixture = driftFixture(t);
+	const seededA = restoreSessionA(fixture);
+	const selectedA = publishScopedPatch(seededA.runtime, seededA.snapshot, "global", { must_not_resurrect: "old-concurrent-value" }, "concurrent-global-seed")!.commit!;
+	const sessionB = new TemporalRuntime(fixture.cwd, "session-b-repair", fixture.root);
+	const snapshotB = emptySnapshot(true);
+	sessionB.prepare();
+	sessionB.initialize(snapshotB, true);
+	const selectedB = publishScopedPatch(sessionB, snapshotB, "session", { owner: "B" }, "session-b-seed")!.commit!;
+	const sessionA = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
+	const snapshotA = sessionA.restore(selectedA);
+	const resumedB = new TemporalRuntime(fixture.cwd, "session-b-repair", fixture.root);
+	const resumedSnapshotB = resumedB.restore(selectedB);
+	removeSharedPair(fixture.root, fixture.cwd, "global");
+	const first = publishScopedPatch(sessionA, snapshotA, "session", { repairedBy: "A" }, "repair-by-a")!.commit!;
+	const second = publishScopedPatch(resumedB, resumedSnapshotB, "session", { reconciledBy: "B" }, "reconcile-by-b")!.commit!;
+	const paths = temporalScopePaths(fixture.cwd, "session-a", "global", fixture.root);
+	const changed = (commit: string) => execFileSync("git", ["-C", fixture.root, "diff-tree", "--no-commit-id", "--name-only", "-r", commit], { encoding: "utf8" }).trim().split("\n");
+	const relativePair = [paths.checkpoint, paths.patches].map((path) => relative(fixture.root, path).replaceAll("\\", "/"));
+	for (const path of relativePair) assert.ok(changed(first).includes(path), "the first publisher owns the absent-pair repair");
+	for (const path of relativePair) assert.equal(changed(second).includes(path), false, "the reconciled publisher does not rewrite the repair");
+	assert.equal(resumedB.read(0, "global").working.must_not_resurrect, undefined);
+	assert.equal(resumedB.read(0, "session").working.owner, "B");
+	assert.equal(resumedB.read(0, "session").working.reconciledBy, "B");
+	assert.equal(readTemporalState(inspectRuntimeRevision(fixture.cwd, "session-a", fixture.root, second).view, 0, "session").working.repairedBy, "A");
+	validateTemporalState(inspectRuntimeRevision(fixture.cwd, "session-b-repair", fixture.root, second).view);
+});
+
+test("a stale absent-scope capture loses CAS after another publisher materializes the pair", (t) => {
+	const fixture = driftFixture(t);
+	const restored = restoreSessionA(fixture);
+	removeSharedPair(fixture.root, fixture.cwd, "global");
+	const stale = captureTemporalGitBase(fixture.cwd, "session-a", fixture.root);
+	const peer = new TemporalRuntime(fixture.cwd, "session-c-repair", fixture.root);
+	const peerSnapshot = emptySnapshot(true);
+	peer.prepare();
+	peer.initialize(peerSnapshot, true);
+	publishScopedPatch(peer, peerSnapshot, "global", { newer: true }, "peer-materializes-global");
+	restored.snapshot.meta.step += 1;
+	assert.throws(
+		() => publishTemporalStateToGit(
+			fixture.cwd, "session-a", restored.runtime.view!, ["session"], stale, fixture.root,
+			createSessionRuntime(restored.snapshot, fixture.cwd, "session-a", restored.runtime.view!.lineage), "session-a",
+		),
+		/changed concurrently/,
+	);
+	assert.equal(peer.read(0, "global").working.newer, true);
 });
 
 test("publication CAS still rejects a target advance after a reconciliation capture", (t) => {

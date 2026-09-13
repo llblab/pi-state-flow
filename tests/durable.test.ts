@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
-	captureTemporalFileBases, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath,
+	captureTemporalFileBases, classifyScopeStream, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath,
 	loadScopeStream, parseScopeStream, resolveSessionAddress, serializeScopeStream, sessionScopeKey, sessionStorageKey,
 	temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates, parseStateSource,
 } from "../lib/durable.ts";
@@ -191,6 +191,8 @@ test("checkpoint codec uses deterministic bytes, anchored state, and no redundan
 test("temporal codec rejects incomplete, legacy, malformed, oversized, and causally invalid replay inputs", () => {
 	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { response: "Done" } }], "T1");
 	const source = serializeScopeStream(view.scopes.session, "session");
+	assert.deepEqual(classifyScopeStream(undefined, undefined, "session"), { kind: "absent" });
+	assert.deepEqual(classifyScopeStream(source.checkpoint, source.patches, "session"), { kind: "present", stream: view.scopes.session });
 	assert.equal(parseScopeStream(undefined, undefined, "session"), undefined);
 	assert.throws(() => parseScopeStream(source.checkpoint, undefined, "session"), /incomplete checkpoint\/tail/);
 	assert.throws(() => parseScopeStream(undefined, source.patches, "session"), /incomplete checkpoint\/tail/);

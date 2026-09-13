@@ -79,6 +79,14 @@ Use a dedicated directory. State storage and Knowledge Markdown have separate re
 
 Each scope materializes an anchored `checkpoint.json` plus `patches.jsonl`. Scope `meta.json` holds runtime-owned artifact evidence; the session also has `config.json` and temporal/runtime metadata. CWD/session directories mirror Pi's native naming while validating canonical identities separately. See the [storage contract](architecture.md#storage-and-identity) for the exact layout.
 
+### Missing, partial, and malformed storage
+
+A checkpoint and tail are one semantic pair. If both live files for an untouched global or CWD scope disappear, State Flow treats that complete absence as current empty shared reality during the next accepted publication. It creates a fresh canonical pair through the normal publication lock and CAS path; selected values remain only in cold Git history and are not silently resurrected. A patch targeting the disappeared scope is rejected once as stale so a later inference can work from the actual empty basis.
+
+Exactly one surviving pair member is corruption and fails closed. Present malformed JSON, invalid envelopes, identity contradictions, and partial session `config.json`/`meta.json` also remain fail-closed and are not replaced. A selected Git revision may reconstruct a missing private session cohort exactly; file-only mode refuses when its exact current cohort is gone because it has no cold history to invent.
+
+Missing shared provenance means freshness evidence is unavailable while semantic state remains usable. A missing whole Knowledge root does not prove that durable artifact routing was deleted, and external files are never created. Queue, worker lease, and lock absence keep their existing meanings—empty, unclaimed, and unlocked—while malformed or foreign present evidence is preserved. See the complete [filesystem recovery contract](filesystem-recovery.md).
+
 ### With Git
 
 Start initializes an exact-root repository when needed, preserving existing contents. Git must have a configured commit identity. A containing ancestor repository is not a substitute. Manual-mode startup/status/restore do not initialize Git; explicit Start and automatic activation of genuinely new sessions may do so.

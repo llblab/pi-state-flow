@@ -8,13 +8,14 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
 import { STATE_FLOW_COMPACTION_SUMMARY } from "../lib/compaction.ts";
-import { TemporalRuntime } from "../lib/runtime.ts";
+import { inspectRuntimeRevision, TemporalRuntime } from "../lib/runtime.ts";
 import { resolveGitPushDestination } from "../lib/git.ts";
 import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePath, savePublicationQueue } from "../lib/publication.ts";
 import { interceptGitPushes } from "./push-fixture.ts";
 import { serializeScopeStream, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { emptyState, type MaterializedState } from "../lib/state.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
+import { readTemporalState } from "../lib/temporal.ts";
 import { hashSkillSource, SKILL_ARTIFACT_COMPILER } from "../lib/skills.ts";
 import {
 	cwdScopePaths,
@@ -38,6 +39,38 @@ import {
 	snapshots,
 	type RealPiFixture,
 } from "./pi-harness.ts";
+
+test("real Pi self-heals a wholly absent CWD pair during response reconciliation without resurrecting it", { timeout: 30_000 }, async (t) => {
+	const fixture = await realPiFixture(t, { autoStart: true, remotePublication: "off" });
+	let session = await fixture.createSession("new");
+	t.after(() => session.dispose());
+	fixture.faux.setResponses(scopedResponses([{ scope: "cwd", patch: { working: { must_not_resurrect: "old-cwd-value" } } }], "Seeded CWD answer."));
+	await session.prompt("Seed CWD state");
+	const selected = latestSnapshot(session).meta.durableBase!;
+	const paths = temporalScopePaths(fixture.cwd, session.sessionId, "cwd", fixture.repositoryRoot, nativeSessionKey(session));
+	rmSync(paths.checkpoint);
+	rmSync(paths.patches);
+	fixture.faux.setResponses(unchangedResponses("Recovered ordinary answer."));
+	await session.prompt("Answer after the complete live CWD pair disappeared");
+	assert.equal(fixture.notifications.some((message) => /Live State Flow cwd scope storage is incomplete/.test(message)), false);
+	assert.equal(fixture.readState(session).response, "Recovered ordinary answer.");
+	assert.equal(fixture.readState(session, 0, "cwd").working.must_not_resurrect, undefined);
+	assert.equal(existsSync(paths.checkpoint), true);
+	assert.equal(existsSync(paths.patches), true);
+	assert.equal(readTemporalState(inspectRuntimeRevision(fixture.cwd, session.sessionId, fixture.repositoryRoot, selected, nativeSessionKey(session)).view, 0, "cwd").working.must_not_resurrect, "old-cwd-value");
+	fixture.faux.setResponses(sessionResponses({ working: { continuedAfterRepair: true } }, "Continued after repair."));
+	await session.prompt("Continue with a session patch");
+	assert.equal(fixture.readState(session).working.continuedAfterRepair, true);
+	const file = session.sessionFile!;
+	await session.reload();
+	assert.equal(fixture.readState(session).working.must_not_resurrect, undefined);
+	assert.equal(fixture.readState(session).working.continuedAfterRepair, true);
+	session.dispose();
+	session = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
+	assert.equal(fixture.readState(session).response, "Continued after repair.");
+	assert.equal(fixture.readState(session).working.must_not_resurrect, undefined);
+	assert.equal(fixture.readState(session).working.continuedAfterRepair, true);
+});
 
 test("real Pi retains large state and accepted answers across reload, resume and a large specification", { timeout: 40_000 }, async (t) => {
 	const fixture = await realPiFixture(t, { remotePublication: "off" });

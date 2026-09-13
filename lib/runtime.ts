@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { join } from "node:path";
-import { parseScopeProvenance, parseScopeStream, sessionRuntimePaths, temporalScopePaths, type SessionAddress } from "./durable.ts";
+import { classifyScopeStream, parseScopeProvenance, parseScopeStream, sessionRuntimePaths, temporalScopePaths, type SessionAddress } from "./durable.ts";
 import { parseArtifactProvenanceRegistry, pruneArtifactProvenance, type ArtifactProvenance, type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { adoptFileStateToGit, initializeGitRepository, isLocalGitRepository, captureTemporalGitBase, loadLegacyStatesAtRevision, loadTemporalRevision, migrateHashedCwdAtHead, migrateHashedLayoutAtHead, migrateLegacyStorageToGit, publishTemporalStateToGit, type TemporalGitBase } from "./git.ts";
 import { captureTemporalFileBase, detectGitCapability, initializeFileStore, loadTemporalFileRevision, migrateLegacyStorageToFiles, publishTemporalStateToFiles, type TemporalFileBase } from "./storage.ts";
@@ -37,6 +37,19 @@ function targetScopeConflict(scopes: readonly StateScope[]): Error {
 		return new Error(`State Flow cannot publish the ${labels[0]} patch because the live ${labels[0]} state advanced after this transition's selected basis. Refresh or reconcile the target scope before retrying.`);
 	}
 	return new Error(`State Flow cannot publish the ${labels.join(" and ")} patches because the live ${labels.join(" and ")} states advanced after this transition's selected basis. Refresh or reconcile the target scopes before retrying.`);
+}
+
+/** Disappearance invalidates a selected write target even though untouched scopes can adopt empty reality. */
+function removedTargetScopeConflict(scopes: readonly StateScope[]): Error {
+	const labels = scopes.map(scopeLabel);
+	if (labels.length === 1) {
+		return new Error(`State Flow cannot publish the ${labels[0]} patch because the live ${labels[0]} scope was removed after this transition's selected basis. Refresh or reconcile the target scope before retrying.`);
+	}
+	return new Error(`State Flow cannot publish the ${labels.join(" and ")} patches because the live ${labels.join(" and ")} scopes were removed after this transition's selected basis. Refresh or reconcile the target scopes before retrying.`);
+}
+
+function freshEmptyScopeStream(scope: StateScope, origin: string): ScopeStream {
+	return createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, origin).scopes[scope];
 }
 
 export class MissingSessionRuntimeError extends Error {
@@ -81,6 +94,8 @@ export class TemporalRuntime {
 	private savedRuntime: string | undefined;
 	private backend: "git" | "files" | undefined;
 	private provenanceByScope: Record<StateScope, ArtifactProvenanceRegistry> = emptyProvenance();
+	/** Shared scopes whose wholly absent live basis was accepted after one stale-target refusal. */
+	private readonly absentSharedScopes = new Set<StateScope>();
 	readonly cwd: string;
 	private readonly session: SessionAddress;
 	readonly root: string;
@@ -119,6 +134,7 @@ export class TemporalRuntime {
 		this.backend = "git";
 		this.semanticRevision = result.revision;
 		this.savedRuntime = savedRuntime;
+		this.absentSharedScopes.clear();
 		return result;
 	}
 
@@ -216,6 +232,7 @@ export class TemporalRuntime {
 			this.provenanceByScope = structuredClone(inspected.file.provenance);
 			this.semanticRevision = revision;
 			this.savedRuntime = savedRuntime;
+			this.absentSharedScopes.clear();
 			return inspected.snapshot;
 		}
 		if (!inspected.temporal) {
@@ -269,6 +286,7 @@ export class TemporalRuntime {
 		this.provenanceByScope = structuredClone(loaded.provenance);
 		this.semanticRevision = semanticRevision;
 		this.savedRuntime = savedRuntime;
+		this.absentSharedScopes.clear();
 		return resolved.snapshot;
 	}
 
@@ -347,6 +365,7 @@ export class TemporalRuntime {
 		this.provenanceByScope = structuredClone(candidate.provenanceByScope);
 		this.semanticRevision = candidate.semanticRevision;
 		this.savedRuntime = candidate.savedRuntime;
+		this.absentSharedScopes.clear();
 		return publication;
 	}
 
@@ -397,10 +416,23 @@ export class TemporalRuntime {
 		const provenance = structuredClone(this.provenanceByScope);
 		const adopted = new Map<StateScope, ScopeStream>();
 		const targets: StateScope[] = [];
+		const removedTargets: StateScope[] = [];
+		const absentScopes: StateScope[] = [];
+		const head = "head" in captured ? captured.head : undefined;
+		const reconciliation = `${head ?? "files"}:reconcile:${randomUUID()}`;
 		for (const scope of SHARED_SCOPES) {
 			const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
-			const stream = parseScopeStream(liveFiles.get(paths.checkpoint)?.content, liveFiles.get(paths.patches)?.content, scope, scope === "cwd" ? this.cwd : undefined);
-			if (stream === undefined) throw new Error(`Live State Flow ${scope} scope storage is incomplete`);
+			const presence = classifyScopeStream(liveFiles.get(paths.checkpoint)?.content, liveFiles.get(paths.patches)?.content, scope, scope === "cwd" ? this.cwd : undefined);
+			if (presence.kind === "absent") {
+				absentScopes.push(scope);
+				provenance[scope] = {};
+				if (changedScopes.has(scope) && !this.absentSharedScopes.has(scope)) removedTargets.push(scope);
+				if (!this.absentSharedScopes.has(scope)) {
+					adopted.set(scope, freshEmptyScopeStream(scope, `${reconciliation}:${scope}:absent`));
+				}
+				continue;
+			}
+			const stream = presence.stream;
 			const liveProvenance = parseScopeProvenance(liveFiles.get(paths.meta)?.content, paths.meta);
 			const streamDrifted = !sameJson(stream, this.view!.scopes[scope]);
 			const provenanceDrifted = !sameJson(liveProvenance, this.provenanceByScope[scope]);
@@ -412,19 +444,20 @@ export class TemporalRuntime {
 			provenance[scope] = liveProvenance;
 			if (streamDrifted) adopted.set(scope, stream);
 		}
-		if (targets.length > 0) throw targetScopeConflict(targets);
-		if (adopted.size === 0) return { view: this.view!, base: captured, provenance };
-		const streams = {
+		const reconciledView = () => adopted.size === 0 ? this.view! : adoptTemporalStreams({
 			global: adopted.get("global") ?? structuredClone(this.view!.scopes.global),
 			cwd: adopted.get("cwd") ?? structuredClone(this.view!.scopes.cwd),
 			session: structuredClone(this.view!.scopes.session),
-		};
-		const head = "head" in captured ? captured.head : undefined;
-		return {
-			view: adoptTemporalStreams(streams, `${head ?? "unborn"}:reconcile:${randomUUID()}`),
-			base: captured,
-			provenance,
-		};
+		}, reconciliation);
+		if (removedTargets.length > 0) {
+			this.view = reconciledView();
+			this.base = captured;
+			this.provenanceByScope = provenance;
+			for (const scope of absentScopes) this.absentSharedScopes.add(scope);
+			throw removedTargetScopeConflict(removedTargets);
+		}
+		if (targets.length > 0) throw targetScopeConflict(targets);
+		return { view: reconciledView(), base: captured, provenance };
 	}
 
 	publish(
@@ -474,6 +507,7 @@ export class TemporalRuntime {
 			this.provenanceByScope = nextProvenance;
 			this.savedRuntime = fingerprint;
 			this.semanticRevision = result.revision;
+			if (semantic) this.absentSharedScopes.clear();
 			return { base: result.base, revision: result.revision };
 		}
 		if (!scopedWrite) {
@@ -497,6 +531,7 @@ export class TemporalRuntime {
 		this.provenanceByScope = nextProvenance;
 		this.savedRuntime = fingerprint;
 		if (scopedWrite && result.commit) this.semanticRevision = result.commit;
+		if (semantic) this.absentSharedScopes.clear();
 		return result;
 	}
 }

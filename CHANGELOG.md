@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 0.10.1: Filesystem self-healing and graceful degradation
+
+- `Shared scopes`: A wholly absent live global/CWD checkpoint-tail pair is now distinct from partial storage. Untouched publication adopts empty current reality at a fresh origin and transactionally materializes the canonical pair without resurrecting selected values; a patch targeting the disappeared scope fails precisely for reinference. Git/file backends retain publication locks, CAS, full cold history and concurrent-writer exclusion.
+- `Authority and locality`: Exact selected Git revisions can reconstruct missing private session files, while file-only loss without a retained cohort and partial session semantic/runtime pairs remain fail-closed. Missing provenance degrades freshness without invalidating semantic artifacts; malformed provenance bytes remain untouched. Existing optional config, Knowledge discovery, queue, lease, lock and external-source absence keeps its local graceful behavior.
+- `Recovery evidence`: Native Pi now reconciles an ordinary answer after complete live CWD-pair deletion, then accepts another session patch and reloads/resumes the repaired state. Regression coverage also proves no shared-value resurrection, stale-target refusal, partial-pair preservation, one-owner concurrent repair, stale-capture CAS loss, exact session reconstruction, and absent/malformed operational or external-resource behavior.
+
 ## 0.10.0: Native session memory and reliability
 
 - `Git work`: Single-use restoration, exact-path tree reads and NUL-safe index batching cut steady Git calls 120→87 and resume 63→21 without caching live bases or weakening exact-byte/CAS guards. Selected state/runtime blobs now bypass Node's implicit 1 MiB output limit, preserving large-state answers and cold restoration. Legacy/file-cohort, mode/owner and rollback checks remain. Call savings do not establish universal latency gains.

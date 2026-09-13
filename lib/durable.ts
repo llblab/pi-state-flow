@@ -55,14 +55,18 @@ export function serializeScopeStream(stream: ScopeStream, scope: StateScope, cwd
 	};
 }
 
-/** Decode the entire bounded replay input before accepting any materialized state. */
-export function parseScopeStream(
+export type ScopeStreamPresence =
+	| { kind: "absent" }
+	| { kind: "present"; stream: ScopeStream };
+
+/** Distinguish a wholly absent semantic cohort from partial or malformed surviving authority. */
+export function classifyScopeStream(
 	checkpointSource: string | undefined,
 	patchesSource: string | undefined,
 	scope: StateScope,
 	expectedCwd?: string,
-): ScopeStream | undefined {
-	if (checkpointSource === undefined && patchesSource === undefined) return undefined;
+): ScopeStreamPresence {
+	if (checkpointSource === undefined && patchesSource === undefined) return { kind: "absent" };
 	if (checkpointSource === undefined || patchesSource === undefined) {
 		throw new Error(`State Flow ${scope} scope has an incomplete checkpoint/tail pair`);
 	}
@@ -94,7 +98,18 @@ export function parseScopeStream(
 	}
 	const stream = { checkpoint, patches };
 	validateScopeStream(stream, scope);
-	return stream;
+	return { kind: "present", stream };
+}
+
+/** Decode the entire bounded replay input before accepting any materialized state. */
+export function parseScopeStream(
+	checkpointSource: string | undefined,
+	patchesSource: string | undefined,
+	scope: StateScope,
+	expectedCwd?: string,
+): ScopeStream | undefined {
+	const presence = classifyScopeStream(checkpointSource, patchesSource, scope, expectedCwd);
+	return presence.kind === "present" ? presence.stream : undefined;
 }
 
 export interface TemporalScopePaths {
