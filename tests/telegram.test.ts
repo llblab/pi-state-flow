@@ -101,20 +101,20 @@ test("section view repeats the state line with one lifecycle button and no refre
 		"<b>🌀 State Flow: <code>off</code></b>\n\nRecords the latest accepted state after every turn, so a new session resumes from the last committed point.",
 	);
 	assert.deepEqual(off.replyMarkup?.inline_keyboard, [
-		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
 		[{ text: "▶️ Start", callback_data: "cb:start" }],
+		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
 	]);
 	const on = buildStateFlowSectionView(snapshot({ enabled: true, step: 3 }), (action) => `cb:${action}`);
 	assert.match(on.text, /^<b>🌀 State Flow: <code>#3<\/code><\/b>/);
 	assert.deepEqual(on.replyMarkup?.inline_keyboard, [
-		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
 		[{ text: "⏹ Stop", callback_data: "cb:stop" }],
+		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
 	]);
 	const pending = buildStateFlowSectionView(snapshot({ startPending: true }), (action) => `cb:${action}`);
 	assert.match(pending.text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
 	assert.deepEqual(pending.replyMarkup?.inline_keyboard, [
-		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
 		[{ text: "▶️ Start", callback_data: "cb:start" }],
+		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
 	]);
 });
 
@@ -128,11 +128,22 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 	const chooser = sectionContext("show-state");
 	assert.equal(await sections[0].handleCallback!(chooser.context), "handled");
 	assert.equal(chooser.edits[0].text, "<b>👁 Show state:</b>");
-	assert.deepEqual(chooser.edits[0].replyMarkup?.inline_keyboard.map((row) => row.map((button) => button.text)), [["Global", "CWD"], ["Session", "Effective"]]);
+	assert.deepEqual(chooser.edits[0].replyMarkup?.inline_keyboard.map((row) => row.map((button) => button.text)), [
+		["⬅️ Back"],
+		["🌐 Global"],
+		["📂 CWD"],
+		["💬 Session"],
+		["🧬 Effective"],
+	]);
 	const inspect = sectionContext("inspect", "effective");
 	assert.equal(await sections[0].handleCallback!(inspect.context), "handled");
 	assert.deepEqual(inspect.richMessages, [renderStateFlowRichState("effective", { ...state, working: { scope: "effective" } })]);
+	assert.deepEqual(inspect.richMessages[0]?.blocks.map((block) => block.type), ["heading", "details", "details", "details", "details"]);
+	assert.deepEqual(inspect.richMessages[0]?.blocks[0], { type: "heading", text: "🧬 Effective", size: 2 });
 	assert.equal(inspect.edits.length, 0);
+	const back = sectionContext("back");
+	assert.equal(await sections[0].handleCallback!(back.context), "handled");
+	assert.match(back.edits[0].text, /^<b>🌀 State Flow:/);
 });
 
 test("Rich state rendering bounds unbounded semantic fields with explicit truncation", () => {
@@ -216,8 +227,8 @@ test("start defers while a run is active and reports a pending intent", async ()
 	assert.deepEqual(notices, ["State Flow will start after the current turn"]);
 	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
 	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard, [
-		[{ text: "👁 Show state", callback_data: "section:0:show-state" }],
 		[{ text: "▶️ Start", callback_data: "section:0:start" }],
+		[{ text: "👁 Show state", callback_data: "section:0:show-state" }],
 	]);
 });
 

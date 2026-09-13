@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.11.1: Telegram inspection hierarchy
+
+- `Telegram inspection`: `👁 Show state` now follows Start/Stop, and its Back, 🌐 Global, 📂 CWD, 💬 Session, and 🧬 Effective controls form one vertical composition axis. A selected scope opens with a fixed emoji-bearing heading followed directly by the four top-level collapsible semantic fields, removing the redundant outer disclosure.
+
 ## 0.11.0: Telegram state inspection
 
 - `Telegram inspection`: The State Flow submenu now offers `👁 Show state` with Global, CWD, Session, and Effective choices. Selecting one scope sends exactly that projected materialized slice as a standalone Telegram Native Rich Message whose semantic fields use collapsible `details` and JSON `pre` blocks; inspection is read-only and the optional adapter remains fail-open without a compatible pi-telegram membrane.

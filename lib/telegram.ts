@@ -26,6 +26,7 @@ export interface StateFlowTelegramState {
 }
 
 export type StateFlowTelegramRichBlock =
+	| { type: "heading"; text: string; size: 2 }
 	| { type: "pre"; text: string; language?: string }
 	| { type: "details"; summary: string | { type: "bold" | "code"; text: string }; blocks: StateFlowTelegramRichBlock[]; is_open?: true };
 
@@ -124,19 +125,28 @@ export function buildStateFlowSectionView(
 		text: [formatStateFlowSectionHeader(snapshot), "", STATE_FLOW_SECTION_HELP].join("\n"),
 		parseMode: "html",
 		replyMarkup: { inline_keyboard: [
-			[{ text: "👁 Show state", callback_data: callbackData("show-state") }],
 			[action],
+			[{ text: "👁 Show state", callback_data: callbackData("show-state") }],
 		] },
 	};
 }
+
+const STATE_FLOW_SCOPE_LABELS: Record<StateFlowTelegramScope, string> = {
+	global: "🌐 Global",
+	cwd: "📂 CWD",
+	session: "💬 Session",
+	effective: "🧬 Effective",
+};
 
 export function buildStateFlowScopeChooser(callbackData: (action: string, payload?: string) => string): StateFlowTelegramView {
 	return {
 		text: "<b>👁 Show state:</b>",
 		parseMode: "html",
 		replyMarkup: { inline_keyboard: [
-			["global", "cwd"].map((scope) => ({ text: scope === "global" ? "Global" : "CWD", callback_data: callbackData("inspect", scope) })),
-			["session", "effective"].map((scope) => ({ text: scope === "session" ? "Session" : "Effective", callback_data: callbackData("inspect", scope) })),
+			[{ text: "⬅️ Back", callback_data: callbackData("back") }],
+			...(["global", "cwd", "session", "effective"] as const).map((scope) => [
+				{ text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope) },
+			]),
 		] },
 	};
 }
@@ -169,18 +179,16 @@ function renderStateFlowTelegramField(value: unknown): string {
 }
 
 export function renderStateFlowRichState(scope: StateFlowTelegramScope, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
-	const title = scope === "cwd" ? "CWD" : `${scope[0].toUpperCase()}${scope.slice(1)}`;
 	const fields = ["artifacts", "contract", "working", "response"] as const;
 	return {
-		blocks: [{
-			type: "details",
-			summary: { type: "bold", text: title },
-			blocks: fields.map((field) => ({
-				type: "details",
-				summary: { type: "code", text: field },
-				blocks: [{ type: "pre", language: "json", text: renderStateFlowTelegramField(state[field]) }],
+		blocks: [
+			{ type: "heading", text: STATE_FLOW_SCOPE_LABELS[scope], size: 2 },
+			...fields.map((field) => ({
+				type: "details" as const,
+				summary: { type: "code" as const, text: field },
+				blocks: [{ type: "pre" as const, language: "json", text: renderStateFlowTelegramField(state[field]) }],
 			})),
-		}],
+		],
 		skip_entity_detection: true,
 	};
 }
@@ -198,7 +206,7 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
 			buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action)),
 		handleCallback: async (ctx: StateFlowTelegramCallbackContext) => {
 			// cancel/refresh remain routable for keyboards sent by earlier versions.
-			if (ctx.action !== "start" && ctx.action !== "stop" && ctx.action !== "cancel" && ctx.action !== "refresh" && ctx.action !== "show-state" && ctx.action !== "inspect") return "pass" as const;
+			if (ctx.action !== "start" && ctx.action !== "stop" && ctx.action !== "cancel" && ctx.action !== "refresh" && ctx.action !== "show-state" && ctx.action !== "inspect" && ctx.action !== "back") return "pass" as const;
 			let notice: string | undefined;
 			try {
 				if (ctx.action === "show-state") {
