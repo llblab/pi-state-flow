@@ -143,7 +143,6 @@ export function buildStateFlowScopeChooser(callbackData: (action: string, payloa
 		text: "<b>👁 Show state:</b>",
 		parseMode: "html",
 		replyMarkup: { inline_keyboard: [
-			[{ text: "⬅️ Back", callback_data: callbackData("back") }],
 			...(["global", "cwd", "session", "effective"] as const).map((scope) => [
 				{ text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope) },
 			]),

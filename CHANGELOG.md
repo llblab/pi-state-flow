@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.11.2: Single hierarchical Back control
+
+- `Telegram inspection navigation`: Removes the chooser-owned `⬅️ Back` button from Show state. The section framework now supplies the only navigation row, `⬆️ Back`, which returns directly to the State Flow section; the four scope choices and read-only Rich state inspection are unchanged.
+
 ## 0.11.1: Telegram inspection hierarchy
 
 - `Telegram inspection`: `👁 Show state` now follows Start/Stop, and its Back, 🌐 Global, 📂 CWD, 💬 Session, and 🧬 Effective controls form one vertical composition axis. A selected scope opens with a fixed emoji-bearing heading followed directly by the four top-level collapsible semantic fields, removing the redundant outer disclosure.

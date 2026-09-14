@@ -129,7 +129,6 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 	assert.equal(await sections[0].handleCallback!(chooser.context), "handled");
 	assert.equal(chooser.edits[0].text, "<b>👁 Show state:</b>");
 	assert.deepEqual(chooser.edits[0].replyMarkup?.inline_keyboard.map((row) => row.map((button) => button.text)), [
-		["⬅️ Back"],
 		["🌐 Global"],
 		["📂 CWD"],
 		["💬 Session"],
