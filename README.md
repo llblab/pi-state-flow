@@ -68,7 +68,7 @@ Memory overlays **global → project CWD → session**. Put reusable cross-proje
 
 **Resuming an existing Pi session restores its selected State Flow state and enablement.** A genuinely new session starts with an empty session layer and inherits only shared global/CWD memory; it does not resume another session's private work. Tree navigation follows the selected branch, not whichever state happens to be at Git `HEAD`.
 
-The agent can inspect `state[0]` through `state[7]`: now and up to seven prior accepted transitions. Every scope is read at the same causal boundary. Git-backed stores retain older committed history separately.
+The agent can inspect `state`/`state[0]` through `state[7]`: now and up to seven prior accepted transitions. Scoped paths such as `state.cwd[1]` use the same causal boundary; `state.global.patches[0]` reads the latest retained accepted patch for that scope. Git-backed stores retain older committed history separately.
 
 ## Boundaries worth knowing
 

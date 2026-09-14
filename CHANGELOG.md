@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.12.0: Unified state reads and visible patches
+
+- `Unified state reads`: `read_state` now resolves current-as-index-zero paths for effective/scoped materializations and retained scope patches while preserving the prior offset/scope input for compatibility. Materialization paths share the composed causal timeline; patch paths walk accepted records for their selected scope.
+- `Successful patch visibility`: Interactive successful `patch_state` rows show the applied JSON arguments by default. Agent-level `showSuccessfulPatches: false` restores compact summaries; rejected calls and private validation payloads remain separate.
+
 ## 0.11.2: Single hierarchical Back control
 
 - `Telegram inspection navigation`: Removes the chooser-owned `⬅️ Back` button from Show state. The section framework now supplies the only navigation row, `⬆️ Back`, which returns directly to the State Flow section; the four scope choices and read-only Rich state inspection are unchanged.

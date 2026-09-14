@@ -204,3 +204,4 @@ export {
   type StateFlowTelegramView
 } from "./lib/telegram.ts";
 export { advanceTemporalState, readTemporalState, type TemporalState } from "./lib/temporal.ts";
+export { parseStateReadPath, readStatePath, type StateReadQuery, type StateReadResult } from "./lib/query.ts";

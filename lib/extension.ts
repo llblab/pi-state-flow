@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { assistantToolCallCount, finalizedAssistantResponse, stateFlowProtocol } from "./protocol.ts";
 import { createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, runtimeContextMessage, VALIDATION_MESSAGE_TYPE, withoutPrivateValidation, type PassiveContinuation } from "./context.ts";
 import { ArtifactReadTracker } from "./acquisition.ts";
@@ -26,6 +27,7 @@ import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePa
 import { runPublicationWorker } from "./publication.ts";
 import { getKnowledgeRoot, GlobalMarkdownDiscovery } from "./discovery.ts";
 import { isObject, sameJson } from "./json.ts";
+import { readStatePath } from "./query.ts";
 import {
 	cwdScopeKey,
 	resolveSessionAddress,
@@ -762,23 +764,33 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	pi.registerTool({
 		name: READ_STATE_TOOL_NAME,
 		label: "Read State",
-		description: "Read one effective or scoped State Flow materialization at offset 0–7 in the active causal lineage. Read-only and lazy; unavailable pre-origin history is an error. Use only for a concrete historical or scope-specific gap, not routine rereading of current context.",
-		promptSnippet: "Read one cached effective/global/CWD/session state at temporal offset 0–7",
+		description: "Read State Flow through a unified path such as state, state[1], state.cwd[2], or state.global.patches[0]. The legacy offset/scope form remains accepted. Read-only and lazy; unavailable hot history is an error.",
+		promptSnippet: "Read cached state or accepted scope patches with a unified path",
 		parameters: Type.Object({
-			offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 7, description: "Accepted transitions before current state; defaults to 0" })),
-			scope: Type.Optional(StringEnum(["effective", "global", "cwd", "session"] as const, { description: "Projection at that same boundary; defaults to effective" })),
+			path: Type.Optional(Type.String({ description: "Unified query path; current aliases use index 0" })),
+			offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 7, description: "Legacy accepted-transition offset; defaults to 0" })),
+			scope: Type.Optional(StringEnum(["effective", "global", "cwd", "session"] as const, { description: "Legacy projection at the same boundary; defaults to effective" })),
 		}, { additionalProperties: false }),
 		async execute(_toolCallId, params, signal) {
 			try {
+				type ReadDetails = { path?: string; offset?: number; scope?: string; transitionId: string };
 				if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
 				if (signal?.aborted) throw new Error("State Flow read was aborted");
 				if (!runtime?.view) throw new Error("State Flow temporal runtime is unavailable");
+				if (params.path !== undefined) {
+					if (params.offset !== undefined || params.scope !== undefined) throw new Error("read_state path cannot be combined with legacy offset or scope");
+					const result = readStatePath(runtime.view, params.path);
+					return {
+						content: [{ type: "text", text: `\n${JSON.stringify(result)}` }],
+						details: { path: params.path, transitionId: result.boundary.id } as ReadDetails,
+					};
+				}
 				const { offset = 0, scope = "effective" } = params;
 				const state = runtime.read(offset, scope === "effective" ? undefined : scope);
 				const boundary = runtime.view.lineage.at(-1 - offset)!;
 				return {
 					content: [{ type: "text", text: `\n${JSON.stringify({ offset, scope, boundary, state: projectStateForModel(state) })}` }],
-					details: { offset, scope, transitionId: boundary.id },
+					details: { offset, scope, transitionId: boundary.id } as ReadDetails,
 				};
 			} catch (error) {
 				throw separatedFailure(error);
@@ -804,6 +816,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			final: Type.Optional(Type.Boolean({ description: "Set exactly true to permit this iteration to finish at a later turn_end" })),
 		}, { additionalProperties: false }),
 		prepareArguments: normalizePatchStateArguments,
+		renderResult(result, { isPartial }, theme, context) {
+			const text = result.content.find((block) => block.type === "text")?.text ?? "";
+			if (isPartial || context.isError || !config.showSuccessfulPatches) return new Text(text, 0, 0);
+			return new Text(`${text.trimStart()}\n${theme.fg("dim", JSON.stringify(context.args, null, 2))}`, 0, 0);
+		},
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			try {
 				if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");

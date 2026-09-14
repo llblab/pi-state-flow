@@ -49,7 +49,8 @@ test("discovers the packaged optional memory-curation Skill without diagnostics"
 	assert.deepEqual(result.diagnostics, []);
 	assert.equal(result.skills.length, 1);
 	assert.equal(result.skills[0].name, "state-flow-memory");
-	assert.match(result.skills[0].description, /phase-boundary reconciliation required by the State Flow runtime contract/);
+	assert.match(result.skills[0].description, /after completing a major feature, important release, large body of work, campaign, project phase, or meaningful checkpoint/);
+	assert.match(result.skills[0].description, /even when the user did not explicitly ask for memory work/);
 	assert.match(result.skills[0].description, /not for unrelated routine turns or background maintenance/);
 	const body = readFileSync(result.skills[0].filePath, "utf8");
 	assert.match(body, /either an explicit curation request or a feature, release, campaign, project, or active-version phase boundary/);

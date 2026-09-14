@@ -2,9 +2,13 @@
 
 This matrix records exact tested dependency stacks, not the version of an operator's running Pi process. Package peer ranges admit `^0.84.4 || ^0.85.1`; keep Pi, AI and agent-core on a matching release line. Mixed-version stacks and later releases are not separate test evidence.
 
+## Current release candidate
+
+The 0.12.0 candidate passes `npm run validate` on the repository-local 0.84.4 dependency graph: typecheck, import check, and 451/451 tests. Its focused path/config/interactive-rendering cohort passes 41/41, including current-as-index-zero `read_state` aliases, composed-lineage scoped reads, retained scope-patch reads, legacy `{offset, scope}` compatibility, and both visible/default and suppressed `patch_state` argument rendering. A live enabled host also resolves current and historical legacy reads; the host must reload the candidate before its model-facing tool schema can expose the new `path` input. The 0.85.1 full-suite result below belongs to the earlier source checkpoint and has not been repeated for this candidate.
+
 ## Tested matrix
 
-The compatibility checks use Linux/x64, Node 26.8.1, Git 2.55.0, TypeScript 7.0.2 and Node types 26.4.0.
+The historical compatibility checks use Linux/x64, Node 26.8.1, Git 2.55.0, TypeScript 7.0.2 and Node types 26.4.0.
 
 | Pi / AI / agent-core | SDK's pi-tui / TypeBox | Typecheck / import | Full suite |
 | --- | --- | --- | --- |

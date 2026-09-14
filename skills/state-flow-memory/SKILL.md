@@ -1,6 +1,6 @@
 ---
 name: state-flow-memory
-description: Audit and reconcile State Flow durable memory across global, CWD, and session scopes. Preserve commitments, established learning, and the point of continuation without freezing provisional approaches. Use for explicit memory curation, ownership migration, contradiction cleanup, stale continuation review, externally evidenced promotion, or a feature/release/project phase-boundary reconciliation required by the State Flow runtime contract; not for unrelated routine turns or background maintenance.
+description: Audit and reconcile State Flow durable memory across global, CWD, and session scopes. Preserve commitments, established learning, and the point of continuation without freezing provisional approaches. Use after completing a major feature, important release, large body of work, campaign, project phase, or meaningful checkpoint—even when the user did not explicitly ask for memory work—as well as for explicit memory curation, ownership migration, contradiction cleanup, stale continuation review, externally evidenced promotion, and active-version boundaries; not for unrelated routine turns or background maintenance.
 ---
 
 # State Flow Memory Curation
@@ -77,6 +77,8 @@ Merge redundant fragments and remove obsolete scaffolding, repeated argumentatio
 Do not erase a meaningful correction, uncertainty, commitment, negative result, or continuation dependency to make state shorter. Do not retain the previous chain of reasoning solely to steer the next run toward the same method.
 
 ### Reconcile phase boundaries
+
+After a major feature, important release, large body of work, or meaningful checkpoint reaches completion or its final stage, proactively optimize the affected State Flow scopes. Distill implementation-specific detail into durable consequences, remove trajectory-bound scaffolding, and rebalance knowledge across global, CWD, and session ownership so the resulting state stays alive, reusable, and open to better future methods rather than preserving the shape of the finished effort.
 
 A completed feature, release, campaign, project switch, or active-version change is evidence that its working set needs one bounded review. Remove completed task lists, obsolete release/version state, run identifiers, timings, incident chronology, dead experiments, and stale continuation. Retain shipped status only when it remains a prerequisite, durable rule, open risk, or useful retrieval pointer.
 

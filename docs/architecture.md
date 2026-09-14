@@ -202,11 +202,17 @@ Both [tested Pi SDKs](compatibility.md) choose or create `SessionManager` before
 {"session":{"working":{"next":"Verify the corrected behavior"}},"final":true}
 ```
 
-`read_state` defaults to effective state at offset zero. It accepts one optional `scope` (`effective`, `global`, `cwd`, or `session`) and integer `offset` from zero to seven, returning `{offset, scope, boundary, state}`. It reads cached selected state without Git queries, publication, checkpoint append, or a semantic step. Pre-origin history is an error, not an empty state.
+`read_state` accepts one unified path. `state == state[0]` is the current effective materialization; `state.global == state.global[0]` (and CWD/session equivalents) selects that scope at the same composed causal boundary. `state.global.patches == state.global.patches[0]` reads the latest accepted retained global patch, with higher patch indices walking only that scope's retained accepted patches. Indices are bounded to zero through seven; unavailable pre-origin or pre-tail history is an error. Resolver aliases are not literal JSON containers. Reads stay cached and create no Git query, publication, checkpoint append, or semantic step.
 
 ```json
-{"offset":1,"scope":"cwd"}
+{"path":"state.cwd[1]"}
 ```
+
+```json
+{"path":"state.global.patches[0]"}
+```
+
+The prior `{offset, scope}` form remains accepted for session/tool-call compatibility, but cannot be combined with `path`.
 
 Both tools follow branch enablement and host restrictions. The patch barrier also blocks reader siblings. These tools do not impose project schemas or state-size caps; semantic usefulness, scope choice, and compression remain model responsibilities. Every ordinary handoff reconciles touched and obviously stale visible state. Feature/release/campaign completion, project switches, and active-version changes additionally require one bounded scoped ownership and obsolescence pass: global retains only established cross-project/user/environment knowledge, CWD owns reusable project truth, and session owns branch/run continuation. Scope movement uses targeted reads and destination verification before source deletion rather than an automatic maintenance loop.
 

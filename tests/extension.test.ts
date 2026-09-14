@@ -318,6 +318,12 @@ test("read_state lazily projects all hot offsets and scopes at one boundary with
 		}
 		assert.equal(JSON.parse((await read.execute("default", {}, undefined)).content[0].text).state.working.shared, "S8");
 		assert.equal(JSON.parse((await read.execute("global-default", { scope: "global" }, undefined)).content[0].text).state.working.shared, "G6");
+		const currentPath = JSON.parse((await read.execute("path-current", { path: "state" }, undefined)).content[0].text);
+		assert.equal(currentPath.state.working.shared, "S8");
+		assert.equal(currentPath.path, "state");
+		const previousGlobalPatch = JSON.parse((await read.execute("path-patch", { path: "state.global.patches[1]" }, undefined)).content[0].text);
+		assert.deepEqual(previousGlobalPatch.patch, { working: { shared: "G1" } });
+		await assert.rejects(read.execute("mixed-query", { path: "state", offset: 0 }, undefined), /cannot be combined/);
 		for (const offset of [-1, 0.5, 8, null, "1"]) await assert.rejects(read.execute("invalid", { offset }, undefined), /0 to 7/);
 		for (const scope of [null, "other"]) await assert.rejects(read.execute("invalid-scope", { scope }, undefined), /Unknown temporal scope/);
 	} finally {
@@ -370,7 +376,7 @@ test("patch_state commits global, CWD, and session as one model-facing atomic ba
 	assert.equal(h.readState().response, "Still pending.");
 });
 
-test("patch_state materializes session state before the next inference and response reconciliation", async () => {
+test("patch_state materializes session state before the next inference and response reconciliation", async (t) => {
 	const h = harness();
 	await start(h, "Long-running task");
 	const patchState = h.tools.get("patch_state")!;
@@ -386,6 +392,36 @@ test("patch_state materializes session state before the next inference and respo
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "");
+	const rendered = patchState.renderResult(
+		result,
+		{ expanded: false, isPartial: false },
+		{ fg: (_color: string, text: string) => text } as any,
+		{ args: { session: { working: { verified: "intermediate" } }, final: true }, isError: false } as any,
+	);
+	assert.match(rendered.render(120).join("\n"), /"verified": "intermediate"/);
+
+	const hiddenAgentDir = mkdtempSync(join(tmpdir(), "state-flow-hidden-patches-"));
+	t.after(() => rmSync(hiddenAgentDir, { recursive: true, force: true }));
+	writeFileSync(join(hiddenAgentDir, "state-flow.json"), JSON.stringify({ showSuccessfulPatches: false }));
+	const hidden = harness({ agentDir: hiddenAgentDir });
+	await start(hidden, "Hide successful patch details");
+	const hiddenPatch = hidden.tools.get("patch_state")!;
+	const hiddenResult = await hiddenPatch.execute(
+		"hidden-patch",
+		{ session: { working: { secretFromToolRow: "hidden" } } },
+		undefined,
+		undefined,
+		hidden.ctx,
+	);
+	const hiddenRendered = hiddenPatch.renderResult(
+		hiddenResult,
+		{ expanded: false, isPartial: false },
+		{ fg: (_color: string, text: string) => text } as any,
+		{ args: { session: { working: { secretFromToolRow: "hidden" } } }, isError: false } as any,
+	);
+	const hiddenText = hiddenRendered.render(120).join("\n");
+	assert.match(hiddenText, /State materialized atomically at session scope\./);
+	assert.doesNotMatch(hiddenText, /secretFromToolRow|"hidden"/);
 
 	const projected = h.handlers.get("context")!({ messages: [user("Long-running task", 1)] }, h.ctx);
 	assert.equal(projected.messages.filter((message: any) => message.content?.[0]?.text?.startsWith("State Flow runtime context")).length, 1);

@@ -19,7 +19,7 @@ function fixture(t: TestContext) {
 test("configuration is optional, read-only and resolves storage independently of its own fixed location", (t) => {
 	const f = fixture(t);
 	assert.deepEqual(loadStateFlowConfig(f.agentDir), {
-		directory: join(f.agentDir, "state-flow"), autoStart: false, logging: false,
+		directory: join(f.agentDir, "state-flow"), autoStart: false, logging: false, showSuccessfulPatches: true,
 	});
 	assert.equal(existsSync(f.path), false);
 	assert.equal(existsSync(join(f.agentDir, "state-flow")), false);
@@ -30,17 +30,17 @@ test("configuration is optional, read-only and resolves storage independently of
 		f.write({ ...(directory === undefined ? {} : { directory }), autoStart: true });
 		const bytes = readFileSync(f.path);
 		assert.deepEqual(loadStateFlowConfig(f.agentDir), {
-			directory: resolve(expected), autoStart: true, logging: false,
+			directory: resolve(expected), autoStart: true, logging: false, showSuccessfulPatches: true,
 		});
 		assert.deepEqual(readFileSync(f.path), bytes);
 	}
 	f.write({ remotePublication: "off" });
 	assert.deepEqual(loadStateFlowConfig(f.agentDir), {
-		directory: join(f.agentDir, "state-flow"), autoStart: false, logging: false, remotePublication: "off",
+		directory: join(f.agentDir, "state-flow"), autoStart: false, logging: false, showSuccessfulPatches: true, remotePublication: "off",
 	});
-	f.write({ logging: true });
+	f.write({ logging: true, showSuccessfulPatches: false });
 	assert.deepEqual(loadStateFlowConfig(f.agentDir), {
-		directory: join(f.agentDir, "state-flow"), autoStart: false, logging: true,
+		directory: join(f.agentDir, "state-flow"), autoStart: false, logging: true, showSuccessfulPatches: false,
 	});
 });
 
@@ -51,6 +51,7 @@ test("invalid configuration fails before extension registration or state writes,
 		{ memoryOwner: "none" }, { memoryOwner: true }, { globalMemory: "false" }, { globalMemory: null },
 		{ remotePublication: "async" }, { remotePublication: true },
 		{ logging: "true" }, { logging: 1 }, { logging: null },
+		{ showSuccessfulPatches: "true" }, { showSuccessfulPatches: 1 }, { showSuccessfulPatches: null },
 		{ directory: "" }, { directory: " " }, { directory: 7 }, { directory: null }, { directory: "a\0b" }, { directory: "~someone/store" }]) {
 		f.write(value);
 		assert.throws(() => stateFlowExtension(untouched as any, { agentDir: f.agentDir }), /State Flow/);
