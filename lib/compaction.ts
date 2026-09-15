@@ -1,3 +1,4 @@
+import { estimateTokens, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { CompactionResult } from "@earendil-works/pi-coding-agent";
 
 export const STATE_FLOW_COMPACTION_SUMMARY = "State Flow accepted the completed work before this boundary. Current memory is restored from its durable revision and projected separately; use the retained native entries for subsequent work.";
@@ -21,7 +22,7 @@ type ActiveEntry = {
 	id?: unknown;
 	type?: unknown;
 	customType?: unknown;
-	message?: { role?: unknown; stopReason?: unknown };
+	message?: { role?: unknown; stopReason?: unknown; content?: unknown };
 };
 
 function stateFlowEntry(entry: ActiveEntry): boolean {
@@ -34,6 +35,21 @@ export function shouldRequestStateFlowCompaction(usage: { tokens: number | null 
 	return typeof usage?.tokens === "number"
 		&& Number.isFinite(usage.tokens)
 		&& usage.tokens >= STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS;
+}
+
+/**
+ * Pi's public usage includes the system prompt, while native compaction can only
+ * shorten persisted messages. Avoid requesting a visibly failing manual
+ * compaction when that transcript is still below the useful-history floor.
+ */
+export function hasCompactionSizedTranscript(entries: readonly ActiveEntry[]): boolean {
+	let tokens = 0;
+	for (const entry of entries) {
+		if (entry.type !== "message" || typeof entry.message?.role !== "string") continue;
+		tokens += estimateTokens(entry.message as unknown as AgentMessage);
+		if (tokens >= STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS) return true;
+	}
+	return false;
 }
 
 /** Retain the complete latest accepted user iteration without hiding foreign extension context. */

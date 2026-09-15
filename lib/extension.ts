@@ -42,7 +42,7 @@ import {
 	planArtifactInvalidation,
 	type ArtifactInvalidationRequest,
 } from "./artifact.ts";
-import { planStateFlowCompaction, shouldRequestStateFlowCompaction, stateFlowCompactionResult, type StateFlowCompactionPlan } from "./compaction.ts";
+import { hasCompactionSizedTranscript, planStateFlowCompaction, shouldRequestStateFlowCompaction, stateFlowCompactionResult, type StateFlowCompactionPlan } from "./compaction.ts";
 
 export interface StateFlowExtensionOptions {
 	agentDir?: string;
@@ -1245,7 +1245,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			|| compactionInFlight || !ctx.isIdle() || ctx.hasPendingMessages() || !snapshot.meta.durableBase
 			|| !shouldRequestStateFlowCompaction(ctx.getContextUsage())) return;
 		completedRunAccepted = false;
-		const plan = planStateFlowCompaction(ctx.sessionManager.buildContextEntries(), snapshot.meta.durableBase, snapshot.meta.step);
+		const entries = ctx.sessionManager.buildContextEntries();
+		if (!hasCompactionSizedTranscript(entries)) return;
+		const plan = planStateFlowCompaction(entries, snapshot.meta.durableBase, snapshot.meta.step);
 		if (!plan) return;
 		compactionPlan = plan;
 		compactionInFlight = true;

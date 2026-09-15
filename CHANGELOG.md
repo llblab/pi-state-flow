@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+## 0.13.2: Benign compaction readiness
+
+- `Benign compaction readiness`: Automatic State Flow compaction now requires enough persisted message history as well as high total context usage, so a short session enlarged only by its system prompt remains a quiet non-action instead of surfacing Pi's native `Nothing to compact` failure.
 - `Release automation`: The publish job now builds the compiled distribution before capturing its script-free local package inventory, so post-publication comparison uses the same manifest shape as the npm artifact.
 
 ## 0.13.1: Compiled package release verification

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS,
 	STATE_FLOW_COMPACTION_SUMMARY,
+	hasCompactionSizedTranscript,
 	planStateFlowCompaction,
 	shouldRequestStateFlowCompaction,
 	stateFlowCompactionResult,
@@ -12,17 +13,22 @@ import { harness, start } from "./harness.ts";
 function entries(options: { foreign?: boolean; retainedForeign?: boolean; terminal?: "stop" | "aborted" } = {}) {
 	return [
 		{ id: "user-old", type: "message", message: { role: "user", content: "Earlier iteration" } },
-		{ id: "assistant-old", type: "message", message: { role: "assistant", stopReason: "stop" } },
+		{ id: "assistant-old", type: "message", message: { role: "assistant", content: [], stopReason: "stop" } },
 		...(options.foreign ? [{ id: "foreign", type: "custom", customType: "foreign-policy" }] : []),
 		{ id: "user-latest", type: "message", message: { role: "user", content: "Latest iteration" } },
 		...(options.retainedForeign ? [{ id: "foreign-retained", type: "custom", customType: "foreign-policy" }] : []),
 		{ id: "checkpoint", type: "custom", customType: "state-flow-snapshot" },
-		{ id: "assistant", type: "message", message: { role: "assistant", stopReason: options.terminal ?? "stop" } },
+		{ id: "assistant", type: "message", message: { role: "assistant", content: [], stopReason: options.terminal ?? "stop" } },
 		{ id: "leaf", type: "custom", customType: "state-flow-snapshot" },
 	];
 }
 
 const revision = "a".repeat(40);
+
+function makeTranscriptCompactable(h: ReturnType<typeof harness>): void {
+	h.entries.push({ type: "message", message: { role: "user", content: "x".repeat(96_000), timestamp: Date.now() - 2 } });
+	h.entries.push({ type: "message", message: { role: "assistant", content: "Earlier answer", stopReason: "stop", timestamp: Date.now() - 1 } });
+}
 
 async function acceptRun(h: ReturnType<typeof harness>, label: string): Promise<void> {
 	const timestamp = Date.now();
@@ -40,6 +46,13 @@ test("uses context-token usage as the early-compaction readiness signal", () => 
 	assert.equal(shouldRequestStateFlowCompaction({ tokens: null }), false);
 	assert.equal(shouldRequestStateFlowCompaction({ tokens: STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS - 1 }), false);
 	assert.equal(shouldRequestStateFlowCompaction({ tokens: STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS }), true);
+});
+
+test("requires enough persisted transcript for native compaction, not only high total context usage", () => {
+	assert.equal(hasCompactionSizedTranscript(entries()), false);
+	const large = entries();
+	(large[0] as any).message.content = "x".repeat(96_000);
+	assert.equal(hasCompactionSizedTranscript(large), true);
 });
 
 test("retains the complete latest accepted user iteration", () => {
@@ -86,6 +99,7 @@ test("customizes only its private manual request and cancels stale or aborted pl
 test("requests one owned compaction only after token-ready accepted non-bootstrap work settles", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Bootstrap");
+	makeTranscriptCompactable(h);
 	const timestamp = Date.now();
 	h.entries.push({ type: "message", message: { role: "user", content: [{ type: "text", text: "Latest request" }], timestamp } });
 	await h.tools.get("patch_state").execute("terminal", { session: { working: { compacted: true } }, final: true }, undefined, undefined, h.ctx);
@@ -103,7 +117,7 @@ test("requests one owned compaction only after token-ready accepted non-bootstra
 		preparation: { tokensBefore: 25_000 }, signal: new AbortController().signal,
 	}, h.ctx);
 	assert.equal(result.compaction.summary, STATE_FLOW_COMPACTION_SUMMARY);
-	assert.equal(result.compaction.firstKeptEntryId, branchEntries.find((entry: any) => entry.message?.role === "user").id);
+	assert.equal(result.compaction.firstKeptEntryId, branchEntries.findLast((entry: any) => entry.message?.role === "user").id);
 	assert.equal(result.compaction.details.owner, "state-flow");
 	assert.match(result.compaction.details.revision, /^[0-9a-f]{40,64}$/);
 	assert.equal(h.readState().working.compacted, true);
@@ -124,6 +138,7 @@ test("short or unknown context remains uncompacted without invoking Pi", async (
 test("benign native preparation refusal releases ownership for a later accepted run", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "First");
+	makeTranscriptCompactable(h);
 	await acceptRun(h, "first");
 	assert.equal(h.compactRequests.length, 1);
 	h.compactRequests[0].onError(new Error("Nothing to compact (session too small)"));
@@ -136,6 +151,7 @@ test("benign native preparation refusal releases ownership for a later accepted 
 test("shutdown fences an admitted compaction before its native hook and later settlement", async () => {
 	const h = harness({ remotePublication: "off" });
 	await start(h, "Shutdown");
+	makeTranscriptCompactable(h);
 	await acceptRun(h, "shutdown");
 	assert.equal(h.compactRequests.length, 1);
 	const request = h.compactRequests[0];

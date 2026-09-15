@@ -654,7 +654,7 @@ test("real Pi compacts accepted State Flow history without another model call an
 	const file = session.sessionFile!;
 	const calls = fixture.faux.state.callCount;
 	fixture.faux.setResponses(sessionResponses({ working: { retainedAcrossCompaction: true } }, "Accepted before compaction."));
-	await session.prompt(`LONG-COMPLETED-REQUEST:${"x".repeat(90_000)}`);
+	await session.prompt(`LONG-COMPLETED-REQUEST:${"x".repeat(110_000)}`);
 	for (let attempt = 0; attempt < 100 && !session.sessionManager.getEntries().some((entry) => entry.type === "compaction"); attempt++) {
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	}
