@@ -122,8 +122,11 @@ test("file cohorts persist scope provenance beside semantic state and reload it 
 	const loaded = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, first.revision);
 	assert.deepEqual(loaded.provenance, provenance);
 	const globalMeta = temporalScopePaths(f.cwd, f.sessionId, "global", f.root).meta;
-	assert.deepEqual(JSON.parse(readFileSync(globalMeta, "utf8")), { version: 1, artifacts: provenance.global });
-	assert.equal(existsSync(temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root).meta), false);
+	assert.deepEqual(JSON.parse(readFileSync(globalMeta, "utf8")), {
+		version: 1, artifacts: provenance.global,
+		temporal: { checkpoint: f.view.scopes.global.checkpoint.through, patches: f.view.scopes.global.patches.map((record) => record.transition) },
+	});
+	assert.equal(existsSync(temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root).meta), true);
 	// A provenance-only change is still one durable cohort without a semantic transition.
 	const refreshed = {
 		global: { [artifactPath]: { sourceHash: hashArtifactSource("guidance two\n"), compilerRevision: ORDINARY_ARTIFACT_COMPILER } },

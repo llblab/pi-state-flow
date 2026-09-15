@@ -26,7 +26,7 @@ export interface StateFlowTelegramState {
 }
 
 export type StateFlowTelegramRichBlock =
-	| { type: "heading"; text: string; size: 2 }
+	| { type: "heading"; text: string; size: 3 }
 	| { type: "pre"; text: string; language?: string }
 	| { type: "details"; summary: string | { type: "bold" | "code"; text: string }; blocks: StateFlowTelegramRichBlock[]; is_open?: true };
 
@@ -177,11 +177,11 @@ function renderStateFlowTelegramField(value: unknown): string {
 	return rendered;
 }
 
-export function renderStateFlowRichState(scope: StateFlowTelegramScope, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
+export function renderStateFlowRichState(scope: StateFlowTelegramScope, step: number, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
 	const fields = ["artifacts", "contract", "working", "response"] as const;
 	return {
 		blocks: [
-			{ type: "heading", text: STATE_FLOW_SCOPE_LABELS[scope], size: 2 },
+			{ type: "heading", text: `${STATE_FLOW_SCOPE_LABELS[scope]}: \`#${step}\``, size: 3 },
 			...fields.map((field) => ({
 				type: "details" as const,
 				summary: { type: "code" as const, text: field },
@@ -215,7 +215,7 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
 				}
 				if (ctx.action === "inspect") {
 					if (!isStateFlowTelegramScope(ctx.payload)) throw new Error("Unknown State Flow scope");
-					await ctx.openRich(renderStateFlowRichState(ctx.payload, port.state(ctx.payload)));
+					await ctx.openRich(renderStateFlowRichState(ctx.payload, port.snapshot().step, port.state(ctx.payload)));
 					await ctx.answerCallback();
 					return "handled" as const;
 				}

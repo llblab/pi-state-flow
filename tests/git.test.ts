@@ -11,14 +11,13 @@ import {
 	cwdPatchesPath,
 	cwdStatePath,
 	durablePaths,
-	legacySessionRuntimePaths,
-	legacyTemporalScopePaths,
 	loadScopeStream,
 	temporalScopePaths,
 	sessionRuntimePaths,
 	sessionPatchesPath,
 	sessionStatePath,
 	parseScopeStream,
+	serializeScopeMetadata,
 	serializeScopeStream,
 	temporalStateFileUpdates,
 	writeOwnedFileUpdates,
@@ -35,7 +34,7 @@ import {
 	resolveGitPushDestination,
 } from "../lib/git.ts";
 import { createPublicationQueue, loadPublicationQueue, publicationQueuePath, removePublicationQueue, savePublicationQueue } from "../lib/publication.ts";
-import { writeCwdState, writeGlobalState, writeSessionState } from "./legacy-fixture.ts";
+import { writeCwdState, writeGlobalState, writeSessionState } from "./storage-fixture.ts";
 import { emptyState, type ScopedStates } from "../lib/state.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState, type ScopeStream, type TemporalState } from "../lib/temporal.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
@@ -202,154 +201,17 @@ test("Git publication cannot omit uncommitted streams merely because live files 
 	const { repository, cwd } = fixture(t, true);
 	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "draft");
 	const initial = captureTemporalGitBase(cwd, "draft", repository);
-	writeOwnedFileUpdates(temporalStateFileUpdates(cwd, "draft", view, ["global", "cwd", "session"], repository), initial.files, repository);
+	const updates = temporalStateFileUpdates(cwd, "draft", view, ["global", "cwd", "session"], repository);
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const paths = temporalScopePaths(cwd, "draft", scope, repository);
+		updates.push({ path: paths.meta, content: serializeScopeMetadata({}, view.scopes[scope], scope, scope === "cwd" ? cwd : undefined) });
+	}
+	writeOwnedFileUpdates(updates, initial.files, repository);
 	const live = captureTemporalGitBase(cwd, "draft", repository);
 	assert.throws(() => publishTemporalStateToGit(cwd, "draft", view, ["session"], live, repository), /omitted an uncommitted stream/);
 	assert.equal(run(repository, "rev-parse", "HEAD"), initial.head);
 	const published = publishTemporalStateToGit(cwd, "draft", view, ["global", "cwd", "session"], live, repository);
 	assert.deepEqual(loadTemporalRevision(cwd, "draft", repository, published.commit!).scopes, view.scopes);
-});
-
-test("pre-0.4 hashed paths remain read-only Git revision input for native session keys", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const sessionId = "01a082d2-1f75-73f0-8c75-c6f28b79887a";
-	const sessionKey = `2026-09-08T18-20-49-000Z_${sessionId}`;
-	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "old-origin");
-	view = advanceTemporalState(view, [
-		{ scope: "cwd", patch: { working: { oldLayout: "shared" } } },
-		{ scope: "session", patch: { working: { oldLayout: "private" } } },
-	], "old-change");
-	for (const scope of ["global", "cwd", "session"] as const) {
-		const paths = legacyTemporalScopePaths(cwd, sessionId, scope, repository);
-		fs.mkdirSync(paths.directory, { recursive: true });
-		const source = scope === "cwd" ? ownerlessLegacyScopeSource(view.scopes[scope]) : serializeScopeStream(view.scopes[scope], scope);
-		writeFileSync(paths.checkpoint, source.checkpoint);
-		writeFileSync(paths.patches, source.patches);
-	}
-	const paths = legacySessionRuntimePaths(cwd, sessionId, repository);
-	const runtime = createSessionRuntime({ ...emptySnapshot(true), meta: { step: 1 } }, cwd, sessionId, view.lineage);
-	const source = serializeSessionRuntime(runtime, cwd, sessionId);
-	writeFileSync(paths.config, source.config);
-	writeFileSync(paths.meta, source.meta);
-	run(repository, "add", "checkpoint.json", "patches.jsonl", legacyTemporalScopePaths(cwd, sessionId, "cwd", repository).directory);
-	run(repository, "commit", "-m", "pre-0.4 hashed layout fixture");
-	const semanticRevision = run(repository, "rev-parse", "HEAD");
-	runtime.meta.temporalRevision = semanticRevision;
-	runtime.meta.specification = "runtime-only draft commit";
-	const runtimeOnly = serializeSessionRuntime(runtime, cwd, sessionId);
-	writeFileSync(paths.config, runtimeOnly.config);
-	writeFileSync(paths.meta, runtimeOnly.meta);
-	run(repository, "add", "--", relative(repository, paths.config), relative(repository, paths.meta));
-	run(repository, "commit", "-m", "pre-0.4 runtime-only fixture");
-	const revision = run(repository, "rev-parse", "HEAD");
-	const loaded = loadTemporalRevision(cwd, sessionId, repository, revision, sessionKey);
-	assert.deepEqual({ lineage: loaded.runtime!.document.meta.lineage, scopes: loaded.scopes }, view);
-	const canonical = temporalScopePaths(cwd, sessionId, "session", repository, sessionKey).directory;
-	const oldDirectory = legacyTemporalScopePaths(cwd, sessionId, "cwd", repository).directory;
-	const oldFiles = run(repository, "ls-files", "--", relative(repository, oldDirectory)).split("\n").filter(Boolean)
-		.map((path) => ({ path, bytes: readFileSync(join(repository, path)) }));
-	const author = process.env.GIT_AUTHOR_NAME;
-	process.env.GIT_AUTHOR_NAME = "";
-	try {
-		assert.throws(() => new TemporalRuntime(cwd, sessionId, repository, sessionKey).restore(revision), /Git command failed/);
-	} finally {
-		if (author === undefined) delete process.env.GIT_AUTHOR_NAME; else process.env.GIT_AUTHOR_NAME = author;
-	}
-	assert.equal(run(repository, "rev-parse", "HEAD"), revision);
-	assert.equal(existsSync(canonical), false);
-	for (const file of oldFiles) assert.deepEqual(readFileSync(join(repository, file.path)), file.bytes);
-	const h = harness({ cwd, repositoryRoot: repository, sessionId, sessionFile: `/sessions/${sessionKey}.jsonl`, initializeRepository: false });
-	h.entries.push({ type: "custom", customType: "state-flow-snapshot", data: { revision } });
-	h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
-	const snapshot = h.resolveSnapshot();
-	assert.equal(snapshot.meta.step, 1);
-	assert.notEqual(snapshot.meta.durableBase, revision);
-	assert.equal(snapshot.meta.pendingPublication, undefined);
-	assert.equal(h.readState().working.oldLayout, "private");
-	assert.equal(h.entries.length, 2, "layout migration appends the canonical revision pointer immediately");
-	assert.deepEqual(h.entries.at(-1).data, { revision: snapshot.meta.durableBase });
-	assert.equal(existsSync(canonical), true);
-	assert.equal(JSON.parse(readFileSync(sessionRuntimePaths(cwd, sessionId, repository, sessionKey).meta, "utf8")).temporalRevision, "self");
-	assert.equal(existsSync(oldDirectory), false);
-	assert.deepEqual({ lineage: loadTemporalRevision(cwd, sessionId, repository, revision, sessionKey).runtime!.document.meta.lineage,
-		scopes: loadTemporalRevision(cwd, sessionId, repository, revision, sessionKey).scopes }, view, "cold old layout remains readable");
-	const resumed = new TemporalRuntime(cwd, sessionId, repository, sessionKey);
-	const resumedSnapshot = resumed.restore(snapshot.meta.durableBase!);
-	assert.equal(resumedSnapshot.meta.step, snapshot.meta.step);
-	assert.equal(resumedSnapshot.meta.durableBase, snapshot.meta.durableBase);
-	assert.deepEqual(resumed.states(), {
-		global: h.readState(0, "global"), cwd: h.readState(0, "cwd"), session: h.readState(0, "session"),
-	});
-});
-
-test("an older hashed branch remains publishable after live HEAD adopts native paths", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const sessionId = "historical-session";
-	const sessionKey = "2026-09-08T19-00-00-000Z_historical-session";
-	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "historical-origin");
-	view = advanceTemporalState(view, [
-		{ scope: "cwd", patch: { working: { shared: true } } },
-		{ scope: "session", patch: { working: { branch: "old" } } },
-	], "historical-change");
-	for (const scope of ["global", "cwd", "session"] as const) {
-		const paths = legacyTemporalScopePaths(cwd, sessionId, scope, repository);
-		fs.mkdirSync(paths.directory, { recursive: true });
-		const source = scope === "cwd" ? ownerlessLegacyScopeSource(view.scopes.cwd) : serializeScopeStream(view.scopes[scope], scope);
-		writeFileSync(paths.checkpoint, source.checkpoint);
-		writeFileSync(paths.patches, source.patches);
-	}
-	const oldRuntime = legacySessionRuntimePaths(cwd, sessionId, repository);
-	const source = serializeSessionRuntime(createSessionRuntime({ ...emptySnapshot(true), meta: { step: 1 } }, cwd, sessionId, view.lineage), cwd, sessionId);
-	writeFileSync(oldRuntime.config, source.config);
-	writeFileSync(oldRuntime.meta, source.meta);
-	run(repository, "add", "checkpoint.json", "patches.jsonl", legacyTemporalScopePaths(cwd, sessionId, "cwd", repository).directory);
-	run(repository, "commit", "-m", "historical hashed branch");
-	const selectedRevision = run(repository, "rev-parse", "HEAD");
-	writeFileSync(join(repository, "unrelated.txt"), "later head\n");
-	run(repository, "add", "unrelated.txt");
-	run(repository, "commit", "-m", "later unrelated head");
-	const liveBefore = run(repository, "rev-parse", "HEAD");
-
-	const historical = new TemporalRuntime(cwd, sessionId, repository, sessionKey);
-	const snapshot = historical.restore(selectedRevision);
-	assert.notEqual(run(repository, "rev-parse", "HEAD"), liveBefore, "live old layout receives its own path-adoption commit");
-	assert.equal(snapshot.meta.durableBase, selectedRevision, "path adoption cannot rebind the older Pi branch before its own publication");
-	assert.equal(historical.read().working.branch, "old");
-	assert.equal(existsSync(legacyTemporalScopePaths(cwd, sessionId, "cwd", repository).directory), false);
-	snapshot.config.enabled = false;
-	const stopped = historical.publish(snapshot)!;
-	assert.ok(stopped.commit);
-	const restored = new TemporalRuntime(cwd, sessionId, repository, sessionKey);
-	const stoppedSnapshot = restored.restore(stopped.commit!);
-	assert.equal(stoppedSnapshot.config.enabled, false);
-	assert.equal(restored.read().working.branch, "old");
-	assert.equal(loadTemporalRevision(cwd, sessionId, repository, selectedRevision, sessionKey).runtime!.document.meta.lineage.at(-1)!.id, "historical-change");
-});
-
-test("new native-named sessions migrate a current hashed CWD pair before inheritance", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const sessionId = "new-session";
-	const sessionKey = "2026-09-08T20-00-00-000Z_new-session";
-	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "old-cwd-origin");
-	view = advanceTemporalState(view, [{ scope: "cwd", patch: { working: { inherited: true } } }], "old-cwd-change");
-	for (const scope of ["global", "cwd"] as const) {
-		const paths = legacyTemporalScopePaths(cwd, "unused", scope, repository);
-		fs.mkdirSync(paths.directory, { recursive: true });
-		const source = scope === "cwd" ? ownerlessLegacyScopeSource(view.scopes[scope]) : serializeScopeStream(view.scopes[scope], scope);
-		writeFileSync(paths.checkpoint, source.checkpoint);
-		writeFileSync(paths.patches, source.patches);
-	}
-	run(repository, "add", "checkpoint.json", "patches.jsonl", "--", relative(repository, legacyTemporalScopePaths(cwd, "unused", "cwd", repository).directory));
-	run(repository, "commit", "-m", "pre-0.4 hashed CWD fixture");
-	const oldRevision = run(repository, "rev-parse", "HEAD");
-	const runtime = new TemporalRuntime(cwd, sessionId, repository, sessionKey);
-	const publication = runtime.initialize(emptySnapshot(true), true)!;
-	assert.equal(runtime.read().working.inherited, true);
-	assert.equal(runtime.read(0, "session").working.inherited, undefined);
-	assert.equal(existsSync(legacyTemporalScopePaths(cwd, "unused", "cwd", repository).directory), false);
-	assert.equal(existsSync(temporalScopePaths(cwd, sessionId, "session", repository, sessionKey).directory), true);
-	assert.equal(loadTemporalRevision(cwd, sessionId, repository, publication.commit!, sessionKey).runtime!.document.meta.identity.sessionId, sessionId);
-	assert.deepEqual(loadTemporalRevision(cwd, "old-unavailable", repository, oldRevision).scopes.cwd, view.scopes.cwd);
 });
 
 test("temporal Git writer preserves all hot states through sparse folding and cold revision reads", (t) => {
@@ -379,7 +241,7 @@ test("temporal Git writer preserves all hot states through sparse folding and co
 		base = publication.base;
 		const allowed = new Set(changes.flatMap(({ scope }) => {
 			const paths = temporalScopePaths(cwd, session, scope, repository);
-			return [paths.checkpoint, paths.patches].map((path) => path.slice(repository.length + 1));
+			return [paths.checkpoint, paths.patches, paths.meta].map((path) => path.slice(repository.length + 1));
 		}));
 		for (const path of run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!).split("\n")) {
 			const completeDelta = index === 1 && (path === "staged.txt" || path === "dirty.txt");
@@ -417,7 +279,9 @@ test("session config/meta publish atomically with temporal files and config-only
 	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository, runtime);
 	const paths = sessionRuntimePaths(cwd, session, repository);
 	assert.deepEqual(JSON.parse(readFileSync(paths.config, "utf8")), runtime.config);
-	assert.deepEqual(JSON.parse(readFileSync(paths.meta, "utf8")), runtime.meta);
+	assert.deepEqual(JSON.parse(readFileSync(paths.meta, "utf8")), {
+		...runtime.meta, temporal: { checkpoint: view.scopes.session.checkpoint.through, patches: [] },
+	});
 	const semanticPaths = (["global", "cwd", "session"] as const).flatMap((scope) => {
 		const pair = temporalScopePaths(cwd, session, scope, repository);
 		return [pair.checkpoint, pair.patches];
@@ -506,7 +370,7 @@ test("large Git-backed checkpoint, tail and runtime blobs survive cold reads and
 	assert.deepEqual(captureTemporalGitBase(cwd, session, repository), before, "cold inspection must not move the branch or rewrite live files");
 });
 
-test("historical reads batch exact literal paths without inspecting unused fallback blobs", { skip: process.platform === "win32" }, (t) => {
+test("historical reads batch exact literal canonical paths", { skip: process.platform === "win32" }, (t) => {
 	const { repository, cwd } = fixture(t, true);
 	const literalCwd = `${cwd}/literal[*?]\tline\nnext`;
 	const session = "literal-paths";
@@ -514,11 +378,7 @@ test("historical reads batch exact literal paths without inspecting unused fallb
 	const runtime = createSessionRuntime(emptySnapshot(true), literalCwd, session, view.lineage);
 	const first = publishTemporalStateToGit(literalCwd, session, view, ["global", "cwd", "session"],
 		captureTemporalGitBase(literalCwd, session, repository), repository, runtime, session, false);
-	const unused = legacyTemporalScopePaths(literalCwd, session, "cwd", repository).checkpoint;
-	const blob = run(repository, "rev-parse", `${first.commit}:checkpoint.json`);
-	run(repository, "update-index", "--add", "--cacheinfo", `120000,${blob},${relative(repository, unused)}`);
-	run(repository, "commit", "-m", "unused legacy symlink");
-	const revision = run(repository, "rev-parse", "HEAD");
+	const revision = first.commit!;
 	const spawn = childProcess.spawnSync;
 	const trees = new Map<string, number>();
 	const blobs = new Map<string, number>();
@@ -529,12 +389,6 @@ test("historical reads batch exact literal paths without inspecting unused fallb
 			if (argv[2] === "show") blobs.set(argv[3], (blobs.get(argv[3]) ?? 0) + 1);
 		}
 		const result = spawn(...args);
-		if (args[0] === "git" && argv[2] === "ls-tree" && argv[4] === revision) {
-			const listing = String(result.stdout);
-			const unusedEntry = listing.split("\0").find((entry) => entry.endsWith(`\t${relative(repository, unused)}`));
-			// Even ambiguous metadata for an unused fallback cannot become authority over the selected canonical files.
-			if (unusedEntry) return { ...result, stdout: listing + unusedEntry + "\0" };
-		}
 		return result;
 	}) as typeof spawn);
 	syncBuiltinESMExports();
@@ -548,11 +402,10 @@ test("historical reads batch exact literal paths without inspecting unused fallb
 	const loaded = loadTemporalRevision(literalCwd, session, repository, revision);
 	assert.deepEqual(loaded.scopes, view.scopes);
 	assert.equal(loaded.runtime!.revision, first.commit);
-	assert.deepEqual([...trees.keys()].sort(), [revision, first.commit!].sort());
+	assert.deepEqual([...trees.keys()], [revision]);
 	for (const count of trees.values()) assert.equal(count, 1, "One bounded tree query per immutable revision");
 	for (const [path, count] of blobs) {
 		assert.equal(count, 1, `Duplicate blob read: ${path}`);
-		assert.equal(path.endsWith(relative(repository, unused)), false, "Unused legacy symlink must stay uninspected");
 		assert.equal(path.endsWith("README.md"), false);
 	}
 	assert.equal(run(repository, "rev-parse", "HEAD"), revision);
@@ -662,7 +515,8 @@ test("temporal publication reconciles a Knowledge-only HEAD advance as commit an
 	const publication = publishTemporalStateToGit(cwd, session, next, ["cwd"], first.base, repository);
 	assert.equal(run(repository, "rev-parse", `${publication.commit}^`), knowledgeCommit);
 	const paths = temporalScopePaths(cwd, session, "cwd", repository);
-	assert.deepEqual(run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!).split("\n"), [paths.patches.slice(repository.length + 1)]);
+	assert.deepEqual(run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!).split("\n").sort(),
+		[paths.meta, paths.patches].map((path) => path.slice(repository.length + 1)).sort());
 	assert.equal(readFileSync(join(repository, "knowledge.md"), "utf8"), "independent knowledge\n");
 	assert.equal(run(remote, "rev-parse", "refs/heads/main"), publication.commit);
 });
@@ -724,93 +578,6 @@ test("retargets a queue orphaned by a journal lineage rewrite without failing tu
 
 	assert.equal(h.notifications.some((notice) => /could not reconcile/i.test(notice)), false);
 	assert.equal(loadPublicationQueue(path)?.target, run(h.repositoryRoot, "rev-parse", "HEAD"));
-});
-
-test("migrates all three current snapshots in one isolated commit without losing semantic or cold history", (t) => {
-	const { repository, remote, cwd } = fixture(t);
-	const sessionId = "migration-session";
-	const global = { ...emptyState(), working: { counter: 10 } };
-	const session = { ...emptyState(), response: "Retained answer" };
-	writeGlobalState(global, repository);
-	writeSessionState(cwd, sessionId, session, repository);
-	const legacyPaths = [durablePaths(repository).globalState, cwdStatePath(cwd, repository), sessionStatePath(cwd, sessionId, repository)];
-	const patchPaths = [durablePaths(repository).globalPatches, cwdPatchesPath(cwd, repository), sessionPatchesPath(cwd, sessionId, repository)];
-	writeFileSync(patchPaths[0]!, "malformed explanatory journal: not replay input\n");
-	run(repository, "add", "--", ...legacyPaths, ...patchPaths);
-	run(repository, "commit", "-m", "legacy scope snapshots");
-	const before = run(repository, "rev-parse", "HEAD");
-	writeFileSync(join(repository, "staged.txt"), "staged\n");
-	run(repository, "add", "staged.txt");
-	writeFileSync(join(repository, "dirty.txt"), "dirty\n");
-	const publication = migrateLegacyStorageToGit(cwd, sessionId, repository);
-	assert.deepEqual(publication.scopes, ["global", "cwd", "session"]);
-	assert.equal(publication.push?.status, "pushed");
-	assert.equal(run(repository, "rev-parse", `${publication.commit}^`), before);
-	assert.equal(run(remote, "rev-parse", "refs/heads/main"), publication.commit);
-	const origins = new Set<string>();
-	for (const [index, scope] of (["global", "cwd", "session"] as const).entries()) {
-		const checkpoint = join(dirname(legacyPaths[index]!), "checkpoint.json");
-		assert.equal(existsSync(legacyPaths[index]!), false);
-		const source = readFileSync(checkpoint, "utf8");
-		const stream = parseScopeStream(source, readFileSync(patchPaths[index]!, "utf8"), scope)!;
-		assert.deepEqual(stream.checkpoint.state, [global, emptyState(), session][index]);
-		assert.deepEqual(stream.patches, []);
-		origins.add(stream.checkpoint.through.id);
-		const historical = JSON.parse(run(repository, "show", `${before}:${legacyPaths[index]!.slice(repository.length + 1)}`));
-		assert.deepEqual(historical, stream.checkpoint.state);
-		assert.deepEqual(JSON.parse(run(repository, "show", `${publication.commit}:${checkpoint.slice(repository.length + 1)}`)), JSON.parse(source));
-	}
-	assert.equal(origins.size, 1);
-	assert.equal(run(repository, "status", "--porcelain=v1"), "");
-	assert.equal(readFileSync(join(repository, "dirty.txt"), "utf8"), "dirty\n");
-	const changed = run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!);
-	assert.doesNotMatch(changed, /README\.md/);
-	assert.match(changed, /staged\.txt/);
-	assert.match(changed, /dirty\.txt/);
-	assert.equal(run(repository, "show", `${publication.commit}:staged.txt`), "staged");
-	assert.equal(run(repository, "show", `${publication.commit}:dirty.txt`), "dirty");
-	assert.deepEqual(migrateLegacyStorageToGit(cwd, sessionId, repository), { scopes: [] });
-	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
-});
-
-test("failed migration restores exact legacy bytes and removes unpublished checkpoints", (t) => {
-	const { repository, cwd } = fixture(t);
-	const state = cwdStatePath(cwd, repository);
-	const patches = cwdPatchesPath(cwd, repository);
-	writeFileSync(patches, Buffer.from([0xff, 0xfe, 0x0a]));
-	run(repository, "add", "--", state, patches);
-	run(repository, "commit", "-m", "legacy scope");
-	writeFileSync(join(repository, "staged.txt"), "unrelated staging\n");
-	run(repository, "add", "staged.txt");
-	const before = { head: run(repository, "rev-parse", "HEAD"), state: readFileSync(state, "utf8"), patches: readFileSync(patches), index: run(repository, "diff", "--cached", "--name-status") };
-	// Force failure after isolated-index commit construction, at caller-index alignment.
-	writeFileSync(join(repository, ".git", "index.lock"), "held by another writer\n");
-	assert.throws(() => migrateLegacyStorageToGit(cwd, "migration-session", repository), /index\.lock/);
-	assert.equal(run(repository, "rev-parse", "HEAD"), before.head);
-	assert.equal(readFileSync(state, "utf8"), before.state);
-	assert.deepEqual(readFileSync(patches), before.patches);
-	assert.equal(existsSync(join(dirname(state), "checkpoint.json")), false);
-	assert.equal(run(repository, "diff", "--cached", "--name-status"), before.index);
-	assert.equal(readFileSync(join(repository, ".git", "index.lock"), "utf8"), "held by another writer\n");
-	assert.equal(existsSync(join(repository, ".git", "state-flow-publication.lock")), false);
-});
-
-test("cooperating migration and semantic publishers fail before writes while another publication owns the lock", (t) => {
-	const { repository, cwd } = fixture(t);
-	const path = cwdStatePath(cwd, repository);
-	const original = readFileSync(path);
-	const base = captureTemporalGitBase(cwd, "session", repository);
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const lock = join(repository, ".git", "state-flow-publication.lock");
-	writeFileSync(lock, "another publisher\n");
-	assert.throws(() => migrateLegacyStorageToGit(cwd, "session", repository), /publication lock is unavailable/);
-	assert.throws(() => publishTemporalStateToGit(cwd, "session", view, ["global", "cwd", "session"], base, repository), /publication lock is unavailable/);
-	assert.deepEqual(readFileSync(path), original);
-	assert.equal(existsSync(join(dirname(path), "checkpoint.json")), false);
-	assert.equal(readFileSync(lock, "utf8"), "another publisher\n");
-	rmSync(lock);
-	assert.ok(migrateLegacyStorageToGit(cwd, "session", repository).commit);
-	assert.equal(existsSync(lock), false);
 });
 
 test("temporal publication rejects changed prepared output and rollback preserves external bytes", (t) => {
@@ -892,78 +659,14 @@ test("accepted temporal publication retains prepared receipts rather than adopti
 	assert.equal(publication.push?.status, "pushed");
 	assert.equal(readFileSync(path, "utf8"), concurrent);
 	const receipt = publication.base.files.find((file) => file.path === path)!;
-	assert.deepEqual(JSON.parse(receipt.content!), view.scopes.global.checkpoint);
+	assert.deepEqual(JSON.parse(receipt.content!), view.scopes.global.checkpoint.state);
 	assert.deepEqual(receipt.bytes, Buffer.from(receipt.content!));
-	assert.deepEqual(JSON.parse(run(repository, "show", `${publication.commit}:checkpoint.json`)), view.scopes.global.checkpoint);
+	assert.deepEqual(JSON.parse(run(repository, "show", `${publication.commit}:checkpoint.json`)), view.scopes.global.checkpoint.state);
 	const next = advanceTemporalState(view, [{ scope: "session", patch: { response: "Next" } }], "T1");
 	assert.throws(() => publishTemporalStateToGit(cwd, session, next, ["session"], publication.base, repository), /changed concurrently/);
 	assert.equal(readFileSync(path, "utf8"), concurrent);
 	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
 });
-
-test("migration push failure retains one accepted commit and retry never repeats semantic conversion", (t) => {
-	const { repository, remote, cwd } = fixture(t);
-	run(repository, "remote", "set-url", "origin", join(repository, "missing.git"));
-	const publication = migrateLegacyStorageToGit(cwd, "migration-session", repository);
-	assert.ok(publication.commit);
-	assert.equal(publication.push?.status, "pending");
-	assert.equal(existsSync(cwdStatePath(cwd, repository)), false);
-	assert.deepEqual(migrateLegacyStorageToGit(cwd, "migration-session", repository), { scopes: [] });
-	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
-	run(repository, "remote", "set-url", "origin", remote);
-	assert.equal(pushGitCommit(repository, publication.commit!).status, "pushed");
-	assert.equal(run(remote, "rev-parse", "refs/heads/main"), publication.commit);
-});
-
-for (const [label, suffix] of [["ordinary", "plain"], ["literal", "literal[*?],\" quoted\tline\nnext"]] as const) {
-	test(`prepared Git cohorts use one index update with exact bytes and ${label} paths`, { skip: label === "literal" && process.platform === "win32" }, (t) => {
-		const { repository, cwd } = fixture(t, true);
-		const selectedCwd = join(cwd, suffix);
-		const session = "index-cohort";
-		const view = createTemporalState({ global: { ...emptyState(), working: { payload: "α 🧭\r\n\t\"\u0000" } }, cwd: emptyState(), session: emptyState() }, "index-origin");
-		const runtime = createSessionRuntime(emptySnapshot(true), selectedCwd, session, view.lineage);
-		// Prepared owned outputs must be overlaid even when ordinary worktree staging ignores them.
-		writeFileSync(join(repository, ".gitignore"), "*.json\n*.jsonl\nignored.txt\n");
-		writeFileSync(join(repository, "ignored.txt"), "not committed\n");
-		writeFileSync(join(repository, "README.md"), "staged version\n");
-		run(repository, "add", "README.md");
-		writeFileSync(join(repository, "README.md"), "current worktree version\n");
-		const spawn = childProcess.spawnSync;
-		let indexUpdates = 0;
-		const preparedInputs: string[] = [];
-		const privateIndexes = new Set<string>();
-		t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
-			const argv = args[1] as string[];
-			const options = args[2] as childProcess.SpawnSyncOptions;
-			if (args[0] === "git" && argv[1] === repository) {
-				if (argv[2] === "update-index") indexUpdates++;
-				if (argv[2] === "hash-object") preparedInputs.push(String(options.input));
-				if (options.env?.GIT_INDEX_FILE) privateIndexes.add(options.env.GIT_INDEX_FILE);
-			}
-			return spawn(...args);
-		}) as typeof spawn);
-		syncBuiltinESMExports();
-		t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-		const publication = publishTemporalStateToGit(selectedCwd, session, view, ["global", "cwd", "session"],
-			captureTemporalGitBase(selectedCwd, session, repository), repository, runtime, session, false);
-		assert.ok(publication.commit);
-		if (process.env.GIT_DEFAULT_HASH === "sha256") assert.match(publication.commit, /^[0-9a-f]{64}$/);
-		const files = publication.base.files.filter((file) => file.identity !== "missing");
-		const names = files.map((file) => relative(repository, file.path).split(sep).join("/"));
-		for (const [index, file] of files.entries()) {
-			assert.deepEqual(execFileSync("git", ["-C", repository, "show", `${publication.commit}:${names[index]}`]), Buffer.from(file.content!));
-		}
-		const tree = execFileSync("git", ["-C", repository, "ls-tree", "-rz", "--name-only", publication.commit], { encoding: "utf8" });
-		assert.deepEqual(tree.split("\0").filter(Boolean).sort(), [...names, "README.md", ".gitignore"].sort());
-		assert.deepEqual(preparedInputs.sort(), files.map((file) => file.content!).sort());
-		assert.equal(run(repository, "show", `${publication.commit}:README.md`), "current worktree version");
-		assert.equal(run(repository, "status", "--porcelain=v1"), "");
-		assert.equal(privateIndexes.size, 1);
-		for (const path of privateIndexes) assert.equal(existsSync(dirname(path)), false);
-		assert.deepEqual(loadTemporalRevision(selectedCwd, session, repository, publication.commit).scopes, view.scopes);
-		assert.equal(indexUpdates, 1, "One native index update for all prepared blobs, not one per file");
-	});
-}
 
 test("a malformed batch after valid index records rolls back exact files and caller index, then retries once", (t) => {
 	const { repository, cwd } = fixture(t, true);

@@ -1241,15 +1241,17 @@ test("real Pi incrementally acquires only invalidated global Markdown and attach
 		},
 		contract: {}, working: {}, response: "",
 	}, fixture.repositoryRoot);
-	const globalPaths = durablePaths(fixture.repositoryRoot);
-	const cwdPaths = cwdScopePaths(fixture.cwd, fixture.repositoryRoot);
+	const globalPaths = temporalScopePaths(fixture.cwd, "fixture", "global", fixture.repositoryRoot);
+	const cwdPaths = temporalScopePaths(fixture.cwd, "fixture", "cwd", fixture.repositoryRoot);
 	runGit(
 		fixture.repositoryRoot,
 		"add",
-		globalPaths.globalState,
-		globalPaths.globalPatches,
-		cwdPaths.state,
+		globalPaths.checkpoint,
+		globalPaths.patches,
+		globalPaths.meta,
+		cwdPaths.checkpoint,
 		cwdPaths.patches,
+		cwdPaths.meta,
 	);
 	runGit(fixture.repositoryRoot, "commit", "-m", "state-flow: seed artifact registry");
 	runGit(fixture.repositoryRoot, "push", "origin", "main");
@@ -1555,7 +1557,7 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 	const session = await fixture.createSession();
 	await session.prompt("/state-flow-start");
 	const owned = runGit(fixture.repositoryRoot, "ls-tree", "-r", "--name-only", "HEAD").split("\n");
-	assert.equal(owned.length, 8);
+	assert.equal(owned.length, 10);
 	assert.equal(owned.filter((path) => path.endsWith("checkpoint.json")).length, 3);
 	assert.equal(owned.filter((path) => path.endsWith("patches.jsonl")).length, 3);
 	assert.equal(owned.some((path) => path.endsWith("state.json")), false);

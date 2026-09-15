@@ -4,7 +4,7 @@ import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition,
 import type { AcceptedTransition } from "../lib/history.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState } from "../lib/temporal.ts";
-import { parseScopeStream, serializeScopeStream } from "../lib/durable.ts";
+import { parseScopeStream, serializeScopeMetadata, serializeScopeStream } from "../lib/durable.ts";
 import { emptyState, type AtomicScopePatches, type ScopedStates } from "../lib/state.ts";
 import { loadCwdState, loadGlobalState, loadSessionMaterialization, loadSessionState } from "./temporal-fixture.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
@@ -114,7 +114,8 @@ test("normalizes artifact replacements and runtime freshness after finalized-res
 	for (const scope of ["global", "cwd", "session"] as const) {
 		const identity = scope === "cwd" ? "/project" : undefined;
 		const bytes = serializeScopeStream(accepted.scopes[scope], scope, identity);
-		accepted.scopes[scope] = parseScopeStream(bytes.checkpoint, bytes.patches, scope, identity)!;
+		accepted.scopes[scope] = parseScopeStream(bytes.checkpoint, bytes.patches, scope, identity,
+			serializeScopeMetadata({}, accepted.scopes[scope], scope, identity))!;
 		assert.deepEqual(readTemporalState(accepted, 0, scope), state[scope]);
 		assert.deepEqual(readTemporalState(accepted, 1, scope), before[scope]);
 		assert.equal(accepted.scopes[scope].patches[0]!.transition.id, cohort!.id);

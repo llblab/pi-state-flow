@@ -140,34 +140,16 @@ test("contains hostile branch entries and continues snapshot discovery", () => {
 	assert.doesNotThrow(() => hasPriorConversation([hostile]));
 });
 
-test("restores State Flow from the active branch after tree navigation", async () => {
+test("restores State Flow from a canonical active branch pointer after tree navigation", async () => {
 	const h = harness();
 	await start(h);
+	await commitTerminal(h, { branch: "active" }, { next: "new" }, "Branch response");
+	const activeBranch = structuredClone(h.entries);
 	await commitTerminal(h, { branch: "abandoned" }, { next: "old" });
-	h.entries.splice(0, h.entries.length, {
-		type: "custom",
-		customType: "state-flow-snapshot",
-		data: {
-			enabled: true,
-			specification: "Branch request",
-			state: {
-				contract: { branch: "active" },
-				working: { next: "new" },
-				response: "Branch response",
-			},
-			step: 4,
-		},
-	});
+	h.entries.splice(0, h.entries.length, ...activeBranch);
 	h.handlers.get("session_tree")!({}, h.ctx);
-	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#4</dim>");
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#2</dim>");
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /"branch": "active"/);
 	assert.doesNotMatch(h.notifications.at(-1)!, /"branch": "abandoned"/);
-
-	h.entries.splice(0, h.entries.length);
-	h.handlers.get("session_tree")!({}, h.ctx);
-	assert.equal(h.statuses.at(-1), undefined);
-	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /config\.enabled=false; branch mode=inactive/);
-	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #0/);
 });

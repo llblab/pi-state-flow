@@ -136,9 +136,9 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 	]);
 	const inspect = sectionContext("inspect", "effective");
 	assert.equal(await sections[0].handleCallback!(inspect.context), "handled");
-	assert.deepEqual(inspect.richMessages, [renderStateFlowRichState("effective", { ...state, working: { scope: "effective" } })]);
+	assert.deepEqual(inspect.richMessages, [renderStateFlowRichState("effective", 0, { ...state, working: { scope: "effective" } })]);
 	assert.deepEqual(inspect.richMessages[0]?.blocks.map((block) => block.type), ["heading", "details", "details", "details", "details"]);
-	assert.deepEqual(inspect.richMessages[0]?.blocks[0], { type: "heading", text: "🧬 Effective", size: 2 });
+	assert.deepEqual(inspect.richMessages[0]?.blocks[0], { type: "heading", text: "🧬 Effective: `#0`", size: 3 });
 	assert.equal(inspect.edits.length, 0);
 	const back = sectionContext("back");
 	assert.equal(await sections[0].handleCallback!(back.context), "handled");
@@ -146,7 +146,7 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 });
 
 test("Rich state rendering bounds unbounded semantic fields with explicit truncation", () => {
-	const message = renderStateFlowRichState("global", {
+	const message = renderStateFlowRichState("global", 12, {
 		artifacts: { huge: "x".repeat(40_000) },
 		contract: { huge: "y".repeat(40_000) },
 		working: { huge: "z".repeat(40_000) },
@@ -157,7 +157,7 @@ test("Rich state rendering bounds unbounded semantic fields with explicit trunca
 	assert.equal((serialized.match(/\\"truncated\\": true/g) ?? []).length, 4);
 	assert.equal((serialized.match(/omittedChars/g) ?? []).length, 4);
 	for (const hostile of ['"', "\\", "\n", "🌀"]) {
-		const hostileMessage = renderStateFlowRichState("effective", {
+		const hostileMessage = renderStateFlowRichState("effective", 12, {
 			artifacts: { huge: hostile.repeat(40_000) },
 			contract: { huge: hostile.repeat(40_000) },
 			working: { huge: hostile.repeat(40_000) },

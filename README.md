@@ -53,8 +53,6 @@ Continue working normally. The agent receives the state protocol and uses `patch
 
 State Flow is **opt-in**. Starting in an existing conversation keeps its active context for one migration run. To enable genuinely new sessions automatically, set `"autoStart": true` in the optional [configuration](docs/usage.md#configuration).
 
-With a compatible `pi-telegram` installed, its main menu exposes the same Start/Stop controls followed by `👁 Show state`. The chooser uses the transport-owned `⬆️ Back` row to return to State Flow, followed by 🌐 Global, 📂 CWD, 💬 Session, and 🧬 Effective as one vertical composition axis. Selecting a scope sends exactly that materialized slice as a standalone native Rich Message with a fixed scope heading and four top-level collapsible semantic fields; inspection is read-only and does not create a State Flow transition.
-
 ## What carries forward
 
 The same four fields exist at every scope:

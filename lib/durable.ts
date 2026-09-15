@@ -18,22 +18,26 @@ import {
 	serializeArtifactProvenanceRegistry,
 	type ArtifactProvenanceRegistry,
 } from "./artifact.ts";
-import { canonicalJson, containsNull, isJsonValue, isObject } from "./json.ts";
+import { canonicalJson, isJsonValue, isObject } from "./json.ts";
 import { validateScopeStream, validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
-import { isMaterializedState, type MaterializedState, type StateScope } from "./state.ts";
+import type { StateScope } from "./state.ts";
 
-const LEGACY_MAX_SCOPE_SLUG_LENGTH = 80;
-const LEGACY_SCOPE_KEY_PATTERN = /^[A-Za-z0-9._-]{1,80}-[a-f0-9]{64}$/;
 const SESSION_KEY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const STATE_FILE = "state.json";
 const CHECKPOINT_FILE = "checkpoint.json";
 const PATCHES_FILE = "patches.jsonl";
 const META_FILE = "meta.json";
 
-/** Canonical replay sources; current state is deliberately not serialized beside the tail. */
+/** Canonical semantic sources plus runtime-owned temporal metadata. */
 export interface ScopeStreamSources {
 	checkpoint: string;
 	patches: string;
+	temporal: ScopeTemporalMetadata;
+}
+
+export interface ScopeTemporalMetadata {
+	checkpoint: ScopeStream["checkpoint"]["through"];
+	patches: ScopeStream["patches"][number]["transition"][];
 }
 
 export interface SessionAddress {
@@ -41,17 +45,18 @@ export interface SessionAddress {
 	readonly key: string;
 }
 
-/** CWD storage requires its canonical owner; legacy ownerless sources are read-only. */
+/** Semantic files contain no runtime envelope; temporal boundaries and CWD ownership live in meta.json. */
 export function serializeScopeStream(stream: ScopeStream, scope: StateScope, cwdIdentity?: string): ScopeStreamSources {
 	validateScopeStream(stream, scope);
 	if (scope === "cwd" && cwdIdentity === undefined) throw new Error("State Flow CWD scope serialization requires its canonical identity");
 	if (scope !== "cwd" && cwdIdentity !== undefined) throw new Error("Only State Flow CWD scope serialization accepts a CWD identity");
-	const checkpoint = scope === "cwd"
-		? { ...stream.checkpoint, owner: { cwd: resolve(cwdIdentity!) } }
-		: stream.checkpoint;
 	return {
-		checkpoint: `${canonicalJson(checkpoint)}\n`,
-		patches: stream.patches.map((record) => `${canonicalJson(record)}\n`).join(""),
+		checkpoint: `${canonicalJson(stream.checkpoint.state)}\n`,
+		patches: stream.patches.map((record) => `${canonicalJson(record.patch)}\n`).join(""),
+		temporal: {
+			checkpoint: structuredClone(stream.checkpoint.through),
+			patches: stream.patches.map((record) => structuredClone(record.transition)),
+		},
 	};
 }
 
@@ -65,6 +70,7 @@ export function classifyScopeStream(
 	patchesSource: string | undefined,
 	scope: StateScope,
 	expectedCwd?: string,
+	metaSource?: string,
 ): ScopeStreamPresence {
 	if (checkpointSource === undefined && patchesSource === undefined) return { kind: "absent" };
 	if (checkpointSource === undefined || patchesSource === undefined) {
@@ -76,16 +82,11 @@ export function classifyScopeStream(
 	} catch {
 		throw new Error(`State Flow ${scope} checkpoint contains invalid JSON`);
 	}
-	if (checkpoint !== null && typeof checkpoint === "object" && !Array.isArray(checkpoint) && Object.hasOwn(checkpoint, "owner")) {
-		const { owner, ...semantic } = checkpoint as Record<string, unknown>;
-		if (scope !== "cwd" || owner === null || typeof owner !== "object" || Array.isArray(owner)
-			|| Object.keys(owner).join(",") !== "cwd" || typeof (owner as { cwd?: unknown }).cwd !== "string") {
-			throw new Error("Invalid State Flow CWD scope identity");
-		}
-		if (expectedCwd !== undefined && (owner as { cwd: string }).cwd !== resolve(expectedCwd)) throw new Error("State Flow CWD scope identity mismatch");
-		checkpoint = semantic;
-	} else if (scope === "cwd" && expectedCwd !== undefined) {
-		throw new Error("State Flow CWD scope identity is missing");
+	let meta: Record<string, unknown> | undefined;
+	if (metaSource !== undefined) {
+		try { meta = JSON.parse(metaSource) as Record<string, unknown>; }
+		catch { throw new Error(`State Flow ${scope} metadata contains invalid JSON`); }
+		if (!isObject(meta)) throw new Error(`Invalid State Flow ${scope} metadata`);
 	}
 	const patches: unknown[] = [];
 	for (const [index, line] of patchesSource.split(/\r?\n/).entries()) {
@@ -96,7 +97,35 @@ export function classifyScopeStream(
 			throw new Error(`State Flow ${scope} tail contains invalid JSON at line ${index + 1}`);
 		}
 	}
-	const stream = { checkpoint, patches };
+	const temporal = meta?.temporal;
+	if (isObject(temporal) && Object.hasOwn(temporal, "checkpoint") && Array.isArray(temporal.patches)) {
+		const owner = meta?.owner;
+		if (scope === "cwd" && expectedCwd !== undefined
+			&& (!isObject(owner) || Object.keys(owner).join(",") !== "cwd" || owner.cwd !== resolve(expectedCwd))) {
+			throw new Error(owner === undefined ? "State Flow CWD scope identity is missing" : "State Flow CWD scope identity mismatch");
+		}
+		const boundaries = temporal.patches;
+		if (boundaries.length !== patches.length) throw new Error(`State Flow ${scope} temporal metadata does not match its semantic tail`);
+		const stream = {
+			checkpoint: { through: temporal.checkpoint, state: checkpoint },
+			patches: patches.map((patch, index) => ({ transition: boundaries[index], patch })),
+		};
+		validateScopeStream(stream, scope);
+		return { kind: "present", stream };
+	}
+	// Complete predecessor envelopes are the only no-meta form that may be unwrapped.
+	let legacyCheckpoint = checkpoint;
+	if (isObject(checkpoint) && Object.hasOwn(checkpoint, "owner")) {
+		const { owner, ...semantic } = checkpoint;
+		if (scope !== "cwd" || !isObject(owner) || Object.keys(owner).join(",") !== "cwd" || typeof owner.cwd !== "string") {
+			throw new Error("Invalid State Flow CWD scope identity");
+		}
+		if (expectedCwd !== undefined && owner.cwd !== resolve(expectedCwd)) throw new Error("State Flow CWD scope identity mismatch");
+		legacyCheckpoint = semantic;
+	} else if (scope === "cwd" && expectedCwd !== undefined) {
+		throw new Error("State Flow CWD scope identity is missing");
+	}
+	const stream = { checkpoint: legacyCheckpoint, patches };
 	validateScopeStream(stream, scope);
 	return { kind: "present", stream };
 }
@@ -107,8 +136,9 @@ export function parseScopeStream(
 	patchesSource: string | undefined,
 	scope: StateScope,
 	expectedCwd?: string,
+	metaSource?: string,
 ): ScopeStream | undefined {
-	const presence = classifyScopeStream(checkpointSource, patchesSource, scope, expectedCwd);
+	const presence = classifyScopeStream(checkpointSource, patchesSource, scope, expectedCwd, metaSource);
 	return presence.kind === "present" ? presence.stream : undefined;
 }
 
@@ -134,13 +164,13 @@ export function sessionRuntimePaths(cwd: string, sessionId: string, repositoryRo
 	return { config: join(directory, "config.json"), meta: join(directory, META_FILE) };
 }
 
-/** A temporal reader never treats a legacy current snapshot as an anchored checkpoint. */
+/** Unsupported state.json presence never becomes an anchored checkpoint. */
 export function loadScopeStream(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string, sessionKey = sessionId): ScopeStream | undefined {
 	const paths = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
 	if (readRegularBytes(join(paths.directory, STATE_FILE), repositoryRoot) !== undefined) {
 		throw new Error(`Legacy State Flow storage requires explicit migration: ${paths.directory}`);
 	}
-	return parseScopeStream(readRegularFile(paths.checkpoint, repositoryRoot), readRegularFile(paths.patches, repositoryRoot), scope, scope === "cwd" ? cwd : undefined);
+	return parseScopeStream(readRegularFile(paths.checkpoint, repositoryRoot), readRegularFile(paths.patches, repositoryRoot), scope, scope === "cwd" ? cwd : undefined, readRegularFile(paths.meta, repositoryRoot));
 }
 
 /** Include legacy names in the CAS basis solely to prevent format races during cutover. */
@@ -182,24 +212,43 @@ export interface DurablePaths {
 	globalPatches: string;
 }
 
-/** One scope-level provenance document; versioned for lenient forward evolution. */
+/** Merge authoritative owned leaves while preserving forward-compatible metadata siblings. */
+export function serializeScopeMetadata(
+	registry: Readonly<ArtifactProvenanceRegistry> | undefined, stream: ScopeStream, scope: StateScope,
+	cwdIdentity?: string, existingSource?: string,
+): string {
+	const existing = parseMetadataDocument(existingSource, `State Flow metadata`);
+	const sources = serializeScopeStream(stream, scope, cwdIdentity);
+	const value = {
+		...existing,
+		version: 1,
+		...(registry === undefined ? {} : { artifacts: serializeArtifactProvenanceRegistry(registry) }),
+		temporal: sources.temporal,
+		...(scope === "cwd" ? { owner: { cwd: resolve(cwdIdentity!) } } : {}),
+	};
+	return `${canonicalJson(value)}\n`;
+}
+
+/** Compatibility serializer retained for metadata-only callers. */
 export function serializeScopeProvenance(registry: Readonly<ArtifactProvenanceRegistry>): string {
 	return `${canonicalJson({ version: 1, artifacts: serializeArtifactProvenanceRegistry(registry) })}\n`;
 }
 
-/** Missing provenance is unavailable evidence, never corrupt state. */
-export function parseScopeProvenance(source: string | undefined, path: string): ArtifactProvenanceRegistry {
+function parseMetadataDocument(source: string | undefined, label: string): Record<string, unknown> {
 	if (source === undefined) return {};
 	let value: unknown;
-	try {
-		value = JSON.parse(source);
-	} catch {
-		throw new Error(`State Flow provenance file contains invalid JSON: ${path}`);
-	}
-	if (!isObject(value) || value.version !== 1 || !Object.hasOwn(value, "artifacts")
-		|| Object.keys(value).some((key) => key !== "version" && key !== "artifacts")) {
-		throw new Error(`Invalid State Flow provenance document: ${path}`);
-	}
+	try { value = JSON.parse(source); }
+	catch { throw new Error(`${label} contains invalid JSON`); }
+	if (!isObject(value) || !isJsonValue(value)) throw new Error(`Invalid ${label}`);
+	return value;
+}
+
+/** Missing provenance is unavailable evidence, never corrupt state. Unknown metadata is preserved by writers. */
+export function parseScopeProvenance(source: string | undefined, path: string): ArtifactProvenanceRegistry {
+	const value = parseMetadataDocument(source, `State Flow provenance file: ${path}`);
+	if (Object.keys(value).length === 0) return {};
+	if (value.version !== 1) throw new Error(`Invalid State Flow provenance document: ${path}`);
+	if (!Object.hasOwn(value, "artifacts")) return {};
 	return parseArtifactProvenanceRegistry(value.artifacts, `State Flow provenance at ${path}`);
 }
 
@@ -232,12 +281,6 @@ export function durablePaths(repositoryRoot = getDurableRepositoryRoot()): Durab
 	};
 }
 
-function legacyReadableScopeKey(identity: string, readable: string): string {
-	if (identity.length === 0) throw new Error("State Flow scope identity must be non-empty");
-	const slug = readable.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, LEGACY_MAX_SCOPE_SLUG_LENGTH) || "scope";
-	return `${slug}-${createHash("sha256").update(identity).digest("hex")}`;
-}
-
 /** Match Pi's native project-session directory convention exactly. */
 export function cwdScopeKey(cwd: string): string {
 	const canonical = resolve(cwd);
@@ -266,16 +309,6 @@ export function resolveSessionAddress(sessionFile: string | undefined, sessionId
 	return Object.freeze({ id: sessionId, key: sessionStorageKey(sessionFile, sessionId, timestamp) });
 }
 
-/** Read-only migration input for the untagged hashed-layout draft. */
-export function legacyCwdScopeKey(cwd: string): string {
-	const canonical = resolve(cwd);
-	return legacyReadableScopeKey(canonical, `--${canonical.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
-}
-
-export function legacySessionScopeKey(sessionId: string): string {
-	return legacyReadableScopeKey(sessionScopeKey(sessionId), sessionId);
-}
-
 export function cwdScopePaths(cwd: string, repositoryRoot = getDurableRepositoryRoot()): ScopePaths {
 	const directory = join(resolve(repositoryRoot), cwdScopeKey(cwd));
 	return { directory, state: join(directory, STATE_FILE), patches: join(directory, PATCHES_FILE) };
@@ -299,28 +332,6 @@ export function cwdPatchesPath(cwd: string, repositoryRoot = getDurableRepositor
 	return cwdScopePaths(cwd, repositoryRoot).patches;
 }
 
-/** Historical paths from the pre-0.4 hashed-layout draft; never selected for new writes. */
-export function legacyTemporalScopePaths(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string): TemporalScopePaths {
-	const root = resolve(repositoryRoot);
-	const cwdDirectory = join(root, legacyCwdScopeKey(cwd));
-	const directory = scope === "global" ? root : scope === "cwd" ? cwdDirectory : join(cwdDirectory, legacySessionScopeKey(sessionId));
-	return { directory, checkpoint: join(directory, CHECKPOINT_FILE), patches: join(directory, PATCHES_FILE), meta: join(directory, META_FILE) };
-}
-
-export function legacySessionRuntimePaths(cwd: string, sessionId: string, repositoryRoot: string): { config: string; meta: string } {
-	const directory = legacyTemporalScopePaths(cwd, sessionId, "session", repositoryRoot).directory;
-	return { config: join(directory, "config.json"), meta: join(directory, "meta.json") };
-}
-
-export function captureLegacyTemporalFileBases(cwd: string, sessionId: string, repositoryRoot: string): DurableFileBase[] {
-	const paths = (["global", "cwd", "session"] as const).flatMap((scope) => {
-		const pair = legacyTemporalScopePaths(cwd, sessionId, scope, repositoryRoot);
-		const runtime = scope === "session" ? legacySessionRuntimePaths(cwd, sessionId, repositoryRoot) : undefined;
-		return [pair.checkpoint, pair.patches, join(pair.directory, STATE_FILE), ...(runtime === undefined ? [] : [runtime.config, runtime.meta])];
-	});
-	return captureOwnedFileBases(paths, repositoryRoot);
-}
-
 export function sessionStatePath(cwd: string, sessionId: string, repositoryRoot = getDurableRepositoryRoot(), sessionKey = sessionId): string {
 	return sessionScopePaths(cwd, sessionId, repositoryRoot, sessionKey).state;
 }
@@ -337,7 +348,7 @@ export function isStateFlowOwnedPath(candidate: string, repositoryRoot = getDura
 	if (absolute === global.globalState || absolute === global.globalPatches
 		|| absolute === join(root, CHECKPOINT_FILE) || absolute === join(root, META_FILE)) return true;
 	const segments = relative(root, absolute).split(sep);
-	const cwdKey = (value: string) => (value.startsWith("--") && value.endsWith("--")) || LEGACY_SCOPE_KEY_PATTERN.test(value);
+	const cwdKey = (value: string) => value.startsWith("--") && value.endsWith("--");
 	const sessionKey = (value: string) => {
 		try { return sessionScopeKey(value) === value; } catch { return false; }
 	};
@@ -346,7 +357,7 @@ export function isStateFlowOwnedPath(candidate: string, repositoryRoot = getDura
 	}
 	if (segments.length === 3) {
 		return cwdKey(segments[0]!)
-			&& (sessionKey(segments[1]!) || LEGACY_SCOPE_KEY_PATTERN.test(segments[1]!))
+			&& sessionKey(segments[1]!)
 			&& (segments[2] === STATE_FILE || segments[2] === CHECKPOINT_FILE || segments[2] === PATCHES_FILE
 				|| segments[2] === "config.json" || segments[2] === META_FILE);
 	}
@@ -444,25 +455,6 @@ export function captureOwnedFileBases(paths: readonly string[], repositoryRoot: 
 		if (!isStateFlowOwnedPath(path, root)) throw new Error(`Cannot capture a non-State Flow path: ${path}`);
 		return fileBase(resolve(path), root);
 	});
-}
-
-function validateState(value: unknown, path: string): asserts value is MaterializedState {
-	if (!isMaterializedState(value) || !isJsonValue(value) || containsNull(value)) {
-		throw new Error(`Durable State Flow file has invalid materialized state: ${path}`);
-	}
-}
-
-/** One-way legacy current-state interpretation; explanatory journals are not recovery input. */
-export function parseStateSource(source: string | undefined, path: string): MaterializedState | undefined {
-	if (source === undefined) return undefined;
-	let value: unknown;
-	try {
-		value = JSON.parse(source);
-	} catch {
-		throw new Error(`Durable State Flow file contains invalid JSON: ${path}`);
-	}
-	validateState(value, path);
-	return structuredClone(value);
 }
 
 interface PreparedFile {

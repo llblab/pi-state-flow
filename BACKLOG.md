@@ -4,14 +4,13 @@ Completed release work belongs in [CHANGELOG.md](CHANGELOG.md).
 
 ## Candidate evolution
 
-- [ ] **Read-only global bootstrap layer:** Project the existing global materialization into enabled and non-enabled sessions by default, so even one-shot work starts carrying established cross-project facts, preferences, routing, and conventions. The global scope is the highest-value, lowest-cost half of the memory, while writing carries the protocol and curation tax; making the read side unconditional gives continuity without enabling mutation.
-  - Boundary: project the existing durable global materialization only. No writes, transitions, patches, barriers, session/CWD initialization, or temporal-history changes. Model tools and the full protocol remain opt-in behind explicit start, and the bootstrap adds no second semantic mode.
-  - Open questions: whether deferred Markdown freshness discovery must run ahead of the first inference, token cost of a stable global prefix, behavior under untrusted project contexts, and naming distinct from the existing bootstrap-run concept.
-  - Status: candidate, not scheduled. Do not start without a dedicated release contract.
-- [ ] **Pi Telegram submenu state analyzer:** Extend the State Flow Telegram section with a read-only analyzer view over the same diagnostics `/state-flow-status` already reports (branch mode, temporal head and hot depth, scope keys, retained tails, artifact freshness, publication). The operator deliberately deferred this beyond the 0.9.0 control surface.
+- [ ] `Default passive memory access`: Separate memory availability from the active State Flow episode lifecycle. A normal installation defaults to both passive state bootstrap and `read_state`/`patch_state` tools, while automatic terminal compaction, iteration continuation, and active episode semantics remain gated behind `/state-flow-start`.
+  - Configuration: control passive bootstrap and passive tools independently, yielding all four supported combinations: both off, bootstrap only, tools only, or both on (default). Fully off must add no state projection or tools to model context.
+  - Passive bootstrap: project existing effective durable state without creating scopes, migrating storage, publishing changes, starting an episode, or promising automatic continuation. Name this separately from active episode/bootstrap semantics.
+  - Passive tools: `read_state` remains read-only; an explicit `patch_state` may initialize or migrate the required durable runtime and publish only the requested semantic change, but must not activate terminal compaction or future automatic iterations.
+  - Lifecycle: `/state-flow-start` promotes passive access into the existing active episode behavior. `/state-flow-stop` returns to the configured passive combination rather than overriding it globally.
+  - Acceptance: cover all four configuration combinations, fresh and existing stores, explicit passive patch publication, unsupported-storage failure, start/stop transitions, tool/context visibility, and proof that passive turns never run terminal compaction.
+  - Status: accepted direction, not implemented. Requires a dedicated release contract.
+- [ ] `Pi Telegram submenu state analyzer`: Extend the State Flow Telegram section with a read-only analyzer view over the same diagnostics `/state-flow-status` already reports (branch mode, temporal head and hot depth, scope keys, retained tails, artifact freshness, publication). The operator deliberately deferred this beyond the 0.9.0 control surface.
   - Boundary: presentation only. Reuse existing status diagnostics; no new semantic mode, and never mutate state from the analyzer view.
   - Status: candidate, not scheduled. Do not start without a dedicated release contract.
-
-## Deferred host integration
-
-- [ ] **Native default session continuation:** Integrate the existing read-only recommendation, exact-selection, and rehydration contracts before Pi creates `SessionManager`, while preserving explicit new/resume and native-picker precedence, truthful notices, and cross-process session ownership. Pi 0.84.4 exposes no suitable pre-session resolver hook, so this requires upstream support or an SDK/launcher integration. Reverify the host API before taking the item; it is not a release dependency.

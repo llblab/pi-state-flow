@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { parseRemotePublicationPolicyDocument, serializeRemotePublicationPolicyDocument, type RemotePublicationPolicyDocument } from "./publication.ts";
 import { applyPatch, canonicalJson, containsNull, isJsonValue, isObject, type JsonObject } from "./json.ts";
-import { validateTemporalLineage, type TransitionBoundary } from "./temporal.ts";
+import { validateTemporalLineage, type ScopeStream, type TransitionBoundary } from "./temporal.ts";
 import { migrateLegacySkillCompilations } from "./skills.ts";
 import { isMaterializedState, type MaterializedState } from "./state.ts";
 const MAX_RESTORED_STEP = Number.MAX_SAFE_INTEGER - 1;
@@ -37,16 +37,10 @@ export interface SnapshotMeta {
 	remotePublication?: RemotePublicationPolicyDocument;
 }
 
-export interface LegacySessionMigration {
-	state: MaterializedState;
-}
-
 /** In-memory runtime config/provenance; durable config/meta and scope files own restoration. */
 export interface StateFlowSnapshot {
 	config: SnapshotConfig;
 	meta: SnapshotMeta;
-	/** Ephemeral one-way migration payload. persistSnapshot() never writes it to Pi checkpoints. */
-	legacySession?: LegacySessionMigration;
 }
 
 export type Snapshot = StateFlowSnapshot;
@@ -64,13 +58,15 @@ export interface SessionRuntime {
 		temporalRevision?: "self" | string;
 		/** Durable intent survives a crash before the push result can be observed. */
 		publication: "unconfirmed" | "files";
+		temporal?: { checkpoint: TransitionBoundary; patches: TransitionBoundary[] };
+		[key: string]: unknown;
 	};
 }
 
 export function validateSessionRuntime(value: unknown, cwd: string, sessionId: string): asserts value is SessionRuntime {
 	if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "config,meta"
 		|| !isObject(value.config) || !isObject(value.meta)) throw new Error("Invalid State Flow session runtime envelope");
-	const { version, identity, lineage, revision, temporalRevision, publication, artifacts, ...fields } = value.meta;
+	const { version, identity, lineage, revision, temporalRevision, publication, artifacts, temporal: _temporalScope, ...fields } = value.meta;
 	if (artifacts !== undefined) parseArtifactProvenanceRegistry(artifacts, "State Flow session artifact provenance");
 	if (temporalRevision !== undefined && temporalRevision !== "self"
 		&& !isExactRevision(temporalRevision)) throw new Error("Invalid temporal revision reference");
@@ -81,13 +77,16 @@ export function validateSessionRuntime(value: unknown, cwd: string, sessionId: s
 		throw new Error("State Flow runtime scope identity mismatch");
 	}
 	validateTemporalLineage(lineage);
-	const allowed = new Set(["step", "specification", "validation", "bootstrap", "remotePublication"]);
-	if (Object.keys(fields).some((key) => !allowed.has(key))) throw new Error("Unexpected State Flow runtime metadata field");
+	const known = new Set(["step", "specification", "validation", "bootstrap", "remotePublication"]);
+	if (Object.keys(fields).some((key) => ["state", "contract", "working", "response"].includes(key))) {
+		throw new Error("Semantic state does not belong in State Flow runtime metadata");
+	}
+	const runtimeFields = Object.fromEntries(Object.entries(fields).filter(([key]) => known.has(key)));
 	const { transitionWindow: _retiredWindow, ...supportedConfig } = value.config;
-	const normalized = migrateSnapshot({ config: supportedConfig, meta: fields });
-	if (fields.bootstrap === false) normalized.meta.bootstrap = false;
-	if (fields.step === Number.MAX_SAFE_INTEGER) normalized.meta.step = Number.MAX_SAFE_INTEGER;
-	if (canonicalJson({ config: normalized.config, meta: normalized.meta }) !== canonicalJson({ config: supportedConfig, meta: fields })) {
+	const normalized = migrateSnapshot({ config: supportedConfig, meta: runtimeFields });
+	if (runtimeFields.bootstrap === false) normalized.meta.bootstrap = false;
+	if (runtimeFields.step === Number.MAX_SAFE_INTEGER) normalized.meta.step = Number.MAX_SAFE_INTEGER;
+	if (canonicalJson({ config: normalized.config, meta: normalized.meta }) !== canonicalJson({ config: supportedConfig, meta: runtimeFields })) {
 		throw new Error("Invalid State Flow runtime configuration or counters");
 	}
 }
@@ -117,13 +116,31 @@ export function createSessionRuntime(
 	return runtime;
 }
 
-export function serializeSessionRuntime(runtime: SessionRuntime, cwd: string, sessionId: string): { config: string; meta: string } {
+export function serializeSessionRuntime(
+	runtime: SessionRuntime, cwd: string, sessionId: string, stream?: ScopeStream, existingSource?: string,
+): { config: string; meta: string } {
 	validateSessionRuntime(runtime, cwd, sessionId);
-	return { config: `${canonicalJson(runtime.config)}\n`, meta: `${canonicalJson(runtime.meta)}\n` };
+	let existing: Record<string, unknown> = {};
+	if (existingSource !== undefined) {
+		try { existing = JSON.parse(existingSource) as Record<string, unknown>; }
+		catch { throw new Error("State Flow session runtime contains invalid JSON"); }
+		if (!isObject(existing) || !isJsonValue(existing)) throw new Error("Invalid State Flow session runtime metadata");
+	}
+	const temporal = stream === undefined ? runtime.meta.temporal : {
+		checkpoint: structuredClone(stream.checkpoint.through),
+		patches: stream.patches.map((record) => structuredClone(record.transition)),
+	};
+	return { config: `${canonicalJson(runtime.config)}\n`, meta: `${canonicalJson({ ...existing, ...runtime.meta, ...(temporal ? { temporal } : {}) })}\n` };
 }
 
 export function parseSessionRuntime(config: string | undefined, meta: string | undefined, cwd: string, sessionId: string): SessionRuntime | undefined {
 	if (config === undefined && meta === undefined) return undefined;
+	if (config === undefined && meta !== undefined) {
+		let document: unknown;
+		try { document = JSON.parse(meta); } catch { throw new Error("State Flow session runtime contains invalid JSON"); }
+		if (isObject(document) && !Object.hasOwn(document, "identity") && !Object.hasOwn(document, "lineage")
+			&& Object.keys(document).every((key) => ["version", "artifacts", "temporal", "owner"].includes(key))) return undefined;
+	}
 	if (config === undefined || meta === undefined) throw new Error("Incomplete State Flow config/meta pair");
 	let runtime: unknown;
 	try {
@@ -132,7 +149,8 @@ export function parseSessionRuntime(config: string | undefined, meta: string | u
 		throw new Error("State Flow session runtime contains invalid JSON");
 	}
 	validateSessionRuntime(runtime, cwd, sessionId);
-	return { config: { enabled: runtime.config.enabled }, meta: runtime.meta };
+	const { temporal: _temporal, ...runtimeMeta } = runtime.meta;
+	return { config: { enabled: runtime.config.enabled }, meta: runtimeMeta };
 }
 
 export function resolveSessionRuntime(runtime: SessionRuntime, revision: string): { snapshot: Snapshot; lineage: TransitionBoundary[]; publicationTarget: string; artifacts: ArtifactProvenanceRegistry } {
@@ -226,16 +244,8 @@ function restoredMeta(value: unknown, legacy: JsonObject = {}): SnapshotMeta {
 	};
 }
 
-function envelope(
-	enabled: boolean,
-	meta: SnapshotMeta,
-	legacySession?: LegacySessionMigration,
-): Snapshot {
-	return {
-		config: { enabled },
-		meta,
-		...(legacySession === undefined ? {} : { legacySession }),
-	};
+function envelope(enabled: boolean, meta: SnapshotMeta): Snapshot {
+	return { config: { enabled }, meta };
 }
 
 export function emptySnapshot(enabled = false): Snapshot {
@@ -262,13 +272,12 @@ export function persistableSnapshot(snapshot: Snapshot): PiCheckpoint {
 		if (!isDurableRevision(snapshot.meta.durableBase)) throw new Error("Checkpoint requires an exact Git revision or file reference");
 		return { revision: snapshot.meta.durableBase };
 	}
-	if (snapshot.legacySession) throw new Error("Legacy semantic state requires migration before checkpoint publication");
 	if (snapshot.config.enabled) throw new Error("Enabled checkpoint requires a durable runtime revision");
 	return { disabled: true };
 }
 
-/** New wire shapes are strict; predecessor envelopes remain one-way migration input. */
-export function parsePiCheckpoint(value: unknown): PiCheckpoint | Snapshot {
+/** Pi checkpoints admit only strict revision pointers or the disabled marker. */
+export function parsePiCheckpoint(value: unknown): PiCheckpoint {
 	if (!isObject(value)) throw new Error("Invalid State Flow checkpoint");
 	if (Object.hasOwn(value, "revision") || Object.hasOwn(value, "disabled")) {
 		if (Object.keys(value).length === 1) {
@@ -277,13 +286,7 @@ export function parsePiCheckpoint(value: unknown): PiCheckpoint | Snapshot {
 		}
 		throw new Error("Invalid State Flow checkpoint pointer or disabled marker");
 	}
-	if (!Object.hasOwn(value, "config") && !Object.hasOwn(value, "enabled")) throw new Error("Unrecognized State Flow checkpoint");
-	const config = Object.hasOwn(value, "config") ? value.config : value;
-	if (!isObject(config) || typeof config.enabled !== "boolean") throw new Error("Invalid legacy State Flow configuration");
-	if (Object.hasOwn(value, "meta") && !isObject(value.meta)) throw new Error("Invalid legacy State Flow metadata");
-	const meta = isObject(value.meta) ? value.meta : value;
-	if (Object.hasOwn(meta, "durableBase") && !isDurableRevision(meta.durableBase)) throw new Error("Invalid legacy State Flow revision");
-	return migrateSnapshot(value);
+	throw new Error("Unrecognized State Flow checkpoint");
 }
 
 export function migrationFailure(data: JsonObject, error: string): Snapshot {
@@ -296,71 +299,12 @@ export function migrationFailure(data: JsonObject, error: string): Snapshot {
 	return envelope(false, meta);
 }
 
-function migratedSnapshot(
-	enabled: boolean,
-	meta: SnapshotMeta,
-	state: MaterializedState,
-): Snapshot {
-	return envelope(enabled, meta, {
-		state: migrateLegacySkillCompilations(state),
-	});
-}
-
 export function migrateSnapshot(value: unknown): Snapshot {
 	if (!isObject(value)) return emptySnapshot();
 	const isEnvelope = Object.hasOwn(value, "config") || Object.hasOwn(value, "meta");
 	const config = isEnvelope && isObject(value.config) ? value.config : value;
 	const meta = restoredMeta(isEnvelope ? value.meta : undefined, value);
 	const enabled = config.enabled === true;
-	if (isMaterializedState(value.state)) {
-		if (!isJsonValue(value.state)) return migrationFailure(value, "Restored state contains non-JSON data");
-		if (containsNull(value.state)) return migrationFailure(value, "Restored state contains null data");
-		return migratedSnapshot(enabled, meta, structuredClone(value.state));
-	}
-	if (isLegacyThreePartState(value.state)) {
-		if (!isJsonValue(value.state)) return migrationFailure(value, "Restored state contains non-JSON data");
-		if (containsNull(value.state)) return migrationFailure(value, "Restored state contains null data");
-		return migratedSnapshot(enabled, meta, {
-			artifacts: {},
-			...structuredClone(value.state),
-		});
-	}
-	if (isLegacyTwoPartState(value.state)) {
-		if (!isJsonValue(value.state)) return migrationFailure(value, "Restored state contains non-JSON data");
-		if (containsNull(value.state)) return migrationFailure(value, "Restored state contains null data");
-		return migratedSnapshot(enabled, meta, {
-			artifacts: {},
-			contract: structuredClone(value.state.contract),
-			working: structuredClone(value.state.working),
-			response: "",
-		});
-	}
-	if (Object.hasOwn(value, "state")) {
-		if (isObject(value.state)
-			&& (Object.hasOwn(value.state, "response")
-				|| Object.hasOwn(value.state, "artifacts")
-				|| (Object.hasOwn(value.state, "contract") && Object.hasOwn(value.state, "working")))) {
-			return migrationFailure(value, "Restored state has an invalid materialized-state schema");
-		}
-		if (value.state !== undefined && !isObject(value.state)) {
-			return migrationFailure(value, "Restored state has an invalid materialized-state schema");
-		}
-	}
-	if (Object.hasOwn(value, "stateBasis") || Object.hasOwn(value, "previousStatePatch")) {
-		const legacyBasis = isObject(value.stateBasis)
-			? value.stateBasis
-			: isObject(value.state)
-				? value.state
-				: {};
-		const legacyPatch = isObject(value.previousStatePatch) ? value.previousStatePatch : undefined;
-		if (!isJsonValue(legacyBasis) || (legacyPatch !== undefined && !isJsonValue(legacyPatch))) {
-			return migrationFailure(value, "Legacy state contains non-JSON data");
-		}
-		const legacyState = legacyPatch === undefined ? legacyBasis : applyPatch(legacyBasis, legacyPatch);
-		if (containsNull(legacyState)) return migrationFailure(value, "Legacy state contains null data");
-		return migratedSnapshot(enabled, meta, {
-			artifacts: {}, contract: {}, working: structuredClone(legacyState), response: "",
-		});
-	}
+	if (Object.hasOwn(value, "state") || Object.hasOwn(value, "stateBasis") || Object.hasOwn(value, "previousStatePatch")) return envelope(false, meta);
 	return envelope(enabled, meta);
 }

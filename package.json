@@ -1,8 +1,8 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "private": false,
-  "description": "Incremental scoped state/context compiler for Pi, inspired by SKILL.state",
+  "description": "Incremental scoped state/context/memory compiler for Pi, inspired by SKILL.state",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -20,6 +20,7 @@
   "files": [
     "index.ts",
     "lib",
+    "dist",
     "skills",
     "docs",
     "README.md",
@@ -28,18 +29,32 @@
     "AGENTS.md"
   ],
   "scripts": {
-    "check": "node --experimental-strip-types -e \"await import('./index.ts')\"",
+    "check": "node -e \"await import('./dist/pi-state-flow/index.js'); console.log('pi-state-flow: extension import ok')\"",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "benchmark": "node --experimental-strip-types benchmarks/benchmark.ts",
     "typecheck": "tsc --noEmit",
-    "validate": "npm run typecheck && npm test && npm run check",
-    "prepack": "npm run validate"
+    "build": "node scripts/build-dist.mjs",
+    "pack:check": "npm pack --dry-run",
+    "validate": "npm run build && npm run typecheck && npm test && npm run check && npm run pack:check",
+    "prepack": "npm run build"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "pi": {
     "extensions": [
+      "./dist/pi-state-flow/index.js"
+    ],
+    "sourceExtensions": [
       "./index.ts"
     ],
     "skills": [
+      "./dist/skills"
+    ],
+    "sourceSkills": [
       "./skills"
     ],
     "image": "https://raw.githubusercontent.com/llblab/pi-state-flow/main/banner.jpg"

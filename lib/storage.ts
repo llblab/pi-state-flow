@@ -6,7 +6,7 @@ import { closeSync, lstatSync, mkdirSync, openSync, rmSync, writeFileSync } from
 import { dirname, relative, resolve } from "node:path";
 import {
 	assertOwnedFileUpdates, captureTemporalFileBases, parseScopeProvenance, parseScopeStream, restoreDurableFileBases,
-	serializeScopeProvenance, sessionRuntimePaths, temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
+	serializeScopeMetadata, sessionRuntimePaths, temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
 	type DurableFileBase, type OwnedFileUpdate,
 } from "./durable.ts";
 import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
@@ -84,22 +84,23 @@ export function planTemporalPublication(
 	for (const scope of SCOPES) {
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		if (files.get(resolve(paths.directory, "state.json"))!.identity !== "missing") throw new Error("Legacy State Flow storage requires explicit migration");
-		const previous = parseScopeStream(files.get(paths.checkpoint)!.content, files.get(paths.patches)!.content, scope, scope === "cwd" ? cwd : undefined);
+		const previous = parseScopeStream(files.get(paths.checkpoint)!.content, files.get(paths.patches)!.content, scope,
+			scope === "cwd" ? cwd : undefined, files.get(paths.meta)!.content);
 		if (runtimeOnly || (previous !== undefined && sameJson(previous, view.scopes[scope]))) continue;
 		if (!scopes.includes(scope)) throw new Error(`Temporal scope update omitted a changed stream: ${scope}`);
 		changedScopes.push(scope);
 	}
 	const provenanceUpdates: OwnedFileUpdate[] = [];
-	// Shared provenance belongs to its semantic scopes, not the session config being saved.
-	if (!runtimeOnly && provenance !== undefined) {
+	// Shared metadata owns provenance, temporal boundaries, and CWD identity beside semantic files.
+	if (!runtimeOnly) {
 		for (const scope of ["global", "cwd"] as const) {
 			const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
-			const registry = provenance[scope];
+			const registry = provenance?.[scope] ?? parseScopeProvenance(files.get(paths.meta)!.content, paths.meta);
 			const currentFile = files.get(paths.meta)!;
-			if (Object.keys(registry).length === 0 && currentFile.identity === "missing") continue;
-			if (!sameJson(parseScopeProvenance(currentFile.content, paths.meta), registry)) {
-				provenanceUpdates.push({ path: paths.meta, content: serializeScopeProvenance(registry) });
-			}
+			if (!changedScopes.includes(scope)
+				&& (provenance === undefined || sameJson(parseScopeProvenance(currentFile.content, paths.meta), registry))) continue;
+			const content = serializeScopeMetadata(registry, view.scopes[scope], scope, scope === "cwd" ? cwd : undefined, currentFile.content);
+			if (currentFile.content !== content) provenanceUpdates.push({ path: paths.meta, content });
 		}
 	}
 	const runtimePaths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
@@ -107,11 +108,14 @@ export function planTemporalPublication(
 	if (previousRuntime !== undefined && changedScopes.length > 0 && runtime === undefined) throw new Error("Temporal semantic publication requires its session runtime cohort");
 	const runtimeUpdates: OwnedFileUpdate[] = [];
 	if (runtime !== undefined) {
-		const sources = serializeSessionRuntime(runtime, cwd, sessionId);
+		const sources = serializeSessionRuntime(runtime, cwd, sessionId, runtimeOnly ? undefined : view.scopes.session, files.get(runtimePaths.meta)!.content);
 		if (!sameJson(runtime.meta.lineage, view.lineage)) throw new Error("Runtime lineage does not match the temporal cohort");
-		if (previousRuntime === undefined || !sameJson(previousRuntime, runtime)) {
+		if (files.get(runtimePaths.config)!.content !== sources.config || files.get(runtimePaths.meta)!.content !== sources.meta) {
 			runtimeUpdates.push({ path: runtimePaths.config, content: sources.config }, { path: runtimePaths.meta, content: sources.meta });
 		}
+	} else if (!runtimeOnly && changedScopes.includes("session")) {
+		const content = serializeScopeMetadata(undefined, view.scopes.session, "session", undefined, files.get(runtimePaths.meta)!.content);
+		if (files.get(runtimePaths.meta)!.content !== content) runtimeUpdates.push({ path: runtimePaths.meta, content });
 	}
 	const changedPaths = new Set(changedScopes.flatMap((scope) => {
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
@@ -143,7 +147,8 @@ function decodeFileCohort(cwd: string, sessionId: string, root: string, base: Te
 	for (const scope of SCOPES) {
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		if (files.get(resolve(paths.directory, "state.json")) !== undefined) throw new Error("Legacy State Flow storage requires explicit migration");
-		const stream = parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope, scope === "cwd" ? cwd : undefined);
+		const stream = parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope,
+			scope === "cwd" ? cwd : undefined, files.get(paths.meta));
 		if (!stream) throw new Error("Incomplete file-only temporal scope cohort");
 		scopes[scope] = stream;
 	}

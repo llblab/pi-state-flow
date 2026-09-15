@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { inspectRuntimeRevision, TemporalRuntime } from "../lib/runtime.ts";
 import type { ArtifactProvenanceRegistry } from "../lib/artifact.ts";
-import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths, sessionPatchesPath, serializeScopeProvenance } from "../lib/durable.ts";
-import { writeCwdState, writeGlobalState, writeSessionState } from "./legacy-fixture.ts";
+import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths, sessionPatchesPath, serializeScopeMetadata, serializeScopeStream } from "../lib/durable.ts";
+import { writeCwdState, writeGlobalState, writeSessionState } from "./storage-fixture.ts";
 import { createSessionRuntime, emptySnapshot, isFileRevision, parsePiCheckpoint, persistableSnapshot, type Snapshot } from "../lib/snapshot.ts";
 import { withStoragePublicationLock } from "../lib/storage.ts";
 import { captureTemporalGitBase, publishTemporalStateToGit } from "../lib/git.ts";
@@ -30,6 +30,32 @@ test("runtime keeps native session storage identity paired and detached from cal
 	address.key = "mutated";
 	assert.equal(runtime.sessionId, "session-id");
 	assert.equal(runtime.sessionKey, "timestamp_session-id");
+});
+
+test("explicit migration upgrades predecessor envelopes after passive restore populated the runtime cache", (t) => {
+	const fixture = driftFixture(t);
+	const { runtime } = restoreSessionA(fixture);
+	const before = runtime.states();
+	const paths = temporalScopePaths(fixture.cwd, "session-a", "global", fixture.root);
+	const stream = runtime.view!.scopes.global;
+	writeFileSync(paths.checkpoint, `${JSON.stringify(stream.checkpoint)}\n`);
+	writeFileSync(paths.patches, stream.patches.map((record) => `${JSON.stringify(record)}\n`).join(""));
+	const metadata = JSON.parse(readFileSync(paths.meta, "utf8"));
+	delete metadata.temporal;
+	writeFileSync(paths.meta, `${JSON.stringify(metadata)}\n`);
+	execFileSync("git", ["-C", fixture.root, "add", "-A"]);
+	execFileSync("git", ["-C", fixture.root, "commit", "-m", "predecessor envelope"]);
+
+	runtime.migrateLegacyStorage();
+
+	const semantic = serializeScopeStream(stream, "global");
+	assert.equal(readFileSync(paths.checkpoint, "utf8"), semantic.checkpoint);
+	assert.equal(readFileSync(paths.patches, "utf8"), semantic.patches);
+	assert.deepEqual(runtime.states(), before);
+	assert.deepEqual(JSON.parse(readFileSync(paths.meta, "utf8")).temporal, {
+		checkpoint: stream.checkpoint.through,
+		patches: stream.patches.map((record) => record.transition),
+	});
 });
 
 test("fork copies only the selected session stream and provenance into a fresh owner over live shared scopes", (t) => {
@@ -69,7 +95,7 @@ test("fork copies only the selected session stream and provenance into a fresh o
 	// Forking must not even prune a valid but currently unreferenced shared provenance entry.
 	const globalMeta = temporalScopePaths(f.cwd, "session-a", "global", f.root).meta;
 	const registry = { ...parent.runtime.artifactProvenance("global"), "/sources/orphan.md": { sourceHash: `sha256:${"c".repeat(64)}`, compilerRevision: "fixture-v2" } };
-	writeFileSync(globalMeta, serializeScopeProvenance(registry));
+	writeFileSync(globalMeta, serializeScopeMetadata(registry, parent.runtime.view!.scopes.global, "global", undefined, readFileSync(globalMeta, "utf8")));
 	execFileSync("git", ["-C", f.root, "add", "-A"]);
 	execFileSync("git", ["-C", f.root, "commit", "-m", "fixture provenance"]);
 	const protectedFiles = captureTemporalGitBase(f.cwd, "session-a", f.root).files;
@@ -308,7 +334,7 @@ test("live adapter writes only temporal pairs and runtime, and restores old bran
 	const h = harness();
 	await start(h);
 	const files = readdirSync(h.repositoryRoot, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && !entry.parentPath.includes(".git")).map((entry) => relative(h.repositoryRoot, join(entry.parentPath, entry.name))).sort();
-	assert.equal(files.length, 8);
+	assert.equal(files.length, 10);
 	assert.equal(files.filter((name) => name.endsWith("checkpoint.json")).length, 3);
 	assert.equal(files.some((name) => name.endsWith("state.json")), false);
 	await commitTerminal(h, {}, { branch: "old" }, "Old");
@@ -326,22 +352,6 @@ test("live adapter writes only temporal pairs and runtime, and restores old bran
 	assert.equal(runtime.read().working.branch, "old");
 	assert.equal(runtime.read(1).working.branch, "old");
 	assert.throws(() => runtime.read(8), /0 to 7/);
-});
-
-test("live initialization explicitly migrates a revision-linked predecessor session without replaying explanatory journals", () => {
-	const h = harness();
-	writeGlobalState(emptyState(), h.repositoryRoot);
-	writeCwdState(h.ctx.cwd, emptyState(), h.repositoryRoot);
-	writeSessionState(h.ctx.cwd, "harness-session", { ...emptyState(), working: { retained: "legacy" } }, h.repositoryRoot);
-	writeFileSync(sessionPatchesPath(h.ctx.cwd, "harness-session", h.repositoryRoot), "old explanatory text, not replay JSON\n");
-	const git = (...args: string[]) => execFileSync("git", ["-C", h.repositoryRoot, ...args], { encoding: "utf8" }).trim();
-	git("add", "."); // Temporary fixture contains only these predecessor files.
-	git("commit", "-m", "legacy fixture");
-	h.entries.push({ type: "custom", customType: "state-flow-snapshot", data: { config: { enabled: true, transitionWindow: 7 }, meta: { step: 3, durableBase: git("rev-parse", "HEAD") } } });
-	h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
-	assert.equal(h.readState().working.retained, "legacy");
-	assert.throws(() => h.readState(1), /predates the proven temporal origin/);
-	assert.equal(git("ls-tree", "-r", "--name-only", "HEAD").split("\n").some((path) => path.endsWith("state.json")), false);
 });
 
 test("failed restore installs no partial runtime and unavailable publication cannot accept transitions", async () => {
@@ -364,7 +374,7 @@ test("failed restore installs no partial runtime and unavailable publication can
 	assert.equal(runtime.read().working.value, "old");
 });
 
-for (const legacy of [false, true]) test(`start retries the selected ${legacy ? "legacy" : "pointer"} branch after transient restore failure and the next terminal state is durable`, async () => {
+for (const legacy of [false]) test(`start retries the selected pointer branch after transient restore failure and the next terminal state is durable`, async () => {
 	const h = harness();
 	const head = () => execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 	await start(h);
@@ -399,21 +409,6 @@ for (const legacy of [false, true]) test(`start retries the selected ${legacy ? 
 	assert.equal(h.readState(2).working.value, "old");
 	assert.equal(h.resolveSnapshot().meta.step, 4);
 	assert.match(h.entries.at(-1).data.revision, /^[a-f0-9]{40}$/);
-});
-
-test("ordinary startup leaves global-only legacy storage and publication history untouched", () => {
-	const h = harness();
-	writeGlobalState({ ...emptyState(), working: { keep: "global legacy" } }, h.repositoryRoot);
-	const head = () => execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-	const before = head();
-	const path = join(h.repositoryRoot, "state.json");
-	const original = readFileSync(path);
-	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	assert.equal(h.activeTools.includes("patch_state"), false);
-	assert.equal(head(), before);
-	assert.deepEqual(readFileSync(path), original);
-	assert.equal(existsSync(join(h.repositoryRoot, "checkpoint.json")), false);
-	assert.equal(h.entries.length, 0);
 });
 
 test("stopping an ordinary disabled session is harmless and does not initialize or publish storage", async () => {
@@ -592,26 +587,6 @@ test("a new session initializes Git over inherited file-only scopes and commits 
 	assert.throws(() => restored.read(1), /origin/);
 	assert.deepEqual(inherited.map((path) => readFileSync(path)), bytes);
 	for (const [index, path] of inherited.entries()) assert.deepEqual(execFileSync("git", ["-C", root, "show", `${published.commit}:${relative(root, path)}`]), bytes[index]);
-});
-
-test("enabled legacy Pi state restores into a missing file store without Git", async (t) => {
-	const parent = mkdtempSync(join(tmpdir(), "state-flow-legacy-no-git-"));
-	const root = join(parent, "store");
-	const path = process.env.PATH;
-	process.env.PATH = parent;
-	t.after(() => { process.env.PATH = path; rmSync(parent, { recursive: true, force: true }); });
-	const h = harness({ repositoryRoot: root, initializeRepository: false });
-	h.entries.push({ type: "custom", customType: "state-flow-snapshot", data: {
-		enabled: true, state: { contract: { legacy: true }, working: { preserved: true }, response: "Legacy" }, step: 2,
-	} });
-	h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
-	assert.equal(h.activeTools.includes("patch_state"), true);
-	assert.deepEqual(h.readState(), { artifacts: {}, contract: { legacy: true }, working: { preserved: true }, response: "Legacy" });
-	await h.commands.get("state-flow-stop").handler("", h.ctx);
-	assert.ok(isFileRevision(h.resolveSnapshot().meta.durableBase));
-	assert.equal(h.resolveSnapshot().meta.step, 2);
-	assert.equal(h.resolveSnapshot().config.enabled, false);
-	assert.equal(existsSync(join(root, ".git")), false);
 });
 
 test("file runtime starts without Git, retains locked pointers, resumes stopped state and refuses lost past", async (t) => {
@@ -1126,13 +1101,16 @@ test("missing shared provenance degrades freshness without blocking semantic pub
 	const runtime = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
 	const snapshot = runtime.restore(seeded.revision);
 	const paths = temporalScopePaths(fixture.cwd, "session-a", "global", fixture.root);
-	rmSync(paths.meta);
+	const metadata = JSON.parse(readFileSync(paths.meta, "utf8"));
+	delete metadata.artifacts;
+	writeFileSync(paths.meta, JSON.stringify(metadata));
 	const publication = publishScopedPatch(runtime, snapshot, "session", { sessionPatch: "applied" }, "missing-provenance")!;
 	assert.ok(publication.commit);
 	assert.deepEqual(runtime.artifactProvenance("global"), {});
 	assert.ok(runtime.read(0, "global").artifacts[seeded.path]);
 	assert.equal(runtime.read().working.sessionPatch, "applied");
-	assert.equal(existsSync(paths.meta), false);
+	assert.equal(existsSync(paths.meta), true);
+	assert.equal(Object.hasOwn(JSON.parse(readFileSync(paths.meta, "utf8")), "artifacts"), false);
 });
 
 test("malformed shared provenance remains byte-exact and fails only the dependent publication", (t) => {
@@ -1145,7 +1123,7 @@ test("malformed shared provenance remains byte-exact and fails only the dependen
 	writeFileSync(paths.meta, malformed);
 	assert.throws(
 		() => publishScopedPatch(runtime, snapshot, "session", { rejected: true }, "malformed-provenance"),
-		/State Flow provenance file contains invalid JSON/,
+		/State Flow global metadata contains invalid JSON/,
 	);
 	assert.equal(readFileSync(paths.meta, "utf8"), malformed);
 	assert.equal(runtime.read(0, "session").working.rejected, undefined);
@@ -1357,9 +1335,9 @@ test("two independent sessions encounter one absent shared repair basis without 
 	const second = publishScopedPatch(resumedB, resumedSnapshotB, "session", { reconciledBy: "B" }, "reconcile-by-b")!.commit!;
 	const paths = temporalScopePaths(fixture.cwd, "session-a", "global", fixture.root);
 	const changed = (commit: string) => execFileSync("git", ["-C", fixture.root, "diff-tree", "--no-commit-id", "--name-only", "-r", commit], { encoding: "utf8" }).trim().split("\n");
-	const relativePair = [paths.checkpoint, paths.patches].map((path) => relative(fixture.root, path).replaceAll("\\", "/"));
-	for (const path of relativePair) assert.ok(changed(first).includes(path), "the first publisher owns the absent-pair repair");
-	for (const path of relativePair) assert.equal(changed(second).includes(path), false, "the reconciled publisher does not rewrite the repair");
+	const repairedPaths = [paths.patches, paths.meta].map((path) => relative(fixture.root, path).replaceAll("\\", "/"));
+	for (const path of repairedPaths) assert.ok(changed(first).includes(path), `the first publisher owns the absent-pair repair: ${path}`);
+	for (const path of repairedPaths) assert.equal(changed(second).includes(path), false, "the reconciled publisher does not rewrite the repair");
 	assert.equal(resumedB.read(0, "global").working.must_not_resurrect, undefined);
 	assert.equal(resumedB.read(0, "session").working.owner, "B");
 	assert.equal(resumedB.read(0, "session").working.reconciledBy, "B");

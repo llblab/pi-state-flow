@@ -235,7 +235,8 @@ test("live storage paths mirror Pi CWD and session file names without appended h
 	assert.equal(temporalScopePaths(cwd, sessionId, "session", root, key).directory, expectedSession);
 	assert.equal(existsSync(join(expectedSession, "checkpoint.json")), true);
 	assert.equal(existsSync(join(expectedSession, "patches.jsonl")), true);
-	assert.deepEqual(JSON.parse(readFileSync(join(expectedCwd, "checkpoint.json"), "utf8")).owner, { cwd });
+	assert.deepEqual(JSON.parse(readFileSync(join(expectedCwd, "meta.json"), "utf8")).owner, { cwd });
+	assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(expectedCwd, "checkpoint.json"), "utf8")), "owner"), false);
 	const runtime = sessionRuntimePaths(cwd, sessionId, root, key);
 	assert.equal(JSON.parse(readFileSync(runtime.meta, "utf8")).identity.sessionId, sessionId);
 	assert.equal(JSON.parse(readFileSync(runtime.meta, "utf8")).identity.cwd, cwd);
@@ -408,9 +409,18 @@ test("patch_state materializes session state before the next inference and respo
 		{ args: visibleArgs, isError: false } as any,
 	);
 	const visibleText = rendered.render(1_000).map((line: string) => line.trimEnd()).join("\n");
+	assert.ok(visibleText.startsWith("\n"), "successful patch JSON should follow the tool heading after one blank line");
 	assert.doesNotMatch(visibleText, /State materialized|session scope/);
 	assert.match(visibleText, /"artifacts": \{[\s\S]+\n\n    "contract": \{[\s\S]+\n\n    "working": \{[\s\S]+\n\n    "response": null/);
 	assert.deepEqual(JSON.parse(visibleText), visibleArgs);
+	const renderedError = patchState.renderResult(
+		{ content: [{ type: "text", text: "WebSocket error" }] },
+		{ expanded: false, isPartial: false },
+		{ fg: (_color: string, text: string) => text } as any,
+		{ args: visibleArgs, isError: true } as any,
+	);
+	const renderedErrorText = renderedError.render(1_000).map((line: string) => line.trimEnd()).join("\n");
+	assert.equal(renderedErrorText, "\nWebSocket error");
 
 	const hiddenAgentDir = mkdtempSync(join(tmpdir(), "state-flow-hidden-patches-"));
 	t.after(() => rmSync(hiddenAgentDir, { recursive: true, force: true }));

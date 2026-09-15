@@ -40,7 +40,7 @@ function runtimeSourceHash(): string {
 }
 function workloadSourceHash(): string {
 	return sourceFilesHash(["package.json", "package-lock.json", "benchmarks/benchmark.ts", "benchmarks/benchmark-writer.ts",
-		"benchmarks/benchmark-session.ts", "benchmarks/benchmark-resume.ts", "tests/pi-harness.ts", "tests/temporal-fixture.ts", "tests/legacy-fixture.ts"]);
+		"benchmarks/benchmark-session.ts", "benchmarks/benchmark-resume.ts", "tests/pi-harness.ts", "tests/temporal-fixture.ts", "tests/storage-fixture.ts"]);
 }
 function packageVersion(name: string): string {
 	const path = findPackageJSON(name, import.meta.url);

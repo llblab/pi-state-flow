@@ -91,10 +91,15 @@ export function normalizePatchStateArguments(args: unknown): any {
 	return { ...args, final };
 }
 
+/** Keep tool output visually separated from its heading with exactly one leading newline. */
+function separatedOutput(text: string): string {
+	return `\n${text.replace(/^\n+/, "")}`;
+}
+
 /** Keep a failed tool invocation visually separated from its rendered error without changing error semantics. */
 function separatedFailure(error: unknown): Error {
 	const message = error instanceof Error ? error.message : String(error);
-	return new Error(`\n${message}`, error instanceof Error ? { cause: error } : undefined);
+	return new Error(separatedOutput(message), error instanceof Error ? { cause: error } : undefined);
 }
 
 export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowExtensionOptions = {}): void {
@@ -581,9 +586,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			const branch = ctx.sessionManager.getBranch();
 			const discovery = discoverSnapshotData(branch);
 			let restoreSelected: (() => Snapshot) | undefined;
-			const recovery = recoverSnapshot(discovery.candidates, (revision, legacy) => {
+			const recovery = recoverSnapshot(discovery.candidates, (revision) => {
 				try {
-					const prepared = prepareBranchRestore(ctx, revision, legacy);
+					const prepared = prepareBranchRestore(ctx, revision);
 					restoreSelected = prepared.restore;
 					return prepared.snapshot;
 				} catch (error) {
@@ -607,7 +612,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				} else if (branchHasSnapshot && snapshot.config.enabled) {
 					const publication = runtime.initialize(snapshot, true);
 					recordPolicyPublication(publication, ctx);
-					delete snapshot.legacySession;
 				}
 				installScopeStates();
 			} else if (config.autoStart && isNewSession(sessionStartReason, branch)) {
@@ -837,8 +841,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		prepareArguments: normalizePatchStateArguments,
 		renderResult(result, { isPartial }, theme, context) {
 			const text = result.content.find((block) => block.type === "text")?.text ?? "";
-			if (isPartial || context.isError || !config.showSuccessfulPatches) return new Text(text, 0, 0);
-			return new Text(theme.fg("dim", formatPatchStateArguments(context.args)), 0, 0);
+			if (context.isError) return new Text(separatedOutput(text), 0, 0);
+			if (isPartial || !config.showSuccessfulPatches) return new Text(text, 0, 0);
+			return new Text(separatedOutput(theme.fg("dim", formatPatchStateArguments(context.args))), 0, 0);
 		},
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			try {
@@ -910,6 +915,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			activeContext = ctx;
 			runtime ??= createRuntime(ctx);
 			if (branchStartsWithoutRuntime) runtime.prepare();
+			runtime.migrateLegacyStorage();
 			const bootstrap = (!branchHasSnapshot || !snapshot.config.enabled)
 				&& (hasPriorConversation(branch) || previousPassiveContinuation !== undefined);
 			if (!runtime.view && snapshot.meta.durableBase) {
@@ -932,7 +938,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				: runtime.initialize(snapshot, true, undefined, branchStartsWithoutRuntime);
 			recordPolicyPublication(publication, ctx);
 			installScopeStates();
-			delete snapshot.legacySession;
 			clearRunTransient();
 			passiveContinuation = undefined;
 			bootstrapContinuation = snapshot.meta.bootstrap

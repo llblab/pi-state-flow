@@ -25,7 +25,7 @@ export function resolveCheckpoint(data: unknown, cwd: string, sessionId: string,
 }
 
 export * from "../lib/durable.ts";
-export * from "./legacy-fixture.ts";
+export * from "./storage-fixture.ts";
 function materialization(cwd: string, sessionId: string, scope: StateScope, root: string, sessionKey = sessionId) {
 	const stream = loadScopeStream(cwd, sessionId, scope, root, sessionKey);
 	if (!stream) return undefined;

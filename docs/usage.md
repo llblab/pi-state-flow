@@ -79,15 +79,15 @@ Use a dedicated directory. State storage and Knowledge Markdown have separate re
 <agentDir>/knowledge/    optional Markdown sources for compilation
 ```
 
-Each scope materializes an anchored `checkpoint.json` plus `patches.jsonl`. Scope `meta.json` holds runtime-owned artifact evidence; the session also has `config.json` and temporal/runtime metadata. CWD/session directories mirror Pi's native naming while validating canonical identities separately. See the [storage contract](architecture.md#storage-and-identity) for the exact layout.
+Each scope materializes an anchored semantic-only `checkpoint.json` plus semantic-only lines in `patches.jsonl`. Scope `meta.json` holds their temporal boundaries, CWD ownership where applicable, and runtime-owned artifact evidence; the session also has `config.json` and branch runtime metadata. CWD/session directories mirror Pi's native naming while validating canonical identities separately. See the [storage contract](architecture.md#storage-and-identity) for the exact layout.
 
 ### Missing, partial, and malformed storage
 
 A checkpoint and tail are one semantic pair. If both live files for an untouched global or CWD scope disappear, State Flow treats that complete absence as current empty shared reality during the next accepted publication. It creates a fresh canonical pair through the normal publication lock and CAS path; selected values remain only in cold Git history and are not silently resurrected. A patch targeting the disappeared scope is rejected once as stale so a later inference can work from the actual empty basis.
 
-Exactly one surviving pair member is corruption and fails closed. Present malformed JSON, invalid envelopes, identity contradictions, and partial session `config.json`/`meta.json` also remain fail-closed and are not replaced. A selected Git revision may reconstruct a missing private session cohort exactly; file-only mode refuses when its exact current cohort is gone because it has no cold history to invent.
+Exactly one surviving pair member is corruption and fails closed. Present malformed JSON, incomplete predecessor envelopes, semantic/metadata boundary mismatches, identity contradictions, and partial session runtime evidence also remain fail-closed and are not replaced. A selected Git revision may reconstruct a missing private session cohort exactly; file-only mode refuses when its exact current cohort is gone because it has no cold history to invent.
 
-Missing shared provenance means freshness evidence is unavailable while semantic state remains usable. A missing whole Knowledge root does not prove that durable artifact routing was deleted, and external files are never created. Queue, worker lease, and lock absence keep their existing meanings—empty, unclaimed, and unlocked—while malformed or foreign present evidence is preserved. See the complete [filesystem recovery contract](filesystem-recovery.md).
+Missing artifact provenance inside an otherwise complete scope `meta.json` means freshness evidence is unavailable while semantic state remains usable; removing the whole metadata file also removes temporal authority and fails closed. A missing whole Knowledge root does not prove that durable artifact routing was deleted, and external files are never created. Queue, worker lease, and lock absence keep their existing meanings—empty, unclaimed, and unlocked—while malformed or foreign present evidence is preserved. See the complete [filesystem recovery contract](filesystem-recovery.md).
 
 ### With Git
 
@@ -121,7 +121,7 @@ If Git becomes available later, explicit Start can adopt the proven current file
 
 Changing `directory` selects a location; it does not relocate existing state or history. Git-backed Pi checkpoints require their original commit objects. Copying only current checkpoint/tail files cannot preserve old branch recovery. Keep the original store intact until an explicit history-preserving relocation is complete, or use a genuinely new Pi session for an independent store.
 
-In-store predecessor-format migration is different: legacy current `state.json` snapshots become initial anchored checkpoints with empty tails. Current snapshots, not explanatory journals, are the recovery basis. Successful migration removes obsolete ownership and preserves only proven history. Let the runtime perform supported migration; manually renaming files is not a valid conversion.
+The only supported in-store migration converts complete predecessor checkpoint/tail envelopes into semantic-only files plus temporal `meta.json`. `state.json`, pre-0.4 hashed layouts, and semantic Pi checkpoint envelopes are unsupported and fail closed; manually renaming files is not a valid conversion.
 
 Pre-0.4 hashed-path layouts remain readable at their historical revisions and can be adopted into native paths at current HEAD. A missing revision or failed restoration is not permission to import another session or reset existing files.
 

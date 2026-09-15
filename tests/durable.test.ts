@@ -5,8 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
 	captureTemporalFileBases, classifyScopeStream, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath,
-	loadScopeStream, parseScopeStream, resolveSessionAddress, serializeScopeStream, sessionScopeKey, sessionStorageKey,
-	temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates, parseStateSource,
+	loadScopeStream, parseScopeStream, resolveSessionAddress, serializeScopeMetadata, serializeScopeStream, sessionScopeKey, sessionStorageKey,
+	temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
 } from "../lib/durable.ts";
 import { emptyState, type StateScope } from "../lib/state.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState, type ScopeStream, type TemporalState } from "../lib/temporal.ts";
@@ -71,25 +71,15 @@ test("canonical scope hierarchy mirrors Pi project and session names without red
 	assert.equal(isStateFlowOwnedPath(join(root, cwdScopeKey(cwd), ".git", "config.json"), root), false);
 });
 
-test("readable CWD paths retain collision provenance inside the checkpoint envelope", () => {
+test("readable CWD paths retain collision provenance only in metadata", () => {
 	const stream = temporalFixture().scopes.cwd;
 	const owned = serializeScopeStream(stream, "cwd", "/a-b/c");
-	assert.deepEqual(parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a-b/c"), stream);
-	assert.throws(() => parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a/b-c"), /identity mismatch/);
+	const meta = serializeScopeMetadata({}, stream, "cwd", "/a-b/c");
+	assert.deepEqual(parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a-b/c", meta), stream);
+	assert.throws(() => parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a/b-c", meta), /identity mismatch/);
 	assert.throws(() => serializeScopeStream(stream, "cwd"), /requires its canonical identity/);
-	const unowned = { checkpoint: `${JSON.stringify(stream.checkpoint)}\n`, patches: stream.patches.map((record) => `${JSON.stringify(record)}\n`).join("") };
-	assert.throws(() => parseScopeStream(unowned.checkpoint, unowned.patches, "cwd", "/a-b/c"), /identity is missing/);
-	assert.throws(() => parseScopeStream(owned.checkpoint.replace('"cwd":"/a-b/c"', '"project":"/a-b/c"'), owned.patches, "cwd", "/a-b/c"), /scope identity/);
-});
-
-test("legacy interpretation reads only a validated current snapshot and returns defensive state", () => {
-	assert.equal(parseStateSource(undefined, "state.json"), undefined);
-	assert.throws(() => parseStateSource("bad", "state.json"), /invalid JSON/);
-	assert.throws(() => parseStateSource(JSON.stringify({ ...emptyState(), working: { invalid: null } }), "state.json"), /invalid materialized state/);
-	const source = JSON.stringify({ ...emptyState(), working: { retained: true } });
-	const state = parseStateSource(source, "state.json")!;
-	state.working.retained = false;
-	assert.equal(parseStateSource(source, "state.json")!.working.retained, true);
+	assert.throws(() => parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a-b/c", JSON.stringify({ temporal: owned.temporal })), /identity is missing/);
+	assert.equal(Object.hasOwn(JSON.parse(owned.checkpoint), "owner"), false);
 });
 
 test("canonical writer persists anchored pairs and readers replay only tails with defensive copies", (t) => {
@@ -100,15 +90,19 @@ test("canonical writer persists anchored pairs and readers replay only tails wit
 	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { response: "Current" } }], "T1");
 	const bases = captureTemporalFileBases(cwd, session, repository);
 	const updates = temporalStateFileUpdates(cwd, session, view, ["global", "cwd", "session"], repository);
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const paths = temporalScopePaths(cwd, session, scope, repository);
+		updates.push({ path: paths.meta, content: serializeScopeMetadata({}, view.scopes[scope], scope, scope === "cwd" ? cwd : undefined) });
+	}
 	writeOwnedFileUpdates(updates, bases, repository);
-	assert.equal(updates.length, 6);
+	assert.equal(updates.length, 9);
 	for (const scope of ["global", "cwd", "session"] as const) {
 		const paths = temporalScopePaths(cwd, session, scope, repository);
 		assert.deepEqual(loadScopeStream(cwd, session, scope, repository), view.scopes[scope]);
 		assert.equal(readdirSync(paths.directory).includes("state.json"), false);
 	}
 	const paths = temporalScopePaths(cwd, session, "session", repository);
-	assert.equal(JSON.parse(readFileSync(paths.checkpoint, "utf8")).state.response, "");
+	assert.equal(JSON.parse(readFileSync(paths.checkpoint, "utf8")).response, "");
 	const loaded = loadScopeStream(cwd, session, "session", repository)!;
 	loaded.patches[0]!.transition.id = "mutated";
 	loaded.checkpoint.state.working.mutated = true;
@@ -158,7 +152,8 @@ test("temporal codec round-trips zero, seven, and repeatedly folded sparse tails
 		for (const scope of ["global", "cwd", "session"] as const) {
 			const identity = scope === "cwd" ? cwd : undefined;
 			const sources = serializeScopeStream(view.scopes[scope], scope, identity);
-			restored.scopes[scope] = parseScopeStream(sources.checkpoint, sources.patches, scope, identity)!;
+			const meta = serializeScopeMetadata({}, view.scopes[scope], scope, identity);
+			restored.scopes[scope] = parseScopeStream(sources.checkpoint, sources.patches, scope, identity, meta)!;
 			assert.deepEqual(restored.scopes[scope], view.scopes[scope]);
 			assert.deepEqual(serializeScopeStream(restored.scopes[scope], scope, identity), sources);
 			assert.equal(sources.patches.trim().split("\n").filter(Boolean).length, view.scopes[scope].patches.length);
@@ -181,30 +176,34 @@ test("checkpoint codec uses deterministic bytes, anchored state, and no redundan
 	const reordered = structuredClone(view.scopes.session);
 	reordered.patches[0]!.patch = { response: "Done", working: { a: 2, z: 1 } };
 	assert.deepEqual(serializeScopeStream(reordered, "session"), first);
-	assert.deepEqual(Object.keys(JSON.parse(first.checkpoint)).sort(), ["state", "through"]);
-	assert.equal(JSON.parse(first.checkpoint).through.parent, null);
-	assert.equal(JSON.parse(first.checkpoint).state.response, "");
-	assert.equal(JSON.parse(first.patches).patch.response, "Done");
-	assert.equal(Object.hasOwn(JSON.parse(first.patches), "state"), false);
+	assert.deepEqual(Object.keys(JSON.parse(first.checkpoint)).sort(), ["artifacts", "contract", "response", "working"]);
+	assert.equal(JSON.parse(first.checkpoint).response, "");
+	assert.equal(JSON.parse(first.patches).response, "Done");
+	assert.equal(Object.hasOwn(JSON.parse(first.patches), "transition"), false);
+	assert.deepEqual(first.temporal.checkpoint, view.scopes.session.checkpoint.through);
 });
 
 test("temporal codec rejects incomplete, legacy, malformed, oversized, and causally invalid replay inputs", () => {
 	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { response: "Done" } }], "T1");
 	const source = serializeScopeStream(view.scopes.session, "session");
 	assert.deepEqual(classifyScopeStream(undefined, undefined, "session"), { kind: "absent" });
-	assert.deepEqual(classifyScopeStream(source.checkpoint, source.patches, "session"), { kind: "present", stream: view.scopes.session });
+	const meta = serializeScopeMetadata({}, view.scopes.session, "session");
+	assert.deepEqual(classifyScopeStream(source.checkpoint, source.patches, "session", undefined, meta), { kind: "present", stream: view.scopes.session });
 	assert.equal(parseScopeStream(undefined, undefined, "session"), undefined);
 	assert.throws(() => parseScopeStream(source.checkpoint, undefined, "session"), /incomplete checkpoint\/tail/);
 	assert.throws(() => parseScopeStream(undefined, source.patches, "session"), /incomplete checkpoint\/tail/);
 	assert.throws(() => parseScopeStream("bad", "", "session"), /checkpoint contains invalid JSON/);
 	assert.throws(() => parseScopeStream(source.checkpoint, `${source.patches}bad`, "session"), /line 2/);
 	assert.throws(() => parseScopeStream(JSON.stringify(emptyState()), "", "session"), /checkpoint\/tail envelope/);
-	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(8), "session"), /exceeds seven/);
-	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(2), "session"), /not ordered/);
-	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "global"), /session response/);
+	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(8), "session", undefined, meta), /does not match/);
+	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(2), "session", undefined, meta), /does not match/);
+	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "global", undefined, meta), /session response/);
 	const broken = structuredClone(view.scopes.session);
 	broken.patches[0]!.transition.parent = "other-branch";
-	assert.throws(() => parseScopeStream(source.checkpoint, `${JSON.stringify(broken.patches[0])}\n`, "session"), /Disconnected/);
+	const brokenMeta = JSON.stringify({ version: 1, artifacts: {}, temporal: {
+		checkpoint: broken.checkpoint.through, patches: broken.patches.map((record) => record.transition),
+	} });
+	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "session", undefined, brokenMeta), /Disconnected/);
 });
 
 test("temporal codec validates semantic replay instead of merely accepting valid JSON envelopes", () => {

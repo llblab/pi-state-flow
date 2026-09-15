@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+## 0.13.0: Semantic storage and compiled distribution
+
+- `Semantic storage`: `checkpoint.json` and each `patches.jsonl` line now contain only semantic payloads; temporal boundaries and CWD ownership moved into `meta.json`. Explicit Start atomically converts global state, every owner-proven CWD, and every owned session in the configured store, preserving runtime/config/provenance and unknown metadata. Git-backed stores receive one new root commit; file-only stores receive the same migration without Git.
+- `Compiled distribution`: Pi now executes a nested `dist/pi-state-flow/index.js` identity shim backed by compiled JavaScript and declarations. Builds also stage packaged Skills, while source entrypoints remain available for local development.
+- `Versioned Telegram inspection`: State snapshots now use a less-prominent heading and include the matching monospaced `#N` State Flow step for Global, CWD, Session, and Effective views; the `State Flow: #N` button is unchanged.
+- `Tool output spacing`: Successful visible `patch_state` rows and every failure path, including transport/WebSocket errors, now leave exactly one blank line between the tool heading and its output without changing patch or error semantics.
+
 ## 0.12.1: Cleaner successful patch rendering
 
 - `Successful patch rendering`: Successful visible `patch_state` rows now contain only valid pretty-printed JSON, without the redundant materialized-scope summary, and separate adjacent memory sections with blank lines.
