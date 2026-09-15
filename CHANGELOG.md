@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- `Release verification`: Public npm verification now checks the compiled Pi entrypoint and packaged Skill introduced in 0.13.0 instead of requiring the retired source entrypoint, with an invariant preventing the workflow from drifting back to source-package assumptions.
+
 ## 0.13.0: Semantic storage and compiled distribution
 
 - `Semantic storage`: `checkpoint.json` and each `patches.jsonl` line now contain only semantic payloads; temporal boundaries and CWD ownership moved into `meta.json`. Explicit Start atomically converts global state, every owner-proven CWD, and every owned session in the configured store, preserving runtime/config/provenance and unknown metadata. Git-backed stores receive one new root commit; file-only stores receive the same migration without Git.

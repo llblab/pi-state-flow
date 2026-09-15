@@ -173,10 +173,13 @@ jobs:
           const localPaths = (localPacked?.files ?? []).map((file) => file.path).sort();
           const paths = (packed?.files ?? []).map((file) => file.path).sort();
           if (published.version !== process.env.VERSION || published.gitHead !== process.env.TAG_COMMIT ||
-              !published.pi?.extensions?.includes("./index.ts") ||
+              !published.pi?.extensions?.includes("./dist/pi-state-flow/index.js") ||
+              !published.pi?.skills?.includes("./dist/skills") ||
               packed?.name !== process.env.PACKAGE_NAME || packed?.version !== process.env.VERSION ||
               JSON.stringify(paths) !== JSON.stringify(localPaths) ||
-              !paths.includes("index.ts") || !paths.includes("package.json")) {
+              !paths.includes("dist/pi-state-flow/index.js") ||
+              !paths.includes("dist/skills/state-flow-memory/SKILL.md") ||
+              !paths.includes("package.json")) {
             throw new Error("Published npm identity or packed manifest does not match the release tag.");
           }
           NODE
