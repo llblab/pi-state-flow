@@ -394,6 +394,8 @@ test("patch_state materializes session state before the next inference and respo
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "");
 	const visibleArgs = {
+		global: { working: { shared: true } },
+		cwd: { working: { project: true } },
 		session: {
 			artifacts: { source: { description: "compiled" } },
 			contract: { mode: "strict" },
@@ -411,7 +413,8 @@ test("patch_state materializes session state before the next inference and respo
 	const visibleText = rendered.render(1_000).map((line: string) => line.trimEnd()).join("\n");
 	assert.ok(visibleText.startsWith("\n"), "successful patch JSON should follow the tool heading after one blank line");
 	assert.doesNotMatch(visibleText, /State materialized|session scope/);
-	assert.match(visibleText, /"artifacts": \{[\s\S]+\n\n    "contract": \{[\s\S]+\n\n    "working": \{[\s\S]+\n\n    "response": null/);
+	assert.match(visibleText, /"global": \{[\s\S]+\n\n  "cwd": \{[\s\S]+\n\n  "session": \{/);
+	assert.match(visibleText, /"artifacts": \{[\s\S]+\n\n    "contract": \{[\s\S]+\n\n    "working": \{[\s\S]+\n\n    "response": null[\s\S]+\n\n  "final": true/);
 	assert.deepEqual(JSON.parse(visibleText), visibleArgs);
 	const renderedError = patchState.renderResult(
 		{ content: [{ type: "text", text: "WebSocket error" }] },

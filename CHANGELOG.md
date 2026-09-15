@@ -10,6 +10,7 @@
 - `Compiled distribution`: Pi now executes a nested `dist/pi-state-flow/index.js` identity shim backed by compiled JavaScript and declarations. Builds also stage packaged Skills, while source entrypoints remain available for local development.
 - `Versioned Telegram inspection`: State snapshots now use a less-prominent heading and include the matching monospaced `#N` State Flow step for Global, CWD, Session, and Effective views; the `State Flow: #N` button is unchanged.
 - `Tool output spacing`: Successful visible `patch_state` rows and every failure path, including transport/WebSocket errors, now leave exactly one blank line between the tool heading and its output without changing patch or error semantics.
+- `Patch readability`: Successful patch JSON now separates adjacent Global, CWD, and Session scopes, adjacent semantic sections such as `working` and `response`, and the final eligibility field with blank lines while remaining valid JSON.
 
 ## 0.12.1: Cleaner successful patch rendering
 

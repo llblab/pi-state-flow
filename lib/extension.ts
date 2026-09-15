@@ -57,15 +57,24 @@ export const READ_STATE_TOOL_NAME = "read_state";
 export const MAX_FALLBACK_ATTEMPTS: number = 2;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 const PUBLICATION_SHUTDOWN_WAIT_MS = 2_000;
-const MEMORY_SECTION_KEYS = new Set(["artifacts", "contract", "working", "response"]);
+const PATCH_DISPLAY_SECTION_KEYS = new Set([
+	"global",
+	"cwd",
+	"session",
+	"artifacts",
+	"contract",
+	"working",
+	"response",
+	"final",
+]);
 
-/** Keep successful patch JSON valid while separating adjacent memory sections visually. */
+/** Keep successful patch JSON valid while separating adjacent scopes and memory sections visually. */
 export function formatPatchStateArguments(args: unknown): string {
 	const seenAtIndent = new Set<number>();
 	return JSON.stringify(args, null, 2).split("\n").flatMap((line) => {
 		const indent = line.length - line.trimStart().length;
 		const match = /^(\s+)"([^"]+)":/.exec(line);
-		if (match === null || !MEMORY_SECTION_KEYS.has(match[2])) {
+		if (match === null || !PATCH_DISPLAY_SECTION_KEYS.has(match[2])) {
 			for (const seenIndent of seenAtIndent) {
 				if (seenIndent > indent) seenAtIndent.delete(seenIndent);
 			}
