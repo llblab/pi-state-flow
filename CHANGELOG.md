@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- `Release automation`: The publish job now builds the compiled distribution before capturing its script-free local package inventory, so post-publication comparison uses the same manifest shape as the npm artifact.
+
 ## 0.13.1: Compiled package release verification
 
 - `Release verification`: Public npm verification now checks the compiled Pi entrypoint and packaged Skill introduced in 0.13.0 instead of requiring the retired source entrypoint, with an invariant preventing the workflow from drifting back to source-package assumptions.

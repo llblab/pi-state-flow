@@ -12,6 +12,7 @@ test("index is only a composition and public-export boundary", async () => {
 
 test("release verification requires the compiled package surfaces", async () => {
 	const workflow = await readFile(new URL(".github/workflows/release.yml", root), "utf8");
+	assert.match(workflow, /- name: Build exact local package\n\s+run: npm run build\n\s+- name: Capture exact local package inventory/);
 	assert.match(workflow, /published\.pi\?\.extensions\?\.includes\("\.\/dist\/pi-state-flow\/index\.js"\)/);
 	assert.match(workflow, /published\.pi\?\.skills\?\.includes\("\.\/dist\/skills"\)/);
 	assert.match(workflow, /paths\.includes\("dist\/pi-state-flow\/index\.js"\)/);

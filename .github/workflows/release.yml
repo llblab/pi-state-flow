@@ -120,6 +120,8 @@ jobs:
           NODE
       - name: Install exact dependencies
         run: npm ci
+      - name: Build exact local package
+        run: npm run build
       - name: Capture exact local package inventory
         run: npm pack --dry-run --json --ignore-scripts > npm-local-pack.json
       - name: Resolve npm publication state
