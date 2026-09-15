@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.12.1: Cleaner successful patch rendering
+
+- `Successful patch rendering`: Successful visible `patch_state` rows now contain only valid pretty-printed JSON, without the redundant materialized-scope summary, and separate adjacent memory sections with blank lines.
+
 ## 0.12.0: Unified state reads and visible patches
 
 - `Unified state reads`: `read_state` now resolves current-as-index-zero paths for effective/scoped materializations and retained scope patches while preserving the prior offset/scope input for compatibility. Materialization paths share the composed causal timeline; patch paths walk accepted records for their selected scope.

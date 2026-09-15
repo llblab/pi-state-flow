@@ -392,13 +392,25 @@ test("patch_state materializes session state before the next inference and respo
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "");
+	const visibleArgs = {
+		session: {
+			artifacts: { source: { description: "compiled" } },
+			contract: { mode: "strict" },
+			working: { verified: "intermediate" },
+			response: null,
+		},
+		final: true,
+	};
 	const rendered = patchState.renderResult(
 		result,
 		{ expanded: false, isPartial: false },
 		{ fg: (_color: string, text: string) => text } as any,
-		{ args: { session: { working: { verified: "intermediate" } }, final: true }, isError: false } as any,
+		{ args: visibleArgs, isError: false } as any,
 	);
-	assert.match(rendered.render(120).join("\n"), /"verified": "intermediate"/);
+	const visibleText = rendered.render(1_000).map((line: string) => line.trimEnd()).join("\n");
+	assert.doesNotMatch(visibleText, /State materialized|session scope/);
+	assert.match(visibleText, /"artifacts": \{[\s\S]+\n\n    "contract": \{[\s\S]+\n\n    "working": \{[\s\S]+\n\n    "response": null/);
+	assert.deepEqual(JSON.parse(visibleText), visibleArgs);
 
 	const hiddenAgentDir = mkdtempSync(join(tmpdir(), "state-flow-hidden-patches-"));
 	t.after(() => rmSync(hiddenAgentDir, { recursive: true, force: true }));

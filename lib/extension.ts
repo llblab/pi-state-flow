@@ -57,6 +57,25 @@ export const READ_STATE_TOOL_NAME = "read_state";
 export const MAX_FALLBACK_ATTEMPTS: number = 2;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 const PUBLICATION_SHUTDOWN_WAIT_MS = 2_000;
+const MEMORY_SECTION_KEYS = new Set(["artifacts", "contract", "working", "response"]);
+
+/** Keep successful patch JSON valid while separating adjacent memory sections visually. */
+export function formatPatchStateArguments(args: unknown): string {
+	const seenAtIndent = new Set<number>();
+	return JSON.stringify(args, null, 2).split("\n").flatMap((line) => {
+		const indent = line.length - line.trimStart().length;
+		const match = /^(\s+)"([^"]+)":/.exec(line);
+		if (match === null || !MEMORY_SECTION_KEYS.has(match[2])) {
+			for (const seenIndent of seenAtIndent) {
+				if (seenIndent > indent) seenAtIndent.delete(seenIndent);
+			}
+			return [line];
+		}
+		const separator = seenAtIndent.has(indent) ? [""] : [];
+		seenAtIndent.add(indent);
+		return [...separator, line];
+	}).join("\n");
+}
 
 /** Normalize a bounded compatibility superset without advertising aliases in the model-facing contract. */
 export function normalizePatchStateArguments(args: unknown): any {
@@ -819,7 +838,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		renderResult(result, { isPartial }, theme, context) {
 			const text = result.content.find((block) => block.type === "text")?.text ?? "";
 			if (isPartial || context.isError || !config.showSuccessfulPatches) return new Text(text, 0, 0);
-			return new Text(`${text.trimStart()}\n${theme.fg("dim", JSON.stringify(context.args, null, 2))}`, 0, 0);
+			return new Text(theme.fg("dim", formatPatchStateArguments(context.args)), 0, 0);
 		},
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			try {
