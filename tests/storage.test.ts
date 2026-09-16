@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { execFileSync } from "node:child_process";
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -190,6 +191,25 @@ test("file and Git publishers share worktree exclusion, and file recovery never 
 		assert.equal(existsSync(join(f.root, "checkpoint.json")), false);
 	});
 	assert.equal(existsSync(join(f.root, ".state-flow-publication.lock")), false);
+});
+
+test("publication waits for a brief cooperating live owner", async (t) => {
+	const f = fixture(t);
+	const lock = join(f.root, ".state-flow-publication.lock");
+	const child = childProcess.spawn(process.execPath, ["-e", `
+		const fs = require("node:fs");
+		const path = process.argv[1];
+		fs.writeFileSync(path, process.pid + "\\n", { flag: "wx", mode: 0o600 });
+		process.stdout.write("ready\\n");
+		setTimeout(() => { fs.rmSync(path); }, 150);
+	`, lock], { stdio: ["ignore", "pipe", "inherit"] });
+	t.after(() => { if (child.exitCode === null) child.kill(); });
+	await once(child.stdout!, "data");
+	let entered = false;
+	withStoragePublicationLock(f.root, () => { entered = true; });
+	assert.equal(entered, true);
+	assert.equal(existsSync(lock), false);
+	if (child.exitCode === null) await once(child, "exit");
 });
 
 test("file preparation rollback restores opaque originals and preserves conflicting external output", (t) => {

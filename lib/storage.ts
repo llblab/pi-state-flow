@@ -2,7 +2,7 @@
 // Excludes: temporal algebra, Pi lifecycle, Git objects/remotes, and backend fallback policy.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, lstatSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import {
 	assertOwnedFileUpdates, captureTemporalFileBases, parseScopeProvenance, parseScopeStream, restoreDurableFileBases,
@@ -44,17 +44,42 @@ export function initializeFileStore(root: string): void {
 	mkdirSync(resolve(root), { recursive: true });
 }
 
+const PUBLICATION_LOCK_WAIT_MS = 2_000;
+const PUBLICATION_LOCK_POLL_MS = 25;
+const publicationLockWait = new Int32Array(new SharedArrayBuffer(4));
+
+function liveForeignLockOwner(path: string): boolean {
+	let owner: string;
+	try { owner = readFileSync(path, "utf8").trim(); }
+	catch { return true; }
+	if (owner.length === 0) return true;
+	if (!/^[1-9]\d*$/.test(owner)) return false;
+	const pid = Number(owner);
+	if (!Number.isSafeInteger(pid) || pid === process.pid) return false;
+	try { process.kill(pid, 0); return true; }
+	catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/** Wait only for a cooperating live owner; interrupted or malformed locks remain explicit recovery errors. */
+export function acquirePublicationLock(path: string, unavailable: (cause: unknown) => Error): number {
+	const deadline = Date.now() + PUBLICATION_LOCK_WAIT_MS;
+	while (true) {
+		try { return openSync(path, "wx", 0o600); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !liveForeignLockOwner(path) || Date.now() >= deadline) throw unavailable(error);
+			Atomics.wait(publicationLockWait, 0, 0, Math.min(PUBLICATION_LOCK_POLL_MS, deadline - Date.now()));
+		}
+	}
+}
+
 /** Git writers also acquire this lock before their common-Git-directory lock. */
 export function withStoragePublicationLock<T>(repositoryRoot: string, action: (root: string) => T): T {
 	const root = resolve(repositoryRoot);
 	assertStorageDirectory(root);
 	const path = resolve(root, ".state-flow-publication.lock");
-	let descriptor: number;
-	try {
-		descriptor = openSync(path, "wx", 0o600);
-	} catch (error) {
-		throw new RevisionUnavailableError(`State Flow publication lock is unavailable at ${path}; reconcile the active or interrupted publisher before retrying`, { cause: error });
-	}
+	const descriptor = acquirePublicationLock(path, (cause) => new RevisionUnavailableError(
+		`State Flow publication lock is unavailable at ${path}; reconcile the active or interrupted publisher before retrying`, { cause },
+	));
 	try {
 		writeFileSync(descriptor, `${process.pid}\n`);
 		return action(root);

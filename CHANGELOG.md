@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.13.4: Concurrent publication hotfix
+
+- `Publication contention`: A publisher now waits briefly for a cooperating live State Flow process to release the storage or shared Git lock, preventing transient concurrent `patch_state` calls from failing while preserving explicit errors for interrupted, malformed, reentrant, or prolonged lock ownership.
+
 ## 0.13.3: Telegram section discovery hotfix
 
 - `Telegram section discovery`: The compiled extension now resolves the sibling pi-telegram public sections membrane from its compiled layout as well as the package export, restoring the State Flow control in the Telegram main menu without making Telegram a core dependency.

@@ -1,6 +1,6 @@
 // Domain: durable Git revision reads, compare-and-swap publication, and exact-commit push retry.
 import { createHash } from "node:crypto";
-import { closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, mkdtempSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -25,7 +25,7 @@ import { planLegacyStorageMigration } from "./migration.ts";
 import { canonicalJson, sameJson } from "./json.ts";
 import { validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
 import { createSessionRuntime, parseSessionRuntime, serializeSessionRuntime, type SessionRuntime, type Snapshot } from "./snapshot.ts";
-import { assertTemporalFileBase, loadTemporalFileRevision, planTemporalPublication, temporalFileReceipts, withStoragePublicationLock } from "./storage.ts";
+import { acquirePublicationLock, assertTemporalFileBase, loadTemporalFileRevision, planTemporalPublication, temporalFileReceipts, withStoragePublicationLock } from "./storage.ts";
 import type { MaterializedState, StateScope } from "./state.ts";
 
 const GIT_TIMEOUT_MS = 15_000;
@@ -108,12 +108,9 @@ function withPublicationLock<T>(repositoryRoot: string, action: (root: string) =
 		const root = assertRepositoryRoot(lockedRoot);
 		const common = resolve(root, git(root, ["rev-parse", "--git-common-dir"]).stdout.trim());
 		const path = resolve(common, "state-flow-publication.lock");
-		let descriptor: number;
-		try {
-			descriptor = openSync(path, "wx", 0o600);
-		} catch (error) {
-			throw new Error(`State Flow publication lock is unavailable at ${path}; reconcile the active or interrupted publisher before retrying`, { cause: error });
-		}
+		const descriptor = acquirePublicationLock(path, (cause) => new Error(
+			`State Flow publication lock is unavailable at ${path}; reconcile the active or interrupted publisher before retrying`, { cause },
+		));
 		try {
 			writeFileSync(descriptor, `${process.pid}\n`);
 			return action(root);
