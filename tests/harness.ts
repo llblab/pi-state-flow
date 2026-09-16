@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stateFlowExtension from "../index.ts";
@@ -32,6 +32,8 @@ function trackFixtureRoot(root: string): string {
 export interface HarnessOptions {
 	agentDir?: string;
 	autoStart?: boolean;
+	passiveBootstrap?: boolean;
+	passiveTools?: boolean;
 	remotePublication?: "off" | "turn-end" | "transition";
 	cwd?: string;
 	repositoryRoot?: string;
@@ -99,8 +101,10 @@ export function harness(options: HarnessOptions = {}) {
 	const fixtureRoot = options.repositoryRoot ?? trackFixtureRoot(mkdtempSync(join(tmpdir(), "state-flow-harness-")));
 	const agentDir = options.agentDir ?? (options.useDefaultKnowledgeRoot ? getAgentDir() : join(fixtureRoot, "agent"));
 	if (options.autoStart !== undefined || options.remotePublication !== undefined) {
-		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "state-flow.json"), JSON.stringify({
+		const configRoot = options.useConfiguredDirectory ? join(agentDir, "state-flow") : fixtureRoot;
+		mkdirSync(configRoot, { recursive: true });
+		const configPath = join(configRoot, "config.json");
+		if (!existsSync(configPath)) writeFileSync(configPath, JSON.stringify({
 			...(options.autoStart === undefined ? {} : { autoStart: options.autoStart }),
 			...(options.remotePublication === undefined ? {} : { remotePublication: options.remotePublication }),
 		}));
@@ -124,7 +128,7 @@ export function harness(options: HarnessOptions = {}) {
 		}
 	}
 	let accessor: { read(offset?: number, scope?: StateScope): MaterializedState };
-	stateFlowExtension(pi as any, { agentDir, repositoryRoot: options.useConfiguredDirectory ? undefined : repositoryRoot, knowledgeRoot: options.useDefaultKnowledgeRoot ? undefined : options.knowledgeRoot ?? repositoryRoot, onRuntime: (value) => { accessor = value; }, ...(options.telegram === undefined ? {} : { telegram: options.telegram }) });
+	stateFlowExtension(pi as any, { agentDir, repositoryRoot: options.useConfiguredDirectory ? undefined : repositoryRoot, knowledgeRoot: options.useDefaultKnowledgeRoot ? undefined : options.knowledgeRoot ?? repositoryRoot, passive: { bootstrap: options.passiveBootstrap ?? false, tools: options.passiveTools ?? false }, onRuntime: (value) => { accessor = value; }, ...(options.telegram === undefined ? {} : { telegram: options.telegram }) });
 	return {
 		handlers,
 		commands,

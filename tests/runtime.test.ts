@@ -19,6 +19,7 @@ import { emptyState, type StateScope } from "../lib/state.ts";
 import type { JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { readTemporalState, validateTemporalState } from "../lib/temporal.ts";
+import { readProjectedState } from "../lib/query.ts";
 import { commitScopedTransition, stageAtomicScopePatches } from "../lib/transition.ts";
 import { commitScopedTerminal, commitTerminal, harness, start } from "./harness.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
@@ -34,7 +35,8 @@ test("runtime keeps native session storage identity paired and detached from cal
 
 test("explicit migration upgrades predecessor envelopes after passive restore populated the runtime cache", (t) => {
 	const fixture = driftFixture(t);
-	const { runtime } = restoreSessionA(fixture);
+	const { runtime, snapshot } = restoreSessionA(fixture);
+	publishLazyPatch(runtime, snapshot, "global", { migrated: ["ordinary", "json"] }, "legacy-lazy");
 	const before = runtime.states();
 	const paths = temporalScopePaths(fixture.cwd, "session-a", "global", fixture.root);
 	const stream = runtime.view!.scopes.global;
@@ -52,6 +54,7 @@ test("explicit migration upgrades predecessor envelopes after passive restore po
 	assert.equal(readFileSync(paths.checkpoint, "utf8"), semantic.checkpoint);
 	assert.equal(readFileSync(paths.patches, "utf8"), semantic.patches);
 	assert.deepEqual(runtime.states(), before);
+	assert.deepEqual(runtime.read(0, "global").lazy, { migrated: ["ordinary", "json"] });
 	assert.deepEqual(JSON.parse(readFileSync(paths.meta, "utf8")).temporal, {
 		checkpoint: stream.checkpoint.through,
 		patches: stream.patches.map((record) => record.transition),
@@ -71,6 +74,7 @@ test("fork copies only the selected session stream and provenance into a fresh o
 	parent.snapshot.meta.specification = "Parent request, not a child run";
 	parent.snapshot.meta.step++;
 	parent.runtime.publish(parent.snapshot, true, createAcceptedTransition(before, after, "fork-artifacts"), { provenance });
+	publishLazyPatch(parent.runtime, parent.snapshot, "session", { memory: ["selected", { retained: true }] }, "fork-lazy");
 	let selectedRevision = "";
 	for (let index = 0; index < 5; index++) selectedRevision = publishScopedPatch(parent.runtime, parent.snapshot, "session", { counter: index }, `fork-seed-${index}`)!.commit!;
 	const selected = structuredClone(parent.runtime.view!.scopes.session);
@@ -106,6 +110,8 @@ test("fork copies only the selected session stream and provenance into a fresh o
 	assert.equal(fork.snapshot.meta.step, 0);
 	assert.equal(fork.snapshot.meta.specification, undefined);
 	assert.deepEqual(child.view!.scopes.session, selected);
+	assert.deepEqual(child.read(0, "session").lazy, { memory: ["selected", { retained: true }] });
+	assert.deepEqual(readProjectedState(child.view!, ["effective.lazy.memory"]), { value: ["selected", { retained: true }] });
 	assert.deepEqual(child.artifactProvenance("session"), provenance.session);
 	assert.deepEqual(child.artifactProvenance("global"), registry);
 	assert.equal(child.artifactProvenance("cwd")["/sources/cwd.md"].compilerRevision, "fixture-v2");
@@ -200,6 +206,7 @@ test("file-only fork copies its exact session cohort and rejects a source that e
 	const before = parent.states();
 	const after = structuredClone(before);
 	after.session.working.retained = true;
+	after.session.lazy = { memory: ["file-only", 7] };
 	after.session.artifacts["/private.md"] = { description: "Private file routing" };
 	parent.publish(snapshot, true, createAcceptedTransition(before, after, "file-seed"), { provenance: { session: { "/private.md": { sourceHash: `sha256:${"a".repeat(64)}`, compilerRevision: "fixture-v1" } } } });
 	snapshot.config.enabled = false;
@@ -211,6 +218,7 @@ test("file-only fork copies its exact session cohort and rejects a source that e
 	assert.ok(isFileRevision(copied.snapshot.meta.durableBase));
 	assert.equal(copied.snapshot.config.enabled, false);
 	assert.deepEqual(child.view!.scopes.session, parent.view!.scopes.session);
+	assert.deepEqual(child.read(0, "session").lazy, { memory: ["file-only", 7] });
 	assert.deepEqual(child.artifactProvenance("session"), parent.artifactProvenance("session"));
 	assert.equal(existsSync(join(root, ".git")), false);
 	const other = new TemporalRuntime(cwd, "file-other", root);
@@ -334,7 +342,7 @@ test("live adapter writes only temporal pairs and runtime, and restores old bran
 	const h = harness();
 	await start(h);
 	const files = readdirSync(h.repositoryRoot, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && !entry.parentPath.includes(".git")).map((entry) => relative(h.repositoryRoot, join(entry.parentPath, entry.name))).sort();
-	assert.equal(files.length, 10);
+	assert.equal(files.length, 11);
 	assert.equal(files.filter((name) => name.endsWith("checkpoint.json")).length, 3);
 	assert.equal(files.some((name) => name.endsWith("state.json")), false);
 	await commitTerminal(h, {}, { branch: "old" }, "Old");
@@ -726,6 +734,20 @@ function seedGlobalArtifact(fixture: ReturnType<typeof driftFixture>) {
 	return { path, revision: publication.commit!, snapshot: selected.snapshot };
 }
 
+function publishLazyPatch(
+	runtime: TemporalRuntime,
+	snapshot: Snapshot,
+	scope: StateScope,
+	lazy: JsonObject,
+	id: string,
+) {
+	const before = runtime.states();
+	const after = structuredClone(before);
+	after[scope].lazy = structuredClone(lazy);
+	snapshot.meta.step += 1;
+	return runtime.publish(snapshot, true, createAcceptedTransition(before, after, id));
+}
+
 function publishScopedPatch(
 	runtime: TemporalRuntime,
 	snapshot: Snapshot,
@@ -978,7 +1000,7 @@ test("a partial live session cohort fails closed without regenerating missing au
 	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), fixture.revision);
 });
 
-for (const missingRuntimeFile of ["config", "meta"] as const) test(`a partial live session runtime missing ${missingRuntimeFile} fails closed without repair`, (t) => {
+for (const missingRuntimeFile of ["config", "runtime"] as const) test(`a partial live session runtime missing ${missingRuntimeFile} fails closed without repair`, (t) => {
 	const fixture = driftFixture(t);
 	const paths = sessionRuntimePaths(fixture.cwd, "session-a", fixture.root);
 	rmSync(paths[missingRuntimeFile]);
@@ -986,10 +1008,10 @@ for (const missingRuntimeFile of ["config", "meta"] as const) test(`a partial li
 	const snapshot = runtime.restore(fixture.revision);
 	assert.throws(
 		() => publishScopedPatch(runtime, snapshot, "session", { rejected: true }, `partial-runtime-${missingRuntimeFile}`),
-		/Incomplete State Flow config\/meta pair/,
+		/Incomplete State Flow config\/runtime pair/,
 	);
 	assert.equal(existsSync(paths[missingRuntimeFile]), false);
-	assert.equal(existsSync(paths[missingRuntimeFile === "config" ? "meta" : "config"]), true);
+	assert.equal(existsSync(paths[missingRuntimeFile === "config" ? "runtime" : "config"]), true);
 	assert.equal(runtime.read(0, "session").working.rejected, undefined);
 	assert.equal(execFileSync("git", ["-C", fixture.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), fixture.revision);
 });
@@ -1240,7 +1262,7 @@ for (const resumeAfterAdvance of [false, true]) test(`runtime-only Stop preserve
 	assert.deepEqual(sharedPaths.map((path) => readFileSync(path)), sharedBefore, "Stop must not rewind another publisher's semantic files or provenance");
 	const paths = sessionRuntimePaths(fixture.cwd, "session-a", fixture.root);
 	const changed = execFileSync("git", ["-C", fixture.root, "diff-tree", "--no-commit-id", "--name-only", "-r", stopped], { encoding: "utf8" }).trim().split("\n").sort();
-	assert.deepEqual(changed, [paths.config, paths.meta].map((path) => relative(fixture.root, path).replaceAll("\\", "/")).sort());
+	assert.deepEqual(changed, [paths.config, paths.runtime].map((path) => relative(fixture.root, path).replaceAll("\\", "/")).sort());
 	const restored = new TemporalRuntime(fixture.cwd, "session-a", fixture.root);
 	const stoppedSnapshot = restored.restore(stopped);
 	assert.equal(stoppedSnapshot.config.enabled, false);

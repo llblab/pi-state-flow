@@ -238,8 +238,8 @@ test("live storage paths mirror Pi CWD and session file names without appended h
 	assert.deepEqual(JSON.parse(readFileSync(join(expectedCwd, "meta.json"), "utf8")).owner, { cwd });
 	assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(expectedCwd, "checkpoint.json"), "utf8")), "owner"), false);
 	const runtime = sessionRuntimePaths(cwd, sessionId, root, key);
-	assert.equal(JSON.parse(readFileSync(runtime.meta, "utf8")).identity.sessionId, sessionId);
-	assert.equal(JSON.parse(readFileSync(runtime.meta, "utf8")).identity.cwd, cwd);
+	assert.equal(JSON.parse(readFileSync(runtime.runtime, "utf8")).identity.sessionId, sessionId);
+	assert.equal(JSON.parse(readFileSync(runtime.runtime, "utf8")).identity.cwd, cwd);
 	assert.equal(execFileSync("git", ["-C", root, "ls-files"], { encoding: "utf8" }).includes("-" + "a".repeat(64)), false);
 	await h.commands.get("state-flow-status").handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, new RegExp(`Scope keys: CWD --home-llb-Repos-deos--; session ${key}`));
@@ -260,6 +260,31 @@ test("registers patch_state plus read-only read_state and exposes the lifecycle 
 	assert.equal(h.tools.get("patch_state")!.executionMode, "sequential");
 	assert.deepEqual([...h.commands.keys()], ["state-flow-start", "state-flow-status", "state-flow-stop"]);
 });
+test("passive bootstrap and tools are independently configurable and passive patches do not start an episode", async () => {
+	for (const [passiveBootstrap, passiveTools] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+		const seed = harness({ passiveBootstrap: false, passiveTools: false });
+		seed.handlers.get("session_start")!({ reason: "new" }, seed.ctx);
+		await start(seed);
+		await seed.tools.get("patch_state")!.execute("seed", { cwd: { working: { shared: "durable" } } }, undefined, undefined, seed.ctx);
+		await seed.commands.get("state-flow-stop")!.handler("", seed.ctx);
+		const h = harness({ repositoryRoot: seed.repositoryRoot, cwd: seed.ctx.cwd, sessionId: `passive-${passiveBootstrap}-${passiveTools}`, initializeRepository: false, passiveBootstrap, passiveTools });
+		h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+		assert.equal(h.activeTools.includes("patch_state"), passiveTools);
+		const bootstrapResult = h.handlers.get("before_agent_start")!({ prompt: "ordinary", systemPrompt: "base" }, h.ctx);
+		assert.equal(bootstrapResult !== undefined, passiveBootstrap);
+		const projected = h.handlers.get("context")!({ messages: [] }, h.ctx);
+		assert.equal(projected !== undefined, passiveBootstrap);
+		if (passiveBootstrap) assert.match(JSON.stringify(projected), /durable/);
+		if (passiveTools) {
+			const read = await h.tools.get("read_state")!.execute("read", { path: "working.shared" });
+			assert.match(read.content[0].text, /durable/);
+			await h.tools.get("patch_state")!.execute("write", { session: { working: { local: true } }, final: true }, undefined, undefined, h.ctx);
+			assert.equal(h.resolveSnapshot().config.enabled, false);
+			assert.equal(h.compactRequests.length, 0);
+		}
+	}
+});
+
 test("State Flow tools follow branch enablement and history reads cannot run while disabled", async () => {
 	const h = harness();
 	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
@@ -279,11 +304,12 @@ test("State Flow tools follow branch enablement and history reads cannot run whi
 	await assert.rejects(read.execute("aborted", {}, AbortSignal.abort()), /aborted/);
 });
 
-test("read_state lazily projects all hot offsets and scopes at one boundary without publication or Git calls", async () => {
+test("read_state lazily projects all hot historical paths and scopes without publication or Git calls", async () => {
 	const h = harness();
 	await start(h);
 	const read = h.tools.get("read_state");
-	await assert.rejects(read.execute("pre-origin", { offset: 1 }, undefined), /predates the proven temporal origin/);
+	await assert.rejects(read.execute("missing-path", {}, undefined), /requires path or paths/);
+	await assert.rejects(read.execute("pre-origin", { path: "effective[1]" }, undefined), /predates the proven temporal origin/);
 	const expected: Record<string, Record<string, string>> = { global: {}, cwd: {}, session: {} };
 	const history = [structuredClone(expected)];
 	const changes = [["global", "G1"], ["cwd", "C2"], ["session", "S3"], ["session", null],
@@ -303,30 +329,35 @@ test("read_state lazily projects all hot offsets and scopes at one boundary with
 	try {
 		for (let offset = 0; offset <= 7; offset++) {
 			const states = history[history.length - 1 - offset]!;
-			const boundaries = [];
 			for (const scope of ["effective", "global", "cwd", "session"]) {
-				const result = await read.execute("history", { offset, scope }, undefined);
+				const path = `${scope}[${offset}]`;
+				const result = await read.execute("history", { path }, undefined);
 				const value = JSON.parse(result.content[0].text);
 				const working = scope === "effective" ? { ...states.global, ...states.cwd, ...states.session } : states[scope];
-				assert.deepEqual(value.state, { artifacts: {}, contract: {}, working, response: "" });
-				assert.equal(value.offset, offset);
-				assert.equal(value.scope, scope);
-				assert.deepEqual(result.details, { offset, scope, transitionId: value.boundary.id });
-				assert.deepEqual(Object.keys(value).sort(), ["boundary", "offset", "scope", "state"]);
-				boundaries.push(value.boundary);
+				assert.deepEqual(value.value, { artifacts: {}, contract: {}, working, response: "" });
+				assert.deepEqual(result.details, { path, projection: "value" });
 			}
-			for (const boundary of boundaries) assert.deepEqual(boundary, boundaries[0]);
 		}
-		assert.equal(JSON.parse((await read.execute("default", {}, undefined)).content[0].text).state.working.shared, "S8");
-		assert.equal(JSON.parse((await read.execute("global-default", { scope: "global" }, undefined)).content[0].text).state.working.shared, "G6");
-		const currentPath = JSON.parse((await read.execute("path-current", { path: "state" }, undefined)).content[0].text);
-		assert.equal(currentPath.state.working.shared, "S8");
-		assert.equal(currentPath.path, "state");
-		const previousGlobalPatch = JSON.parse((await read.execute("path-patch", { path: "state.global.patches[1]" }, undefined)).content[0].text);
-		assert.deepEqual(previousGlobalPatch.patch, { working: { shared: "G1" } });
-		await assert.rejects(read.execute("mixed-query", { path: "state", offset: 0 }, undefined), /cannot be combined/);
-		for (const offset of [-1, 0.5, 8, null, "1"]) await assert.rejects(read.execute("invalid", { offset }, undefined), /0 to 7/);
-		for (const scope of [null, "other"]) await assert.rejects(read.execute("invalid-scope", { scope }, undefined), /Unknown temporal scope/);
+		const currentPath = JSON.parse((await read.execute("path-current", { path: "effective" }, undefined)).content[0].text);
+		assert.equal(currentPath.value.working.shared, "S8");
+		assert.deepEqual(Object.keys(currentPath), ["value"]);
+		const selectedValue = JSON.parse((await read.execute("path-value", { path: "effective.working.shared" }, undefined)).content[0].text);
+		assert.deepEqual(selectedValue, { value: "S8" });
+		const conciseValue = JSON.parse((await read.execute("concise-path", { path: "working.shared" }, undefined)).content[0].text);
+		assert.deepEqual(conciseValue, selectedValue);
+		const selectedKeys = JSON.parse((await read.execute("path-keys", { path: "effective.working", projection: "keys" }, undefined)).content[0].text);
+		assert.deepEqual(selectedKeys, { meta: { type: "object", size: 1 }, keys: { shared: "string" } });
+		const batch = JSON.parse((await read.execute("path-batch", { paths: ["global.working.shared", "cwd.working.shared"] }, undefined)).content[0].text);
+		assert.deepEqual(batch, { value: ["G6", "C7"] });
+		const selectedPatch = JSON.parse((await read.execute("projected-patch", { path: "global[2].working.shared", projection: "patch" }, undefined)).content[0].text);
+		assert.deepEqual(selectedPatch, { patch: "G6" });
+		const previousGlobalPatch = JSON.parse((await read.execute("path-patch", { path: "global.patches[1]" }, undefined)).content[0].text);
+		assert.deepEqual(previousGlobalPatch, { patch: { working: { shared: "G1" } } });
+		await assert.rejects(read.execute("double-path", { path: "working", paths: ["cwd.working"] }, undefined), /not both/);
+		await assert.rejects(read.execute("projection-only", { projection: "keys" }, undefined), /requires path or paths/);
+		for (const path of ["effective[-1]", "effective[8]", "effective[0.5]", "other.working"]) {
+			await assert.rejects(read.execute("invalid", { path }, undefined));
+		}
 	} finally {
 		childProcess.spawnSync = spawn;
 		syncBuiltinESMExports();
@@ -427,8 +458,9 @@ test("patch_state materializes session state before the next inference and respo
 
 	const hiddenAgentDir = mkdtempSync(join(tmpdir(), "state-flow-hidden-patches-"));
 	t.after(() => rmSync(hiddenAgentDir, { recursive: true, force: true }));
-	writeFileSync(join(hiddenAgentDir, "state-flow.json"), JSON.stringify({ showSuccessfulPatches: false }));
-	const hidden = harness({ agentDir: hiddenAgentDir });
+	mkdirSync(join(hiddenAgentDir, "state-flow"));
+	writeFileSync(join(hiddenAgentDir, "state-flow", "config.json"), JSON.stringify({ showSuccessfulPatches: false }));
+	const hidden = harness({ agentDir: hiddenAgentDir, repositoryRoot: join(hiddenAgentDir, "state-flow") });
 	await start(hidden, "Hide successful patch details");
 	const hiddenPatch = hidden.tools.get("patch_state")!;
 	const hiddenResult = await hiddenPatch.execute(
@@ -930,6 +962,7 @@ test("start uses the passive boundary for one active bootstrap instead of resurr
 	const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Active again." }] };
 	h.handlers.get("message_end")!({ message: final }, h.ctx);
 	h.handlers.get("turn_end")!({ message: final }, h.ctx);
+	h.handlers.get("before_agent_start")!({ prompt: "Later", systemPrompt: "base" }, h.ctx);
 	const later = h.handlers.get("context")!({ messages: [user("Later", afterStop + 3)] }, h.ctx);
 	assert.match(later.messages[0].content[0].text, /State Flow runtime context/);
 	assert.doesNotMatch(JSON.stringify(later.messages), /exit handoff/);

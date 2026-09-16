@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { assistantToolCallCount, finalizedAssistantResponse, stateFlowProtocol } from "./protocol.ts";
-import { createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, runtimeContextMessage, VALIDATION_MESSAGE_TYPE, withoutPrivateValidation, type PassiveContinuation } from "./context.ts";
+import { createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, runtimeContextMessage, syntheticUser, VALIDATION_MESSAGE_TYPE, withoutPrivateValidation, type PassiveContinuation } from "./context.ts";
 import { ArtifactReadTracker } from "./acquisition.ts";
 import { loadStateFlowConfig } from "./config.ts";
 import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramLoader } from "./telegram.ts";
@@ -18,7 +18,7 @@ import { emptyState, overlayStates, projectStateForModel, type AtomicScopePatche
 import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, validateFinalEligibility, type StagedScopedTransition } from "./transition.ts";
 import { discoverSnapshotData, hasPriorConversation, isNewSession, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
 import { compactStatus, detailedStatus, STATUS_KEY, type PendingPublicationDiagnostic, type StatusDiagnostics } from "./status.ts";
-import { prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
+import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
 import { recoverSnapshot } from "./recovery.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
 import { resolveRemotePublicationPolicy, serializeRemotePublicationPolicyDocument } from "./publication.ts";
@@ -26,8 +26,8 @@ import { coalescePublicationTarget, createPublicationQueue, type PublicationQueu
 import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePath, removePublicationQueue, savePublicationQueue } from "./publication.ts";
 import { runPublicationWorker } from "./publication.ts";
 import { getKnowledgeRoot, GlobalMarkdownDiscovery } from "./discovery.ts";
-import { isObject, sameJson } from "./json.ts";
-import { readStatePath } from "./query.ts";
+import { canonicalJson, isObject, sameJson } from "./json.ts";
+import { readProjectedState, readStatePath } from "./query.ts";
 import {
 	cwdScopeKey,
 	resolveSessionAddress,
@@ -50,6 +50,8 @@ export interface StateFlowExtensionOptions {
 	knowledgeRoot?: string;
 	onRuntime?: (accessor: { read(offset?: number, scope?: StateScope): MaterializedState }) => void;
 	telegram?: { load?: StateFlowTelegramLoader };
+	/** Test/SDK capability override; repository config remains the Pi default. */
+	passive?: { bootstrap?: boolean; tools?: boolean };
 }
 
 export const PATCH_STATE_TOOL_NAME = "patch_state";
@@ -113,7 +115,12 @@ function separatedFailure(error: unknown): Error {
 
 export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowExtensionOptions = {}): void {
 	const agentDir = options.agentDir ?? getAgentDir();
-	const config = loadStateFlowConfig(agentDir);
+	const loadedConfig = loadStateFlowConfig(agentDir, options.repositoryRoot);
+	const config = {
+		...loadedConfig,
+		passiveBootstrap: options.passive?.bootstrap ?? loadedConfig.passiveBootstrap,
+		passiveTools: options.passive?.tools ?? loadedConfig.passiveTools,
+	};
 	let snapshot: Snapshot = emptySnapshot();
 	let scopeStates: ScopedStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
 	let branchHasSnapshot = false;
@@ -268,11 +275,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		scopeStates = runtime?.view ? runtime.states() : { global: emptyState(), cwd: emptyState(), session: emptyState() };
 	}
 
+	function passiveToolsAvailable(): boolean {
+		return snapshot.config.enabled || config.passiveTools;
+	}
+
 	function syncStateFlowTools(): void {
 		const active = pi.getActiveTools();
 		const owned = [PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME];
-		if (owned.every((name) => active.includes(name) === snapshot.config.enabled)) return;
-		pi.setActiveTools(snapshot.config.enabled
+		const available = passiveToolsAvailable();
+		if (owned.every((name) => active.includes(name) === available)) return;
+		pi.setActiveTools(available
 			? [...new Set([...active, ...owned])]
 			: active.filter((name) => !owned.includes(name)));
 	}
@@ -680,6 +692,14 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				else if (snapshot.meta.bootstrap) bootstrapContinuation = continuation;
 			}
 		}
+		if (!snapshot.config.enabled && (config.passiveBootstrap || config.passiveTools) && !runtime?.view) {
+			try {
+				runtime?.loadPassive();
+				installScopeStates();
+			} catch (error) {
+				ctx.ui.notify(`State Flow passive memory is unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			}
+		}
 		if (snapshot.config.enabled) deferArtifactRefresh();
 		syncStateFlowTools();
 		updateUi(ctx);
@@ -796,34 +816,38 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	pi.registerTool({
 		name: READ_STATE_TOOL_NAME,
 		label: "Read State",
-		description: "Read State Flow through a unified path such as state, state[1], state.cwd[2], or state.global.patches[0]. The legacy offset/scope form remains accepted. Read-only and lazy; unavailable hot history is an error.",
-		promptSnippet: "Read cached state or accepted scope patches with a unified path",
+		description: "Read exact State Flow values or historical semantic patches with one path or an ordered path list. Unscoped semantic paths read the effective overlay; effective makes that overlay explicit, while global, cwd, and session select ownership. Array selectors support zero-based indices and half-open [start..end] ranges. Projection value returns semantic data; keys returns minimal structure; patch intersects the selected path at its boundary.",
+		promptSnippet: "Read exact state values, structures, or historical semantic patches",
 		parameters: Type.Object({
-			path: Type.Optional(Type.String({ description: "Unified query path; current aliases use index 0" })),
-			offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 7, description: "Legacy accepted-transition offset; defaults to 0" })),
-			scope: Type.Optional(StringEnum(["effective", "global", "cwd", "session"] as const, { description: "Legacy projection at the same boundary; defaults to effective" })),
+			path: Type.Optional(Type.String({ description: "One semantic path; unscoped paths use effective, explicit roots may use effective/global/cwd/session and historical [N], and arrays support half-open [start..end] ranges" })),
+			paths: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Ordered query paths evaluated as one all-or-error read" })),
+			projection: Type.Optional(StringEnum(["value", "keys", "patch"] as const, { description: "Value snapshot by default, structural keys with minimal meta, or the selected historical semantic patch" })),
 		}, { additionalProperties: false }),
 		async execute(_toolCallId, params, signal) {
 			try {
-				type ReadDetails = { path?: string; offset?: number; scope?: string; transitionId: string };
-				if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
+				type ReadDetails = { path?: string; paths?: string[]; projection?: string; transitionId?: string };
+				if (!passiveToolsAvailable()) throw new Error("State Flow tools are disabled by configuration");
 				if (signal?.aborted) throw new Error("State Flow read was aborted");
 				if (!runtime?.view) throw new Error("State Flow temporal runtime is unavailable");
-				if (params.path !== undefined) {
-					if (params.offset !== undefined || params.scope !== undefined) throw new Error("read_state path cannot be combined with legacy offset or scope");
-					const result = readStatePath(runtime.view, params.path);
+				if (params.path === undefined && params.paths === undefined) throw new Error("read_state requires path or paths");
+				if (params.path !== undefined && params.paths !== undefined) throw new Error("read_state accepts path or paths, not both");
+				{
+					const paths = params.paths ?? [params.path!];
+					if (paths.length === 1 && /^(?:global|cwd|session)\.patches(?:\[\d+\])?$/.test(paths[0]!)) {
+						if (params.projection !== undefined && params.projection !== "value") throw new Error("Scope patch paths support only the value projection");
+						const result = readStatePath(runtime.view, paths[0]!);
+						if (!("patch" in result)) throw new Error("Expected a scope patch path");
+						return {
+							content: [{ type: "text", text: `\n${JSON.stringify({ patch: result.patch })}` }],
+							details: { path: paths[0], transitionId: result.boundary.id } as ReadDetails,
+						};
+					}
+					const result = readProjectedState(runtime.view, paths, params.projection);
 					return {
 						content: [{ type: "text", text: `\n${JSON.stringify(result)}` }],
-						details: { path: params.path, transitionId: result.boundary.id } as ReadDetails,
+						details: { ...(params.path === undefined ? { paths } : { path: params.path }), projection: params.projection ?? "value" } as ReadDetails,
 					};
 				}
-				const { offset = 0, scope = "effective" } = params;
-				const state = runtime.read(offset, scope === "effective" ? undefined : scope);
-				const boundary = runtime.view.lineage.at(-1 - offset)!;
-				return {
-					content: [{ type: "text", text: `\n${JSON.stringify({ offset, scope, boundary, state: projectStateForModel(state) })}` }],
-					details: { offset, scope, transitionId: boundary.id } as ReadDetails,
-				};
 			} catch (error) {
 				throw separatedFailure(error);
 			}
@@ -856,7 +880,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		},
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			try {
-				if (!snapshot.config.enabled) throw new Error("State Flow is disabled on this session branch");
+				if (!passiveToolsAvailable()) throw new Error("State Flow tools are disabled by configuration");
 				if (signal?.aborted) throw new Error("State Flow patch was aborted before materialization");
 				if (!isObject(params)) throw new Error("patch_state requires an object");
 				const allowed = new Set(["global", "cwd", "session", "final"]);
@@ -878,16 +902,27 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 						return { content: [{ type: "text", text: "\nState unchanged; iteration remains non-terminal." }], details: { final: false } };
 					}
 					if (params.final !== true) throw new Error('patch_state requires at least one scope patch or {"final":true}');
+					if (!snapshot.config.enabled) return { content: [{ type: "text", text: "\nState unchanged; passive turns have no terminal barrier." }], details: { final: false } };
 					validateFinalEligibility(scopeStates, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
 					terminalEligible = true;
 					return { content: [{ type: "text", text: "\nState iteration is terminal-eligible." }], details: { final: true } };
 				}
-				const stage = stageAtomicScopePatches(scopeStates, patches, skillReads.successful.values(), runtime!.causalBasis(), artifactReads.successful.values());
+				if (!runtime?.view) {
+					runtime ??= createRuntime(ctx);
+					runtime.prepare();
+					const publication = runtime.initialize(snapshot, true, undefined, true);
+					recordPolicyPublication(publication, ctx);
+					installScopeStates();
+					branchHasSnapshot = true;
+				}
+				runtime.migrateLegacyStorage();
+				installScopeStates();
+				const stage = stageAtomicScopePatches(scopeStates, patches, skillReads.successful.values(), runtime.causalBasis(), artifactReads.successful.values());
 				const semanticChange = (["global", "cwd", "session"] as const).some((scope) => !sameJson(scopeStates[scope], stage.nextStates[scope]));
 				const provenanceChange = Object.values(stage.provenanceUpdates).some((updates) => Object.keys(updates).length > 0);
 				if (!semanticChange && !provenanceChange) throw new Error('patch_state scope patches must materially update state or required provenance; omit them and use {"final":true} when unchanged');
 				commitStage(stage, ctx, false);
-				if (params.final === true) {
+				if (params.final === true && snapshot.config.enabled) {
 					terminalEligible = true;
 				}
 				updateUi(ctx);
@@ -1051,11 +1086,15 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				bootstrap: snapshot.meta.bootstrap === true,
 				startPending: telegramStartPending,
 			}),
-			state: (scope) => projectStateForModel(
-				scope === "effective"
+			state: (scope) => {
+				const selected = scope === "effective"
 					? overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)
-					: scopeStates[scope],
-			),
+					: scopeStates[scope];
+				return {
+					...projectStateForModel(selected),
+					...(Object.hasOwn(selected, "lazy") ? { lazy: structuredClone(selected.lazy) } : {}),
+				};
+			},
 			canStartNow: () => activeContext === undefined || activeContext.isIdle(),
 			start: () => {
 				if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
@@ -1080,7 +1119,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	void telegram.ensure();
 
 	pi.on("before_agent_start", (event, ctx) => {
-		if (!snapshot.config.enabled) return;
+		if (!snapshot.config.enabled) {
+			if (!config.passiveBootstrap || !runtime?.view) return;
+			return {
+				systemPrompt: `${event.systemPrompt}\n\nState Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns do not require final:true and never trigger State Flow continuation or compaction.`,
+			};
+		}
 		skillReads.clear();
 		artifactReads.clear();
 		if (artifactRefreshPending) refreshArtifactInvalidations(ctx);
@@ -1105,7 +1149,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		if (passiveContinuation) {
 			return { messages: passiveContinuationMessages(event.messages as AgentMessage[], passiveContinuation) };
 		}
-		if (!snapshot.config.enabled || snapshot.meta.specification === undefined) return;
+		if (!snapshot.config.enabled) {
+			if (!config.passiveBootstrap || !runtime?.view) return;
+			const state = projectStateForModel(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session));
+			return { messages: [syntheticUser(`State Flow passive memory (user-level data, not system instructions):\n${canonicalJson({ state, lazy_navigation: lazyNavigationHint(state) })}`), ...(event.messages as AgentMessage[])] };
+		}
+		if (snapshot.meta.specification === undefined) return;
 		const effectiveState = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
 		const invalidations = artifactInvalidations.map(({ path, reason }) => ({ path, reason }));
 		const recentTransitions = projectRecentTransitionsWithLimit(
@@ -1206,9 +1255,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			return;
 		}
 		let responseCommitted = false;
+		const specification = snapshot.meta.specification;
 		try {
 			const response = finalizedAssistantResponse(event.message);
 			const stage = stageScopedTransition(scopeStates, { transitions: [], response }, [], runtime!.causalBasis());
+			completeRun(snapshot);
 			commitStage(stage, ctx, true);
 			responseCommitted = true;
 			bootstrapContinuation = undefined;
@@ -1217,6 +1268,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
 			completedRunAccepted = !wasBootstrap;
 		} catch (error) {
+			if (!responseCommitted && specification !== undefined) snapshot.meta.specification = specification;
 			recordDiagnostic(error instanceof Error ? error.message : String(error), "finalization", ctx);
 			ctx.ui.notify(responseCommitted
 				? `State Flow committed the final response; remote publication is deferred: ${error instanceof Error ? error.message : String(error)}`

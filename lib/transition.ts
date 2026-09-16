@@ -35,7 +35,7 @@ export interface StagedScopedTransition {
 }
 
 const SCOPES = new Set<StateScope>(["global", "cwd", "session"]);
-const PATCH_KEYS = new Set(["artifacts", "contract", "working"]);
+const PATCH_KEYS = new Set(["artifacts", "contract", "working", "lazy"]);
 
 function compileReadArtifacts(
 	nextState: StateDocument,
@@ -123,13 +123,16 @@ function validateScopePatch(scope: unknown, patch: unknown): asserts patch is Sc
 	validatePatch(patch);
 	for (const key of Object.keys(patch)) {
 		if (!PATCH_KEYS.has(key)) {
-			throw new Error(`Scoped State Flow patches cannot modify ${key}; only artifacts, contract, and working are model-owned`);
+			throw new Error(`Scoped State Flow patches cannot modify ${key}; only artifacts, contract, working, and lazy are model-owned`);
 		}
 	}
-	for (const key of PATCH_KEYS) {
+	for (const key of ["artifacts", "contract", "working"] as const) {
 		if (Object.hasOwn(patch, key) && !isObject(patch[key])) {
 			throw new Error(`Scoped State Flow patch field ${key} must be a JSON object`);
 		}
+	}
+	if (Object.hasOwn(patch, "lazy") && patch.lazy === null) {
+		throw new Error("Scoped State Flow patch field lazy cannot be null");
 	}
 	if (isObject(patch.artifacts)) validateModelArtifactPatch(patch.artifacts);
 }
@@ -140,6 +143,7 @@ function completePatch(patch: ScopePatch, response: string): StatePatch {
 		contract: patch.contract ?? {},
 		working: patch.working ?? {},
 		response,
+		...(Object.hasOwn(patch, "lazy") ? { lazy: structuredClone(patch.lazy!) } : {}),
 	};
 }
 

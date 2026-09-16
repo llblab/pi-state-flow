@@ -226,15 +226,15 @@ export function loadTemporalRevision(cwd: string, sessionId: string, repositoryR
 	const canonicalRuntime = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
 	const readFile = revisionFileReader(root, revision, [
 		...scopePaths.flatMap(({ paths }) => [paths.checkpoint, paths.patches, paths.meta]),
-		canonicalRuntime.config, canonicalRuntime.meta,
+		canonicalRuntime.config, canonicalRuntime.runtime,
 	]);
 	const files: DurableFileBase[] = [];
 	const scopes = {} as Record<StateScope, ScopeStream | undefined>;
 	const provenance: Record<StateScope, ArtifactProvenanceRegistry> = { global: {}, cwd: {}, session: {} };
 	for (const { scope, paths } of scopePaths) {
 		const selected = revisionScopeFiles(readFile, paths);
-		files.push(selected.checkpoint, selected.patches, ...(scope === "session" ? [] : [selected.meta]));
-		if (scope !== "session") provenance[scope] = parseScopeProvenance(selected.meta.content, selected.meta.path);
+		files.push(selected.checkpoint, selected.patches, selected.meta);
+		provenance[scope] = parseScopeProvenance(selected.meta.content, selected.meta.path);
 		try {
 			scopes[scope] = parseScopeStream(selected.checkpoint.content, selected.patches.content, scope,
 				scope === "cwd" ? cwd : undefined, selected.meta.content);
@@ -243,15 +243,18 @@ export function loadTemporalRevision(cwd: string, sessionId: string, repositoryR
 		}
 	}
 	const readRuntime = (paths: ReturnType<typeof sessionRuntimePaths>) => ({
-		paths, config: readFile(paths.config), meta: readFile(paths.meta),
+		paths, config: readFile(paths.config), runtime: readFile(paths.runtime), meta: readFile(paths.meta),
 	});
-	const { paths: runtimePaths, config, meta } = readRuntime(canonicalRuntime);
-	files.push(config, meta);
-	const document = parseSessionRuntime(config.content, meta.content, cwd, sessionId);
+	const { paths: runtimePaths, config, runtime, meta } = readRuntime(canonicalRuntime);
+	files.push(config, runtime);
+	const document = parseSessionRuntime(config.content, runtime.content, cwd, sessionId, meta.content);
 	if (document === undefined) return { base: { head: revision, files }, scopes, provenance };
-	provenance.session = parseArtifactProvenanceRegistry(document.meta.artifacts, "State Flow session artifact provenance");
+	if (Object.keys(provenance.session).length === 0 && document.meta.artifacts !== undefined) {
+		provenance.session = parseArtifactProvenanceRegistry(document.meta.artifacts, "State Flow session artifact provenance");
+	}
+	const runtimeOwnerPath = runtime.content === undefined ? runtimePaths.meta : runtimePaths.runtime;
 	const owner = git(root, ["log", "-1", "--format=%H", revision, "--",
-		relativeOwnedPath(runtimePaths.config, root), relativeOwnedPath(runtimePaths.meta, root),
+		relativeOwnedPath(runtimePaths.config, root), relativeOwnedPath(runtimeOwnerPath, root),
 	]).stdout.trim();
 	assertReadableRevision(root, owner);
 	let temporalRevision = document.meta.temporalRevision === undefined || document.meta.temporalRevision === "self"
@@ -407,8 +410,7 @@ export function adoptFileStateToGit(cwd: string, sessionId: string, repositoryRo
 	if (snapshot.meta.step !== selected.runtime.meta.step) throw new Error("Git adoption must preserve the semantic step");
 	const runtime = createSessionRuntime(snapshot, cwd, sessionId, selected.view.lineage, "unconfirmed", selected.provenance.session);
 	runtime.meta.temporalRevision = "self";
-	const sources = serializeSessionRuntime(runtime, cwd, sessionId, selected.view.scopes.session,
-		selected.base.files.find(({ path }) => path === sessionRuntimePaths(cwd, sessionId, repositoryRoot, sessionKey).meta)?.content);
+	const sources = serializeSessionRuntime(runtime, cwd, sessionId);
 	initializeGitRepository(repositoryRoot);
 	return withPublicationLock(repositoryRoot, (root) => {
 		const current = captureTemporalBaseUnderLock(cwd, sessionId, root, sessionKey);
@@ -417,13 +419,14 @@ export function adoptFileStateToGit(cwd: string, sessionId: string, repositoryRo
 		const provenancePaths = new Set([
 			temporalScopePaths(cwd, sessionId, "global", root, sessionKey).meta,
 			temporalScopePaths(cwd, sessionId, "cwd", root, sessionKey).meta,
+			temporalScopePaths(cwd, sessionId, "session", root, sessionKey).meta,
 		]);
 		// Preserve exact valid scope bytes; only runtime provenance changes representation.
 		const updates = current.files.filter(({ path, identity }) => path.endsWith("checkpoint.json")
 			|| path.endsWith("patches.jsonl")
 			|| (provenancePaths.has(path) && identity !== "missing"))
 			.map(({ path, content }) => ({ path, content: content! }));
-		updates.push({ path: paths.config, content: sources.config }, { path: paths.meta, content: sources.meta });
+		updates.push({ path: paths.config, content: sources.config }, { path: paths.runtime, content: sources.runtime });
 		const existing = current.head && updates.every(({ path, content }) => revisionFile(root, current.head!, path).content === content)
 			? loadTemporalRevision(cwd, sessionId, root, current.head, sessionKey) : undefined;
 		if (existing && (!existing.runtime || !sameJson({ lineage: existing.runtime.document.meta.lineage, scopes: existing.scopes }, selected.view))) {
@@ -447,7 +450,7 @@ function includeUncommittedCohort(cwd: string, sessionId: string, root: string, 
 		return { scope, pair: desired([paths.checkpoint, paths.patches]) };
 	});
 	const runtimePaths = runtime ? sessionRuntimePaths(cwd, sessionId, root, sessionKey) : undefined;
-	const runtimePair = runtimePaths ? desired([runtimePaths.config, runtimePaths.meta]) : [];
+	const runtimePair = runtimePaths ? desired([runtimePaths.config, runtimePaths.runtime]) : [];
 	const readFile = current.head === undefined ? undefined : revisionFileReader(root, current.head,
 		[...pairs.flatMap(({ pair }) => pair), ...runtimePair].map(({ path }) => path));
 	const absentFromHead = (files: OwnedFileUpdate[]) => files.some(({ path, content }) => readFile === undefined || readFile(path).content !== content);
@@ -480,7 +483,8 @@ export function publishTemporalStateToGit(
 		if (runtime?.meta.publication === "files") throw new Error("Git publication requires explicit Git provenance");
 		const runtimePaths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
 		const previousRuntime = parseSessionRuntime(current.files.find(({ path }) => path === runtimePaths.config)?.content,
-			current.files.find(({ path }) => path === runtimePaths.meta)?.content, cwd, sessionId);
+			current.files.find(({ path }) => path === runtimePaths.runtime)?.content, cwd, sessionId,
+			current.files.find(({ path }) => path === runtimePaths.meta)?.content);
 		if (previousRuntime?.meta.publication === "files") throw new Error("File-only storage requires explicit full-cohort Git adoption");
 		const runtimeOnly = runtime?.meta.temporalRevision !== undefined && runtime.meta.temporalRevision !== "self";
 		if (runtimeOnly) {

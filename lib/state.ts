@@ -5,15 +5,17 @@ import {
 	type ArtifactCompilationUpdate,
 	type ArtifactRegistry,
 } from "./artifact.ts";
-import { applyPatch, isObject, type JsonObject } from "./json.ts";
+import { applyPatch, isJsonValue, isObject, type JsonObject, type JsonValue } from "./json.ts";
 
 /** The canonical semantic state shape shared by global, CWD, and session scopes. */
-export interface MaterializedState extends JsonObject {
+export type MaterializedState = JsonObject & {
 	artifacts: ArtifactRegistry;
 	contract: JsonObject;
 	working: JsonObject;
 	response: string;
-}
+	/** Absent is the canonical empty lazy plane and preserves predecessor-store compatibility. */
+	lazy?: JsonValue;
+};
 
 /** Compatibility name for callers that still treat materialized state as a document. */
 export type StateDocument = MaterializedState;
@@ -33,6 +35,7 @@ export interface ScopePatch {
 	artifacts?: JsonObject;
 	contract?: JsonObject;
 	working?: JsonObject;
+	lazy?: JsonValue;
 }
 
 export interface ScopedPatch {
@@ -62,7 +65,7 @@ export interface ScopedStates {
 }
 
 export function emptyState(): MaterializedState {
-	return { artifacts: {}, contract: {}, working: {}, response: "" };
+	return { artifacts: {}, contract: {}, working: {}, response: "" } as MaterializedState;
 }
 
 export function isMaterializedState(value: unknown): value is MaterializedState {
@@ -71,7 +74,8 @@ export function isMaterializedState(value: unknown): value is MaterializedState 
 		&& isObject(value.contract)
 		&& isObject(value.working)
 		&& typeof value.response === "string"
-		&& Object.keys(value).every((key) => key === "artifacts" || key === "contract" || key === "working" || key === "response");
+		&& (!Object.hasOwn(value, "lazy") || (isJsonValue(value.lazy) && value.lazy !== null))
+		&& Object.keys(value).every((key) => key === "artifacts" || key === "contract" || key === "working" || key === "response" || key === "lazy");
 }
 
 export const isStateDocument = isMaterializedState;
@@ -96,5 +100,6 @@ export function overlayStates(...scopes: readonly MaterializedState[]): Material
 
 /** Model-visible projection: runtime artifact bookkeeping never reaches ordinary context. */
 export function projectStateForModel(state: MaterializedState): MaterializedState {
-	return { ...structuredClone(state), artifacts: projectArtifactsForModel(state.artifacts) };
+	const { lazy: _lazy, ...hot } = structuredClone(state);
+	return { ...hot, artifacts: projectArtifactsForModel(state.artifacts) } as MaterializedState;
 }

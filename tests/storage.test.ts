@@ -151,8 +151,8 @@ test("file references bind exact bytes, complete runtime identities and lineage,
 	fs.cpSync(f.root, copy, { recursive: true });
 	assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, copy, p.revision), /unavailable/);
 	const paths = sessionRuntimePaths(f.cwd, f.sessionId, f.root);
-	const original = readFileSync(paths.meta);
-	writeFileSync(paths.meta, Buffer.concat([original, Buffer.from("\n")]));
+	const original = readFileSync(paths.runtime);
+	writeFileSync(paths.runtime, Buffer.concat([original, Buffer.from("\n")]));
 	assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, p.revision), /unavailable/);
 	for (const mutate of [
 		(meta: any) => { meta.identity.sessionId = "foreign"; },
@@ -162,7 +162,7 @@ test("file references bind exact bytes, complete runtime identities and lineage,
 	]) {
 		const meta = JSON.parse(original.toString());
 		mutate(meta);
-		writeFileSync(paths.meta, JSON.stringify(meta));
+		writeFileSync(paths.runtime, JSON.stringify(meta));
 		assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, actualReference(f.cwd, f.sessionId, f.root)), /identity|lineage|boundary|provenance|historical|origin|reachable/i);
 	}
 	assert.throws(() => resolveSessionRuntime(f.runtime, "a".repeat(40)), /Git publication provenance/);
@@ -179,6 +179,31 @@ test("file CAS rejects stale and foreign bases and omitted changes before writes
 	writeFileSync(path, concurrent);
 	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], p.base, f.root, f.runtime), /changed concurrently/);
 	assert.deepEqual(readFileSync(path), concurrent);
+});
+
+test("lazy corruption and stale-basis publication fail before damaging retained hot state", (t) => {
+	const f = fixture(t);
+	const initialized = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
+	const peer = advanceTemporalState(f.view, [{ scope: "session", patch: { lazy: { owner: "peer" } } }], "lazy-peer");
+	const peerRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, peer.lineage, "files");
+	const accepted = publishTemporalStateToFiles(f.cwd, f.sessionId, peer, ["session"], initialized.base, f.root, peerRuntime);
+
+	const corrupt = structuredClone(peer);
+	corrupt.scopes.session.checkpoint.state.lazy = null as never;
+	assert.throws(
+		() => publishTemporalStateToFiles(f.cwd, f.sessionId, corrupt, ["session"], accepted.base, f.root, peerRuntime),
+		/Invalid temporal materialized semantic state/,
+	);
+
+	const stale = advanceTemporalState(f.view, [{ scope: "session", patch: { working: { hot: "stale" }, lazy: { owner: "stale" } } }], "lazy-stale");
+	const staleRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, stale.lineage, "files");
+	assert.throws(
+		() => publishTemporalStateToFiles(f.cwd, f.sessionId, stale, ["session"], initialized.base, f.root, staleRuntime),
+		/changed concurrently/,
+	);
+	const retained = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, actualReference(f.cwd, f.sessionId, f.root)).view;
+	assert.deepEqual(readTemporalState(retained, 0, "session").lazy, { owner: "peer" });
+	assert.equal(readTemporalState(retained, 0, "session").working.hot, undefined);
 });
 
 test("file and Git publishers share worktree exclusion, and file recovery never steals locks", (t) => {

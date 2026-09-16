@@ -47,7 +47,7 @@ test("distinguishes branch diagnostics and renders only effective memory as JSON
 	assert.match(output, /^State Flow diagnostics — config\.enabled=true; branch mode=active/);
 	assert.match(output, /Repository: \/tmp\/knowledge/);
 	assert.match(output, /Scope keys: CWD --tmp-project--hash; session session-hash/);
-	assert.match(output, /Session files: config\.json owns behavior; meta\.json owns lineage and provenance/);
+	assert.match(output, /Session files: config\.json owns behavior; runtime\.json owns branch recovery; meta\.json owns scope provenance/);
 	assert.match(output, /Runtime metadata: step #7; active revision abcdef1234567890/);
 	assert.match(output, /Remote publication policy: legacy-transition/);
 	assert.match(output, /Remote queue: idle/);
@@ -162,8 +162,8 @@ test("status distinguishes retained shared tails from new-origin depth and resto
 	let oldEntries: any[] = [];
 	for (let n = 1; n <= 8; n++) {
 		await h.tools.get("patch_state").execute("global", { global: { working: { n } } }, undefined, undefined, h.ctx);
-		const read = await h.tools.get("read_state").execute("head", {}, undefined);
-		heads.push(JSON.parse(read.content[0].text).boundary.id);
+		const read = await h.tools.get("read_state").execute("head", { path: "global.patches[0]" }, undefined);
+		heads.push(read.details.transitionId);
 		if (n === 1) oldEntries = structuredClone(h.entries);
 	}
 	await h.commands.get("state-flow-status").handler("", h.ctx);

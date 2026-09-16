@@ -60,7 +60,16 @@ test("migration discovers every owner-proven predecessor session beneath the con
 	const stream = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "historical-origin").scopes.session;
 	writeFileSync(join(directory, "checkpoint.json"), `${JSON.stringify(stream.checkpoint)}\n`);
 	writeFileSync(join(directory, "patches.jsonl"), stream.patches.map((record) => `${JSON.stringify(record)}\n`).join(""));
-	writeFileSync(join(directory, "meta.json"), JSON.stringify({ version: 1, identity: { cwd, sessionId: "historical-session" }, future: true }));
+	writeFileSync(join(directory, "config.json"), JSON.stringify({ enabled: true }));
+	writeFileSync(join(directory, "meta.json"), JSON.stringify({
+		version: 1,
+		identity: { cwd, sessionId: "historical-session" },
+		lineage: [stream.checkpoint.through],
+		step: 1,
+		revision: "self",
+		publication: "unconfirmed",
+		future: true,
+	}));
 
 	assert.equal(hasLegacyStateSources(cwd, session, root), true);
 	const plan = planLegacyStorageMigration(cwd, session, root);
@@ -73,6 +82,94 @@ test("migration discovers every owner-proven predecessor session beneath the con
 		checkpoint: stream.checkpoint.through,
 		patches: [],
 	});
+	assert.deepEqual(planLegacyStorageMigration(cwd, session, root).updates, []);
+});
+
+test("migration upgrades 0.13 combined session metadata across every owner-proven CWD in one cohort", (t) => {
+	const { root, cwd, session } = fixture(t);
+	const otherCwd = join(root, "other-project");
+	for (const [ownedCwd, key, ownedSession] of [
+		[cwd, session, session],
+		[otherCwd, "2026-09-13T09-26-25-598Z_other-session", "other-session"],
+	] as const) {
+		const cwdDirectory = cwdScopePaths(ownedCwd, root).directory;
+		const directory = join(cwdDirectory, key);
+		mkdirSync(directory, { recursive: true });
+		const stream = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, `${ownedSession}-origin`).scopes.session;
+		writeFileSync(join(cwdDirectory, "checkpoint.json"), `${JSON.stringify(stream.checkpoint.state)}\n`);
+		writeFileSync(join(cwdDirectory, "patches.jsonl"), "");
+		writeFileSync(join(cwdDirectory, "meta.json"), JSON.stringify({ owner: { cwd: ownedCwd }, temporal: { checkpoint: stream.checkpoint.through, patches: [] } }));
+		writeFileSync(join(directory, "checkpoint.json"), `${JSON.stringify(stream.checkpoint.state)}\n`);
+		writeFileSync(join(directory, "patches.jsonl"), "");
+		writeFileSync(join(directory, "config.json"), `${JSON.stringify({ enabled: true })}\n`);
+		writeFileSync(join(directory, "meta.json"), JSON.stringify({
+			version: 1,
+			temporal: { checkpoint: stream.checkpoint.through, patches: [] },
+			identity: { cwd: ownedCwd, sessionId: ownedSession },
+			lineage: [stream.checkpoint.through],
+			step: 13,
+			revision: "self",
+			publication: "unconfirmed",
+		}));
+	}
+
+	const plan = planLegacyStorageMigration(cwd, session, root);
+	assert.equal(plan.updates.filter(({ path }) => path.endsWith("runtime.json")).length, 2);
+	writeOwnedFileUpdates(plan.updates, plan.bases, root);
+	for (const [ownedCwd, key] of [
+		[cwd, session],
+		[otherCwd, "2026-09-13T09-26-25-598Z_other-session"],
+	] as const) {
+		const directory = join(cwdScopePaths(ownedCwd, root).directory, key);
+		assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")), "identity"), false);
+		assert.deepEqual(JSON.parse(readFileSync(join(directory, "runtime.json"), "utf8")).identity.cwd, ownedCwd);
+	}
+	assert.deepEqual(planLegacyStorageMigration(cwd, session, root).updates, []);
+});
+
+test("migration upgrades 0.13 combined session metadata to the 0.14 meta/runtime contract", (t) => {
+	const { root, cwd, session } = fixture(t);
+	const directory = join(cwdScopePaths(cwd, root).directory, session);
+	mkdirSync(directory, { recursive: true });
+	const stream = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "session-origin").scopes.session;
+	writeFileSync(join(directory, "checkpoint.json"), `${JSON.stringify(stream.checkpoint.state)}\n`);
+	writeFileSync(join(directory, "patches.jsonl"), "");
+	writeFileSync(join(directory, "config.json"), `${JSON.stringify({ enabled: true })}\n`);
+	writeFileSync(join(directory, "meta.json"), JSON.stringify({
+		version: 1,
+		artifacts: { "/source.md": { sourceHash: `sha256:${"a".repeat(64)}`, compilerRevision: "test-v1" } },
+		temporal: { checkpoint: stream.checkpoint.through, patches: [] },
+		identity: { cwd, sessionId: session },
+		lineage: [stream.checkpoint.through],
+		step: 13,
+		specification: "unfinished request",
+		revision: "self",
+		temporalRevision: "self",
+		publication: "unconfirmed",
+		futureRuntime: "retained",
+		futureScope: { retained: true },
+	}));
+
+	assert.equal(hasLegacyStateSources(cwd, session, root), true);
+	const plan = planLegacyStorageMigration(cwd, session, root);
+	assert.deepEqual(plan.scopes, ["session"]);
+	writeOwnedFileUpdates(plan.updates, plan.bases, root);
+	const meta = JSON.parse(readFileSync(join(directory, "meta.json"), "utf8"));
+	assert.deepEqual(meta.temporal, { checkpoint: stream.checkpoint.through, patches: [] });
+	assert.deepEqual(meta.futureScope, { retained: true });
+	assert.ok(meta.artifacts["/source.md"]);
+	for (const key of ["identity", "lineage", "step", "specification", "revision", "temporalRevision", "publication"]) {
+		assert.equal(Object.hasOwn(meta, key), false);
+	}
+	const runtime = JSON.parse(readFileSync(join(directory, "runtime.json"), "utf8"));
+	assert.deepEqual(runtime.identity, { cwd, sessionId: session });
+	assert.deepEqual(runtime.lineage, [stream.checkpoint.through]);
+	assert.equal(runtime.step, 13);
+	assert.equal(runtime.specification, "unfinished request");
+	assert.equal(runtime.futureRuntime, "retained");
+	assert.equal(Object.hasOwn(runtime, "artifacts"), false);
+	assert.equal(Object.hasOwn(runtime, "temporal"), false);
+	assert.equal(hasLegacyStateSources(cwd, session, root), false);
 	assert.deepEqual(planLegacyStorageMigration(cwd, session, root).updates, []);
 });
 

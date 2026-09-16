@@ -100,6 +100,7 @@ The default store is `<agentDir>/state-flow`, independent from Markdown discover
 Owned paths are:
 
 ```text
+config.json
 checkpoint.json
 patches.jsonl
 meta.json
@@ -108,13 +109,14 @@ meta.json
 <cwd-key>/meta.json
 <cwd-key>/<session-key>/checkpoint.json
 <cwd-key>/<session-key>/patches.jsonl
-<cwd-key>/<session-key>/config.json
 <cwd-key>/<session-key>/meta.json
+<cwd-key>/<session-key>/config.json
+<cwd-key>/<session-key>/runtime.json
 ```
 
 CWD and session keys mirror Pi's native encoding. The Pi UUID remains authoritative; readable directory keys never replace identity validation.
 
-`checkpoint.json` is only the canonical materialized semantic state, and each nonblank `patches.jsonl` line is only one semantic patch. Scope `meta.json` owns the checkpoint/tail boundaries, CWD owner identity, and runtime artifact provenance for its scope; the session file additionally owns lineage, counters, session identity, publication provenance and remote-publication policy. Metadata writers replace only their owned leaves and preserve JSON-safe unknown siblings. Pi checkpoints retain only an exact Git revision, an exact `file:<hash>` cohort reference, or a proven ordinary-disabled marker.
+Root `config.json` is the read-only operator configuration shared by every session in the repository; it never participates in semantic overlay. `checkpoint.json` is only the canonical materialized semantic state, and each nonblank `patches.jsonl` line is only one semantic patch. Every scope's `meta.json` symmetrically owns checkpoint/tail boundaries and artifact provenance, with CWD ownership added where applicable. Session `config.json` owns behavior; session `runtime.json` asymmetrically owns lineage, counters, session identity, publication provenance, remote-publication policy, and the full specification only while a run is unfinished. The predecessor combined session `meta.json` remains readable as migration input and is separated by the next normal CAS publication. Metadata writers replace only their owned leaves and preserve JSON-safe unknown siblings. Pi checkpoints retain only an exact Git revision, an exact `file:<hash>` cohort reference, or a proven ordinary-disabled marker.
 
 All owned writes use same-directory atomic replacement, regular-file and symlink checks, prepared byte receipts and CAS validation. Unrelated files and detected concurrent bytes are preserved; Git staging follows the acceptance contract below. Rollback restores only bytes still matching the failed publisher's output.
 
@@ -122,7 +124,7 @@ All owned writes use same-directory atomic replacement, regular-file and symlink
 
 If Git is unavailable specifically through executable `ENOENT`, State Flow uses file-only persistence. File mode retains exact current materialization and proven hot history but offers no arbitrary cold revisions.
 
-With Git, each effective semantic cohort creates one local commit immediately through an isolated index that stages the complete non-ignored worktree delta before overlaying the exact prepared State Flow outputs; the caller-visible index is synchronized to the committed tree afterward. Each prepared content is still hashed separately from its supplied bytes, never substituted by mutable worktree reads or filtered staging. Prepared blobs enter the isolated index through one NUL-delimited `update-index --index-info` batch, preserving literal path characters; explicit removals retain their existing path. Any failed batch aborts before reference publication and follows the same exact-output rollback and temporary-index cleanup. Activation returns after local runtime acceptance for normal `turn-end`/`off` policy, skips full predecessor migration planning only when legacy snapshots and complete predecessor checkpoint/tail envelopes are absent, and defers Markdown discovery until the next enabled inference. State Flow-owned active files keep compare-and-swap protection, and `.gitignore` stays authoritative. Git supplies cold history and exact branch restoration. Runtime `revision: "self"` resolves to the commit that owns the runtime record, never arbitrary `HEAD`. Runtime-only writes may use `temporalRevision` to select older semantic streams and their matching artifact provenance. They update the current session's config/meta without rewriting live shared checkpoints, tails, or provenance.
+With Git, each effective semantic cohort creates one local commit immediately through an isolated index that stages the complete non-ignored worktree delta before overlaying the exact prepared State Flow outputs; the caller-visible index is synchronized to the committed tree afterward. Each prepared content is still hashed separately from its supplied bytes, never substituted by mutable worktree reads or filtered staging. Prepared blobs enter the isolated index through one NUL-delimited `update-index --index-info` batch, preserving literal path characters; explicit removals retain their existing path. Any failed batch aborts before reference publication and follows the same exact-output rollback and temporary-index cleanup. Activation returns after local runtime acceptance for normal `turn-end`/`off` policy, skips full predecessor migration planning only when legacy snapshots and complete predecessor checkpoint/tail envelopes are absent, and defers Markdown discovery until the next enabled inference. State Flow-owned active files keep compare-and-swap protection, and `.gitignore` stays authoritative. Git supplies cold history and exact branch restoration. Runtime `revision: "self"` resolves to the commit that owns the runtime record, never arbitrary `HEAD`. Runtime-only writes may use `temporalRevision` to select older semantic streams and their matching artifact provenance. They update the current session's `config.json`/`runtime.json` without rewriting live shared checkpoints, tails, or provenance.
 
 Branch recovery validates immutable selection before live publication acquisition. `TemporalRuntime.prepareRestore` returns a detached snapshot and an instance-bound, single-use restoration closure. For an exact matching Git owner, that closure reuses the validated cohort and provenance rather than decoding them twice; it still captures the current publication basis under exclusion before installing any runtime fields. Expired file cohorts, legacy snapshot fallbacks, and references redirected to another runtime owner take the fresh-read path. A consumed or failed preparation cannot be replayed, and neither the mutable inspection snapshot nor an old publication basis can become restore authority. This is bounded reuse within one selection, not a cross-session revision cache.
 

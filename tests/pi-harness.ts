@@ -50,6 +50,8 @@ export async function realPiFixture(t: TestContext, options: {
 	tokensPerSecond?: number;
 	initializeRepository?: boolean;
 	autoStart?: boolean;
+	passiveBootstrap?: boolean;
+	passiveTools?: boolean;
 	remotePublication?: "off" | "turn-end" | "transition";
 	stateFlow?: boolean;
 	contextWindow?: number;
@@ -63,12 +65,10 @@ export async function realPiFixture(t: TestContext, options: {
 	const agentDir = join(root, "agent");
 	const sessionDir = join(root, "sessions");
 	for (const path of [repositoryRoot, cwd, agentDir, join(agentDir, "knowledge"), sessionDir]) mkdirSync(path, { recursive: true });
-	if (options.autoStart !== undefined || options.remotePublication !== undefined) {
-		writeFileSync(join(agentDir, "state-flow.json"), JSON.stringify({
-			...(options.autoStart === undefined ? {} : { autoStart: options.autoStart }),
-			...(options.remotePublication === undefined ? {} : { remotePublication: options.remotePublication }),
-		}));
-	}
+	if (options.autoStart !== undefined || options.remotePublication !== undefined) writeFileSync(join(repositoryRoot, "config.json"), JSON.stringify({
+		...(options.autoStart === undefined ? {} : { autoStart: options.autoStart }),
+		...(options.remotePublication === undefined ? {} : { remotePublication: options.remotePublication }),
+	}));
 	if (options.initializeRepository !== false) {
 		execFileSync("git", ["init", "-b", "main", repositoryRoot], { stdio: "ignore" });
 		git(repositoryRoot, "config", "user.name", "State Flow Integration Tests");
@@ -111,7 +111,7 @@ export async function realPiFixture(t: TestContext, options: {
 			noContextFiles: true,
 			extensionFactories: options.stateFlow === false ? [] : [{
 				name: "state-flow-integration",
-				factory: (pi) => stateFlowExtension(pi, { agentDir, repositoryRoot, knowledgeRoot: join(agentDir, "knowledge"), onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
+				factory: (pi) => stateFlowExtension(pi, { agentDir, repositoryRoot, knowledgeRoot: join(agentDir, "knowledge"), passive: { bootstrap: options.passiveBootstrap ?? false, tools: options.passiveTools ?? false }, onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
 			}],
 		});
 		await resourceLoader.reload();

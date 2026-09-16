@@ -270,7 +270,7 @@ test("temporal Git writer preserves all hot states through sparse folding and co
 	assert.equal(run(repository, "rev-parse", "HEAD"), before.head);
 });
 
-test("session config/meta publish atomically with temporal files and config-only stop creates no semantic step", (t) => {
+test("session config/runtime publish atomically with temporal files and config-only stop creates no semantic step", (t) => {
 	const { repository, cwd } = fixture(t, true);
 	const session = "runtime-session";
 	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
@@ -279,8 +279,9 @@ test("session config/meta publish atomically with temporal files and config-only
 	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository, runtime);
 	const paths = sessionRuntimePaths(cwd, session, repository);
 	assert.deepEqual(JSON.parse(readFileSync(paths.config, "utf8")), runtime.config);
+	assert.deepEqual(JSON.parse(readFileSync(paths.runtime, "utf8")), runtime.meta);
 	assert.deepEqual(JSON.parse(readFileSync(paths.meta, "utf8")), {
-		...runtime.meta, temporal: { checkpoint: view.scopes.session.checkpoint.through, patches: [] },
+		version: 1, artifacts: {}, temporal: { checkpoint: view.scopes.session.checkpoint.through, patches: [] },
 	});
 	const semanticPaths = (["global", "cwd", "session"] as const).flatMap((scope) => {
 		const pair = temporalScopePaths(cwd, session, scope, repository);

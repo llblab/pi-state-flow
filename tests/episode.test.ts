@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
-import { prepareRun, resumeEpisode, startEpisode, stopEpisode } from "../lib/episode.ts";
+import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "../lib/episode.ts";
 import { loadCwdState, loadSessionState } from "./temporal-fixture.ts";
 import { commitTerminal, harness, start } from "./harness.ts";
 
@@ -26,6 +26,8 @@ test("rotates specifications at user-run boundaries", () => {
 	assert.equal(snapshot.meta.specification, "first");
 	assert.equal(prepareRun(snapshot, "second"), true);
 	assert.equal(snapshot.meta.specification, "second");
+	completeRun(snapshot);
+	assert.equal(snapshot.meta.specification, undefined);
 });
 
 test("does not demand a terminal handoff from an aborted response", async () => {

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, runtimeContextMessage, withoutPrivateValidation } from "../lib/context.ts";
+import { createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, runtimeContextMessage, withoutPrivateValidation } from "../lib/context.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { startEpisode } from "../lib/episode.ts";
 import { emptyState, type MaterializedState } from "../lib/state.ts";
@@ -23,6 +23,7 @@ test("ordinary context derives compact lineage from cached runtime without Git q
 	const h = harness();
 	await start(h, "Continue");
 	await commitTerminal(h, {}, { verified: true }, "Accepted");
+	h.handlers.get("before_agent_start")!({ prompt: "Continue", systemPrompt: "base" }, h.ctx);
 	const spawn = childProcess.spawnSync;
 	childProcess.spawnSync = (() => { throw new Error("Ordinary inference queried a process"); }) as typeof spawn;
 	syncBuiltinESMExports();
@@ -167,6 +168,33 @@ test("builds runtime context as synthetic user data without system-prompt interp
 	assert.throws(() => runtimeContextMessage(startEpisode(false), emptyState()), /requires an active specification/);
 });
 
+test("projects bounded lazy navigation without hydrating lazy bodies or partial catalogs", () => {
+	const state = { ...emptyState(), lazy: {
+		memory: ["private body"], rules: { preserve: true }, enabled: false, count: 3, empty: null,
+	} };
+	assert.deepEqual(lazyNavigationHint(state), {
+		available: true,
+		path: "effective.lazy",
+		keys: { memory: "array", rules: "object", enabled: "boolean", count: "number", empty: "null" },
+	});
+	const snapshot = startEpisode(false);
+	snapshot.meta.specification = "Navigate";
+	const context = runtimeContextMessage(snapshot, state);
+	const text = ((context as any).content as any[])[0].text as string;
+	const projected = JSON.parse(text.slice(text.indexOf("\n") + 1));
+	assert.deepEqual(projected.lazy_navigation, lazyNavigationHint(state));
+	assert.equal(Object.hasOwn(projected.state, "lazy"), false);
+	assert.doesNotMatch(text, /private body|preserve/);
+
+	const tooMany = Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`key-${index}`, index]));
+	assert.deepEqual(lazyNavigationHint({ ...emptyState(), lazy: tooMany }), {
+		available: true, path: "effective.lazy",
+	});
+	assert.deepEqual(lazyNavigationHint(emptyState()), {
+		available: false, path: "effective.lazy",
+	});
+});
+
 test("removes only private State Flow validation messages", () => {
 	const validation = message("custom", "retry", 1, "state-flow-validation");
 	const other = message("custom", "policy", 2, "policy");
@@ -309,6 +337,7 @@ test("projects only the latest seven compact accepted transitions", async () => 
 	const h = harness();
 	await start(h, "Current task");
 	for (let index = 0; index < 10; index++) await commitTerminal(h, {}, { index });
+	h.handlers.get("before_agent_start")!({ prompt: "Current task", systemPrompt: "base" }, h.ctx);
 	const projected = h.handlers.get("context")!({ messages: [user("Current task", 1)] });
 	const text = projected.messages[0].content[0].text as string;
 	const runtime = JSON.parse(text.slice(text.indexOf("\n") + 1));

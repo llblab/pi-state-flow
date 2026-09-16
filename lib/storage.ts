@@ -116,9 +116,9 @@ export function planTemporalPublication(
 		changedScopes.push(scope);
 	}
 	const provenanceUpdates: OwnedFileUpdate[] = [];
-	// Shared metadata owns provenance, temporal boundaries, and CWD identity beside semantic files.
+	// Every scope metadata file owns provenance and temporal boundaries beside semantic files.
 	if (!runtimeOnly) {
-		for (const scope of ["global", "cwd"] as const) {
+		for (const scope of SCOPES) {
 			const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 			const registry = provenance?.[scope] ?? parseScopeProvenance(files.get(paths.meta)!.content, paths.meta);
 			const currentFile = files.get(paths.meta)!;
@@ -129,18 +129,21 @@ export function planTemporalPublication(
 		}
 	}
 	const runtimePaths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
-	const previousRuntime = parseSessionRuntime(files.get(runtimePaths.config)!.content, files.get(runtimePaths.meta)!.content, cwd, sessionId);
+	const previousRuntime = parseSessionRuntime(files.get(runtimePaths.config)!.content, files.get(runtimePaths.runtime)!.content, cwd, sessionId, files.get(runtimePaths.meta)!.content);
 	if (previousRuntime !== undefined && changedScopes.length > 0 && runtime === undefined) throw new Error("Temporal semantic publication requires its session runtime cohort");
 	const runtimeUpdates: OwnedFileUpdate[] = [];
 	if (runtime !== undefined) {
-		const sources = serializeSessionRuntime(runtime, cwd, sessionId, runtimeOnly ? undefined : view.scopes.session, files.get(runtimePaths.meta)!.content);
+		const sources = serializeSessionRuntime(runtime, cwd, sessionId);
 		if (!sameJson(runtime.meta.lineage, view.lineage)) throw new Error("Runtime lineage does not match the temporal cohort");
-		if (files.get(runtimePaths.config)!.content !== sources.config || files.get(runtimePaths.meta)!.content !== sources.meta) {
-			runtimeUpdates.push({ path: runtimePaths.config, content: sources.config }, { path: runtimePaths.meta, content: sources.meta });
+		if (files.get(runtimePaths.config)!.content !== sources.config || files.get(runtimePaths.runtime)!.content !== sources.runtime) {
+			runtimeUpdates.push({ path: runtimePaths.config, content: sources.config }, { path: runtimePaths.runtime, content: sources.runtime });
 		}
-	} else if (!runtimeOnly && changedScopes.includes("session")) {
-		const content = serializeScopeMetadata(undefined, view.scopes.session, "session", undefined, files.get(runtimePaths.meta)!.content);
-		if (files.get(runtimePaths.meta)!.content !== content) runtimeUpdates.push({ path: runtimePaths.meta, content });
+		if (files.get(runtimePaths.runtime)!.identity === "missing" && files.get(runtimePaths.meta)!.content !== undefined
+			&& previousRuntime !== undefined && !provenanceUpdates.some(({ path }) => path === runtimePaths.meta)) {
+			const registry = provenance?.session ?? parseArtifactProvenanceRegistry(previousRuntime.meta.artifacts, "State Flow session artifact provenance");
+			const content = serializeScopeMetadata(registry, view.scopes.session, "session", undefined, files.get(runtimePaths.meta)!.content);
+			runtimeUpdates.push({ path: runtimePaths.meta, content });
+		}
 	}
 	const changedPaths = new Set(changedScopes.flatMap((scope) => {
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
@@ -178,14 +181,14 @@ function decodeFileCohort(cwd: string, sessionId: string, root: string, base: Te
 		scopes[scope] = stream;
 	}
 	const paths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
-	const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.meta), cwd, sessionId);
+	const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), cwd, sessionId, files.get(paths.meta));
 	if (!runtime || runtime.meta.publication !== "files") throw new Error("File-only recovery requires file publication provenance, not a Git self reference");
 	const view = { scopes, lineage: runtime.meta.lineage };
 	validateTemporalState(view);
 	const provenance: Record<StateScope, ArtifactProvenanceRegistry> = {
 		global: parseScopeProvenance(files.get(temporalScopePaths(cwd, sessionId, "global", root, sessionKey).meta), temporalScopePaths(cwd, sessionId, "global", root, sessionKey).meta),
 		cwd: parseScopeProvenance(files.get(temporalScopePaths(cwd, sessionId, "cwd", root, sessionKey).meta), temporalScopePaths(cwd, sessionId, "cwd", root, sessionKey).meta),
-		session: parseArtifactProvenanceRegistry(runtime.meta.artifacts, "State Flow session artifact provenance"),
+		session: parseScopeProvenance(files.get(paths.meta), paths.meta),
 	};
 	return { runtime, view, provenance };
 }

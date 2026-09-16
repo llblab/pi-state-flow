@@ -100,7 +100,7 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 		`State Flow diagnostics — config.enabled=${snapshot.config.enabled}; branch mode=${snapshot.config.enabled ? "active" : "inactive"}`,
 		`Repository: ${diagnostics.repositoryRoot}`,
 		`Scope keys: CWD ${diagnostics.cwdScopeKey}; session ${diagnostics.sessionScopeKey}`,
-		"Session files: config.json owns behavior; meta.json owns lineage and provenance",
+		"Session files: config.json owns behavior; runtime.json owns branch recovery; meta.json owns scope provenance",
 		`Runtime metadata: step #${snapshot.meta.step}; active revision ${snapshot.meta.durableBase ?? "none"}; bootstrap ${snapshot.meta.bootstrap === true}`,
 		`Remote publication policy: ${snapshot.meta.remotePublication?.mode ?? "legacy-transition"}`,
 		diagnostics.publicationQueueError !== undefined

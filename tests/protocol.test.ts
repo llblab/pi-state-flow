@@ -13,8 +13,9 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.doesNotMatch(protocol, /terminal reconciliation/i);
 	assert.doesNotMatch(protocol, /final:false|false-like|truthy|falsy/i);
 	assert.match(protocol, /every patch as reconciliation rather than append-only notes/);
-	assert.match(protocol, /feature\/release\/campaign closes or the active project\/version changes/);
+	assert.match(protocol, /feature\/release\/campaign or project\/version completion/);
 	assert.match(protocol, /destination-verify-source-delete/);
+	assert.ok(protocol.length <= 4_000, `model protocol grew to ${protocol.length} characters`);
 });
 
 test("bootstrap protocol retains the migration obligation through patch_state", () => {

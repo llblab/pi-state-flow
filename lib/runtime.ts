@@ -114,6 +114,34 @@ export class TemporalRuntime {
 		return structuredClone(this.provenanceByScope[scope]);
 	}
 
+	/** Read canonical shared memory without creating, migrating, or publishing storage. */
+	loadPassive(): boolean {
+		if (!lstatSync(this.root, { throwIfNoEntry: false })) return false;
+		const backend = detectGitCapability() === "git" && lstatSync(join(this.root, ".git"), { throwIfNoEntry: false }) ? "git" : "files";
+		const base = backend === "git"
+			? captureTemporalGitBase(this.cwd, this.sessionId, this.root, this.sessionKey)
+			: captureTemporalFileBase(this.cwd, this.sessionId, this.root, this.sessionKey);
+		const files = new Map(base.files.map((file) => [file.path, file.content]));
+		const shared = Object.fromEntries(SHARED_SCOPES.map((scope) => {
+			const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
+			return [scope, parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope,
+				scope === "cwd" ? this.cwd : undefined, files.get(paths.meta))];
+		})) as Record<(typeof SHARED_SCOPES)[number], ScopeStream | undefined>;
+		if (!shared.global && !shared.cwd) return false;
+		if (!shared.global || !shared.cwd) throw new Error("Incomplete passive State Flow shared storage");
+		const fresh = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, randomUUID());
+		const basis = backend === "git" ? (base as TemporalGitBase).head ?? "unborn" : "files";
+		this.view = adoptTemporalStreams({ global: shared.global, cwd: shared.cwd, session: fresh.scopes.session }, `passive:${basis}:${randomUUID()}`);
+		this.base = base;
+		this.backend = backend;
+		this.provenanceByScope = {
+			global: parseScopeProvenance(files.get(temporalScopePaths(this.cwd, this.sessionId, "global", this.root, this.sessionKey).meta), "State Flow global metadata"),
+			cwd: parseScopeProvenance(files.get(temporalScopePaths(this.cwd, this.sessionId, "cwd", this.root, this.sessionKey).meta), "State Flow CWD metadata"),
+			session: {},
+		};
+		return true;
+	}
+
 	/** Explicit start owns directory/repository creation; reads never call this. */
 	prepare(): void {
 		const backend = detectGitCapability();
@@ -325,7 +353,7 @@ export class TemporalRuntime {
 		const files = new Map(base.files.map((file) => [file.path, file.content]));
 		if (copy) {
 			const session = temporalScopePaths(this.cwd, this.sessionId, "session", this.root, this.sessionKey);
-			const owned = [session.checkpoint, session.patches, session.meta, join(session.directory, "config.json"), join(session.directory, "state.json")];
+			const owned = [session.checkpoint, session.patches, session.meta, join(session.directory, "config.json"), join(session.directory, "runtime.json"), join(session.directory, "state.json")];
 			const occupied = owned.some((path) => files.get(path) !== undefined);
 			const historical = !occupied && backend === "git" && base.head ? loadTemporalRevision(this.cwd, this.sessionId, this.root, base.head, this.sessionKey) : undefined;
 			if (occupied || historical?.runtime || historical?.scopes.session) {
@@ -344,7 +372,7 @@ export class TemporalRuntime {
 		if (!streams.cwd && !allowCreateCwd) return undefined;
 		if (copy && !streams.global) throw new Error("State Flow fork requires existing shared scope storage");
 		const paths = sessionRuntimePaths(this.cwd, this.sessionId, this.root, this.sessionKey);
-		const existingRuntime = parseSessionRuntime(files.get(paths.config), files.get(paths.meta), this.cwd, this.sessionId);
+		const existingRuntime = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), this.cwd, this.sessionId, files.get(paths.meta));
 		if (existingRuntime && !newSessionOrigin) throw new Error("Existing session runtime requires a branch revision pointer");
 		// Explicit start before any branch runtime is a new origin, never inheritance of a later session layer.
 		if (newSessionOrigin) streams.session = undefined;
@@ -359,7 +387,7 @@ export class TemporalRuntime {
 		candidate.provenanceByScope = {
 			global: parseScopeProvenance(files.get(globalMeta), globalMeta),
 			cwd: parseScopeProvenance(files.get(cwdMeta), cwdMeta),
-			session: copy ? structuredClone(copy.provenance) : streams.session === undefined ? {} : parseArtifactProvenanceRegistry(existingRuntime?.meta.artifacts, "State Flow session artifact provenance"),
+			session: copy ? structuredClone(copy.provenance) : streams.session === undefined ? {} : parseScopeProvenance(files.get(paths.meta), paths.meta),
 		};
 		if (expectedShared && (["global", "cwd"] as const).some((scope) => !sameJson(candidate.read(0, scope), expectedShared[scope]))) {
 			throw new Error("Legacy branch shared scopes diverged from the selected revision; migration cannot overwrite them");
@@ -520,7 +548,7 @@ export class TemporalRuntime {
 		if (!scopedWrite) {
 			const current = captureTemporalGitBase(this.cwd, this.sessionId, this.root, this.sessionKey);
 			const paths = sessionRuntimePaths(this.cwd, this.sessionId, this.root, this.sessionKey);
-			for (const path of [paths.config, paths.meta]) {
+			for (const path of [paths.config, paths.runtime]) {
 				if (current.files.find((file) => file.path === path)?.identity !== base.files.find((file) => file.path === path)?.identity) {
 					throw new Error("Temporal State Flow runtime changed concurrently");
 				}

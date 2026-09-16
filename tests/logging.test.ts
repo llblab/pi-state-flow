@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,8 +22,9 @@ test("diagnostics append local JSONL records", () => {
 
 test("rejected patch_state diagnostics retain the exact attempted arguments", async () => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-input-log-"));
-	writeFileSync(join(root, "state-flow.json"), JSON.stringify({ logging: true, remotePublication: "off" }));
-	const h = harness({ agentDir: root });
+	mkdirSync(join(root, "state-flow"));
+	writeFileSync(join(root, "state-flow", "config.json"), JSON.stringify({ logging: true, remotePublication: "off" }));
+	const h = harness({ agentDir: root, repositoryRoot: join(root, "state-flow") });
 	await start(h, "Reject an invalid patch");
 	const attempted = { global: { working: { example: true } }, final: "maybe" };
 	await assert.rejects(
@@ -41,7 +42,7 @@ test("rejected patch_state diagnostics retain the exact attempted arguments", as
 
 test("diagnostics fail inertly instead of entering an overlapping state repository", async () => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-overlap-log-"));
-	writeFileSync(join(root, "state-flow.json"), JSON.stringify({ logging: true }));
+	writeFileSync(join(root, "config.json"), JSON.stringify({ logging: true }));
 	const h = harness({ agentDir: root, repositoryRoot: root });
 	await start(h, "Reject an invalid patch");
 	await assert.rejects(h.tools.get("patch_state")!.execute(

@@ -7,6 +7,29 @@ import type { RehydrationPhase } from "./rehydration.ts";
 import { projectStateForModel, type MaterializedState } from "./state.ts";
 
 export const VALIDATION_MESSAGE_TYPE = "state-flow-validation";
+const LAZY_HINT_PATH = "effective.lazy";
+const LAZY_HINT_MAX_KEYS = 32;
+const LAZY_HINT_MAX_JSON_CHARS = 1024;
+
+type LazyValueKind = "array" | "boolean" | "null" | "number" | "object" | "string";
+
+function lazyValueKind(value: Exclude<MaterializedState["lazy"], undefined>): LazyValueKind {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "array";
+	if (typeof value === "object") return "object";
+	return typeof value as Exclude<LazyValueKind, "array" | "object">;
+}
+
+/** Fixed-budget navigation only: never place lazy bodies or partial key catalogs in baseline context. */
+export function lazyNavigationHint(state: MaterializedState): { available: boolean; path: string; keys?: Record<string, LazyValueKind> } {
+	const base = { available: Object.hasOwn(state, "lazy"), path: LAZY_HINT_PATH };
+	if (!base.available || typeof state.lazy !== "object" || state.lazy === null || Array.isArray(state.lazy)) return base;
+	const entries = Object.entries(state.lazy);
+	if (entries.length > LAZY_HINT_MAX_KEYS) return base;
+	const keys = Object.fromEntries(entries.map(([key, value]) => [key, lazyValueKind(value)]));
+	return JSON.stringify(keys).length <= LAZY_HINT_MAX_JSON_CHARS ? { ...base, keys } : base;
+}
+
 
 /** Bounded context retained after semantic State Flow is stopped in this physical session. */
 export interface PassiveContinuation {
@@ -85,6 +108,7 @@ export function runtimeContextMessage(
 	const context = {
 		specification: snapshot.meta.specification,
 		state: projectStateForModel(state),
+		lazy_navigation: lazyNavigationHint(state),
 		...(rehydrationPhase === undefined ? {} : { knowledge_rehydration: { phase: rehydrationPhase } }),
 		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations.map(({ path, reason }) => ({ path, reason })) }),
 		...(recentTransitions.length === 0 ? {} : { recent_transitions: projectRecentForModel(recentTransitions) }),

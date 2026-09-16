@@ -2,9 +2,9 @@
 
 ![pi-state-flow banner](https://raw.githubusercontent.com/llblab/pi-state-flow/main/banner.jpg)
 
-**Working memory for Pi, carried with the session.**
+**Incremental scoped context/memory compiler for Pi.**
 
-Keep decisions, constraints, verified findings, and next steps without sending every completed tool exchange back to the model. State Flow lets the agent maintain explicit state; Pi still owns the conversation, the native tool loop, and the complete inspectable trace.
+Keep decisions, constraints, verified findings, and next steps without sending every completed tool exchange back to the model. State Flow compiles curated context and memory into explicit state; Pi still owns the conversation, the native tool loop, and the complete inspectable trace.
 
 > Inspired by [SKILL.state](https://arxiv.org/html/2608.26263v2).
 
@@ -51,22 +51,23 @@ Continue working normally. The agent receives the state protocol and uses `patch
 - `/state-flow-status`: Inspect the selected state, history, artifact freshness, and publication status.
 - `/state-flow-stop`: Disable updates on this branch without deleting retained state.
 
-State Flow is **opt-in**. Starting in an existing conversation keeps its active context for one migration run. To enable genuinely new sessions automatically, set `"autoStart": true` in the optional [configuration](docs/usage.md#configuration).
+Active State Flow episodes remain **opt-in**, while passive durable memory bootstrap and tools are available by default. Passive turns never require `final:true`, continue automatically, or trigger State Flow compaction. Starting an active episode in an existing conversation keeps its context for one migration run; set `"autoStart": true` to promote genuinely new sessions automatically. See [configuration](docs/usage.md#configuration).
 
 ## What carries forward
 
-The same four fields exist at every scope:
+The same semantic planes exist at every scope:
 
 - `contract`: Requirements, decisions, constraints, and interface commitments.
 - `working`: Observations, results, unresolved questions, and what to do next.
 - `artifacts`: Source-addressed descriptions and reusable compiled knowledge.
 - `response`: The latest complete answer, captured by the runtime.
+- `lazy`: Durable, versioned memory omitted from ordinary context until explicitly read.
 
-Memory overlays **global → project CWD → session**. Put reusable cross-project knowledge in global, project knowledge in CWD, and private task continuation in session.
+Memory overlays **global → project CWD → session**. Put reusable cross-project knowledge in global, project knowledge in CWD, and private task continuation in session. Hot planes carry what must matter now; `lazy` retains what may matter later without hydrating its body into every prompt.
 
 **Resuming an existing Pi session restores its selected State Flow state and enablement.** A genuinely new session starts with an empty session layer and inherits only shared global/CWD memory; it does not resume another session's private work. Tree navigation follows the selected branch, not whichever state happens to be at Git `HEAD`.
 
-The agent can inspect `state`/`state[0]` through `state[7]`: now and up to seven prior accepted transitions. Scoped paths such as `state.cwd[1]` use the same causal boundary; `state.global.patches[0]` reads the latest retained accepted patch for that scope. Git-backed stores retain older committed history separately.
+The agent uses `read_state` for exact current or historical paths. Unscoped paths read the effective overlay; `global`, `cwd`, and `session` address ownership directly; `[n]` selects one of up to seven prior accepted transition boundaries. Bounded array ranges and `value`, `keys`, or `patch` projections support progressive reads without hydrating whole lazy collections. Git-backed stores retain older committed history separately.
 
 ## Boundaries worth knowing
 

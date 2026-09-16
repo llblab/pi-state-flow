@@ -105,7 +105,7 @@ test("real Pi retains large state and accepted answers across reload, resume and
 	assert.equal(fixture.readState(session).working.payload, payload);
 	assert.equal(fixture.readState(session).working.resumed, true);
 	assert.equal(latestSnapshot(session).meta.step, 4);
-	assert.equal(latestSnapshot(session).meta.specification, specification);
+	assert.equal(latestSnapshot(session).meta.specification, undefined);
 	assert.equal(fixture.readState(session, 1).response, "Large state accepted");
 });
 
@@ -707,7 +707,7 @@ test("real Pi preserves branch-local state through compaction, tree navigation, 
 	assert.equal(runGit(fixture.remote, "rev-list", "--count", "refs/heads/main"), "2");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
 	assert.deepEqual(latestSnapshot(session).config, { enabled: true });
-	writeFileSync(join(fixture.agentDir, "state-flow.json"), JSON.stringify({ autoStart: true }));
+	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ autoStart: true }));
 	const nextSession = await fixture.createSession("new");
 	assert.equal(latestSnapshot(nextSession).config.enabled, true);
 	assert.equal(nextSession.getActiveToolNames().includes("patch_state"), true);
@@ -881,7 +881,7 @@ test("real Pi patch diagnostics omit accepted false degradation and accepted ans
 	await disabled.prompt("Complete without diagnostics");
 	assert.equal(existsSync(logPath), false);
 
-	writeFileSync(join(fixture.agentDir, "state-flow.json"), JSON.stringify({ logging: true }));
+	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ logging: true }));
 	const logged = await fixture.createSession();
 	t.after(() => logged.dispose());
 	await logged.prompt("/state-flow-start");
@@ -906,7 +906,7 @@ test("real Pi patch diagnostics omit accepted false degradation and accepted ans
 
 test("real Pi diagnostic write failure leaves resolution and accepted state untouched", async (t) => {
 	const fixture = await realPiFixture(t);
-	writeFileSync(join(fixture.agentDir, "state-flow.json"), JSON.stringify({ logging: true }));
+	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ logging: true }));
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
 	await session.prompt("/state-flow-start");
@@ -1003,7 +1003,7 @@ test("real Pi patch_state barriers rematerialize every scope before the next inf
 	assert.deepEqual(loadSessionMaterialization(fixture.cwd, session.sessionManager.getSessionId(), fixture.repositoryRoot, nativeSessionKey(session)), beforeNoop);
 });
 
-test("real Pi reads prior scoped state lazily after a barrier and rejects offset eight without a transition", async (t) => {
+test("real Pi reads prior scoped state lazily after a barrier and rejects path offset eight without a transition", async (t) => {
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
@@ -1025,22 +1025,20 @@ test("real Pi reads prior scoped state lazily after a barrier and rejects offset
 			assert.equal(projection(context).state.working.version, "new");
 			beforeReads = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
 			checkpointCount = snapshots(session).length;
-			return fauxAssistantMessage(fauxToolCall("read_state", { offset: 1, scope: "session" }, { id: "history-read" }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("read_state", { path: "session[1]" }, { id: "history-read" }), { stopReason: "toolUse" });
 		},
 		(context) => {
 			const result = context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === "history-read") as any;
 			assert.equal(result.isError, false);
-			assert.match(result.content[0].text, /^\n\{"offset":1/);
+			assert.match(result.content[0].text, /^\n\{"value":/);
 			const historical = JSON.parse(result.content[0].text);
-			assert.equal(historical.offset, 1);
-			assert.equal(historical.scope, "session");
-			assert.equal(historical.state.working.version, "old");
-			assert.equal(historical.state.response, "Baseline.");
+			assert.equal(historical.value.working.version, "old");
+			assert.equal(historical.value.response, "Baseline.");
 			assert.equal(projection(context).state.working.version, "new");
 			assert.equal(runGit(fixture.repositoryRoot, "rev-parse", "HEAD"), beforeReads);
 			assert.equal(snapshots(session).length, checkpointCount);
 			assert.equal(latestSnapshot(session).meta.step, 2);
-			return fauxAssistantMessage(fauxToolCall("read_state", { offset: 8 }, { id: "unavailable-read" }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("read_state", { path: "effective[8]" }, { id: "unavailable-read" }), { stopReason: "toolUse" });
 		},
 		(context) => {
 			const result = context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === "unavailable-read") as any;
@@ -1067,7 +1065,7 @@ test("real Pi reads prior scoped state lazily after a barrier and rejects offset
 	assert.ok(retained?.type === "message" && retained.message.role === "toolResult");
 	const content = retained.message.content[0];
 	assert.ok(content?.type === "text");
-	assert.equal(JSON.parse(content.text).state.working.version, "old", "full native trace survives model-context projection");
+	assert.equal(JSON.parse(content.text).value.working.version, "old", "full native trace survives model-context projection");
 	const beforeStatus = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
 	await session.prompt("/state-flow-status");
 	assert.match(fixture.notifications.at(-1)!, /Hot history: offsets 0\.\.4; maximum depth 7/);
@@ -1096,7 +1094,7 @@ test("real Pi executes only patch_state when a response also proposes a sibling 
 	fixture.faux.setResponses([
 		fauxAssistantMessage([
 			fauxToolCall("read", { path: join(fixture.cwd, "must-not-run.md") }, { id: "blocked-read" }),
-			fauxToolCall("read_state", { offset: 0 }, { id: "blocked-history" }),
+			fauxToolCall("read_state", { path: "effective" }, { id: "blocked-history" }),
 			fauxToolCall("patch_state", {
 				session: { working: { barrier: "accepted" } }, final: true,
 			}, { id: "accepted-patch" }),
@@ -1557,7 +1555,7 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 	const session = await fixture.createSession();
 	await session.prompt("/state-flow-start");
 	const owned = runGit(fixture.repositoryRoot, "ls-tree", "-r", "--name-only", "HEAD").split("\n");
-	assert.equal(owned.length, 10);
+	assert.equal(owned.length, 11);
 	assert.equal(owned.filter((path) => path.endsWith("checkpoint.json")).length, 3);
 	assert.equal(owned.filter((path) => path.endsWith("patches.jsonl")).length, 3);
 	assert.equal(owned.some((path) => path.endsWith("state.json")), false);
@@ -1572,14 +1570,14 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 		{ scope: "session", patch: { working: { selected: "new" } } },
 	], "New answer"));
 	await session.prompt("New state");
-	const before = owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("meta.json"))
+	const before = owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("runtime.json") && !path.endsWith("meta.json"))
 		.map((path) => readFileSync(join(fixture.repositoryRoot, path)));
 	await session.navigateTree(old.id, { summarize: false });
 	assert.equal(fixture.readState(session).working.selected, "old");
 	await session.prompt("/state-flow-stop");
 	const stopped = latestSnapshot(session);
 	assert.equal(stopped.meta.step, 2);
-	const after = owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("meta.json"))
+	const after = owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("runtime.json") && !path.endsWith("meta.json"))
 		.map((path) => readFileSync(join(fixture.repositoryRoot, path)));
 	assert.deepEqual(after, before);
 	const file = session.sessionFile!;
@@ -1606,7 +1604,7 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 	assert.equal(fixture.readState(resumed).working.selected, "old");
 	assert.equal(fixture.readState(resumed).working.branch, "old");
 	assert.equal(fixture.readState(resumed, 1).response, "");
-	assert.deepEqual(owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("meta.json"))
+	assert.deepEqual(owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("runtime.json") && !path.endsWith("meta.json"))
 		.map((path) => readFileSync(join(fixture.repositoryRoot, path))), before);
 });
 
@@ -1728,7 +1726,7 @@ test("real Pi derives an in-memory session directory from the native header time
 	assert.equal(nativeSessionKey(session), key);
 	const directory = temporalScopePaths(fixture.cwd, manager.getSessionId(), "session", fixture.repositoryRoot, key).directory;
 	assert.equal(existsSync(join(directory, "checkpoint.json")), true);
-	assert.equal(JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")).identity.sessionId, manager.getSessionId());
+	assert.equal(JSON.parse(readFileSync(join(directory, "runtime.json"), "utf8")).identity.sessionId, manager.getSessionId());
 });
 
 test("real Pi baseline memory crosses CWDs while project memory remains scoped", async (t) => {
@@ -1986,7 +1984,7 @@ test("real Pi auto-start follows agent configuration without overriding resumed 
 	const enabledFile = next.sessionFile!;
 	assert.equal(existsSync(enabledFile), true);
 	next.dispose();
-	writeFileSync(join(fixture.agentDir, "state-flow.json"), JSON.stringify({ autoStart: false }));
+	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ autoStart: false }));
 	const manual = await fixture.createSession("new");
 	t.after(() => manual.dispose());
 	assert.equal(manual.getActiveToolNames().includes("patch_state"), false);
@@ -1995,5 +1993,5 @@ test("real Pi auto-start follows agent configuration without overriding resumed 
 	t.after(() => enabled.dispose());
 	assert.equal(enabled.getActiveToolNames().includes("patch_state"), true);
 	assert.equal(latestSnapshot(enabled).config.enabled, true);
-	assert.deepEqual(JSON.parse(readFileSync(join(fixture.agentDir, "state-flow.json"), "utf8")), { autoStart: false });
+	assert.deepEqual(JSON.parse(readFileSync(join(fixture.repositoryRoot, "config.json"), "utf8")), { autoStart: false });
 });

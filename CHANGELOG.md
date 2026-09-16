@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## 0.14.0: Passive and progressive memory
+
+- `Default passive memory`: Repository-root configuration now adds independently configurable passive bootstrap and `read_state`/`patch_state` access, both enabled by default. Passive reads project durable memory without mutation; explicit patches may materialize storage while episode barriers, continuation, response reconciliation, and compaction remain inactive. Start promotes to active semantics and Stop returns to passive mode.
+- `Bounded array ranges`: Added strict half-open `[start:end]` selectors to `read_state` value and patch paths, with `[start..end]` accepted as a forgiving fallback spelling. Ranges are zero-based, must fit fully within the selected array, preserve ordered batch semantics, and never truncate silently.
+- `Direct read paths`: Removed the redundant top-level `state` segment and legacy public `offset`/`scope` inputs. `read_state` now accepts only `path` or `paths`; unscoped semantic paths read the current effective overlay, while `effective`, `global`, `cwd`, and `session` select overlay or ownership. The injected model protocol is 25% shorter while retaining its normative contract.
+- `Lazy semantic plane`: Added scope-local ordinary-JSON `lazy` state under the existing atomic temporal lineage. Ordinary projections omit lazy bodies but expose a bounded root hint; explicit scoped, effective, historical, value, and keys reads resolve lazy data through `read_state`. Telegram inspection now exposes `lazy` and represents the state step with native rich-text code rather than visible Markdown delimiters.
+- `Lazy durability`: Preserved lazy values through predecessor-envelope migration, exact Git and file-only restoration, and native session forks. Invalid lazy state and stale-basis hot-plus-lazy publication now fail before changing retained hot or lazy semantics. Local incompressible-payload measurements found roughly linear current-layout growth and sub-0.5-second publication/restoration through 1 MiB, so this release keeps lazy data co-located with canonical scope semantics rather than adding speculative sharding.
+- `Indexed array patches`: Extended recursive `patch_state` semantics so canonical `"[N]"` selectors update existing array elements, including nested object and array elements, while invalid indices or indexed deletion reject the complete atomic cohort.
+- `Progressive historical reads`: Extended `read_state` with arbitrary path-intersected semantic `patch` projection, including ordered all-or-error batches and effective-state change projection without exposing temporal metadata.
+- `Session storage ownership`: Split branch/run recovery into session `runtime.json`, leaving every scope's `meta.json` symmetric around temporal boundaries and artifact provenance. The migration domain now explicitly detects and atomically upgrades every owner-proven 0.13 session to the 0.14 contract through normal CAS publication; full specifications are removed after accepted terminal reconciliation.
+
 ## 0.13.4: Concurrent publication hotfix
 
 - `Publication contention`: A publisher now waits briefly for a cooperating live State Flow process to release the storage or shared Git lock, preventing transient concurrent `patch_state` calls from failing while preserving explicit errors for interrupted, malformed, reentrant, or prolonged lock ownership.

@@ -61,6 +61,36 @@ test("rejects an invalid member without mutating any scope in the atomic cohort"
 	assert.throws(() => stageAtomicScopePatches(state, { other: {} } as AtomicScopePatches, [], "origin"), /Unknown atomic State Flow scope/);
 });
 
+test("stages indexed array updates atomically across scopes and rejects one invalid index", () => {
+	const state = states();
+	state.global.working.memory = ["global-0", "global-1"];
+	state.cwd.working.groups = [{ notes: ["cwd-0", "cwd-1"], keep: true }];
+	const stage = stageAtomicScopePatches(state, {
+		global: { working: { memory: { "[1]": "global-updated" } } },
+		cwd: { working: { groups: { "[0]": { notes: { "[1]": "cwd-updated" } } } } },
+	}, [], "origin");
+	assert.deepEqual(stage.nextStates.global.working.memory, ["global-0", "global-updated"]);
+	assert.deepEqual(stage.nextStates.cwd.working.groups, [{ notes: ["cwd-0", "cwd-updated"], keep: true }]);
+	assert.throws(() => stageAtomicScopePatches(state, {
+		global: { working: { memory: { "[0]": "would-change" } } },
+		cwd: { working: { groups: { "[1]": { notes: [] } } } },
+	}, [], "origin"), /array index \[1\] is out of bounds/);
+	assert.deepEqual(state.global.working.memory, ["global-0", "global-1"]);
+	assert.deepEqual(state.cwd.working.groups, [{ notes: ["cwd-0", "cwd-1"], keep: true }]);
+});
+
+test("stages ordinary JSON lazy planes without hydrating untouched scopes", () => {
+	const state = states();
+	const stage = stageAtomicScopePatches(state, {
+		global: { lazy: ["first", "second"] },
+		cwd: { lazy: 42 },
+	}, [], "origin");
+	assert.deepEqual(stage.nextStates.global.lazy, ["first", "second"]);
+	assert.equal(stage.nextStates.cwd.lazy, 42);
+	assert.equal(Object.hasOwn(stage.nextStates.session, "lazy"), false);
+	assert.throws(() => stageAtomicScopePatches(state, { session: { lazy: null } }, [], "origin"), /lazy cannot be null/);
+});
+
 test("publishes one exact multi-scope replay cohort without explanatory windows or current-state DTOs", () => {
 	const current = snapshot();
 	const state = states();

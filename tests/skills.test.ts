@@ -56,7 +56,12 @@ test("discovers the packaged optional memory-curation Skill without diagnostics"
 	assert.match(body, /either an explicit curation request or a feature, release, campaign, project, or active-version phase boundary/);
 	assert.match(body, /`reframe`: useful, but expressed with unsupported certainty, authority, or breadth/);
 	assert.match(body, /These are audit decisions, not required stored labels/);
-	assert.match(body, /fresh executor know what must still hold, what changed, what remains unresolved, and how to continue/);
+	assert.match(body, /fresh executor know what must still hold, what changed, what remains unresolved, and the exact next action without replaying the prior cognitive trajectory/);
+	assert.match(body, /Optimize decomposition for resumability as well as functional completion/);
+	assert.match(body, /array order in Lazy as semantic priority: earlier entries are higher priority/);
+	assert.match(body, /Keep a top-level collection as a direct array when its members are the domain values/);
+	assert.match(body, /use an object only when that item genuinely owns structured or nested fields/);
+	assert.match(body, /Do not add `items`, `owner`, `source`, or similar wrapper objects merely to describe the collection/);
 	assert.match(body, /compile it into its exact-path CWD artifact before acquiring a stale global Markdown source/);
 	assert.match(body, /verify it with a separate `read_state`, then delete or narrow the source/);
 	assert.match(body, /Do all readback before the terminal answer/);
@@ -100,16 +105,16 @@ test("curation compiles an acquired Skill before write-verify-delete barriers", 
 		cwd: { contract: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
 	const destination = await readState.execute("verify-destination", {
-		offset: 0, scope: "cwd",
+		path: "cwd.contract.projectRule",
 	}, undefined, undefined, h.ctx);
-	assert.equal(JSON.parse(destination.content[0].text).state.contract.projectRule, "project-only");
+	assert.equal(JSON.parse(destination.content[0].text).value, "project-only");
 	await patchState.execute("delete-source", {
 		global: { contract: { projectRule: null } },
 	}, undefined, undefined, h.ctx);
 	const effective = await readState.execute("verify-effective", {
-		offset: 0, scope: "effective",
+		path: "contract.projectRule",
 	}, undefined, undefined, h.ctx);
-	assert.equal(JSON.parse(effective.content[0].text).state.contract.projectRule, "project-only");
+	assert.equal(JSON.parse(effective.content[0].text).value, "project-only");
 	assert.equal(h.readState(0, "global").contract.projectRule, undefined);
 	const terminal = await commitTerminal(h, {}, {}, "Curation verified.");
 	assert.equal(terminal.message.content[0].text, "Curation verified.");

@@ -27,3 +27,8 @@ export function prepareRun(snapshot: Snapshot, prompt: string): boolean {
 	snapshot.meta.validation = undefined;
 	return true;
 }
+
+/** Retain the full prompt only while its run remains recoverable and unfinished. */
+export function completeRun(snapshot: Snapshot): void {
+	delete snapshot.meta.specification;
+}

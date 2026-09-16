@@ -27,6 +27,7 @@ const STATE_FILE = "state.json";
 const CHECKPOINT_FILE = "checkpoint.json";
 const PATCHES_FILE = "patches.jsonl";
 const META_FILE = "meta.json";
+const RUNTIME_FILE = "runtime.json";
 
 /** Canonical semantic sources plus runtime-owned temporal metadata. */
 export interface ScopeStreamSources {
@@ -159,9 +160,9 @@ export function temporalScopePaths(cwd: string, sessionId: string, scope: StateS
 	return { directory, checkpoint: join(directory, CHECKPOINT_FILE), patches: join(directory, PATCHES_FILE), meta: join(directory, META_FILE) };
 }
 
-export function sessionRuntimePaths(cwd: string, sessionId: string, repositoryRoot: string, sessionKey = sessionId): { config: string; meta: string } {
+export function sessionRuntimePaths(cwd: string, sessionId: string, repositoryRoot: string, sessionKey = sessionId): { config: string; runtime: string; meta: string } {
 	const directory = sessionScopePaths(cwd, sessionId, repositoryRoot, sessionKey).directory;
-	return { config: join(directory, "config.json"), meta: join(directory, META_FILE) };
+	return { config: join(directory, "config.json"), runtime: join(directory, RUNTIME_FILE), meta: join(directory, META_FILE) };
 }
 
 /** Unsupported state.json presence never becomes an anchored checkpoint. */
@@ -178,7 +179,7 @@ export function captureTemporalFileBases(cwd: string, sessionId: string, reposit
 	const paths = (["global", "cwd", "session"] as const).flatMap((scope) => {
 		const pair = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
 		const runtime = scope === "session" ? sessionRuntimePaths(cwd, sessionId, repositoryRoot, sessionKey) : undefined;
-		return [pair.checkpoint, pair.patches, join(pair.directory, STATE_FILE), ...(runtime === undefined ? [pair.meta] : [runtime.config, runtime.meta])];
+		return [pair.checkpoint, pair.patches, join(pair.directory, STATE_FILE), ...(runtime === undefined ? [pair.meta] : [runtime.config, runtime.runtime, runtime.meta])];
 	});
 	return captureOwnedFileBases(paths, repositoryRoot);
 }
@@ -218,6 +219,9 @@ export function serializeScopeMetadata(
 	cwdIdentity?: string, existingSource?: string,
 ): string {
 	const existing = parseMetadataDocument(existingSource, `State Flow metadata`);
+	if (scope === "session") {
+		for (const key of ["identity", "lineage", "step", "specification", "validation", "bootstrap", "remotePublication", "revision", "temporalRevision", "publication"]) delete existing[key];
+	}
 	const sources = serializeScopeStream(stream, scope, cwdIdentity);
 	const value = {
 		...existing,
@@ -359,7 +363,7 @@ export function isStateFlowOwnedPath(candidate: string, repositoryRoot = getDura
 		return cwdKey(segments[0]!)
 			&& sessionKey(segments[1]!)
 			&& (segments[2] === STATE_FILE || segments[2] === CHECKPOINT_FILE || segments[2] === PATCHES_FILE
-				|| segments[2] === "config.json" || segments[2] === META_FILE);
+				|| segments[2] === "config.json" || segments[2] === RUNTIME_FILE || segments[2] === META_FILE);
 	}
 	return false;
 }

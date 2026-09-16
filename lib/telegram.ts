@@ -27,12 +27,18 @@ export interface StateFlowTelegramState {
 	contract: Record<string, unknown>;
 	working: Record<string, unknown>;
 	response: string;
+	lazy?: unknown;
 }
 
+export type StateFlowTelegramRichText =
+	| string
+	| StateFlowTelegramRichText[]
+	| { type: "bold" | "code"; text: StateFlowTelegramRichText };
+
 export type StateFlowTelegramRichBlock =
-	| { type: "heading"; text: string; size: 3 }
-	| { type: "pre"; text: string; language?: string }
-	| { type: "details"; summary: string | { type: "bold" | "code"; text: string }; blocks: StateFlowTelegramRichBlock[]; is_open?: true };
+	| { type: "heading"; text: StateFlowTelegramRichText; size: 3 }
+	| { type: "pre"; text: StateFlowTelegramRichText; language?: string }
+	| { type: "details"; summary: StateFlowTelegramRichText; blocks: StateFlowTelegramRichBlock[]; is_open?: true };
 
 export interface StateFlowTelegramRichMessage {
 	blocks: StateFlowTelegramRichBlock[];
@@ -168,6 +174,9 @@ function renderStateFlowTelegramField(value: unknown): string {
 		const length = Math.floor((low + high) / 2);
 		const candidate = JSON.stringify({
 			truncated: true,
+			...(value !== null && typeof value === "object" && !Array.isArray(value)
+				? { keys: Object.keys(value) }
+				: {}),
 			preview: json.slice(0, length),
 			omittedChars: json.length - length,
 		}, null, 2);
@@ -182,14 +191,18 @@ function renderStateFlowTelegramField(value: unknown): string {
 }
 
 export function renderStateFlowRichState(scope: StateFlowTelegramScope, step: number, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
-	const fields = ["artifacts", "contract", "working", "response"] as const;
+	const fields = ["artifacts", "contract", "working", "response", "lazy"] as const;
 	return {
 		blocks: [
-			{ type: "heading", text: `${STATE_FLOW_SCOPE_LABELS[scope]}: \`#${step}\``, size: 3 },
+			{
+				type: "heading",
+				text: [`${STATE_FLOW_SCOPE_LABELS[scope]}: `, { type: "code", text: `#${step}` }],
+				size: 3,
+			},
 			...fields.map((field) => ({
 				type: "details" as const,
 				summary: { type: "code" as const, text: field },
-				blocks: [{ type: "pre" as const, language: "json", text: renderStateFlowTelegramField(state[field]) }],
+				blocks: [{ type: "pre" as const, language: "json", text: renderStateFlowTelegramField(state[field] ?? {}) }],
 			})),
 		],
 		skip_entity_detection: true,

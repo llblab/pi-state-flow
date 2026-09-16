@@ -22,7 +22,7 @@ export interface RecentTransition extends AcceptedTransition {
 
 export type RecentTransitionWindow = RecentTransition[];
 const SCOPES = new Set<StateScope>(["global", "cwd", "session"]);
-const PATCH_KEYS = new Set(["artifacts", "contract", "working", "response"]);
+const PATCH_KEYS = new Set(["artifacts", "contract", "working", "response", "lazy"]);
 
 /** Normalize accepted replacements into recursive-merge replay, including removals. */
 function replayPatch(before: JsonObject, after: JsonObject): JsonObject {
@@ -49,9 +49,13 @@ function validateScopedPatch(value: unknown): asserts value is RecentScopePatch 
 	}
 	validatePatch(value.patch);
 	for (const [key, field] of Object.entries(value.patch)) {
-		if (!PATCH_KEYS.has(key) || (key === "response"
-			? value.scope !== "session" || typeof field !== "string" : !isObject(field))) {
-			throw new Error("Recent State Flow patches may contain object-valued artifacts, contract, and working plus a session response string");
+		const valid = key === "response"
+			? value.scope === "session" && typeof field === "string"
+			: key === "lazy"
+				? field !== null
+				: PATCH_KEYS.has(key) && isObject(field);
+		if (!PATCH_KEYS.has(key) || !valid) {
+			throw new Error("Recent State Flow patches may contain hot object planes, ordinary-JSON lazy state, and a session response string");
 		}
 	}
 }

@@ -46,6 +46,8 @@ Separate a binding requirement from the method currently proposed to satisfy it.
 
 When it affects continuation, retain what was proposed, accepted, rejected, corrected, explained, or left unresolved, and what the next response or action must address. Preserve enough referents for pending follow-ups to make sense.
 
+Treat every completed work slice as a possible restart boundary. Its checkpoint should let a fresh executor recover the achieved outcome, surviving evidence, active commitments, decision-relevant uncertainty, and exact continuation without replaying the prior reasoning trajectory. Optimize decomposition for resumability as well as functional completion; if the next safe action depends on transient context that will disappear, the slice is not yet at a sufficient boundary.
+
 Keep consequences, not a transcript or a personality dossier. Do not invent shared history or claim subjective continuity. A fresh run should not unnecessarily reopen a settled exchange or treat an unanswered proposal as approved.
 
 ### Preserve learning at its demonstrated boundary
@@ -70,11 +72,17 @@ A locator supports later retrieval; it does not replace content needed for the n
 
 Do not rerun the underlying project merely to curate its memory. Leave an exact unresolved check when verification falls outside the requested boundary.
 
-### Compact without flattening
+### Preserve priority and keep Lazy shallow
+
+Treat array order in Lazy as semantic priority: earlier entries are higher priority. Preserve that order deliberately; do not reorder entries for aesthetics, incidental grouping, or normalization.
+
+Minimize Lazy nesting, especially for top-level collections. Keep a top-level collection as a direct array when its members are the domain values. Represent a standalone item directly, normally as a string; use an object only when that item genuinely owns structured or nested fields. Do not add `items`, `owner`, `source`, or similar wrapper objects merely to describe the collection, and do not introduce nested arrays unless the domain itself requires a matrix or grouped sequence.
+
+### Compact without flattening meaning
 
 Merge redundant fragments and remove obsolete scaffolding, repeated argumentation, and routine progress. Do not rewrite unchanged state merely to normalize wording.
 
-Do not erase a meaningful correction, uncertainty, commitment, negative result, or continuation dependency to make state shorter. Do not retain the previous chain of reasoning solely to steer the next run toward the same method.
+Do not erase a meaningful correction, uncertainty, commitment, negative result, priority order, or continuation dependency to make state shorter. Do not retain the previous chain of reasoning solely to steer the next run toward the same method.
 
 ### Reconcile phase boundaries
 
@@ -90,7 +98,7 @@ Effective state does not prove which scope owns a value. When ownership matters 
 
 Before writing, review the proposed changes once within the requested boundary:
 
-- Would a fresh executor know what must still hold, what changed, what remains unresolved, and how to continue?
+- Would a fresh executor know what must still hold, what changed, what remains unresolved, and the exact next action without replaying the prior cognitive trajectory?
 - Could an omission cause a known failed attempt, an unnecessary repeated explanation, or loss of an active commitment?
 - Could a retained claim impose an unapproved method, overgeneralize a result, or hide a live alternative?
 

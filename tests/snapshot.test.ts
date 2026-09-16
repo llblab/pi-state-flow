@@ -7,12 +7,12 @@ import {
 import { createTemporalState } from "../lib/temporal.ts";
 import { emptyState } from "../lib/state.ts";
 
-test("session config/meta codec separates runtime provenance from semantic state and resolves self explicitly", () => {
+test("session config/runtime codec separates runtime provenance from semantic state and resolves self explicitly", () => {
 	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
 	const snapshot = { ...emptySnapshot(true), meta: { step: 3, specification: "Continue" } };
 	const runtime = createSessionRuntime(snapshot, "/project", "session", view.lineage);
-	const sources = serializeSessionRuntime(runtime, "/project", "session", view.scopes.session);
-	const parsed = parseSessionRuntime(sources.config, sources.meta, "/project", "session")!;
+	const sources = serializeSessionRuntime(runtime, "/project", "session");
+	const parsed = parseSessionRuntime(sources.config, sources.runtime, "/project", "session")!;
 	assert.deepEqual(parsed, runtime);
 	assert.deepEqual(resolveSessionRuntime(parsed, "a".repeat(40)).snapshot, {
 		config: snapshot.config,
@@ -27,9 +27,9 @@ test("runtime decoding rejects mismatched identity, malformed lineage, invalid c
 	const runtime = createSessionRuntime(emptySnapshot(true), "/project", "session", view.lineage);
 	const sources = serializeSessionRuntime(runtime, "/project", "session");
 	assert.equal(parseSessionRuntime(undefined, undefined, "/project", "session"), undefined);
-	assert.throws(() => parseSessionRuntime(undefined, sources.meta, "/project", "session"), /Incomplete/);
-	assert.throws(() => parseSessionRuntime("bad", sources.meta, "/project", "session"), /invalid JSON/);
-	assert.throws(() => parseSessionRuntime(sources.config, sources.meta, "/other", "session"), /identity mismatch/);
+	assert.throws(() => parseSessionRuntime(undefined, sources.runtime, "/project", "session"), /Incomplete/);
+	assert.throws(() => parseSessionRuntime("bad", sources.runtime, "/project", "session"), /invalid JSON/);
+	assert.throws(() => parseSessionRuntime(sources.config, sources.runtime, "/other", "session"), /identity mismatch/);
 	for (const candidate of [
 		{ ...runtime, config: { enabled: true, unexpected: true } },
 		{ ...runtime, meta: { ...runtime.meta, step: -1 } },

@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { parseRemotePublicationPolicyDocument, serializeRemotePublicationPolicyDocument, type RemotePublicationPolicyDocument } from "./publication.ts";
 import { applyPatch, canonicalJson, containsNull, isJsonValue, isObject, type JsonObject } from "./json.ts";
-import { validateTemporalLineage, type ScopeStream, type TransitionBoundary } from "./temporal.ts";
+import { validateTemporalLineage, type TransitionBoundary } from "./temporal.ts";
 import { migrateLegacySkillCompilations } from "./skills.ts";
 import { isMaterializedState, type MaterializedState } from "./state.ts";
 const MAX_RESTORED_STEP = Number.MAX_SAFE_INTEGER - 1;
@@ -97,7 +97,7 @@ export function createSessionRuntime(
 	sessionId: string,
 	lineage: readonly TransitionBoundary[],
 	publication: SessionRuntime["meta"]["publication"] = "unconfirmed",
-	artifacts: ArtifactProvenanceRegistry = {},
+	_artifacts: ArtifactProvenanceRegistry = {},
 ): SessionRuntime {
 	const { durableBase: _base, pendingPublication: _publication, ...fields } = snapshot.meta;
 	const runtime: SessionRuntime = {
@@ -107,7 +107,6 @@ export function createSessionRuntime(
 			version: 1,
 			identity: { cwd: resolve(cwd), sessionId },
 			lineage: structuredClone([...lineage]),
-			...(Object.keys(artifacts).length === 0 ? {} : { artifacts: structuredClone(artifacts) }),
 			revision: "self",
 			publication,
 		},
@@ -117,39 +116,37 @@ export function createSessionRuntime(
 }
 
 export function serializeSessionRuntime(
-	runtime: SessionRuntime, cwd: string, sessionId: string, stream?: ScopeStream, existingSource?: string,
-): { config: string; meta: string } {
+	runtime: SessionRuntime, cwd: string, sessionId: string,
+): { config: string; runtime: string } {
 	validateSessionRuntime(runtime, cwd, sessionId);
-	let existing: Record<string, unknown> = {};
-	if (existingSource !== undefined) {
-		try { existing = JSON.parse(existingSource) as Record<string, unknown>; }
-		catch { throw new Error("State Flow session runtime contains invalid JSON"); }
-		if (!isObject(existing) || !isJsonValue(existing)) throw new Error("Invalid State Flow session runtime metadata");
-	}
-	const temporal = stream === undefined ? runtime.meta.temporal : {
-		checkpoint: structuredClone(stream.checkpoint.through),
-		patches: stream.patches.map((record) => structuredClone(record.transition)),
-	};
-	return { config: `${canonicalJson(runtime.config)}\n`, meta: `${canonicalJson({ ...existing, ...runtime.meta, ...(temporal ? { temporal } : {}) })}\n` };
+	const { temporal: _retiredTemporal, artifacts: _legacyArtifacts, ...runtimeMeta } = runtime.meta;
+	return { config: `${canonicalJson(runtime.config)}\n`, runtime: `${canonicalJson(runtimeMeta)}\n` };
 }
 
-export function parseSessionRuntime(config: string | undefined, meta: string | undefined, cwd: string, sessionId: string): SessionRuntime | undefined {
-	if (config === undefined && meta === undefined) return undefined;
-	if (config === undefined && meta !== undefined) {
-		let document: unknown;
-		try { document = JSON.parse(meta); } catch { throw new Error("State Flow session runtime contains invalid JSON"); }
-		if (isObject(document) && !Object.hasOwn(document, "identity") && !Object.hasOwn(document, "lineage")
-			&& Object.keys(document).every((key) => ["version", "artifacts", "temporal", "owner"].includes(key))) return undefined;
+export function parseSessionRuntime(
+	config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string, legacyMetaSource?: string,
+): SessionRuntime | undefined {
+	let selected = runtimeSource;
+	if (selected === undefined && legacyMetaSource !== undefined) {
+		let legacy: unknown;
+		try { legacy = JSON.parse(legacyMetaSource); } catch { throw new Error("State Flow session runtime contains invalid JSON"); }
+		if (isObject(legacy) && (Object.hasOwn(legacy, "identity") || Object.hasOwn(legacy, "lineage"))) selected = legacyMetaSource;
 	}
-	if (config === undefined || meta === undefined) throw new Error("Incomplete State Flow config/meta pair");
+	if (config === undefined && selected === undefined) return undefined;
+	if (config === undefined && selected !== undefined) {
+		let document: unknown;
+		try { document = JSON.parse(selected); } catch { throw new Error("State Flow session runtime contains invalid JSON"); }
+		if (isObject(document) && !Object.hasOwn(document, "identity") && !Object.hasOwn(document, "lineage")) return undefined;
+	}
+	if (config === undefined || selected === undefined) throw new Error("Incomplete State Flow config/runtime pair");
 	let runtime: unknown;
 	try {
-		runtime = { config: JSON.parse(config), meta: JSON.parse(meta) };
+		runtime = { config: JSON.parse(config), meta: JSON.parse(selected) };
 	} catch {
 		throw new Error("State Flow session runtime contains invalid JSON");
 	}
 	validateSessionRuntime(runtime, cwd, sessionId);
-	const { temporal: _temporal, ...runtimeMeta } = runtime.meta;
+	const { temporal: _legacyTemporal, ...runtimeMeta } = runtime.meta;
 	return { config: { enabled: runtime.config.enabled }, meta: runtimeMeta };
 }
 

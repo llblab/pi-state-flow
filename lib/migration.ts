@@ -12,7 +12,7 @@ import {
 	type DurableFileBase,
 	type OwnedFileUpdate,
 } from "./durable.ts";
-import { canonicalJson } from "./json.ts";
+import { parseSessionRuntime, serializeSessionRuntime } from "./snapshot.ts";
 import type { StateScope } from "./state.ts";
 
 export interface LegacyStorageMigration {
@@ -25,6 +25,7 @@ interface MigrationDirectory {
 	directory: string;
 	scope: StateScope;
 	cwdIdentity?: string;
+	sessionId?: string;
 }
 
 /** Discover every owner-proven CWD and session cohort beneath the configured store. */
@@ -61,10 +62,14 @@ function migrationDirectories(cwd: string, sessionId: string, root: string, sess
 			const identity = meta && typeof meta === "object" && !Array.isArray(meta) ? (meta as { identity?: unknown }).identity : undefined;
 			if (!identity || typeof identity !== "object" || Array.isArray(identity)) continue;
 			const owner = identity as { cwd?: unknown; sessionId?: unknown };
-			if (owner.cwd === cwdOwner && typeof owner.sessionId === "string" && owner.sessionId.length > 0) directories.push({ directory, scope: "session" });
+			if (owner.cwd === cwdOwner && typeof owner.sessionId === "string" && owner.sessionId.length > 0) {
+				directories.push({ directory, scope: "session", cwdIdentity: cwdOwner, sessionId: owner.sessionId });
+			}
 		}
 	}
-	if (!directories.some(({ directory }) => directory === selectedSession)) directories.push({ directory: selectedSession, scope: "session" });
+	if (!directories.some(({ directory }) => directory === selectedSession)) {
+		directories.push({ directory: selectedSession, scope: "session", cwdIdentity: resolve(cwd), sessionId });
+	}
 	return directories;
 }
 
@@ -88,11 +93,14 @@ export function hasLegacyStateSources(
 	sessionKey = sessionId,
 ): boolean {
 	const root = resolve(repositoryRoot);
-	return migrationDirectories(cwd, sessionId, root, sessionKey).some(({ directory }) => {
+	return migrationDirectories(cwd, sessionId, root, sessionKey).some(({ directory, scope }) => {
 		if (lstatSync(join(directory, "checkpoint.json"), { throwIfNoEntry: false }) === undefined) return false;
 		try {
 			const meta = JSON.parse(readFileSync(join(directory, "meta.json"), "utf8"));
-			return meta === null || typeof meta !== "object" || !("temporal" in meta);
+			if (meta === null || typeof meta !== "object" || !("temporal" in meta)) return true;
+			return scope === "session"
+				&& lstatSync(join(directory, "runtime.json"), { throwIfNoEntry: false }) === undefined
+				&& ("identity" in meta || "lineage" in meta);
 		} catch { return true; }
 	});
 }
@@ -107,30 +115,39 @@ export function planLegacyStorageMigration(
 ): LegacyStorageMigration {
 	const root = resolve(repositoryRoot);
 	const directories = migrationDirectories(cwd, sessionId, root, sessionKey);
-	const paths = directories.flatMap(({ directory }) => [
+	const paths = directories.flatMap(({ directory, scope }) => [
 		join(directory, "checkpoint.json"), join(directory, "patches.jsonl"), join(directory, "meta.json"),
+		...(scope === "session" ? [join(directory, "config.json"), join(directory, "runtime.json")] : []),
 	]);
 	const bases = captureOwnedFileBases(paths, root);
 	const byPath = new Map(bases.map((base) => [base.path, base]));
 	const updates: OwnedFileUpdate[] = [];
 	const scopes: StateScope[] = [];
-	for (const { scope, directory, cwdIdentity } of directories) {
+	for (const { scope, directory, cwdIdentity, sessionId: ownedSessionId } of directories) {
 		const checkpoint = byPath.get(join(directory, "checkpoint.json"))!;
 		const patches = byPath.get(join(directory, "patches.jsonl"))!;
 		const meta = byPath.get(join(directory, "meta.json"))!;
 		if (checkpoint.content !== undefined) {
-			const stream = parseScopeStream(checkpoint.content, patches.content, scope, cwdIdentity, meta.content)!;
-			const source = serializeScopeStream(stream, scope, cwdIdentity);
-			let metadata = serializeScopeMetadata(undefined, stream, scope, cwdIdentity, meta.content);
+			const stream = parseScopeStream(checkpoint.content, patches.content, scope, scope === "cwd" ? cwdIdentity : undefined, meta.content)!;
+			const source = serializeScopeStream(stream, scope, scope === "cwd" ? cwdIdentity : undefined);
+			const metadata = serializeScopeMetadata(undefined, stream, scope, scope === "cwd" ? cwdIdentity : undefined, meta.content);
+			const cohortUpdates: OwnedFileUpdate[] = [
+				...(checkpoint.content === source.checkpoint ? [] : [{ path: checkpoint.path, content: source.checkpoint }]),
+				...(patches.content === source.patches ? [] : [{ path: patches.path, content: source.patches }]),
+				...(meta.content === metadata ? [] : [{ path: meta.path, content: metadata }]),
+			];
 			if (scope === "session") {
-				const runtime = JSON.parse(metadata) as Record<string, unknown>;
-				runtime.revision = "self";
-				runtime.temporalRevision = "self";
-				metadata = `${canonicalJson(runtime)}\n`;
+				const config = byPath.get(join(directory, "config.json"))!;
+				const runtimeFile = byPath.get(join(directory, "runtime.json"))!;
+				const runtime = parseSessionRuntime(config.content, runtimeFile.content, cwdIdentity!, ownedSessionId!, meta.content);
+				if (runtime !== undefined) {
+					const serialized = serializeSessionRuntime(runtime, cwdIdentity!, ownedSessionId!);
+					if (runtimeFile.content !== serialized.runtime) cohortUpdates.push({ path: runtimeFile.path, content: serialized.runtime });
+				}
 			}
-			if (checkpoint.content !== source.checkpoint || patches.content !== source.patches || meta.content !== metadata) {
+			if (cohortUpdates.length > 0) {
 				if (!scopes.includes(scope)) scopes.push(scope);
-				updates.push({ path: checkpoint.path, content: source.checkpoint }, { path: patches.path, content: source.patches }, { path: meta.path, content: metadata });
+				updates.push(...cohortUpdates);
 			}
 			continue;
 		}

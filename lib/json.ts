@@ -3,6 +3,32 @@ import { createHash } from "node:crypto";
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export interface JsonObject { [key: string]: JsonValue }
 
+const ARRAY_INDEX_SELECTOR = /^\[(0|[1-9]\d*)\]$/;
+
+function isIndexedArrayPatch(value: JsonObject): boolean {
+	const keys = Object.keys(value);
+	return keys.length > 0 && keys.every((key) => ARRAY_INDEX_SELECTOR.test(key));
+}
+
+function applyArrayPatch(state: JsonValue[], patch: JsonObject): JsonValue[] {
+	const next = structuredClone(state);
+	for (const [selector, value] of Object.entries(patch)) {
+		const match = ARRAY_INDEX_SELECTOR.exec(selector)!;
+		const index = Number(match[1]);
+		if (!Number.isSafeInteger(index) || index >= next.length) {
+			throw new Error(`State patch array index ${selector} is out of bounds for length ${next.length}`);
+		}
+		if (value === null) throw new Error(`State patch array index ${selector} cannot be deleted; replace the whole array instead`);
+		const current = next[index]!;
+		next[index] = Array.isArray(current) && isObject(value) && isIndexedArrayPatch(value)
+			? applyArrayPatch(current, value)
+			: isObject(current) && isObject(value)
+				? applyPatch(current, value)
+				: structuredClone(value);
+	}
+	return next;
+}
+
 export function applyPatch(state: JsonObject, patch: JsonObject): JsonObject {
 	const next: JsonObject = structuredClone(state);
 	for (const [key, value] of Object.entries(patch)) {
@@ -11,9 +37,11 @@ export function applyPatch(state: JsonObject, patch: JsonObject): JsonObject {
 			continue;
 		}
 		const current = next[key];
-		const materialized = isObject(current) && isObject(value)
-			? applyPatch(current, value)
-			: structuredClone(value);
+		const materialized = Array.isArray(current) && isObject(value) && isIndexedArrayPatch(value)
+			? applyArrayPatch(current, value)
+			: isObject(current) && isObject(value)
+				? applyPatch(current, value)
+				: structuredClone(value);
 		Object.defineProperty(next, key, {
 			value: materialized,
 			enumerable: true,

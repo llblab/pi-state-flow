@@ -6,11 +6,11 @@ For the concept and installation, start with the [README](../README.md). This gu
 
 `/state-flow-start` initializes any missing storage and enables the current Pi branch. No remote is required. Starting mid-conversation retains Pi's active context for one complete bootstrap run, during which the agent must compile future-relevant information into state.
 
-- **New session:** Ordinary Pi unless `autoStart` is enabled. An enabled new session has its own empty session layer and inherits global/CWD state, never another session's private continuation.
+- **New session:** Passive durable memory is available by default without starting an episode. `autoStart` promotes genuinely new sessions into active State Flow; an active new session has its own empty session layer and inherits global/CWD state, never another session's private continuation.
 - **Resume:** Restores the selected session's stored enablement, state, and lineage. Agent-level `autoStart` does not override a resumed branch.
 - **Tree navigation:** Restores the selected checkpoint and recorded state revision without checking out or resetting the shared store.
 - **Abort inference:** Stops generation while already accepted patches remain durable for continued work and corrected direction in the same session. It does not roll back memory or require immediate remote replication.
-- **Stop:** Disables semantic tools and updates immediately on the selected branch; ordinary prompt composition resumes with the next user run. It preserves state and does not create a semantic transition or change automatic-start policy for future new sessions.
+- **Stop:** Ends active episode semantics and returns to the configured passive bootstrap/tool combination. It preserves state, creates no semantic transition, and does not change passive or automatic-start policy.
 - **Continue after Stop:** The same physical session retains a frozen state handoff, any interrupted current request and tool trajectory (including late results), and post-stop conversation. Completed earlier conversation stays excluded, while other extensions' custom context survives. Reload/resume/tree preserve this projection; new/forked physical sessions do not inherit it. Active restart uses it for one bootstrap run.
 - **Completed-history compaction:** After an accepted run settles without queued input, State Flow asks Pi for a native compaction boundary only when public context usage reaches 24,000 tokens. No extra model summary is requested; Pi keeps the complete latest user iteration—from its request through tools and final answer—in active history and retains the complete append-only JSONL/tree. On resume, native `buildContextEntries()` and TUI rendering omit the older completed prefix. Unknown or smaller usage skips the request, and custom Pi retention settings may still decline it benignly. Foreign custom context in the removed prefix, bootstrap/fallback/abort/error, Stop and pending input prevent State Flow-owned shortening; ordinary manual/threshold/overflow compaction remains native and may preserve unfinished work not yet patched into memory.
 
@@ -28,27 +28,30 @@ Selecting a copied parent checkpoint through the child's `/tree` does not make i
 
 ## Configuration
 
-Optional `state-flow.json` beneath Pi's agent directory, normally `~/.pi/agent/state-flow.json`:
+Optional global `config.json` at the root of the State Flow repository, normally `~/.pi/agent/state-flow/config.json`:
 
 ```json
 {
-  "directory": "~/.pi/agent/state-flow",
   "autoStart": false,
+  "passiveBootstrap": true,
+  "passiveTools": true,
   "logging": false,
   "showSuccessfulPatches": true,
   "remotePublication": "turn-end"
 }
 ```
 
-- `directory`: State store. The default is `state-flow/` beneath the agent directory. Absolute paths, `~`/`~/`, and relative paths are accepted; relative paths resolve from the configuration directory, not project CWD.
+The canonical store is `state-flow/` beneath the agent directory. Keeping configuration inside that repository removes the separate agent-level `state-flow.json`; SDK embeddings may still provide an explicit repository override.
 - `autoStart`: Defaults to `false`. When `true`, genuinely new sessions use the same initialization as explicit Start, including fresh CWDs.
+- `passiveBootstrap`: Defaults to `true`. Projects existing effective durable memory into ordinary model context without creating scopes, migrating storage, publishing, or starting an episode.
+- `passiveTools`: Defaults to `true`. Exposes `read_state` and `patch_state` outside active episodes. Reads remain side-effect free; the first explicit patch may initialize or migrate storage but does not enable continuation, terminal barriers, or compaction.
 - `logging`: Defaults to `false`. When enabled, records rejected patches and unresolved terminal/fallback diagnostics locally at `tmp/state-flow/logs.jsonl` beneath the agent directory.
 - `showSuccessfulPatches`: Defaults to `true`. In interactive Pi, successful `patch_state` rows show only the applied pretty-printed JSON arguments, with blank lines between adjacent memory sections; set it to `false` to keep only the compact summary. Rejected calls still use ordinary error rendering and private validation details are never added.
 - `remotePublication`: New-runtime policy: `turn-end` queues the newest accepted commit for asynchronous push; `off` keeps commits local; `transition` retains synchronous compatibility behavior. Existing branches keep their persisted policy.
 
 Settings are read once at extension load. After editing, use `/reload` or restart Pi. A missing file uses defaults without creating a configuration file; malformed JSON, unknown keys, or invalid values fail loading rather than silently selecting another store.
 
-`PI_CODING_AGENT_DIR` changes the agent-directory default. Configuration remains in that directory even when `directory` selects another state store. This override does not move data or redirect Knowledge discovery, whose default remains `knowledge/` beneath the agent directory. SDK overrides are documented under [embedding](architecture.md#embedding).
+`PI_CODING_AGENT_DIR` changes both the default State Flow repository and its global configuration location. It does not redirect Knowledge discovery, whose default remains `knowledge/` beneath the agent directory. SDK repository overrides are documented under [embedding](architecture.md#embedding); an overridden repository owns its own root `config.json`.
 
 ### Diagnostic logging and privacy
 
@@ -75,11 +78,11 @@ The terminal indicator is `state-flow #N`. When `pi-telegram` is available, one 
 Use a dedicated directory. State storage and Knowledge Markdown have separate responsibilities:
 
 ```text
-<agentDir>/state-flow/   accepted state and runtime metadata
+<agentDir>/state-flow/   global config, accepted state, and runtime metadata
 <agentDir>/knowledge/    optional Markdown sources for compilation
 ```
 
-Each scope materializes an anchored semantic-only `checkpoint.json` plus semantic-only lines in `patches.jsonl`. Scope `meta.json` holds their temporal boundaries, CWD ownership where applicable, and runtime-owned artifact evidence; the session also has `config.json` and branch runtime metadata. CWD/session directories mirror Pi's native naming while validating canonical identities separately. See the [storage contract](architecture.md#storage-and-identity) for the exact layout.
+Each scope materializes an anchored semantic-only `checkpoint.json` plus semantic-only lines in `patches.jsonl`. Scope `meta.json` holds temporal boundaries, CWD ownership where applicable, and runtime-owned artifact evidence. The session additionally uses `config.json` for behavior and `runtime.json` for branch/run recovery metadata; a full prompt is retained there only while its run is unfinished. CWD/session directories mirror Pi's native naming while validating canonical identities separately. See the [storage contract](architecture.md#storage-and-identity) for the exact layout.
 
 ### Missing, partial, and malformed storage
 

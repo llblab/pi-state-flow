@@ -223,11 +223,12 @@ export function inspectStateFlowContinuationProvenance(
 	const paths = sessionRuntimePaths(header.cwd, header.id, repositoryRoot, sessionKey);
 	try {
 		const config = readRegular(paths.config);
+		const runtimeSource = readRegular(paths.runtime);
 		const meta = readRegular(paths.meta);
-		if (config === undefined && meta === undefined) {
+		if (config === undefined && runtimeSource === undefined && meta === undefined) {
 			return { stateFlow: { enabled: false, restorable: true }, reason: "no State Flow session runtime" };
 		}
-		const runtime = parseSessionRuntime(config, meta, header.cwd, header.id);
+		const runtime = parseSessionRuntime(config, runtimeSource, header.cwd, header.id, meta);
 		if (!runtime) return { stateFlow: { enabled: false, restorable: true }, reason: "no State Flow session runtime" };
 		if (!runtime.config.enabled) return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow stopped on selected runtime" };
 		if (runtime.meta.publication === "files") {
@@ -238,7 +239,7 @@ export function inspectStateFlowContinuationProvenance(
 			validateTemporalState({ lineage: runtime.meta.lineage, scopes: { global, cwd, session } });
 			return { stateFlow: { enabled: true, restorable: true }, reason: "exact file-only runtime cohort is restorable" };
 		}
-		const runtimePath = relative(resolve(repositoryRoot), paths.meta);
+		const runtimePath = relative(resolve(repositoryRoot), runtimeSource === undefined ? paths.meta : paths.runtime);
 		if (runtimePath.startsWith("..")) throw new Error("runtime provenance escapes repository");
 		const owner = execFileSync("git", ["-C", repositoryRoot, "log", "-1", "--format=%H", "--", runtimePath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 		if (!owner) throw new Error("runtime owner commit is unavailable");
