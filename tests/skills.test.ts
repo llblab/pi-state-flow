@@ -56,7 +56,8 @@ test("discovers the packaged optional memory-curation Skill without diagnostics"
 	assert.match(body, /either an explicit curation request or a feature, release, campaign, project, or active-version phase boundary/);
 	assert.match(body, /`reframe`: useful, but expressed with unsupported certainty, authority, or breadth/);
 	assert.match(body, /These are audit decisions, not required stored labels/);
-	assert.match(body, /fresh executor know what must still hold, what changed, what remains unresolved, and how to continue/);
+	assert.match(body, /fresh executor know what must still hold, what changed, what remains unresolved, and the exact next action without replaying the prior cognitive trajectory/);
+	assert.match(body, /Optimize decomposition for resumability as well as functional completion/);
 	assert.match(body, /compile it into its exact-path CWD artifact before acquiring a stale global Markdown source/);
 	assert.match(body, /verify it with a separate `read_state`, then delete or narrow the source/);
 	assert.match(body, /Do all readback before the terminal answer/);

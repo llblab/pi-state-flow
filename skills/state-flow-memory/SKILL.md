@@ -46,6 +46,8 @@ Separate a binding requirement from the method currently proposed to satisfy it.
 
 When it affects continuation, retain what was proposed, accepted, rejected, corrected, explained, or left unresolved, and what the next response or action must address. Preserve enough referents for pending follow-ups to make sense.
 
+Treat every completed work slice as a possible restart boundary. Its checkpoint should let a fresh executor recover the achieved outcome, surviving evidence, active commitments, decision-relevant uncertainty, and exact continuation without replaying the prior reasoning trajectory. Optimize decomposition for resumability as well as functional completion; if the next safe action depends on transient context that will disappear, the slice is not yet at a sufficient boundary.
+
 Keep consequences, not a transcript or a personality dossier. Do not invent shared history or claim subjective continuity. A fresh run should not unnecessarily reopen a settled exchange or treat an unanswered proposal as approved.
 
 ### Preserve learning at its demonstrated boundary
@@ -90,7 +92,7 @@ Effective state does not prove which scope owns a value. When ownership matters 
 
 Before writing, review the proposed changes once within the requested boundary:
 
-- Would a fresh executor know what must still hold, what changed, what remains unresolved, and how to continue?
+- Would a fresh executor know what must still hold, what changed, what remains unresolved, and the exact next action without replaying the prior cognitive trajectory?
 - Could an omission cause a known failed attempt, an unnecessary repeated explanation, or loss of an active commitment?
 - Could a retained claim impose an unapproved method, overgeneralize a result, or hide a live alternative?
 

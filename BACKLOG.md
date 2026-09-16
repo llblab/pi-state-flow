@@ -4,6 +4,8 @@ Completed release work belongs in [CHANGELOG.md](CHANGELOG.md).
 
 ## Candidate evolution
 
+- [ ] `Lazy memory`: Preserve large historical semantic records outside normal model projection while keeping them discoverable through a bounded, freshness-ranked epistemic index, metadata-only search, and exact scoped reads. Keep active obligations in hot State Flow and route all lazy mutations through the existing causal publication boundary. See [the exploratory proposal](docs/lazy-memory-proposal.md).
+  - Status: concept preserved, not scheduled. The write surface, physical layout, ranking policy, and history semantics require implementation experiments before a release contract.
 - [ ] `Default passive memory access`: Separate memory availability from the active State Flow episode lifecycle. A normal installation defaults to both passive state bootstrap and `read_state`/`patch_state` tools, while automatic terminal compaction, iteration continuation, and active episode semantics remain gated behind `/state-flow-start`.
   - Configuration: control passive bootstrap and passive tools independently, yielding all four supported combinations: both off, bootstrap only, tools only, or both on (default). Fully off must add no state projection or tools to model context.
   - Passive bootstrap: project existing effective durable state without creating scopes, migrating storage, publishing changes, starting an episode, or promising automatic continuation. Name this separately from active episode/bootstrap semantics.
