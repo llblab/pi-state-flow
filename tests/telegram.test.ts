@@ -5,6 +5,7 @@ import {
 	createStateFlowTelegramAdapter,
 	formatStateFlowSectionLabel,
 	renderStateFlowRichState,
+	stateFlowTelegramSectionSpecifiers,
 	type StateFlowTelegramCallbackContext,
 	type StateFlowTelegramModules,
 	type StateFlowTelegramPort,
@@ -86,6 +87,14 @@ function sectionContext(action: string, payload = "") {
 	} as StateFlowTelegramCallbackContext;
 	return { context, edits, notices, richMessages };
 }
+
+test("Telegram section discovery covers the package and compiled sibling layouts", () => {
+	const compiledUrl = new URL("../dist/lib/telegram.js", import.meta.url).href;
+	assert.deepEqual(stateFlowTelegramSectionSpecifiers(compiledUrl), [
+		"@llblab/pi-telegram/sections",
+		new URL("../../pi-telegram/dist/api/sections.js", import.meta.url).href,
+	]);
+});
 
 test("section label always carries the spiral identity and the live state value", () => {
 	assert.equal(formatStateFlowSectionLabel(snapshot()), "🌀 State Flow: off");

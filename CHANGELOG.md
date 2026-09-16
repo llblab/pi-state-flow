@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.13.3: Telegram section discovery hotfix
+
+- `Telegram section discovery`: The compiled extension now resolves the sibling pi-telegram public sections membrane from its compiled layout as well as the package export, restoring the State Flow control in the Telegram main menu without making Telegram a core dependency.
+
 ## 0.13.2: Benign compaction readiness
 
 - `Benign compaction readiness`: Automatic State Flow compaction now requires enough persisted message history as well as high total context usage, so a short session enlarged only by its system prompt remains a quiet non-action instead of surfacing Pi's native `Nothing to compact` failure.

@@ -4,10 +4,14 @@
 // pi-telegram is absent or its registry is not ready, registration fails open and retries.
 
 export const STATE_FLOW_TELEGRAM_ID = "@llblab/pi-state-flow";
-const SECTIONS_IMPORT_SPECIFIERS = [
-	"@llblab/pi-telegram/sections",
-	new URL("../../pi-telegram/api/sections.ts", import.meta.url).href,
-];
+
+/** Resolve the package export or the compiled sibling-extension layout used in local development. */
+export function stateFlowTelegramSectionSpecifiers(moduleUrl = import.meta.url): string[] {
+	return [
+		"@llblab/pi-telegram/sections",
+		new URL("../../../pi-telegram/dist/api/sections.js", moduleUrl).href,
+	];
+}
 
 export interface StateFlowTelegramSnapshot {
 	enabled: boolean;
@@ -259,7 +263,7 @@ async function importTelegramModule<TModule>(
 /** Default loader; injectable so tests and embedded hosts can control transport presence. */
 export async function loadStateFlowTelegramModules(): Promise<StateFlowTelegramModules> {
 	const sections = await importTelegramModule<StateFlowTelegramSectionModule>(
-		SECTIONS_IMPORT_SPECIFIERS,
+		stateFlowTelegramSectionSpecifiers(),
 		(module): module is StateFlowTelegramSectionModule =>
 			typeof (module as StateFlowTelegramSectionModule | undefined)?.registerTelegramSection === "function",
 	);
