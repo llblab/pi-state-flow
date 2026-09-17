@@ -26,6 +26,7 @@ export interface StateFlowTelegramState {
 	artifacts: Record<string, unknown>;
 	contract: Record<string, unknown>;
 	working: Record<string, unknown>;
+	intents: Record<string, unknown>;
 	response: string;
 	lazy?: unknown;
 }
@@ -191,7 +192,7 @@ function renderStateFlowTelegramField(value: unknown): string {
 }
 
 export function renderStateFlowRichState(scope: StateFlowTelegramScope, step: number, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
-	const fields = ["artifacts", "contract", "working", "response", "lazy"] as const;
+	const fields = ["artifacts", "contract", "working", "intents", "response", "lazy"] as const;
 	return {
 		blocks: [
 			{

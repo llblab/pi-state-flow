@@ -265,7 +265,11 @@ test("passive bootstrap and tools are independently configurable and passive pat
 		const seed = harness({ passiveBootstrap: false, passiveTools: false });
 		seed.handlers.get("session_start")!({ reason: "new" }, seed.ctx);
 		await start(seed);
-		await seed.tools.get("patch_state")!.execute("seed", { cwd: { working: { shared: "durable" } } }, undefined, undefined, seed.ctx);
+		await seed.tools.get("patch_state")!.execute("seed", { cwd: {
+			working: { shared: "durable" },
+			intents: { release: { action: "Validate release", plan: { $ref: "cwd.lazy.releasePlan" } } },
+			lazy: { releasePlan: { steps: ["validate"] } },
+		} }, undefined, undefined, seed.ctx);
 		await seed.commands.get("state-flow-stop")!.handler("", seed.ctx);
 		const h = harness({ repositoryRoot: seed.repositoryRoot, cwd: seed.ctx.cwd, sessionId: `passive-${passiveBootstrap}-${passiveTools}`, initializeRepository: false, passiveBootstrap, passiveTools });
 		h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
@@ -274,13 +278,22 @@ test("passive bootstrap and tools are independently configurable and passive pat
 		assert.equal(bootstrapResult !== undefined, passiveBootstrap);
 		const projected = h.handlers.get("context")!({ messages: [] }, h.ctx);
 		assert.equal(projected !== undefined, passiveBootstrap);
-		if (passiveBootstrap) assert.match(JSON.stringify(projected), /durable/);
+		if (passiveBootstrap) {
+			assert.match(JSON.stringify(projected), /durable/);
+			assert.match(JSON.stringify(projected), /Validate release/);
+			assert.doesNotMatch(JSON.stringify(projected), /\"steps\":\[\"validate\"\]/);
+		}
 		if (passiveTools) {
 			const read = await h.tools.get("read_state")!.execute("read", { path: "working.shared" });
 			assert.match(read.content[0].text, /durable/);
-			await h.tools.get("patch_state")!.execute("write", { session: { working: { local: true } }, final: true }, undefined, undefined, h.ctx);
+			const intent = await h.tools.get("read_state")!.execute("intent", { path: "intents.release" });
+			assert.match(intent.content[0].text, /cwd\.lazy\.releasePlan/);
+			await h.tools.get("patch_state")!.execute("write", { session: { intents: { local: "Continue locally" } }, final: true }, undefined, undefined, h.ctx);
 			assert.equal(h.resolveSnapshot().config.enabled, false);
 			assert.equal(h.compactRequests.length, 0);
+			assert.equal(h.resolveSnapshot().meta.step, 1);
+			const local = await h.tools.get("read_state")!.execute("local-intent", { path: "session.intents.local" });
+			assert.match(local.content[0].text, /Continue locally/);
 		}
 	}
 });
@@ -334,7 +347,7 @@ test("read_state lazily projects all hot historical paths and scopes without pub
 				const result = await read.execute("history", { path }, undefined);
 				const value = JSON.parse(result.content[0].text);
 				const working = scope === "effective" ? { ...states.global, ...states.cwd, ...states.session } : states[scope];
-				assert.deepEqual(value.value, { artifacts: {}, contract: {}, working, response: "" });
+				assert.deepEqual(value.value, { artifacts: {}, contract: {}, working, intents: {}, response: "" });
 				assert.deepEqual(result.details, { path, projection: "value" });
 			}
 		}

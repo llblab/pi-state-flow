@@ -34,18 +34,19 @@ The model-facing surface remains small:
 
 ## Semantic model
 
-Each scope may contain five semantic planes:
+Each scope may contain six semantic planes:
 
 ```text
 global | CWD | session
 ├── artifacts
 ├── contract
 ├── working
+├── intents
 ├── response (session-owned where applicable)
 └── lazy
 ```
 
-`artifacts`, `contract`, `working`, and `response` remain hot. `lazy` differs only in projection policy:
+`artifacts`, `contract`, `working`, `intents`, and `response` remain hot. `intents` may keep compact active direction while pointing to large supporting detail in `lazy` with an ordinary `{"$ref":"cwd.lazy.plan"}` value. References are read explicitly and never auto-hydrated, rewritten, executed, or completed. `lazy` differs only in projection policy:
 
 - It is canonical semantic JSON, validated and versioned with its owning scope.
 - It is excluded from the ordinary baseline effective-state body.

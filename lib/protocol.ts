@@ -13,25 +13,28 @@ export function stateFlowProtocol(bootstrap: boolean): string {
 		: "";
 	return `State Flow is enabled.
 ${bootstrapProtocol}
-STATE: {"artifacts":{},"contract":{},"working":{},"response":"latest complete answer"}
+STATE: {"artifacts":{},"contract":{},"working":{},"intents":{},"response":"latest complete answer"}
 - artifacts: source-path routing metadata; descriptions do not imply body acquisition.
 - contract: durable requirements, decisions, rejections, interfaces, compiled knowledge.
 - working: facts, validation, failures, domain state, unresolved work, continuation.
+- intents: active commitments; remove when fulfilled, abandoned, superseded, or impossible.
 - response: previous complete answer; runtime-owned.
 
-READ: Use read_state only for a concrete historical/scope gap. lazy_navigation gives the effective lazy root and bounded key kinds, never bodies or a partial catalog. Unscoped paths alias effective; effective/global/cwd/session select overlay or owner. Paths read cached values; arrays support zero-based indices and half-open [start..end]. keys returns minimal structure; patch returns the path-intersected change.
+READ: Use read_state for concrete scope/history gaps. lazy_navigation exposes the effective lazy root's bounded key kinds, not bodies. Unscoped paths alias effective; effective/global/cwd/session select overlay or owner. Arrays support indices and [start..end]; keys gives structure and patch the intersected change.
 
 WRITE: patch_state is the sole model-authored semantic mutation mechanism. Supply global/cwd/session patches in any combination; all supplied scopes are validated and durably accepted as one atomic transition. Call it alone in an assistant response, then continue only after its acknowledgement.
 
-FINAL: Every enabled iteration starts terminal-ineligible. A successful patch_state with final:true permits a later turn_end but does not stop reasoning, tools, or later patches. Use {"final":true} if state needs no change. Without eligibility, runtime preserves the terminal answer and starts at most two fallback turns solely for a final:true patch; never restate or replace that answer. Exhaustion closes with the preserved answer/current state. A final-only call creates no semantic transition. Never patch response; runtime records the delivered answer.
+FINAL: Every enabled iteration starts terminal-ineligible. Successful patch_state final:true permits a later turn_end without stopping later work; use {"final":true} when no state change is needed. Otherwise runtime preserves the answer and allows at most two fallback turns only for final:true; never restate it. A final-only call creates no transition. Runtime owns response.
+
+INTENTS: Store selected actions, not requirements, observations, possibilities, alternatives, or completed work. Preserve them across handoffs at the narrowest scope; detail may stay lazy. A {"$ref":"cwd.lazy.plan"} is an ordinary pointer: follow it with read_state only when needed; infer no dependency, hydration, execution, or completion.
 
 SCOPES: global=cross-project; cwd=project and Skills; session=branch/run. Deleting an override may reveal its parent.
 
 ${baselineMemoryProtocol()}
 
-PATCH: Optional global/cwd/session object patches plus optional final:true; require at least one. Omit empty/materially no-op scopes. Semantic fields are object-valued artifacts/contract/working and ordinary-JSON lazy; omitted fields persist. Never patch runtime config/meta/response. Objects merge recursively; arrays/primitives replace. An object containing only canonical "[N]" keys recursively patches array elements. Indexed deletion is forbidden; nested object null deletes; materialized null is forbidden.
+PATCH: Optional global/cwd/session object patches plus optional final:true; require at least one. Omit empty/materially no-op scopes. Semantic fields are object-valued artifacts/contract/working/intents and ordinary-JSON lazy; omitted fields persist. Never patch runtime config/meta/response. Objects merge recursively; arrays/primitives replace. An object containing only canonical "[N]" keys recursively patches array elements. Indexed deletion is forbidden; nested object null deletes; materialized null is forbidden.
 
-HANDOFF: Preserve active commitments, unresolved questions, consequential results, and exact continuation. Distinguish requirements, decisions, observations, conclusions, and hypotheses. Before final handoff curate touched and obviously stale/mis-scoped state. On feature/release/campaign or project/version completion, do one bounded reconciliation: remove obsolete work, retain operative consequences, and use targeted read_state plus destination-verify-source-delete for ownership moves. Never invent memory changes or restyle unrelated state.
+HANDOFF: Preserve active commitments, open questions, consequential results, and exact continuation; distinguish requirements, decisions, observations, conclusions, and hypotheses. Curate touched and obviously stale/mis-scoped state. At feature/release/campaign or project/version completion, reconcile once: remove obsolete work, retain consequences, and use targeted read_state plus destination-verify-source-delete for moves. Never invent memory changes.
 
 ACQUISITION: Start materialized. Read only for a compilation gap, exact source/edit, invalidation, contradiction/failure, or explicit request; changed hashes require rereading.
 ARTIFACTS: For each acquired new/invalidated ordinary artifact, patch global.artifacts[exact path] with a compact non-empty description. Runtime owns provenance.

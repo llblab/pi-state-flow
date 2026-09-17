@@ -19,7 +19,7 @@ Use this Skill for one bounded maintenance cohort: either an explicit curation r
 
 ## Inventory
 
-Read only the smallest required projections with `read_state`: session for branch/run continuation, CWD for project-specific knowledge, and global for established cross-project, user, or environment knowledge. Use older offsets only for a concrete contradiction or provenance question. Do not reread current effective state already in context without a specific verification or ownership need.
+Read only the smallest required projections with `read_state`: session for branch/run continuation, CWD for project-specific knowledge, and global for established cross-project, user, or environment knowledge. Distinguish `contract` requirements, `working` observations and unresolved state, active commitments in `intents`, and inactive reusable memory in `lazy`. Use older offsets only for a concrete contradiction or provenance question. Do not reread current effective state already in context without a specific verification or ownership need.
 
 Distinguish user requirements, confirmed decisions, observations, assistant conclusions, and hypotheses. Do not infer user acceptance from silence, repetition, or an earlier assistant assertion.
 
@@ -37,6 +37,8 @@ These are audit decisions, not required stored labels. Do not manufacture timest
 ## Reconcile for continuity and search
 
 ### Preserve commitments without freezing methods
+
+Treat every value in `intents` as an active commitment to future action. Keep it only while that course remains chosen; remove it when fulfilled, abandoned, superseded, or impossible, retaining only consequential results in `working`, `contract`, or `lazy`. Alternatives, possible next steps, observations, and historical plans are not intents. Check touched intent references for moved or missing targets, but never auto-hydrate, rewrite, execute, or complete a `{"$ref":"..."}` pointer.
 
 Preserve active goals, explicit constraints, confirmed decisions, completed prerequisites, and obligations that still affect future work. Preserve corrections and their consequences.
 
@@ -106,14 +108,14 @@ Adjust only identified defects. This is a semantic review, not a request for ext
 
 ## Apply one reconciliation cohort
 
-Use `patch_state` only for material changes to `artifacts`, `contract`, or `working`. One call may supply `global`, `cwd`, and `session` patches as one atomic cohort; each call must be alone in its assistant response, and subsequent actions must use the rematerialized state. Set `final:true` only when the iteration is eligible to finish at a later `turn_end`. Do not patch runtime-owned `response`, config, or metadata, or bypass validation by editing backing files.
+Use `patch_state` only for material changes to `artifacts`, `contract`, `working`, `intents`, or `lazy`. One call may supply `global`, `cwd`, and `session` patches as one atomic cohort; each call must be alone in its assistant response, and subsequent actions must use the rematerialized state. Set `final:true` only when the iteration is eligible to finish at a later `turn_end`. Do not patch runtime-owned `response`, config, or metadata, or bypass validation by editing backing files.
 
 Schedule acquisition and migration barriers in this order:
 
 1. After reading this Skill, compile it into its exact-path CWD artifact before acquiring a stale global Markdown source or attempting an unrelated state write.
 2. Read only the smallest required state projections. If a justified stale Markdown read creates a global compilation obligation, include every pending compilation scope in the next atomic patch before unrelated work.
 3. Write the migration destination with `patch_state`, verify it with a separate `read_state`, then delete or narrow the source and verify both its scope and the effective overlay. Do all readback before the terminal answer.
-4. Complete one terminal reconciliation without repeating accepted compilations or inventing memory changes. Simultaneously pending CWD and global acquisitions must be compiled together in one atomic `patch_state` call; set `final:true` in that call only when the iteration is otherwise ready to finish.
+4. Complete one terminal reconciliation without repeating accepted compilations or inventing memory changes. Review touched intents explicitly: retain active commitments, remove completed or impossible ones, replace superseded ones, and preserve their consequential results in the appropriate plane. Simultaneously pending CWD and global acquisitions must be compiled together in one atomic `patch_state` call; set `final:true` in that call only when the iteration is otherwise ready to finish.
 
 Scope-local deletion may reveal a lower-scope value. Deleting an override is not necessarily removal from effective state.
 

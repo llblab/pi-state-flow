@@ -64,6 +64,7 @@ test("distinguishes branch diagnostics and renders only effective memory as JSON
 		artifacts: {},
 		contract: { shared: true },
 		working: { project: true },
+		intents: {},
 		response: "Done",
 	});
 	assert.equal(Object.hasOwn(memory, "global"), false);

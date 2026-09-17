@@ -71,7 +71,10 @@ test("file cohorts persist sparse hot history, terminal responses, and config-on
 		const retained = [readTemporalState(f.view)];
 		for (let n = 1; n <= 10; n++) {
 			const scope = n % 3 === 0 ? "global" : n % 2 === 0 ? "cwd" : "session";
-			f.view = advanceTemporalState(f.view, [{ scope, patch: { working: { [scope]: n } } }], `T${n}`);
+			f.view = advanceTemporalState(f.view, [{ scope, patch: {
+				working: { [scope]: n },
+				...(n === 1 ? { intents: { current: "Persist in file-only mode" } } : {}),
+			} }], `T${n}`);
 			f.snapshot.meta.step = n;
 			f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files");
 			publication = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [scope], publication.base, f.root, f.runtime);
@@ -81,6 +84,7 @@ test("file cohorts persist sparse hot history, terminal responses, and config-on
 			for (let offset = 0; offset < restarted.view.lineage.length; offset++) assert.deepEqual(readTemporalState(restarted.view, offset), retained.at(-1 - offset));
 			for (const stream of Object.values(restarted.view.scopes)) assert.ok(stream.patches.length <= 7);
 		}
+		assert.equal(readTemporalState(f.view).intents.current, "Persist in file-only mode");
 		assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, firstReference), /unavailable/);
 		f.view = advanceTemporalState(f.view, [{ scope: "session", patch: { response: "Final answer" } }], "terminal");
 		f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files");

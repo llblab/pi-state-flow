@@ -22,7 +22,7 @@ export interface RecentTransition extends AcceptedTransition {
 
 export type RecentTransitionWindow = RecentTransition[];
 const SCOPES = new Set<StateScope>(["global", "cwd", "session"]);
-const PATCH_KEYS = new Set(["artifacts", "contract", "working", "response", "lazy"]);
+const PATCH_KEYS = new Set(["artifacts", "contract", "working", "intents", "response", "lazy"]);
 
 /** Normalize accepted replacements into recursive-merge replay, including removals. */
 function replayPatch(before: JsonObject, after: JsonObject): JsonObject {

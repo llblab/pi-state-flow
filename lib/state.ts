@@ -12,6 +12,7 @@ export type MaterializedState = JsonObject & {
 	artifacts: ArtifactRegistry;
 	contract: JsonObject;
 	working: JsonObject;
+	intents: JsonObject;
 	response: string;
 	/** Absent is the canonical empty lazy plane and preserves predecessor-store compatibility. */
 	lazy?: JsonValue;
@@ -25,6 +26,7 @@ export interface StatePatch extends JsonObject {
 	artifacts: JsonObject;
 	contract: JsonObject;
 	working: JsonObject;
+	intents: JsonObject;
 	response: string;
 }
 
@@ -35,6 +37,7 @@ export interface ScopePatch {
 	artifacts?: JsonObject;
 	contract?: JsonObject;
 	working?: JsonObject;
+	intents?: JsonObject;
 	lazy?: JsonValue;
 }
 
@@ -65,7 +68,7 @@ export interface ScopedStates {
 }
 
 export function emptyState(): MaterializedState {
-	return { artifacts: {}, contract: {}, working: {}, response: "" } as MaterializedState;
+	return { artifacts: {}, contract: {}, working: {}, intents: {}, response: "" } as MaterializedState;
 }
 
 export function isMaterializedState(value: unknown): value is MaterializedState {
@@ -73,12 +76,20 @@ export function isMaterializedState(value: unknown): value is MaterializedState 
 		&& isArtifactRegistry(value.artifacts)
 		&& isObject(value.contract)
 		&& isObject(value.working)
+		&& isObject(value.intents)
 		&& typeof value.response === "string"
 		&& (!Object.hasOwn(value, "lazy") || (isJsonValue(value.lazy) && value.lazy !== null))
-		&& Object.keys(value).every((key) => key === "artifacts" || key === "contract" || key === "working" || key === "response" || key === "lazy");
+		&& Object.keys(value).every((key) => key === "artifacts" || key === "contract" || key === "working" || key === "intents" || key === "response" || key === "lazy");
 }
 
 export const isStateDocument = isMaterializedState;
+
+/** Upgrade one exact pre-intents materialized state without inferring commitments. */
+export function migratePreIntentState(value: unknown): MaterializedState | undefined {
+	if (!isObject(value) || Object.hasOwn(value, "intents")) return undefined;
+	const candidate = { ...structuredClone(value), intents: {} };
+	return isMaterializedState(candidate) ? candidate : undefined;
+}
 
 /** Atomically replace compiled and removed artifacts inside one materialized scope. */
 export function updateMaterializedArtifacts(

@@ -66,6 +66,7 @@ test("fork copies only the selected session stream and provenance into a fresh o
 	const parent = restoreSessionA(f);
 	const before = parent.runtime.states();
 	const after = structuredClone(before);
+	after.session.intents.current = { action: "Finish fork validation", detail: { $ref: "session.lazy.memory" } };
 	const provenance = Object.fromEntries((["global", "cwd", "session"] as const).map((scope) => {
 		const path = `/sources/${scope}.md`;
 		after[scope].artifacts[path] = { description: `${scope} routing` };
@@ -110,6 +111,7 @@ test("fork copies only the selected session stream and provenance into a fresh o
 	assert.equal(fork.snapshot.meta.step, 0);
 	assert.equal(fork.snapshot.meta.specification, undefined);
 	assert.deepEqual(child.view!.scopes.session, selected);
+	assert.deepEqual(child.read(0, "session").intents.current, { action: "Finish fork validation", detail: { $ref: "session.lazy.memory" } });
 	assert.deepEqual(child.read(0, "session").lazy, { memory: ["selected", { retained: true }] });
 	assert.deepEqual(readProjectedState(child.view!, ["effective.lazy.memory"]), { value: ["selected", { retained: true }] });
 	assert.deepEqual(child.artifactProvenance("session"), provenance.session);
@@ -526,9 +528,9 @@ test("runtime causal basis rejects staged work after accepted history returns to
 	const initial = runtime.states();
 	const initialBasis = runtime.causalBasis();
 	const originPosition = runtime.view!.lineage.at(-1)!.position;
-	const stage = stageAtomicScopePatches(initial, { session: { working: { stale: true } } }, [], initialBasis);
+	const stage = stageAtomicScopePatches(initial, { session: { intents: { stale: "Must not publish" } } }, [], initialBasis);
 	const changed = structuredClone(initial);
-	changed.session.working.temporary = true;
+	changed.session.intents.temporary = "Advance and remove";
 	snapshot.meta.step = 1;
 	runtime.publish(snapshot, true, createAcceptedTransition(initial, changed, "z-first"));
 	snapshot.meta.step = 2;
@@ -538,9 +540,9 @@ test("runtime causal basis rejects staged work after accepted history returns to
 	assert.throws(() => commitScopedTransition(snapshot, runtime.states(), stage, () => assert.fail("stale publication"), runtime.causalBasis()), /causal basis changed/);
 	assert.deepEqual(runtime.recent().map(({ id, at }) => ({ id, at })), [{ id: "z-first", at: originPosition + 1 }, { id: "a-second", at: originPosition + 2 }]);
 	const projected = runtime.recent();
-	projected[0]!.transitions[0]!.patch.working!.temporary = "mutated";
-	assert.equal(runtime.recent()[0]!.transitions[0]!.patch.working!.temporary, true);
-	assert.equal(runtime.read(1).working.temporary, true);
+	projected[0]!.transitions[0]!.patch.intents!.temporary = "mutated";
+	assert.equal(runtime.recent()[0]!.transitions[0]!.patch.intents!.temporary, "Advance and remove");
+	assert.equal(runtime.read(1).intents.temporary, "Advance and remove");
 	assert.equal(snapshot.meta.step, 2);
 });
 

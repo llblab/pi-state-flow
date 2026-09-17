@@ -653,7 +653,10 @@ test("real Pi compacts accepted State Flow history without another model call an
 	const id = session.sessionId;
 	const file = session.sessionFile!;
 	const calls = fixture.faux.state.callCount;
-	fixture.faux.setResponses(sessionResponses({ working: { retainedAcrossCompaction: true } }, "Accepted before compaction."));
+	fixture.faux.setResponses(sessionResponses({
+		working: { retainedAcrossCompaction: true },
+		intents: { current: "Finish validation after compaction" },
+	}, "Accepted before compaction."));
 	await session.prompt(`LONG-COMPLETED-REQUEST:${"x".repeat(110_000)}`);
 	for (let attempt = 0; attempt < 100 && !session.sessionManager.getEntries().some((entry) => entry.type === "compaction"); attempt++) {
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -674,6 +677,7 @@ test("real Pi compacts accepted State Flow history without another model call an
 	assert.equal(readFileSync(file, "utf8").trimEnd().split("\n").length, all.length + 1, "JSONL retains its header and every native entry");
 	const state = fixture.readState(session);
 	assert.equal(state.working.retainedAcrossCompaction, true);
+	assert.equal(state.intents.current, "Finish validation after compaction");
 	await session.reload();
 	assert.equal(session.sessionId, id);
 	assert.deepEqual(fixture.readState(session), state);
@@ -784,7 +788,7 @@ test("real Pi can restart an early disabled marker as a new origin while preserv
 	await session.prompt("/state-flow-start");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
 	assert.equal(latestSnapshot(session).meta.step, 0);
-	assert.deepEqual(fixture.readState(session, 0, "session"), { artifacts: {}, contract: {}, working: {}, response: "" });
+	assert.deepEqual(fixture.readState(session, 0, "session"), { artifacts: {}, contract: {}, working: {}, intents: {}, response: "" });
 	assert.equal(fixture.readState(session).working.sharedGlobal, "keep");
 	assert.equal(fixture.readState(session).working.sharedCwd, "keep");
 	assert.throws(() => fixture.readState(session, 1), /predates the proven temporal origin/);
@@ -818,7 +822,7 @@ test("real Pi isolates same-CWD sessions and retains seven patches per scope", a
 	assert.notEqual(firstId, secondId);
 	assert.equal(loadSessionState(fixture.cwd, firstId, fixture.repositoryRoot, firstKey)!.working.owner, "first");
 	assert.deepEqual(loadSessionState(fixture.cwd, secondId, fixture.repositoryRoot, secondKey), {
-		artifacts: {}, contract: {}, working: {}, response: "",
+		artifacts: {}, contract: {}, working: {}, intents: {}, response: "",
 	});
 	for (const [scope, materialization] of [
 		["global", loadGlobalMaterialization(fixture.repositoryRoot)],
@@ -1237,7 +1241,7 @@ test("real Pi incrementally acquires only invalidated global Markdown and attach
 			[unchangedPath]: metadata(unchangedPath, "Stable unchanged guidance"),
 			[changedPath]: metadata(changedPath, "Original changed guidance"),
 		},
-		contract: {}, working: {}, response: "",
+		contract: {}, working: {}, intents: {}, response: "",
 	}, fixture.repositoryRoot);
 	const globalPaths = temporalScopePaths(fixture.cwd, "fixture", "global", fixture.repositoryRoot);
 	const cwdPaths = temporalScopePaths(fixture.cwd, "fixture", "cwd", fixture.repositoryRoot);
@@ -1746,7 +1750,7 @@ test("real Pi baseline memory crosses CWDs while project memory remains scoped",
 	t.after(() => second.dispose());
 	assert.equal(fixture.readState(second, 0, "global").contract.preference, "compact");
 	assert.equal(fixture.readState(second, 0, "cwd").contract.projectRule, undefined);
-	assert.deepEqual(fixture.readState(second, 0, "session"), { artifacts: {}, contract: {}, working: {}, response: "" });
+	assert.deepEqual(fixture.readState(second, 0, "session"), { artifacts: {}, contract: {}, working: {}, intents: {}, response: "" });
 });
 
 test("real Pi preserves failed external promotion and recovers proven destination pointers", async (t) => {

@@ -50,6 +50,53 @@ test("stages every canonical scope combination as one atomic transition", () => 
 	}
 });
 
+test("stages intent lifecycle updates as ordinary atomic semantic transitions", () => {
+	const state = states();
+	const selected = stageAtomicScopePatches(state, {
+		cwd: { intents: { release: { action: "Validate release", plan: { $ref: "cwd.lazy.releasePlan" } } } },
+	}, [], "origin");
+	assert.deepEqual(selected.nextStates.cwd.intents.release, {
+		action: "Validate release", plan: { $ref: "cwd.lazy.releasePlan" },
+	});
+	const fulfilled = stageAtomicScopePatches(selected.nextStates, {
+		cwd: { intents: { release: null }, working: { release: "validated" } },
+	}, [], "origin");
+	assert.equal(Object.hasOwn(fulfilled.nextStates.cwd.intents, "release"), false);
+	assert.equal(fulfilled.nextStates.cwd.working.release, "validated");
+	assert.throws(() => stageAtomicScopePatches(state, {
+		cwd: { intents: "invalid" as unknown as JsonObject },
+	}, [], "origin"), /field intents must be a JSON object/);
+});
+
+test("model-facing intent behavior distinguishes possibilities, commitments, handoffs, supersession, and fulfillment", () => {
+	let state = states();
+	state = stageAtomicScopePatches(state, {
+		cwd: { working: { possibleAction: "Benchmark later" }, lazy: { plan: { steps: ["validate", "publish"] } } },
+	}, [], "origin").nextStates;
+	assert.equal(Object.hasOwn(state.cwd.intents, "possibleAction"), false);
+
+	state = stageAtomicScopePatches(state, {
+		cwd: { intents: { release: { action: "Validate", plan: { $ref: "cwd.lazy.plan" } } } },
+	}, [], "origin").nextStates;
+	state = stageAtomicScopePatches(state, {
+		cwd: { working: { implementation: "complete; validation pending" } },
+	}, [], "origin").nextStates;
+	assert.deepEqual(state.cwd.intents.release, { action: "Validate", plan: { $ref: "cwd.lazy.plan" } });
+
+	state = stageAtomicScopePatches(state, {
+		cwd: { intents: { release: { action: "Publish after validation", plan: { $ref: "cwd.lazy.plan" } }, rejectedAlternative: null } },
+	}, [], "origin").nextStates;
+	assert.equal(Object.hasOwn(state.cwd.intents, "rejectedAlternative"), false);
+	assert.equal((state.cwd.intents.release as JsonObject).action, "Publish after validation");
+
+	state = stageAtomicScopePatches(state, {
+		cwd: { intents: { release: null }, working: { release: "published" } },
+	}, [], "origin").nextStates;
+	assert.equal(Object.hasOwn(state.cwd.intents, "release"), false);
+	assert.equal(state.cwd.working.release, "published");
+	assert.deepEqual(state.cwd.lazy, { plan: { steps: ["validate", "publish"] } });
+});
+
 test("rejects an invalid member without mutating any scope in the atomic cohort", () => {
 	const state = states();
 	const before = structuredClone(state);

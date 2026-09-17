@@ -13,7 +13,7 @@ import {
 	type OwnedFileUpdate,
 } from "./durable.ts";
 import { parseSessionRuntime, serializeSessionRuntime } from "./snapshot.ts";
-import type { StateScope } from "./state.ts";
+import { migratePreIntentState, type StateScope } from "./state.ts";
 
 export interface LegacyStorageMigration {
 	bases: DurableFileBase[];
@@ -57,9 +57,14 @@ function migrationDirectories(cwd: string, sessionId: string, root: string, sess
 			try { sessionScopeKey(entry.name); } catch { continue; }
 			const directory = join(cwdDirectory, entry.name);
 			let meta: unknown;
+			let runtime: unknown;
 			try { meta = JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")); }
 			catch { continue; }
-			const identity = meta && typeof meta === "object" && !Array.isArray(meta) ? (meta as { identity?: unknown }).identity : undefined;
+			try { runtime = JSON.parse(readFileSync(join(directory, "runtime.json"), "utf8")); }
+			catch { /* predecessor sessions keep identity in meta.json */ }
+			const identity = meta && typeof meta === "object" && !Array.isArray(meta) && (meta as { identity?: unknown }).identity !== undefined
+				? (meta as { identity?: unknown }).identity
+				: runtime && typeof runtime === "object" && !Array.isArray(runtime) ? (runtime as { identity?: unknown }).identity : undefined;
 			if (!identity || typeof identity !== "object" || Array.isArray(identity)) continue;
 			const owner = identity as { cwd?: unknown; sessionId?: unknown };
 			if (owner.cwd === cwdOwner && typeof owner.sessionId === "string" && owner.sessionId.length > 0) {
@@ -85,7 +90,14 @@ export function hasCwdMaterialization(cwd: string, repositoryRoot: string): bool
 	return false;
 }
 
-/** Detect predecessor snapshots or temporal envelopes without mutating the store. */
+function checkpointNeedsIntentMigration(source: string): boolean {
+	const checkpoint = JSON.parse(source) as unknown;
+	if (migratePreIntentState(checkpoint) !== undefined) return true;
+	return checkpoint !== null && typeof checkpoint === "object" && !Array.isArray(checkpoint)
+		&& migratePreIntentState((checkpoint as { state?: unknown }).state) !== undefined;
+}
+
+/** Detect predecessor snapshots, temporal envelopes, or pre-intents semantic states without mutating the store. */
 export function hasLegacyStateSources(
 	cwd: string,
 	sessionId: string,
@@ -94,8 +106,10 @@ export function hasLegacyStateSources(
 ): boolean {
 	const root = resolve(repositoryRoot);
 	return migrationDirectories(cwd, sessionId, root, sessionKey).some(({ directory, scope }) => {
-		if (lstatSync(join(directory, "checkpoint.json"), { throwIfNoEntry: false }) === undefined) return false;
+		const checkpointPath = join(directory, "checkpoint.json");
+		if (lstatSync(checkpointPath, { throwIfNoEntry: false }) === undefined) return false;
 		try {
+			if (checkpointNeedsIntentMigration(readFileSync(checkpointPath, "utf8"))) return true;
 			const meta = JSON.parse(readFileSync(join(directory, "meta.json"), "utf8"));
 			if (meta === null || typeof meta !== "object" || !("temporal" in meta)) return true;
 			return scope === "session"

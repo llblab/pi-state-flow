@@ -176,11 +176,25 @@ test("checkpoint codec uses deterministic bytes, anchored state, and no redundan
 	const reordered = structuredClone(view.scopes.session);
 	reordered.patches[0]!.patch = { response: "Done", working: { a: 2, z: 1 } };
 	assert.deepEqual(serializeScopeStream(reordered, "session"), first);
-	assert.deepEqual(Object.keys(JSON.parse(first.checkpoint)).sort(), ["artifacts", "contract", "response", "working"]);
+	assert.deepEqual(Object.keys(JSON.parse(first.checkpoint)).sort(), ["artifacts", "contract", "intents", "response", "working"]);
 	assert.equal(JSON.parse(first.checkpoint).response, "");
 	assert.equal(JSON.parse(first.patches).response, "Done");
 	assert.equal(Object.hasOwn(JSON.parse(first.patches), "transition"), false);
 	assert.deepEqual(first.temporal.checkpoint, view.scopes.session.checkpoint.through);
+});
+
+test("temporal codec migrates 0.14 checkpoints to empty intents without inferring from working", () => {
+	const stream = temporalFixture().scopes.session;
+	stream.checkpoint.state.working.next = "possible, not committed";
+	const source = serializeScopeStream(stream, "session");
+	const checkpoint = JSON.parse(source.checkpoint);
+	delete checkpoint.intents;
+	const meta = serializeScopeMetadata({}, stream, "session");
+	const restored = parseScopeStream(JSON.stringify(checkpoint), source.patches, "session", undefined, meta)!;
+	assert.deepEqual(restored.checkpoint.state.intents, {});
+	assert.equal(restored.checkpoint.state.working.next, "possible, not committed");
+	assert.equal(Object.hasOwn(restored.checkpoint.state.intents, "next"), false);
+	assert.throws(() => parseScopeStream(JSON.stringify({ ...checkpoint, extra: true }), source.patches, "session", undefined, meta), /Invalid temporal/);
 });
 
 test("temporal codec rejects incomplete, legacy, malformed, oversized, and causally invalid replay inputs", () => {

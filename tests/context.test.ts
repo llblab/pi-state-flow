@@ -51,9 +51,12 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		await h.tools.get("patch_state")!.execute("seed-context", {
 			global: { contract: { globalContext: true } },
 			cwd: { contract: { cwdContext: true } },
-			session: { working: { contextPayload: "x".repeat(bytes) }, artifacts: {
-				"/context/source": { description: "Retained route", compilation: { decision: "Keep semantic metadata" } },
-			} }, final: true,
+			session: {
+				working: { contextPayload: "x".repeat(bytes) },
+				intents: { current: { action: "Continue accepted work", detail: { $ref: "session.lazy.plan" } } },
+				lazy: { plan: { steps: ["hidden until read"] } },
+				artifacts: { "/context/source": { description: "Retained route", compilation: { decision: "Keep semantic metadata" } } },
+			}, final: true,
 		}, undefined, undefined, h.ctx);
 		const state = h.readState();
 		const snapshot = h.resolveSnapshot();
@@ -78,6 +81,8 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		const text = projected.messages[0].content[0].text as string;
 		const context = JSON.parse(text.slice(text.indexOf("\n") + 1));
 		assert.deepEqual(context.state, state);
+		assert.deepEqual(context.state.intents.current, { action: "Continue accepted work", detail: { $ref: "session.lazy.plan" } });
+		assert.equal(Object.hasOwn(context.state, "lazy"), false);
 		assert.deepEqual(projected.messages.slice(1), bootstrap ? [persistent, old, current] : [persistent, current]);
 		context.state.working.contextPayload = "caller mutation";
 		assert.deepEqual(h.readState(), state);
@@ -244,6 +249,7 @@ test("keeps existing context for one bootstrap run and commits its terminal hand
 		artifacts: {},
 		contract: { goal: "Existing goal" },
 		working: { next: "continue" },
+		intents: {},
 		response: "Done",
 	});
 });
@@ -263,6 +269,7 @@ test("rotates the user-authority turn specification while retaining committed st
 		artifacts: {},
 		contract: { mode: "stable" },
 		working: { phase: "one" },
+		intents: {},
 		response: "Done",
 	});
 });

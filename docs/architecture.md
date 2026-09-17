@@ -78,7 +78,7 @@ Every enabled assistant iteration starts terminal-ineligible. Only a successful 
 ## Lifecycle planes
 
 ```text
-SEMANTIC STATE       artifacts + contract + working
+SEMANTIC STATE       artifacts + contract + working + intents
 TURN ELIGIBILITY     false → patch_state(..., final:true) → latched true
 CONTEXT PROJECTION   active State Flow projection | passive post-stop handoff
 ```
@@ -198,23 +198,25 @@ Both [tested Pi SDKs](compatibility.md) choose or create `SessionManager` before
 
 ### Model tools
 
-`patch_state` accepts optional fixed `global`, `cwd`, and `session` semantic patches plus optional `final:true`. At least one scope or `final:true` is required in the canonical model contract. Supplied scopes contain only object-valued `artifacts`, `contract`, and `working`; omitted fields preserve their values, recursive object merge updates them, arrays/primitives replace, and nested object-key `null` deletes. Materialized null, empty supplied scopes, material no-ops, unknown top-level fields, model-authored `response`, and retired grammars are rejected. A final-only true call changes ephemeral eligibility, not semantic history. Runtime quietly accepts unambiguous false-like `final` input as non-terminal intent, including an inert false-only call, but this compatibility layer is deliberately absent from model guidance.
+`patch_state` accepts optional fixed `global`, `cwd`, and `session` semantic patches plus optional `final:true`. At least one scope or `final:true` is required in the canonical model contract. Supplied scopes contain object-valued `artifacts`, `contract`, `working`, and `intents`, plus ordinary-JSON `lazy`; omitted fields preserve their values, recursive object merge updates them, arrays/primitives replace, and nested object-key `null` deletes. Materialized null, empty supplied scopes, material no-ops, unknown top-level fields, model-authored `response`, and retired grammars are rejected. A final-only true call changes ephemeral eligibility, not semantic history. Runtime quietly accepts unambiguous false-like `final` input as non-terminal intent, including an inert false-only call, but this compatibility layer is deliberately absent from model guidance.
 
 ```json
-{"session":{"working":{"next":"Verify the corrected behavior"}},"final":true}
+{"session":{"intents":{"next":"Verify the corrected behavior"}},"final":true}
 ```
 
-`read_state` accepts one unified path. `state == state[0]` is the current effective materialization; `state.global == state.global[0]` (and CWD/session equivalents) selects that scope at the same composed causal boundary. `state.global.patches == state.global.patches[0]` reads the latest accepted retained global patch, with higher patch indices walking only that scope's retained accepted patches. Indices are bounded to zero through seven; unavailable pre-origin or pre-tail history is an error. Resolver aliases are not literal JSON containers. Reads stay cached and create no Git query, publication, checkpoint append, or semantic step.
+`intents` is the hot plane for active commitments, not requirements, observations, alternatives, or completed plans. Removing an intent does not remove its consequences or any referenced state. A conventional `{"$ref":"cwd.lazy.plan"}` value remains ordinary JSON and is followed explicitly with `read_state`; it creates no dependency, hydration, execution, or completion semantics.
+
+`read_state` accepts one unified path. `effective == effective[0]` is the current effective materialization; `global == global[0]` (and CWD/session equivalents) selects that scope at the same composed causal boundary. `global.patches == global.patches[0]` reads the latest accepted retained global patch, with higher patch indices walking only that scope's retained accepted patches. Indices are bounded to zero through seven; unavailable pre-origin or pre-tail history is an error. Resolver aliases are not literal JSON containers. Reads stay cached and create no Git query, publication, checkpoint append, or semantic step.
 
 ```json
-{"path":"state.cwd[1]"}
+{"path":"cwd[1].intents"}
 ```
 
 ```json
-{"path":"state.global.patches[0]"}
+{"path":"global.patches[0]"}
 ```
 
-The prior `{offset, scope}` form remains accepted for session/tool-call compatibility, but cannot be combined with `path`.
+Unscoped semantic paths such as `intents.next` alias the current effective overlay. `value`, `keys`, and `patch` projections plus ordered `paths` batches remain all-or-error.
 
 Both tools follow branch enablement and host restrictions. The patch barrier also blocks reader siblings. These tools do not impose project schemas or state-size caps; semantic usefulness, scope choice, and compression remain model responsibilities. Every ordinary handoff reconciles touched and obviously stale visible state. Feature/release/campaign completion, project switches, and active-version changes additionally require one bounded scoped ownership and obsolescence pass: global retains only established cross-project/user/environment knowledge, CWD owns reusable project truth, and session owns branch/run continuation. Scope movement uses targeted reads and destination verification before source deletion rather than an automatic maintenance loop.
 

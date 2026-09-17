@@ -51,7 +51,7 @@ export function readStatePath(view: TemporalState, path: string): StateReadResul
 
 function parseValuePath(path: string): { root: string; selectors: ValueSelector[] } {
 	const explicitRoot = /^(?:effective|global|cwd|session)(?:\[\d+\])?(?=\.|$)/.exec(path)?.[0];
-	const implicitRoot = /^(?:artifacts|contract|working|response|lazy)(?=\.|\[|$)/.exec(path)?.[0];
+	const implicitRoot = /^(?:artifacts|contract|working|intents|response|lazy)(?=\.|\[|$)/.exec(path)?.[0];
 	if (explicitRoot === undefined && implicitRoot === undefined) {
 		throw new Error("State Flow read path requires a semantic path or an effective, global, cwd, or session root");
 	}

@@ -58,12 +58,13 @@ Active State Flow episodes remain **opt-in**, while passive durable memory boots
 The same semantic planes exist at every scope:
 
 - `contract`: Requirements, decisions, constraints, and interface commitments.
-- `working`: Observations, results, unresolved questions, and what to do next.
+- `working`: Observations, results, unresolved questions, and possible next steps.
+- `intents`: Courses of action the agent has actually committed to pursue.
 - `artifacts`: Source-addressed descriptions and reusable compiled knowledge.
 - `response`: The latest complete answer, captured by the runtime.
 - `lazy`: Durable, versioned memory omitted from ordinary context until explicitly read.
 
-Memory overlays **global → project CWD → session**. Put reusable cross-project knowledge in global, project knowledge in CWD, and private task continuation in session. Hot planes carry what must matter now; `lazy` retains what may matter later without hydrating its body into every prompt.
+Memory overlays **global → project CWD → session**. Put reusable cross-project knowledge in global, project knowledge in CWD, and private task continuation in session. Hot planes carry what must matter now; `lazy` retains what may matter later without hydrating its body into every prompt. An intent stays hot only while its course remains chosen and disappears when fulfilled, abandoned, superseded, or impossible. It may carry a plain `{"$ref":"cwd.lazy.plan"}` pointer to supporting detail; State Flow never hydrates, executes, or completes that reference automatically.
 
 **Resuming an existing Pi session restores its selected State Flow state and enablement.** A genuinely new session starts with an empty session layer and inherits only shared global/CWD memory; it does not resume another session's private work. Tree navigation follows the selected branch, not whichever state happens to be at Git `HEAD`.
 

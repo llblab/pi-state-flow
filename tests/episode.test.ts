@@ -60,6 +60,7 @@ test("start creates the CWD activation marker and stop preserves branch state", 
 		artifacts: {},
 		contract: {},
 		working: {},
+		intents: {},
 		response: "",
 	});
 	await commitTerminal(h, { goal: "x" }, { next: "y" });

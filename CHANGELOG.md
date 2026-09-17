@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+## 0.15.0: Intentional agency
+
+- `Intent semantic plane`: Adds hot, object-valued `intents` to global, CWD, session, and effective state. An intent is a selected commitment to future action, distinct from requirements in `contract`, observations or possibilities in `working`, and inactive supporting memory in `lazy`.
+- `Intent lifecycle`: Supports ordinary atomic creation, update, scope overlay, supersession, and removal. Active intents survive intermediate handoffs; fulfilled, abandoned, superseded, or impossible intents disappear while consequential results and referenced state remain independently retained.
+- `Explicit semantic references`: Intents may carry conventional `{"$ref":"cwd.lazy.plan"}` pointers. Reads return references exactly and follow their targets only through a separate explicit `read_state`; State Flow adds no dependency graph, automatic hydration, scheduling, execution, or completion behavior.
+- `Durability and migration`: Preserves intents across hot history, Git and file-only persistence, passive and active operation, forks, compaction, and CAS conflicts. The explicit 0.14 → 0.15 migration adds empty intents to retained scopes without inferring commitments from working state, plans, requirements, lazy memory, or response prose.
+- `Inspection and guidance`: Extends current, scoped, historical, key, patch, and batch reads; adds read-only Telegram intent inspection; and updates the model protocol and bundled memory Skill to reconcile active commitments without introducing a task manager or second agent loop.
+
 ## 0.14.0: Passive and progressive memory
 
 - `Default passive memory`: Repository-root configuration now adds independently configurable passive bootstrap and `read_state`/`patch_state` access, both enabled by default. Passive reads project durable memory without mutation; explicit patches may materialize storage while episode barriers, continuation, response reconciliation, and compaction remain inactive. Start promotes to active semantics and Stop returns to passive mode.

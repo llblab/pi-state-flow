@@ -24,7 +24,7 @@ function fakePort(initial: StateFlowTelegramSnapshot, options: { canStartNow?: b
 	const calls: string[] = [];
 	const port: StateFlowTelegramPort = {
 		snapshot: () => current,
-		state: () => ({ artifacts: {}, contract: {}, working: {}, response: "" }),
+		state: () => ({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "" }),
 		canStartNow: () => options.canStartNow ?? true,
 		start: () => {
 			calls.push("start");
@@ -128,7 +128,7 @@ test("section view repeats the state line with one lifecycle button and no refre
 });
 
 test("scope chooser opens exactly one selected native Rich state tree", async () => {
-	const state = { artifacts: { "/a": { description: "A" } }, contract: { rule: true }, working: {}, response: "Done", lazy: { memory: ["retained"] } };
+	const state = { artifacts: { "/a": { description: "A" } }, contract: { rule: true }, working: {}, intents: { current: "Validate release" }, response: "Done", lazy: { memory: ["retained"] } };
 	const { modules, sections } = fakeModules();
 	const { port } = fakePort(snapshot({ enabled: true }));
 	port.state = (scope) => ({ ...state, working: { scope } });
@@ -146,13 +146,18 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 	const inspect = sectionContext("inspect", "effective");
 	assert.equal(await sections[0].handleCallback!(inspect.context), "handled");
 	assert.deepEqual(inspect.richMessages, [renderStateFlowRichState("effective", 0, { ...state, working: { scope: "effective" } })]);
-	assert.deepEqual(inspect.richMessages[0]?.blocks.map((block) => block.type), ["heading", "details", "details", "details", "details", "details"]);
+	assert.deepEqual(inspect.richMessages[0]?.blocks.map((block) => block.type), ["heading", "details", "details", "details", "details", "details", "details"]);
 	assert.deepEqual(inspect.richMessages[0]?.blocks[0], {
 		type: "heading",
 		text: ["🧬 Effective: ", { type: "code", text: "#0" }],
 		size: 3,
 	});
-	assert.deepEqual(inspect.richMessages[0]?.blocks[5], {
+	assert.deepEqual(inspect.richMessages[0]?.blocks[4], {
+		type: "details",
+		summary: { type: "code", text: "intents" },
+		blocks: [{ type: "pre", language: "json", text: '{\n  "current": "Validate release"\n}' }],
+	});
+	assert.deepEqual(inspect.richMessages[0]?.blocks[6], {
 		type: "details",
 		summary: { type: "code", text: "lazy" },
 		blocks: [{ type: "pre", language: "json", text: '{\n  "memory": [\n    "retained"\n  ]\n}' }],
@@ -168,13 +173,14 @@ test("Rich state rendering bounds unbounded semantic fields with explicit trunca
 		artifacts: { huge: "x".repeat(40_000) },
 		contract: { huge: "y".repeat(40_000) },
 		working: { huge: "z".repeat(40_000) },
+		intents: { huge: "i".repeat(40_000) },
 		response: "r".repeat(40_000),
 		lazy: { rules: "l".repeat(40_000), memory: {}, projects: {}, soul: {}, vision: {} },
 	});
 	const serialized = JSON.stringify(message);
 	assert.ok(serialized.length < 32_768);
-	assert.equal((serialized.match(/\\"truncated\\": true/g) ?? []).length, 5);
-	assert.equal((serialized.match(/omittedChars/g) ?? []).length, 5);
+	assert.equal((serialized.match(/\\"truncated\\": true/g) ?? []).length, 6);
+	assert.equal((serialized.match(/omittedChars/g) ?? []).length, 6);
 	for (const key of ["rules", "memory", "projects", "soul", "vision"]) {
 		assert.match(serialized, new RegExp(`\\\\"${key}\\\\"`));
 	}
@@ -183,6 +189,7 @@ test("Rich state rendering bounds unbounded semantic fields with explicit trunca
 			artifacts: { huge: hostile.repeat(40_000) },
 			contract: { huge: hostile.repeat(40_000) },
 			working: { huge: hostile.repeat(40_000) },
+			intents: { huge: hostile.repeat(40_000) },
 			response: hostile.repeat(40_000),
 		});
 		assert.ok(JSON.stringify(hostileMessage).length < 32_768, JSON.stringify(hostile));

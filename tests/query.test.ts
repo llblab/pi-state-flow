@@ -72,6 +72,38 @@ test("projected reads return pure values, strict ranges, and minimal structural 
 	assert.throws(() => readProjectedState(view, ["cwd.working.missing"]), /does not exist/);
 });
 
+test("intents are hot, historical, scoped, patch-readable, and references remain explicit values", () => {
+	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "T0");
+	view = advanceTemporalState(view, [{ scope: "global", patch: { intents: { policy: "Finish current projects" } } }], "T1");
+	view = advanceTemporalState(view, [{
+		scope: "cwd",
+		patch: {
+			intents: { release: { action: "Execute accepted plan", plan: { $ref: "cwd.lazy.releasePlan" } } },
+			lazy: { releasePlan: { steps: ["validate", "publish"] } },
+		},
+	}], "T2");
+	assert.deepEqual(state(readStatePath(view, "effective")).intents, {
+		policy: "Finish current projects",
+		release: { action: "Execute accepted plan", plan: { $ref: "cwd.lazy.releasePlan" } },
+	});
+	assert.deepEqual(readProjectedState(view, ["cwd.intents.release"]), {
+		value: { action: "Execute accepted plan", plan: { $ref: "cwd.lazy.releasePlan" } },
+	});
+	assert.deepEqual(readProjectedState(view, ["intents.release"]), {
+		value: { action: "Execute accepted plan", plan: { $ref: "cwd.lazy.releasePlan" } },
+	});
+	assert.deepEqual(readProjectedState(view, ["cwd.intents.release"], "keys"), {
+		meta: { type: "object", size: 2 }, keys: { action: "string", plan: "object" },
+	});
+	assert.deepEqual(readProjectedState(view, ["cwd.intents.release.plan"], "patch"), {
+		patch: { $ref: "cwd.lazy.releasePlan" },
+	});
+	assert.deepEqual(readProjectedState(view, ["cwd[1].intents"]), { value: {} });
+	assert.deepEqual(readProjectedState(view, ["cwd.lazy.releasePlan"]), {
+		value: { steps: ["validate", "publish"] },
+	});
+});
+
 test("lazy values remain absent from hot projection and readable through scoped and effective paths", () => {
 	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "T0");
 	view = advanceTemporalState(view, [{ scope: "global", patch: { lazy: { memory: ["global"], rules: { retained: true } } } }], "T1");

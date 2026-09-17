@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emptyState, isStateDocument, overlayStates, updateMaterializedArtifacts } from "../lib/state.ts";
+import { emptyState, isStateDocument, migratePreIntentState, overlayStates, updateMaterializedArtifacts } from "../lib/state.ts";
 
 function state(contract: Record<string, any> = {}) {
-	return { artifacts: {}, contract, working: {}, response: "" };
+	return { artifacts: {}, contract, working: {}, intents: {}, response: "" };
 }
 
 test("creates isolated state documents with the exact public shape", () => {
 	const first = emptyState();
 	first.contract.changed = true;
-	assert.deepEqual(emptyState(), { artifacts: {}, contract: {}, working: {}, response: "" });
+	assert.deepEqual(emptyState(), { artifacts: {}, contract: {}, working: {}, intents: {}, response: "" });
 });
 
 test("accepts only exact materialized state documents with valid artifacts", () => {
@@ -18,12 +18,21 @@ test("accepts only exact materialized state documents with valid artifacts", () 
 		hash: `sha256:${"a".repeat(64)}`,
 		compiler: "artifact-v1",
 	};
-	assert.equal(isStateDocument({ artifacts: { "/a.md": artifact }, contract: {}, working: {}, response: "done" }), true);
-	assert.equal(isStateDocument({ contract: {}, working: {}, response: "done" }), false);
+	assert.equal(isStateDocument({ artifacts: { "/a.md": artifact }, contract: {}, working: {}, intents: {}, response: "done" }), true);
+	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, response: "done" }), false);
+	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, intents: "invalid", response: "done" }), false);
 	// Semantic-only artifacts are usable; missing provenance is not corrupt state.
-	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "Semantic only" } }, contract: {}, working: {}, response: "done" }), true);
-	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "" } }, contract: {}, working: {}, response: "done" }), false);
-	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, response: "done", extra: true }), false);
+	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "Semantic only" } }, contract: {}, working: {}, intents: {}, response: "done" }), true);
+	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "" } }, contract: {}, working: {}, intents: {}, response: "done" }), false);
+	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "done", extra: true }), false);
+});
+
+test("migrates only exact pre-intents states without inferring commitments", () => {
+	assert.deepEqual(migratePreIntentState({ artifacts: {}, contract: {}, working: { next: "possible" }, response: "" }), {
+		artifacts: {}, contract: {}, working: { next: "possible" }, intents: {}, response: "",
+	});
+	assert.equal(migratePreIntentState({ artifacts: {}, contract: {}, working: {}, intents: "invalid", response: "" }), undefined);
+	assert.equal(migratePreIntentState({ artifacts: {}, contract: {}, working: {}, response: "", extra: true }), undefined);
 });
 
 test("overlays global, CWD, and session state recursively with session precedence", () => {
@@ -32,6 +41,15 @@ test("overlays global, CWD, and session state recursively with session precedenc
 	const session = state({ policy: { source: "session" } });
 	assert.deepEqual(overlayStates(global, cwd, session).contract, {
 		policy: { source: "session", retained: true, project: true },
+	});
+});
+
+test("overlays intents recursively with session precedence", () => {
+	const global = { ...state(), intents: { release: { action: "global", retained: true } } };
+	const cwd = { ...state(), intents: { release: { action: "project", plan: { $ref: "cwd.lazy.plan" } } } };
+	const session = { ...state(), intents: { release: { action: "validate" } } };
+	assert.deepEqual(overlayStates(global, cwd, session).intents, {
+		release: { action: "validate", retained: true, plan: { $ref: "cwd.lazy.plan" } },
 	});
 });
 
@@ -60,12 +78,14 @@ test("atomically updates artifact metadata with its materialized scope", () => {
 		},
 		contract: { policy: "preserve" },
 		working: {},
+		intents: {},
 		response: "",
 	});
 	assert.deepEqual(global, {
 		artifacts: {},
 		contract: { policy: "preserve" },
 		working: {},
+		intents: {},
 		response: "",
 	});
 });

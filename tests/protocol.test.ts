@@ -15,6 +15,9 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.match(protocol, /every patch as reconciliation rather than append-only notes/);
 	assert.match(protocol, /feature\/release\/campaign or project\/version completion/);
 	assert.match(protocol, /destination-verify-source-delete/);
+	assert.match(protocol, /intents: active commitments/);
+	assert.match(protocol, /Store selected actions/);
+	assert.match(protocol, /follow it with read_state only when needed/);
 	assert.ok(protocol.length <= 4_000, `model protocol grew to ${protocol.length} characters`);
 });
 

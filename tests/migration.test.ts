@@ -7,6 +7,7 @@ import { hasLegacyStateSources, planLegacyStorageMigration } from "../lib/migrat
 import { cwdScopePaths, parseScopeStream, writeOwnedFileUpdates } from "../lib/durable.ts";
 import { advanceTemporalState, createTemporalState } from "../lib/temporal.ts";
 import { emptyState } from "../lib/state.ts";
+import { createSessionRuntime, emptySnapshot, serializeSessionRuntime } from "../lib/snapshot.ts";
 
 function fixture(t: { after: (callback: () => void) => void }) {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-migration-"));
@@ -23,6 +24,57 @@ test("only predecessor temporal envelopes activate migration detection", (t) => 
 	writeFileSync(join(root, "checkpoint.json"), JSON.stringify(stream.checkpoint));
 	writeFileSync(join(root, "patches.jsonl"), "");
 	assert.equal(hasLegacyStateSources(cwd, session, root), true);
+});
+
+test("migration adds empty intents to 0.14 semantic checkpoints without inferring working fields", (t) => {
+	const { root, cwd, session } = fixture(t);
+	const stream = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "0.14-origin").scopes.global;
+	stream.checkpoint.state.working.next = "possible, not committed";
+	const checkpoint = structuredClone(stream.checkpoint.state) as Record<string, unknown>;
+	delete checkpoint.intents;
+	writeFileSync(join(root, "checkpoint.json"), `${JSON.stringify(checkpoint)}\n`);
+	writeFileSync(join(root, "patches.jsonl"), "");
+	writeFileSync(join(root, "meta.json"), JSON.stringify({
+		version: 1,
+		artifacts: {},
+		temporal: { checkpoint: stream.checkpoint.through, patches: [] },
+	}));
+	assert.equal(hasLegacyStateSources(cwd, session, root), true);
+	const plan = planLegacyStorageMigration(cwd, session, root);
+	assert.deepEqual(plan.scopes, ["global"]);
+	writeOwnedFileUpdates(plan.updates, plan.bases, root);
+	const migrated = JSON.parse(readFileSync(join(root, "checkpoint.json"), "utf8"));
+	assert.deepEqual(migrated.intents, {});
+	assert.equal(migrated.working.next, "possible, not committed");
+	assert.equal(hasLegacyStateSources(cwd, session, root), false);
+	assert.deepEqual(planLegacyStorageMigration(cwd, session, root).updates, []);
+});
+
+test("migration discovers 0.14 sessions through runtime identity and upgrades their intents", (t) => {
+	const { root, cwd, session } = fixture(t);
+	const cwdDirectory = cwdScopePaths(cwd, root).directory;
+	const key = "2026-09-17T00-00-00-000Z_retained-session";
+	const ownedSession = "retained-session";
+	const directory = join(cwdDirectory, key);
+	mkdirSync(directory, { recursive: true });
+	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "0.14-session-origin");
+	const checkpoint = structuredClone(view.scopes.session.checkpoint.state) as Record<string, unknown>;
+	delete checkpoint.intents;
+	writeFileSync(join(directory, "checkpoint.json"), `${JSON.stringify(checkpoint)}\n`);
+	writeFileSync(join(directory, "patches.jsonl"), "");
+	writeFileSync(join(directory, "meta.json"), JSON.stringify({
+		version: 1, artifacts: {}, temporal: { checkpoint: view.scopes.session.checkpoint.through, patches: [] },
+	}));
+	const runtime = createSessionRuntime(emptySnapshot(true), cwd, ownedSession, view.lineage, "unconfirmed");
+	const serialized = serializeSessionRuntime(runtime, cwd, ownedSession);
+	writeFileSync(join(directory, "config.json"), serialized.config);
+	writeFileSync(join(directory, "runtime.json"), serialized.runtime);
+
+	assert.equal(hasLegacyStateSources(cwd, session, root), true);
+	const plan = planLegacyStorageMigration(cwd, session, root);
+	assert.ok(plan.updates.some(({ path }) => path === join(directory, "checkpoint.json")));
+	writeOwnedFileUpdates(plan.updates, plan.bases, root);
+	assert.deepEqual(JSON.parse(readFileSync(join(directory, "checkpoint.json"), "utf8")).intents, {});
 });
 
 test("migration converts complete temporal envelopes, preserves metadata, and is idempotent", (t) => {

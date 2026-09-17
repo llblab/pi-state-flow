@@ -20,7 +20,7 @@ import {
 } from "./artifact.ts";
 import { canonicalJson, isJsonValue, isObject } from "./json.ts";
 import { validateScopeStream, validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
-import type { StateScope } from "./state.ts";
+import { migratePreIntentState, type StateScope } from "./state.ts";
 
 const SESSION_KEY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const STATE_FILE = "state.json";
@@ -100,6 +100,7 @@ export function classifyScopeStream(
 	}
 	const temporal = meta?.temporal;
 	if (isObject(temporal) && Object.hasOwn(temporal, "checkpoint") && Array.isArray(temporal.patches)) {
+		checkpoint = migratePreIntentState(checkpoint) ?? checkpoint;
 		const owner = meta?.owner;
 		if (scope === "cwd" && expectedCwd !== undefined
 			&& (!isObject(owner) || Object.keys(owner).join(",") !== "cwd" || owner.cwd !== resolve(expectedCwd))) {
@@ -125,6 +126,10 @@ export function classifyScopeStream(
 		legacyCheckpoint = semantic;
 	} else if (scope === "cwd" && expectedCwd !== undefined) {
 		throw new Error("State Flow CWD scope identity is missing");
+	}
+	if (isObject(legacyCheckpoint) && isObject(legacyCheckpoint.state)) {
+		const migrated = migratePreIntentState(legacyCheckpoint.state);
+		if (migrated) legacyCheckpoint = { ...legacyCheckpoint, state: migrated };
 	}
 	const stream = { checkpoint: legacyCheckpoint, patches };
 	validateScopeStream(stream, scope);
