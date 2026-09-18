@@ -33,6 +33,16 @@ test("runtime keeps native session storage identity paired and detached from cal
 	assert.equal(runtime.sessionKey, "timestamp_session-id");
 });
 
+test("passive memory admits global state before a CWD has materialized", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-global-passive-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	writeGlobalState({ ...emptyState(), working: { preference: "global" } }, root);
+	const runtime = new TemporalRuntime("/new-project", "new-session", root);
+	assert.equal(runtime.loadPassive(), true);
+	assert.equal(runtime.read(0, "global").working.preference, "global");
+	assert.deepEqual(runtime.read(0, "cwd"), emptyState());
+});
+
 test("explicit migration upgrades predecessor envelopes after passive restore populated the runtime cache", (t) => {
 	const fixture = driftFixture(t);
 	const { runtime, snapshot } = restoreSessionA(fixture);

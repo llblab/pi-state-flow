@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.16.2: Passive first-CWD memory hotfix
+
+- `Passive first-CWD memory`: Treats global-only storage as a valid passive-memory state before the current CWD has ever materialized, projecting an empty CWD overlay instead of warning that shared storage is incomplete; CWD-without-global storage still fails closed.
+
 ## 0.16.1: Resumed activation hotfix
 
 - `Resumed activation`: Reasserts the selected session stream as a complete semantic cohort when `/state-flow-start` enables a resumed branch, so extension upgrades cannot misclassify retained session state as an omitted write while shared scopes still reconcile against their live owners.

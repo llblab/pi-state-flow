@@ -128,10 +128,11 @@ export class TemporalRuntime {
 				scope === "cwd" ? this.cwd : undefined, files.get(paths.meta))];
 		})) as Record<(typeof SHARED_SCOPES)[number], ScopeStream | undefined>;
 		if (!shared.global && !shared.cwd) return false;
-		if (!shared.global || !shared.cwd) throw new Error("Incomplete passive State Flow shared storage");
+		if (!shared.global) throw new Error("Incomplete passive State Flow shared storage: CWD state exists without global state");
 		const fresh = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, randomUUID());
 		const basis = backend === "git" ? (base as TemporalGitBase).head ?? "unborn" : "files";
-		this.view = adoptTemporalStreams({ global: shared.global, cwd: shared.cwd, session: fresh.scopes.session }, `passive:${basis}:${randomUUID()}`);
+		// Global memory is valid before this CWD has ever materialized its own scope.
+		this.view = adoptTemporalStreams({ global: shared.global, cwd: shared.cwd ?? fresh.scopes.cwd, session: fresh.scopes.session }, `passive:${basis}:${randomUUID()}`);
 		this.base = base;
 		this.backend = backend;
 		this.provenanceByScope = {
