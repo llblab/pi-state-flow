@@ -8,18 +8,19 @@ The extension owns durable memory while enabled. Global semantic memory is alway
 
 ## Composition
 
-`index.ts` is the public export and extension composition boundary. Independent modules under `lib/` own one concern each and are mirrored by tests:
+`index.ts` is the minimal public export boundary. `lib/extension.ts` is the Pi lifecycle composition root: it wires configuration and domain capabilities into commands, tools, event subscriptions, and handlers while delegating imperative mechanics to their owning modules. Independent modules under `lib/` own one concern each and are mirrored by tests:
 
 - `state`, `json`: semantic shape, validation, recursive overlay and deletion.
 - `temporal`, `history`: causal boundaries, checkpoint/tail folding and hot history.
-- `durable`, `storage`, `git`: exact files, CAS publication, Git commits/restoration, and owned push processes.
-- `snapshot`, `session`, `runtime`, `recovery`, `episode`: Pi branch/runtime lifecycle.
+- `durable`, `storage`, `git`: exact files, CAS publication, Git commits/restoration, and Git transport.
+- `snapshot`, `session`, `runtime`, `recovery`, `episode`: Pi branch/runtime lifecycle, branch traversal, and passive-boundary interpretation.
 - `transition`, `terminal`, `context`: inference barriers, turn resolution, passive projection, and response reconciliation.
 - `artifact`, `acquisition`, `maintenance`, `skills`, `rehydration`: source routing and compilation.
 - `memory`: external promotion records and memory diagnostics.
 - `continuation`: native-header discovery, runtime-provenance inspection, deterministic recommendation, and host startup precedence.
-- `publication`: remote policy, durable CAS queue/store, cross-process leases, and attempt outcomes.
-- `status`, `telegram`, `extension`: operator projection, the optional fail-open pi-telegram presentation adapter, and Pi adapter wiring.
+- `publication`: remote policy, durable CAS queue/store, cross-process leases, worker lifecycle, generation fencing, and attempt outcomes.
+- `protocol`, `logging`: model/tool presentation and bounded diagnostic persistence.
+- `status`, `telegram`, `extension`: operator projection, the optional fail-open pi-telegram presentation adapter, and high-level Pi adapter wiring.
 
 ## Semantic state
 
@@ -61,17 +62,17 @@ checkpoint.json + patches.jsonl
 
 The checkpoint is an older anchored materialization. The tail contains at most seven effective patches. On overflow, the oldest tail patch folds into the checkpoint before the new patch is appended.
 
-`state[n]`, `state.global[n]`, `state.cwd[n]` and `state.session[n]` resolve the same nth previous causal boundary. They are not independent per-scope patch counters. Pre-origin history is unavailable rather than empty.
+`effective[n]`, `global[n]`, `cwd[n]`, and `session[n]` resolve the same nth previous causal boundary. They are not independent per-scope patch counters. The retired top-level `state` segment is rejected; pre-origin history is unavailable rather than empty.
 
 A final-only `patch_state({"final":true})` call changes only ephemeral terminal eligibility and creates no identity, commit, or history step. A changed accepted response is runtime-owned semantic state and advances history.
 
 ## Pi lifecycle
 
-`patch_state` is the sole mutation tool. It validates any supplied global/CWD/session patches against one causal basis and publishes them as one atomic transition, then acts as an inference barrier. Pi executes no sibling tools from the same assistant response; the next inference sees rematerialized `state[0]`.
+`patch_state` is the sole mutation tool. It validates any supplied global/CWD/session patches against one causal basis and publishes them as one atomic transition, then acts as an inference barrier. Pi executes no sibling tools from the same assistant response; the next inference sees the rematerialized current effective state.
 
 Tool preflight follows Pi's public `getLeafEntry()` / `getEntry(parentId)` links to the nearest assistant containing the current call ID. It inspects that response's complete tool batch without constructing the whole branch or caching a batch across calls/selections. Foreign custom entries and earlier sibling results remain in the native trace. A missing call ID still searches the selected ancestry and preserves the existing unmatched-call behavior; this is not an unconditional constant-time guarantee. See [measured traversal evidence](performance.md#tool-preflight-parent-traversal).
 
-`read_state` reads one cached effective or scoped projection at offsets zero through seven. It never publishes or advances history.
+`read_state` reads one cached effective or scoped projection at current index zero or a retained causal index one through seven. It never publishes or advances history.
 
 Every enabled assistant iteration starts terminal-ineligible. Only a successful `patch_state` call containing `final:true` latches eligibility for the next accepted `turn_end`; the call may atomically include global, CWD, and session patches. Eligibility does not stop later reasoning, tools, or patches. If terminal prose arrives before eligibility, State Flow preserves that draft and reconciles it into runtime-owned `response` at `turn_end`, then starts at most two same-run fallback turns whose only purpose is the `final:true` patch. The same path covers an eligible draft whose final validation fails after a later acquisition. Fallback turns never become the response: a successful `final:true` commits its patches and closes resolution with the preserved answer intact, while two failed fallbacks close the iteration with the preserved answer and current state plus one bounded warning and a finalization diagnostic. Failed patch calls do not consume the budget. A following legal patch remains possible, and only an accepted ordinary answer is reconciled into runtime-owned `response` at `turn_end`. State Flow no longer parses `state_flow` or generic HTML comments; historical comments are ordinary text and other extensions retain their own comment handling.
 
@@ -175,9 +176,11 @@ Compilation is routing, not a substitute for source text. Full source is read on
 
 Skills are CWD artifacts with stricter compilation: `kind: "skill"` and a non-empty compilation describing applicability, constraints and failure conditions. Their source bodies do not persist in state. Matching provenance proves source-version consistency, not semantic fidelity, truth, or higher instruction authority.
 
-## Memory curation and promotion
+## Operational guidance, memory curation, and promotion
 
-The optional packaged `state-flow-memory` Skill performs bounded explicit audits, scope narrowing, contradiction cleanup and external handoffs. It is not part of ordinary retention or background maintenance. Curation compiles a read Skill at CWD before accumulating global compilation obligations, writes and separately reads a migration destination before source deletion, then verifies the changed scope and effective overlay. Simultaneously pending CWD/global acquisitions must be compiled together in one atomic `patch_state` call. Destination write, readback, and source deletion remain separate migration steps so accepted-copy verification is not skipped.
+The packaged Skills deliberately separate two responsibilities. `state-flow-guide` is the on-demand operational reference for concrete read, patch, inheritance, acquisition, finalization, and recovery questions; it does not initiate memory audits or unsolicited cleanup. `state-flow-memory` performs one bounded explicit or phase-boundary curation over stale knowledge, commitments, continuation, ownership, and external handoffs; it is not part of routine turns or background maintenance.
+
+Curation compiles a read Skill at CWD before dependent work, writes and separately reads a migration destination before source deletion, then verifies the changed owner and effective overlay. Simultaneously pending CWD/global acquisitions must be compiled together in one atomic `patch_state` call. Destination write, readback, and source deletion remain separate migration steps so accepted-copy verification is not skipped.
 
 External promotion remains a semantic two-phase handoff, not a memory-owner mode. Optional global `working.memory_promotions` entries record `pending`, `accepted`, `failed` or `unknown` status plus owner. Accepted records additionally require destination pointer and revision. Failed or uncertain promotion preserves the State Flow candidate; the only accepted copy is never deleted.
 
@@ -204,7 +207,7 @@ Both [tested Pi SDKs](compatibility.md) choose or create `SessionManager` before
 {"session":{"intents":{"next":"Verify the corrected behavior"}},"final":true}
 ```
 
-`intents` is the hot plane for active commitments, not requirements, observations, alternatives, or completed plans. Removing an intent does not remove its consequences or any referenced state. A conventional `{"$ref":"cwd.lazy.plan"}` value remains ordinary JSON and is followed explicitly with `read_state`; it creates no dependency, hydration, execution, or completion semantics.
+`intents` is the hot plane for active commitments, not requirements, observations, alternatives, or completed plans. Removing an intent does not remove its consequences or any referenced state. Semantic-state references use either the optional structured `{"$ref":"cwd.lazy.plan"}` convention or `$` immediately followed by one valid `read_state` path inside ordinary text, for example `$effective.lazy.memory[7]`. The text prefix distinguishes references from incidental path-like prose and leaves a deterministic seam for possible future parsing. Resource paths, document locators, URIs, Skill identities, and agent identities retain their native syntax. State Flow stores all forms as ordinary JSON and currently does not parse or validate targets. The agent resolves a relevant locator explicitly through `read_state` or the appropriate external tool; presence alone creates no authority, existence proof, dependency, hydration, execution, or completion semantics. Reference repair is reactive: the agent never scans or resolves references merely to test them. Only after one requested value path is missing does the query domain perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` or `$path` matches. When matches exist, `read_state` returns the explicit diagnostic sentinel `{value:null, hint:[{type:"dangling-reference", message, paths}]}`. `hint` is a top-level sibling rather than state data; its message asks for reconciliation and `paths` contains at most three runtime-verified current owning addresses. The null sentinel is never returned alone for this case. Keys, patch, and multi-path reads keep all-or-error semantics, while no durable match retains the ordinary missing-path error. A match establishes durable semantic provenance, not staleness; no match does not prove invention. The agent may then inspect ownership and patch a proven stale source without discarding surrounding meaning. Effective absence does not establish ownership, and unavailable history, external inaccessibility, or transient read failure does not prove a broken reference.
 
 `read_state` accepts one unified path. `effective == effective[0]` is the current effective materialization; `global == global[0]` (and CWD/session equivalents) selects that scope at the same composed causal boundary. `global.patches == global.patches[0]` reads the latest accepted retained global patch, with higher patch indices walking only that scope's retained accepted patches. Indices are bounded to zero through seven; unavailable pre-origin or pre-tail history is an error. Resolver aliases are not literal JSON containers. Reads stay cached and create no Git query, publication, checkpoint append, or semantic step.
 

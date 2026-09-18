@@ -4,7 +4,7 @@ This matrix records exact tested dependency stacks, not the version of an operat
 
 ## Current release candidate
 
-The 0.12.0 candidate passes `npm run validate` on the repository-local 0.84.4 dependency graph: typecheck, import check, and 451/451 tests. Its focused path/config/interactive-rendering cohort passes 41/41, including current-as-index-zero `read_state` aliases, composed-lineage scoped reads, retained scope-patch reads, legacy `{offset, scope}` compatibility, and both visible/default and suppressed `patch_state` argument rendering. A live enabled host also resolves current and historical legacy reads; the host must reload the candidate before its model-facing tool schema can expose the new `path` input. The 0.85.1 full-suite result below belongs to the earlier source checkpoint and has not been repeated for this candidate.
+The 0.16.0 candidate passes `npm run validate` on the repository-local 0.84.4 dependency graph: build, typecheck, import check, package dry run, and 444/444 tests. Its focused context/Skill/invariant cohort passes 43/43, including discovery of the separate operational and memory-curation Skills and release-package inventory checks for both compiled Skill paths. Current and historical reads use semantic `path`/`paths`; the retired top-level `state` segment and legacy top-level `offset`/`scope` inputs are rejected. The 0.85.1 full-suite evidence below belongs to the earlier recorded source checkpoint and has not been repeated for this candidate.
 
 ## Tested matrix
 

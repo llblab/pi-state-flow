@@ -10,6 +10,16 @@ test("index is only a composition and public-export boundary", async () => {
 	assert.match(source, /lib\/extension\.ts/);
 });
 
+test("extension composition delegates imperative mechanics to owning domains", async () => {
+	const source = await readFile(new URL("lib/extension.ts", root), "utf8");
+	assert.match(source, /new PublicationWorkerController/);
+	assert.match(source, /new StateFlowDiagnosticWriter/);
+	assert.match(source, /findAssistantToolBatch/);
+	assert.match(source, /findPassiveStopBoundary/);
+	assert.doesNotMatch(source, /acquirePublicationWorkerLease|runPublicationWorker|appendStateFlowDiagnostic|projectDiagnosticContent/);
+	assert.doesNotMatch(source, /function formatPatchStateArguments|function normalizePatchStateArguments/);
+});
+
 test("release verification requires the compiled package surfaces", async () => {
 	const workflow = await readFile(new URL(".github/workflows/release.yml", root), "utf8");
 	assert.match(workflow, /- name: Build exact local package\n\s+run: npm run build\n\s+- name: Capture exact local package inventory/);
@@ -17,6 +27,7 @@ test("release verification requires the compiled package surfaces", async () => 
 	assert.match(workflow, /published\.pi\?\.skills\?\.includes\("\.\/dist\/skills"\)/);
 	assert.match(workflow, /paths\.includes\("dist\/pi-state-flow\/index\.js"\)/);
 	assert.match(workflow, /paths\.includes\("dist\/skills\/state-flow-memory\/SKILL\.md"\)/);
+	assert.match(workflow, /paths\.includes\("dist\/skills\/state-flow-guide\/SKILL\.md"\)/);
 	assert.doesNotMatch(workflow, /published\.pi\?\.extensions\?\.includes\("\.\/index\.ts"\)/);
 });
 

@@ -46,12 +46,20 @@ global | CWD | session
 └── lazy
 ```
 
-`artifacts`, `contract`, `working`, `intents`, and `response` remain hot. `intents` may keep compact active direction while pointing to large supporting detail in `lazy` with an ordinary `{"$ref":"cwd.lazy.plan"}` value. References are read explicitly and never auto-hydrated, rewritten, executed, or completed. `lazy` differs only in projection policy:
+`artifacts`, `contract`, `working`, `intents`, and `response` remain hot. `intents` may keep compact active direction while referring to large supporting detail in `lazy`. `lazy` differs only in projection policy:
 
 - It is canonical semantic JSON, validated and versioned with its owning scope.
 - It is excluded from the ordinary baseline effective-state body.
 - It becomes model-visible only through bounded baseline navigation hints or explicit `read_state` output.
 - Reading it does not mutate state, freshness, usage metadata, history, or future context.
+
+### Semantic references
+
+A reference is semantic content, not a runtime type. The optional `{"$ref":"cwd.lazy.plan"}` object provides the structured state-reference form. Inside any ordinary string or paragraph, a semantic-state reference uses `$` immediately followed by one valid `read_state` path, for example `$effective.lazy.memory[7]`. The prefix separates a deliberate reference from incidental path-like text and provides a deterministic seam if code-based parsing is ever justified. File paths, document sections, URIs, artifact locators, Skill identities, and agent identities retain their native syntax.
+
+State Flow preserves all forms exactly as ordinary JSON. It does not scan prose, index targets, validate existence, rewrite relative locators, or infer authority, dependency, hydration, execution, or completion. When a reference matters, the agent resolves it explicitly with `read_state` for semantic paths or the appropriate external read/tool for other resources. A locator supports retrieval but does not replace content required for the current decision.
+
+Reference repair is reactive, not a maintenance scan. The agent does not enumerate, audit, or resolve references merely to test them. Only after one requested `read_state` value path is missing does State Flow perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` and `$path` matches. If found, the tool returns `{value:null, hint:[{type:"dangling-reference", message, paths}]}`. `hint` is explicit top-level metadata rather than state data; its action message asks for reconciliation and its path array contains at most three runtime-verified current owners. The null sentinel is never returned alone for this case. Keys, patch, and multi-path reads keep ordinary all-or-error semantics; no durable match retains the missing-path error and does not prove the agent invented the path. The agent may then reconcile a proven stale owning value while preserving surrounding meaning. This applies equally to `$ref` objects and contextual references in prose. Effective-state absence alone does not identify the owner, and unavailable history, inaccessible external resources, or transient read failure do not prove that a durable reference is broken.
 
 Valid lazy values include:
 
@@ -106,7 +114,7 @@ Active obligations, current constraints, unresolved next actions, and facts requ
 
 `projection` defaults to `value`. A batch uses one projection for every path, evaluates every path against one captured state view, and returns results in request order. Duplicate paths remain duplicate results. If any path is invalid, the whole read fails; there is no mixed partial result.
 
-The legacy single `path` form remains first-class rather than mere compatibility syntax. Existing `offset`/`scope` input may remain temporarily during migration but cannot combine with `path` or `paths`.
+The single `path` form is first-class. The retired top-level `offset` and `scope` inputs are rejected; history and ownership belong in the semantic path itself, such as `cwd[1].lazy.memory`.
 
 ### Response shape
 
@@ -118,13 +126,13 @@ There are three projections:
 | `keys` | `{ "meta": ..., "keys": ... }` | Minimal structural facts followed by immediate keys |
 | `patch` | `{ "patch": ... }` | Historical semantic patch at the selected boundary |
 
-A single-path request returns one payload. A multi-path request returns positionally aligned arrays under the same projection fields.
+A single-path request returns one payload. A multi-path request returns positionally aligned arrays under the same projection fields. One missing value path with exact current durable references instead returns `{ "value": null, "hint": [{ "type": "dangling-reference", "message": "Reconcile the verified current values that reference this path.", "paths": ["cwd.working.note"] }] }`; this explicit sentinel is diagnostic metadata, not semantic state.
 
-`value` deliberately mirrors the effective-state snapshot injected at iteration start: it is semantic state without revision, provenance, range, transport, or storage fields. `patch` likewise contains only the selected semantic patch. Only structural discovery earns `meta`, and `keys` remains the final and most valuable field in that response.
+`value` otherwise deliberately mirrors the effective-state snapshot injected at iteration start: it is semantic state without revision, provenance, range, transport, or storage fields. `patch` likewise contains only the selected semantic patch. Only structural discovery earns `meta`, and `keys` remains the final and most valuable field in that response.
 
 The response does not repeat the requested path or projection and does not return an internal revision. Runtime owns revision selection, locking, CAS, and publication; the model cannot improve correctness by echoing that machinery.
 
-Errors use the normal tool-error channel rather than successful JSON containing an `error` field.
+Errors use the normal tool-error channel rather than successful JSON containing an `error` field. The explicit dangling-reference sentinel above is the sole missing-path exception; keys, patch, multi-path, and unmatched value reads still fail.
 
 ### Path and range model
 

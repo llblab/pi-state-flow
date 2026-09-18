@@ -380,6 +380,29 @@ test("read_state lazily projects all hot historical paths and scopes without pub
 	assert.equal(h.resolveSnapshot().meta.step, 8);
 });
 
+test("read_state returns dangling-reference hints as top-level metadata beside a null sentinel value", async () => {
+	const h = harness();
+	await start(h);
+	await h.tools.get("patch_state").execute("seed-reference", {
+		cwd: { working: { continuation: "Read `$cwd.lazy.missing` only when needed." } },
+	}, undefined, undefined, h.ctx);
+	const read = h.tools.get("read_state");
+	const result = await read.execute("missing-reference", { path: "cwd.lazy.missing" }, undefined);
+	assert.deepEqual(JSON.parse(result.content[0].text), {
+		value: null,
+		hint: [{
+			type: "dangling-reference",
+			message: "Reconcile the verified current values that reference this path.",
+			paths: ["cwd.working.continuation"],
+		}],
+	});
+	assert.deepEqual(result.details, { path: "cwd.lazy.missing", projection: "value" });
+	await assert.rejects(
+		read.execute("invented-reference", { path: "cwd.lazy.invented" }, undefined),
+		(error: unknown) => error instanceof Error && !error.message.includes("hint"),
+	);
+});
+
 test("lets ordinary tool-bearing responses run without comments or intermediate state commits", async () => {
 	const h = harness();
 	await start(h, "Investigate");

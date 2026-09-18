@@ -360,3 +360,99 @@ export async function runPublicationWorker(
 		};
 	}
 }
+
+export interface PublicationWorkerControllerPorts {
+	resolveDestination(): RemotePublicationDestination | undefined;
+	isAncestor(ancestor: string, descendant: string): boolean;
+	push(destination: RemotePublicationDestination, target: string, signal: AbortSignal): Promise<void>;
+	onDiverged(previous: PublicationQueueState, target: string): void;
+}
+
+/** Own durable queue coalescing, worker leases, retries, generation fencing, and bounded shutdown. */
+export class PublicationWorkerController {
+	private readonly active = new Map<string, { controller: AbortController; done: Promise<void> }>();
+	private readonly ports: PublicationWorkerControllerPorts;
+	private stopped = false;
+	private shutdownPromise: Promise<boolean> | undefined;
+
+	constructor(ports: PublicationWorkerControllerPorts) {
+		this.ports = ports;
+	}
+
+	enqueue(target: string): void {
+		const destination = this.ports.resolveDestination();
+		if (!destination) return;
+		const path = publicationQueuePath(destination);
+		const previous = loadPublicationQueue(path);
+		const next = previous
+			? coalescePublicationTarget(previous, destination, target, this.ports.isAncestor, {
+				onDivergedLineage: (dropped) => this.ports.onDiverged(dropped, target),
+			})
+			: createPublicationQueue(destination, target);
+		savePublicationQueue(path, next, previous);
+	}
+
+	launch(): void {
+		if (this.stopped) return;
+		let destination: RemotePublicationDestination | undefined;
+		try { destination = this.ports.resolveDestination(); }
+		catch (error) {
+			if (error instanceof Error && /ENOENT/.test(error.message)) return;
+			throw error;
+		}
+		if (!destination) return;
+		const path = publicationQueuePath(destination);
+		if (this.active.has(path)) return;
+		let queued: PublicationQueueState | undefined;
+		let lease: PublicationWorkerLease | undefined;
+		try {
+			queued = loadPublicationQueue(path);
+			if (!queued) return;
+			lease = acquirePublicationWorkerLease(path);
+		} catch { return; }
+		if (!lease) return;
+		const controller = new AbortController();
+		const done = runPublicationWorker(
+			queued,
+			({ target }) => this.ports.push(destination, target, controller.signal),
+			() => loadPublicationQueue(path) ?? queued,
+			this.ports.isAncestor,
+		).then((result) => {
+			if (this.stopped) return;
+			const current = loadPublicationQueue(path);
+			if (!current) return;
+			if (result.next === undefined) {
+				if (current.target === result.attempted.target) removePublicationQueue(path, current);
+				return;
+			}
+			if (current.target === result.attempted.target || result.next.target === current.target) savePublicationQueue(path, result.next, current);
+		}).catch(() => {
+			// Queue/CAS truth remains durable; status and a later activation expose retry.
+		}).finally(() => {
+			this.active.delete(path);
+			try {
+				lease.release();
+				if (!this.stopped && loadPublicationQueue(path)?.status === "pending") this.launch();
+			} catch {
+				// Failed lease cleanup or malformed persistence stays inert until retry or repair.
+			}
+		});
+		this.active.set(path, { controller, done });
+	}
+
+	shutdown(waitMs: number): Promise<boolean> {
+		this.stopped = true;
+		return this.shutdownPromise ??= (async () => {
+			const workers = [...this.active.values()];
+			for (const { controller } of workers) controller.abort();
+			if (workers.length === 0) return true;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					Promise.all(workers.map(({ done }) => done)).then(() => true),
+					new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), waitMs); }),
+				]);
+			} finally { clearTimeout(timeout); }
+		})();
+	}
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseStateReadPath, readProjectedState, readStatePath, type StateReadResult } from "../lib/query.ts";
+import { findStateReferenceSources, parseStateReadPath, readProjectedState, readStatePath, type StateReadResult } from "../lib/query.ts";
 import { emptyState } from "../lib/state.ts";
 import { advanceTemporalState, createTemporalState } from "../lib/temporal.ts";
 
@@ -101,6 +101,60 @@ test("intents are hot, historical, scoped, patch-readable, and references remain
 	assert.deepEqual(readProjectedState(view, ["cwd[1].intents"]), { value: {} });
 	assert.deepEqual(readProjectedState(view, ["cwd.lazy.releasePlan"]), {
 		value: { steps: ["validate", "publish"] },
+	});
+});
+
+test("missing reads reactively identify exact durable reference sources without returning diagnostics as state", () => {
+	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "T0");
+	view = advanceTemporalState(view, [{
+		scope: "cwd",
+		patch: {
+			intents: { release: { plan: { $ref: "cwd.lazy.missing" } } },
+			working: {
+				note: "Continue from `$cwd.lazy.missing` when needed.",
+				lookalike: "Do not match `$cwd.lazy.missingExtra`.",
+			},
+		},
+	}], "T1");
+	assert.deepEqual(findStateReferenceSources(view, "cwd.lazy.missing"), {
+		sources: [
+			{ scope: "cwd", path: "cwd.intents.release.plan", form: "structured" },
+			{ scope: "cwd", path: "cwd.working.note", form: "text" },
+		],
+		truncated: false,
+	});
+	assert.deepEqual(readProjectedState(view, ["cwd.lazy.missing"]), {
+		value: null,
+		hint: [{
+			type: "dangling-reference",
+			message: "Reconcile the verified current values that reference this path.",
+			paths: ["cwd.intents.release.plan", "cwd.working.note"],
+		}],
+	});
+	assert.throws(
+		() => readProjectedState(view, ["cwd.lazy.invented"]),
+		(error: unknown) => error instanceof Error && !error.message.includes("hint"),
+	);
+	assert.throws(() => readProjectedState(view, ["cwd.lazy.missing"], "keys"), /does not exist/);
+	assert.throws(() => readProjectedState(view, ["cwd.working.note", "cwd.lazy.missing"]), /does not exist/);
+});
+
+test("implicit missing paths match explicit effective references", () => {
+	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "T0");
+	view = advanceTemporalState(view, [{ scope: "session", patch: {
+		working: { note: "See `$effective.lazy.missing` only if needed." },
+	} }], "T1");
+	assert.deepEqual(findStateReferenceSources(view, "lazy.missing"), {
+		sources: [{ scope: "session", path: "session.working.note", form: "text" }],
+		truncated: false,
+	});
+	assert.deepEqual(readProjectedState(view, ["lazy.missing"]), {
+		value: null,
+		hint: [{
+			type: "dangling-reference",
+			message: "Reconcile the verified current values that reference this path.",
+			paths: ["session.working.note"],
+		}],
 	});
 });
 

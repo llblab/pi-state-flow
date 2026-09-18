@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+## 0.16.0: Proportional State Flow guidance
+
+- `Operational Skill`: Adds the packaged `state-flow-guide` as an on-demand reference for concrete read, patch, inheritance, acquisition, finalization, and recovery problems without triggering memory audits or unsolicited cleanup.
+- `Memory Skill`: Compresses `state-flow-memory` into one bounded curation procedure while preserving authority separation, intent cleanup, evidence boundaries, ownership checks, two-phase scope transfer, external acceptance verification, and active/passive finalization behavior.
+- `Contract alignment`: Updates executable Skill discovery and release-package inventory checks for both Skills, removes obsolete documentation for retired read syntax, and defines state references as structured `$ref` values or `$`-prefixed `read_state` paths in prose without proactive link scanning.
+- `Reference diagnostics`: When one requested value path is missing and exact durable sources exist, returns `{value:null, hint:[...]}` with a typed reconciliation message and at most three runtime-verified current owning paths. Keys, patch, batch, and unmatched reads remain all-or-error; no match never implies that the agent invented the path.
+- `Composition root`: Reduces `lib/extension.ts` to higher-level Pi lifecycle wiring by moving patch presentation into `protocol`, branch traversal into `session`, diagnostic persistence into `logging`, and durable queue/worker lifecycle into `publication`, without adding domains or changing public behavior.
+
 ## 0.15.0: Intentional agency
 
 - `Intent semantic plane`: Adds hot, object-valued `intents` to global, CWD, session, and effective state. An intent is a selected commitment to future action, distinct from requirements in `contract`, observations or possibilities in `working`, and inactive supporting memory in `lazy`.

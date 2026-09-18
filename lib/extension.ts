@@ -4,27 +4,24 @@ import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { assistantToolCallCount, finalizedAssistantResponse, stateFlowProtocol } from "./protocol.ts";
+import { assistantToolCallCount, finalizedAssistantResponse, formatPatchStateArguments, normalizePatchStateArguments, separatedFailure, separatedOutput, stateFlowProtocol } from "./protocol.ts";
 import { createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, runtimeContextMessage, syntheticUser, VALIDATION_MESSAGE_TYPE, withoutPrivateValidation, type PassiveContinuation } from "./context.ts";
 import { ArtifactReadTracker } from "./acquisition.ts";
 import { loadStateFlowConfig } from "./config.ts";
 import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramLoader } from "./telegram.ts";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { SkillReadTracker } from "./skills.ts";
 import { emptySnapshot, migrationFailure, persistableSnapshot, RevisionUnavailableError, type Snapshot } from "./snapshot.ts";
 import { readNativeSessionHeader } from "./continuation.ts";
 import { MissingSessionRuntimeError, SharedScopeRemovalConflictError, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
 import { emptyState, overlayStates, projectStateForModel, type AtomicScopePatches, type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
 import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, validateFinalEligibility, type StagedScopedTransition } from "./transition.ts";
-import { discoverSnapshotData, hasPriorConversation, isNewSession, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
+import { discoverSnapshotData, findAssistantToolBatch, findPassiveStopBoundary, hasPriorConversation, isNewSession, retainsPhysicalSessionProjection, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
 import { compactStatus, detailedStatus, STATUS_KEY, type PendingPublicationDiagnostic, type StatusDiagnostics } from "./status.ts";
 import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
 import { recoverSnapshot } from "./recovery.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
-import { resolveRemotePublicationPolicy, serializeRemotePublicationPolicyDocument } from "./publication.ts";
-import { coalescePublicationTarget, createPublicationQueue, type PublicationQueueState } from "./publication.ts";
-import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePath, removePublicationQueue, savePublicationQueue } from "./publication.ts";
-import { runPublicationWorker } from "./publication.ts";
+import { loadPublicationQueue, publicationQueuePath, PublicationWorkerController, resolveRemotePublicationPolicy, serializeRemotePublicationPolicyDocument, type PublicationQueueState } from "./publication.ts";
 import { getKnowledgeRoot, GlobalMarkdownDiscovery } from "./discovery.ts";
 import { canonicalJson, isObject, sameJson } from "./json.ts";
 import { readProjectedState, readStatePath } from "./query.ts";
@@ -35,7 +32,7 @@ import {
 	type SessionAddress,
 } from "./durable.ts";
 import { projectRecentTransitionsWithLimit, RECENT_TRANSITION_LIMIT } from "./history.ts";
-import { appendStateFlowDiagnostic, projectDiagnosticContent, stateFlowLogPath, type StateFlowDiagnosticCategory } from "./logging.ts";
+import { StateFlowDiagnosticWriter, stateFlowLogPath, type DiagnosticExtras, type StateFlowDiagnosticCategory } from "./logging.ts";
 import { isGitCommitAncestor, pushGitCommit, pushGitTarget, resolveGitPushDestination } from "./git.ts";
 import {
 	ORDINARY_ARTIFACT_COMPILER,
@@ -54,64 +51,13 @@ export interface StateFlowExtensionOptions {
 	passive?: { bootstrap?: boolean; tools?: boolean };
 }
 
+export { formatPatchStateArguments, normalizePatchStateArguments };
+
 export const PATCH_STATE_TOOL_NAME = "patch_state";
 export const READ_STATE_TOOL_NAME = "read_state";
 export const MAX_FALLBACK_ATTEMPTS: number = 2;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 const PUBLICATION_SHUTDOWN_WAIT_MS = 2_000;
-const PATCH_DISPLAY_SECTION_KEYS = new Set([
-	"global",
-	"cwd",
-	"session",
-	"artifacts",
-	"contract",
-	"working",
-	"response",
-	"final",
-]);
-
-/** Keep successful patch JSON valid while separating adjacent scopes and memory sections visually. */
-export function formatPatchStateArguments(args: unknown): string {
-	const seenAtIndent = new Set<number>();
-	return JSON.stringify(args, null, 2).split("\n").flatMap((line) => {
-		const indent = line.length - line.trimStart().length;
-		const match = /^(\s+)"([^"]+)":/.exec(line);
-		if (match === null || !PATCH_DISPLAY_SECTION_KEYS.has(match[2])) {
-			for (const seenIndent of seenAtIndent) {
-				if (seenIndent > indent) seenAtIndent.delete(seenIndent);
-			}
-			return [line];
-		}
-		const separator = seenAtIndent.has(indent) ? [""] : [];
-		seenAtIndent.add(indent);
-		return [...separator, line];
-	}).join("\n");
-}
-
-/** Normalize a bounded compatibility superset without advertising aliases in the model-facing contract. */
-export function normalizePatchStateArguments(args: unknown): any {
-	if (!isObject(args) || !Object.hasOwn(args, "final")) return args;
-	const value = args.final;
-	let final: boolean;
-	if (typeof value === "boolean") final = value;
-	else if (value === 1) final = true;
-	else if (value === 0) final = false;
-	else if (typeof value === "string" && value.trim().toLowerCase() === "true") final = true;
-	else if (typeof value === "string" && value.trim().toLowerCase() === "false") final = false;
-	else return args;
-	return { ...args, final };
-}
-
-/** Keep tool output visually separated from its heading with exactly one leading newline. */
-function separatedOutput(text: string): string {
-	return `\n${text.replace(/^\n+/, "")}`;
-}
-
-/** Keep a failed tool invocation visually separated from its rendered error without changing error semantics. */
-function separatedFailure(error: unknown): Error {
-	const message = error instanceof Error ? error.message : String(error);
-	return new Error(separatedOutput(message), error instanceof Error ? { cause: error } : undefined);
-}
 
 export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowExtensionOptions = {}): void {
 	const agentDir = options.agentDir ?? getAgentDir();
@@ -145,15 +91,22 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	let pendingPublication: PendingPublicationDiagnostic | undefined;
 	let rehydrationPhase: RehydrationPhase | undefined;
 	let turnPublicationTarget: string | undefined;
-	const activePublicationWorkers = new Map<string, { controller: AbortController; done: Promise<void> }>();
-	let publicationStopped = false;
 	let publicationShutdown: Promise<void> | undefined;
 	const repositoryRoot = resolve(options.repositoryRoot ?? config.directory);
+	const diagnosticWriter = new StateFlowDiagnosticWriter(config.logging, stateFlowLogPath(agentDir), repositoryRoot, (message) => activeContext?.ui.notify(message, "warning"));
+	const publicationWorker = new PublicationWorkerController({
+		resolveDestination: () => resolveGitPushDestination(repositoryRoot),
+		isAncestor: (ancestor, descendant) => isGitCommitAncestor(repositoryRoot, ancestor, descendant),
+		push: (destination, target, signal) => pushGitTarget(repositoryRoot, destination, target, signal),
+		onDiverged: (dropped, target) => activeContext && recordDiagnostic(
+			`Retired publication queue target ${dropped.target} after a journal lineage rewrite; retargeting to ${target}`,
+			"publication-conflict", activeContext,
+		),
+	});
 	const skillReads = new SkillReadTracker();
 	const artifactReads = new ArtifactReadTracker();
 	const globalMarkdown = new GlobalMarkdownDiscovery(options.knowledgeRoot ?? getKnowledgeRoot(agentDir));
 	let artifactInvalidations: ArtifactInvalidationRequest[] = [];
-	let loggingWarningReported = false;
 	let telegramStartPending = false;
 
 	function sessionAddress(ctx: ExtensionContext): SessionAddress {
@@ -204,27 +157,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		runAnchorTimestamp = undefined;
 		skillReads.clear();
 		artifactReads.clear();
-	}
-
-	function passiveStopBoundary(ctx: ExtensionContext): { at: number; from?: number } | undefined {
-		for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
-			try {
-				if (entry?.type !== "custom" || entry.customType !== PASSIVE_STOP_ENTRY_TYPE) continue;
-				const { at, from, reset, owner } = (entry.data as { at?: unknown; from?: unknown; reset?: unknown; owner?: unknown } | undefined) ?? {};
-				if (reset === true && owner === ctx.sessionManager.getSessionId()) return undefined;
-				if (typeof at === "number" && Number.isSafeInteger(at) && at >= 0) return {
-					at,
-					...(typeof from === "number" && Number.isSafeInteger(from) && from >= 0 ? { from } : {}),
-				};
-			} catch {
-				// A hostile unrelated branch entry cannot manufacture or suppress a valid marker.
-			}
-		}
-		return undefined;
-	}
-
-	function retainsPhysicalSessionProjection(reason: unknown): boolean {
-		return reason === undefined || reason === "startup" || reason === "reload" || reason === "resume";
 	}
 
 	function deferArtifactRefresh(): void {
@@ -289,21 +221,6 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			: active.filter((name) => !owned.includes(name)));
 	}
 
-	function assistantToolBatch(ctx: ExtensionContext, toolCallId: string): string[] | undefined {
-		for (let cursor = ctx.sessionManager.getLeafEntry(); cursor; cursor = cursor.parentId ? ctx.sessionManager.getEntry(cursor.parentId) : undefined) {
-			const entry = cursor as { type?: unknown; message?: { role?: unknown; content?: unknown } };
-			if (entry.type !== "message" || entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
-			const calls = entry.message.content.filter((block): block is { type: "toolCall"; id: string; name: string } => {
-				return typeof block === "object" && block !== null
-					&& (block as { type?: unknown }).type === "toolCall"
-					&& typeof (block as { id?: unknown }).id === "string"
-					&& typeof (block as { name?: unknown }).name === "string";
-			});
-			if (calls.some(({ id }) => id === toolCallId)) return calls.map(({ name }) => name);
-		}
-		return undefined;
-	}
-
 	function recordPublication(publication: RuntimePublication, ctx: ExtensionContext): void {
 		const revision = publication.revision ?? publication.commit;
 		if (revision !== undefined) snapshot.meta.durableBase = revision;
@@ -330,8 +247,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		if (mode !== "turn-end" || target === undefined || !/^[0-9a-f]{40,64}$/.test(target)) return;
 		turnPublicationTarget = target;
 		try {
-			enqueueTurnPublication(ctx);
-			launchPublicationWorker();
+			enqueueTurnPublication();
+			publicationWorker.launch();
 		} catch (error) {
 			ctx.ui.notify(
 				`State Flow accepted the local commit; remote publication is deferred: ${error instanceof Error ? error.message : String(error)}`,
@@ -372,95 +289,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return true;
 	}
 
-	function enqueueTurnPublication(ctx: ExtensionContext): void {
+	function enqueueTurnPublication(): void {
 		const target = turnPublicationTarget;
 		turnPublicationTarget = undefined;
-		if (!target) return;
-		const destination = resolveGitPushDestination(repositoryRoot);
-		if (!destination) return;
-		const path = publicationQueuePath(destination);
-		const previous = loadPublicationQueue(path);
-		const next = previous
-			? coalescePublicationTarget(previous, destination, target, (ancestor, descendant) => isGitCommitAncestor(repositoryRoot, ancestor, descendant), {
-				onDivergedLineage: (dropped) => recordDiagnostic(
-					`Retired publication queue target ${dropped.target} after a journal lineage rewrite; retargeting to ${target}`,
-					"publication-conflict", ctx,
-				),
-			})
-			: createPublicationQueue(destination, target);
-		savePublicationQueue(path, next, previous);
-	}
-
-	function launchPublicationWorker(): void {
-		if (publicationStopped) return;
-		let destination: ReturnType<typeof resolveGitPushDestination>;
-		try {
-			destination = resolveGitPushDestination(repositoryRoot);
-		} catch (error) {
-			if (error instanceof Error && /ENOENT/.test(error.message)) return;
-			throw error;
-		}
-		if (!destination) return;
-		const path = publicationQueuePath(destination);
-		if (activePublicationWorkers.has(path)) return;
-		let queued: PublicationQueueState | undefined;
-		let lease: ReturnType<typeof acquirePublicationWorkerLease>;
-		try {
-			queued = loadPublicationQueue(path);
-			if (!queued) return;
-			lease = acquirePublicationWorkerLease(path);
-		} catch {
-			return;
-		}
-		if (!lease) return;
-		const controller = new AbortController();
-		const done = runPublicationWorker(
-			queued,
-			({ target }) => pushGitTarget(repositoryRoot, destination, target, controller.signal),
-			() => loadPublicationQueue(path) ?? queued,
-			(ancestor, descendant) => isGitCommitAncestor(repositoryRoot, ancestor, descendant),
-		).then((result) => {
-			if (publicationStopped) return; // Late outcomes belong to an unconfirmed queue, not the replacement generation.
-			const current = loadPublicationQueue(path);
-			if (!current) return;
-			if (result.next === undefined) {
-				if (current.target === result.attempted.target) removePublicationQueue(path, current);
-				return;
-			}
-			if (current.target === result.attempted.target || result.next.target === current.target) {
-				savePublicationQueue(path, result.next, current);
-			}
-		}).catch(() => {
-			// Queue/CAS truth remains durable; status and a later activation expose retry.
-		}).finally(() => {
-			activePublicationWorkers.delete(path);
-			try {
-				lease.release();
-				if (!publicationStopped && loadPublicationQueue(path)?.status === "pending") launchPublicationWorker();
-			} catch {
-				// Failed lease cleanup or malformed persistence stays inert until retry or repair.
-			}
-		});
-		activePublicationWorkers.set(path, { controller, done });
+		if (target) publicationWorker.enqueue(target);
 	}
 
 	function shutdownPublicationWorkers(ctx: ExtensionContext): Promise<void> {
-		publicationStopped = true;
-		return publicationShutdown ??= (async () => {
-			const workers = [...activePublicationWorkers.values()];
-			for (const { controller } of workers) controller.abort();
-			if (workers.length === 0) return;
-			let timeout: ReturnType<typeof setTimeout> | undefined;
-			try {
-				const completed = await Promise.race([
-					Promise.all(workers.map(({ done }) => done)).then(() => true),
-					new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), PUBLICATION_SHUTDOWN_WAIT_MS); }),
-				]);
-				if (!completed) ctx.ui.notify(`State Flow push cleanup is unconfirmed after ${PUBLICATION_SHUTDOWN_WAIT_MS}ms; worker leases remain held until child exit.`, "warning");
-			} finally {
-				clearTimeout(timeout);
-			}
-		})();
+		return publicationShutdown ??= publicationWorker.shutdown(PUBLICATION_SHUTDOWN_WAIT_MS).then((completed) => {
+			if (!completed) ctx.ui.notify(`State Flow push cleanup is unconfirmed after ${PUBLICATION_SHUTDOWN_WAIT_MS}ms; worker leases remain held until child exit.`, "warning");
+		});
 	}
 
 	function retryPendingPush(ctx: ExtensionContext): void {
@@ -472,8 +310,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			if (mode === "turn-end") {
 				turnPublicationTarget = target;
 				try {
-					enqueueTurnPublication(ctx);
-					launchPublicationWorker();
+					enqueueTurnPublication();
+					publicationWorker.launch();
 				} catch (error) {
 					ctx.ui.notify(`State Flow retained local state; asynchronous publication recovery is deferred: ${error instanceof Error ? error.message : String(error)}`, "warning");
 				}
@@ -681,7 +519,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			ctx.ui.notify(`State Flow restored disabled: ${snapshot.meta.validation.error}`, "error");
 		}
 		if (retainsPhysicalSessionProjection(sessionStartReason) && runtime?.view) {
-			const boundary = passiveStopBoundary(ctx);
+			const boundary = findPassiveStopBoundary(ctx.sessionManager.getBranch(), ctx.sessionManager.getSessionId(), PASSIVE_STOP_ENTRY_TYPE);
 			if (boundary !== undefined) {
 				const continuation = createPassiveContinuation(
 					projectStateForModel(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)),
@@ -705,41 +543,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		updateUi(ctx);
 	}
 
-	interface DiagnosticExtras {
-		content?: unknown;
-		input?: unknown;
-		tool?: string;
-		toolCallId?: string;
-		resolutionAttempt?: number;
-		terminalEligible?: boolean;
-	}
-
 	function recordDiagnostic(error: string, category: StateFlowDiagnosticCategory, ctx: ExtensionContext, extras: DiagnosticExtras = {}): void {
-		if (!config.logging) return;
-		try {
-			const path = stateFlowLogPath(agentDir);
-			const fromRepository = relative(repositoryRoot, path);
-			if (fromRepository === "" || (!isAbsolute(fromRepository) && fromRepository !== ".." && !fromRepository.startsWith(`..${sep}`))) {
-				throw new Error("diagnostic path overlaps the State Flow repository");
-			}
-			appendStateFlowDiagnostic(path, {
-				at: new Date().toISOString(),
-				sessionId: sessionAddress(ctx).id,
-				cwd: resolve(ctx.cwd),
-				category,
-				error,
-				...(extras.content === undefined ? {} : { content: projectDiagnosticContent(extras.content) }),
-				...(extras.input === undefined ? {} : { input: extras.input }),
-				...(extras.tool === undefined ? {} : { tool: extras.tool }),
-				...(extras.toolCallId === undefined ? {} : { toolCallId: extras.toolCallId }),
-				...(extras.resolutionAttempt === undefined ? {} : { resolutionAttempt: extras.resolutionAttempt }),
-				...(extras.terminalEligible === undefined ? {} : { terminalEligible: extras.terminalEligible }),
-			});
-		} catch (failure) {
-			if (loggingWarningReported) return;
-			loggingWarningReported = true;
-			ctx.ui.notify(`State Flow could not write diagnostics: ${failure instanceof Error ? failure.message : String(failure)}`, "warning");
-		}
+		diagnosticWriter.record(sessionAddress(ctx).id, ctx.cwd, error, category, extras);
 	}
 
 	function continueFallbackResolution(lastWarning: boolean): void {
@@ -1193,7 +998,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	pi.on("tool_call", (event, ctx) => {
 		if (!snapshot.config.enabled) return;
-		const batch = assistantToolBatch(ctx, event.toolCallId);
+		const batch = findAssistantToolBatch(ctx.sessionManager, event.toolCallId);
 		const patchCalls = batch?.filter((name) => name === PATCH_STATE_TOOL_NAME).length ?? 0;
 		if (patchCalls > 0) {
 			if (patchCalls !== 1) {
@@ -1264,8 +1069,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			responseCommitted = true;
 			bootstrapContinuation = undefined;
 			rehydrationPhase = "step";
-			enqueueTurnPublication(ctx);
-			if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
+			enqueueTurnPublication();
+			if (snapshot.meta.remotePublication?.mode === "turn-end") publicationWorker.launch();
 			completedRunAccepted = !wasBootstrap;
 		} catch (error) {
 			if (!responseCommitted && specification !== undefined) snapshot.meta.specification = specification;
@@ -1292,7 +1097,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			telegramStartPending = false;
 			startStateFlow(ctx);
 		}
-		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
+		if (snapshot.meta.remotePublication?.mode === "turn-end") publicationWorker.launch();
 		if (!completedRunAccepted || compactionStopped || !snapshot.config.enabled || snapshot.meta.bootstrap || resolutionPending
 			|| compactionInFlight || !ctx.isIdle() || ctx.hasPendingMessages() || !snapshot.meta.durableBase
 			|| !shouldRequestStateFlowCompaction(ctx.getContextUsage())) return;
@@ -1314,7 +1119,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		rehydrationPhase = event.reason === "resume" ? "resume-bootstrap" : "new-bootstrap";
 		restoreActiveBranch(ctx, event.reason);
 		retryPendingPush(ctx);
-		if (snapshot.meta.remotePublication?.mode === "turn-end") launchPublicationWorker();
+		if (snapshot.meta.remotePublication?.mode === "turn-end") publicationWorker.launch();
 		updateUi(ctx);
 		void telegram.ensure();
 	});

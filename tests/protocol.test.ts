@@ -16,8 +16,10 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.match(protocol, /feature\/release\/campaign or project\/version completion/);
 	assert.match(protocol, /destination-verify-source-delete/);
 	assert.match(protocol, /intents: active commitments/);
-	assert.match(protocol, /Store selected actions/);
-	assert.match(protocol, /follow it with read_state only when needed/);
+	assert.match(protocol, /Keep chosen actions/);
+	assert.match(protocol, /State refs use .*\$ref.* or `\$cwd\.lazy\.plan` in text/);
+	assert.match(protocol, /Resolve only when needed/);
+	assert.match(protocol, /If that resolution proves a dangling state ref, fix\/drop it in owning text; never scan for broken refs/);
 	assert.ok(protocol.length <= 4_000, `model protocol grew to ${protocol.length} characters`);
 });
 

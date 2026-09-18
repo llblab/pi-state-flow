@@ -13,10 +13,25 @@ export type StateReadResult =
 export type StateReadProjection = "value" | "keys" | "patch";
 type StateReadMeta = { type: "object"; size: number } | { type: "array"; length: number } | { type: "string"; length: number } | { type: "number" | "boolean" };
 type StateReadKeys = Record<string, string> | [];
+export interface StateReadHint {
+	type: "dangling-reference";
+	message: string;
+	paths: string[];
+}
+
 export type ProjectedStateRead =
-	| { value: JsonValue | JsonValue[] }
+	| { value: JsonValue | JsonValue[]; hint?: StateReadHint[] }
 	| { meta: StateReadMeta | StateReadMeta[]; keys: StateReadKeys | StateReadKeys[] }
 	| { patch: JsonValue | JsonValue[] };
+
+export interface StateReferenceSource {
+	scope: StateScope;
+	path: string;
+	form: "structured" | "text";
+}
+
+const MAX_REFERENCE_SOURCES = 3;
+const MAX_REFERENCE_SCAN_NODES = 10_000;
 
 type ValueSelector = { kind: "key"; key: string } | { kind: "index"; index: number } | { kind: "range"; start: number; end: number };
 
@@ -108,6 +123,71 @@ function valueKind(value: JsonValue): string {
 	return typeof value;
 }
 
+function referenceCandidates(path: string): string[] {
+	if (/^(?:artifacts|contract|working|intents|response|lazy)(?=\.|\[|$)/.test(path)) return [path, `effective.${path}`];
+	return [path];
+}
+
+function inlineReferencePattern(path: string): RegExp {
+	const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(?:^|[^A-Za-z0-9_$.[\\]:-])\\$${escaped}(?=$|[^A-Za-z0-9_$.[\\]:-])`, "u");
+}
+
+/** Reactively locate exact durable sources for one failed state-path resolution. */
+export function findStateReferenceSources(view: TemporalState, path: string): { sources: StateReferenceSource[]; truncated: boolean } {
+	const candidates = referenceCandidates(path);
+	const patterns = candidates.map(inlineReferencePattern);
+	const sources: StateReferenceSource[] = [];
+	let visited = 0;
+	let truncated = false;
+	const visit = (value: JsonValue, owner: StateScope, ownerPath: string): void => {
+		if (sources.length >= MAX_REFERENCE_SOURCES || visited >= MAX_REFERENCE_SCAN_NODES) {
+			truncated = true;
+			return;
+		}
+		visited += 1;
+		if (typeof value === "string") {
+			if (patterns.some((pattern) => pattern.test(value))) sources.push({ scope: owner, path: ownerPath, form: "text" });
+			return;
+		}
+		if (Array.isArray(value)) {
+			for (let index = 0; index < value.length && !truncated; index++) visit(value[index]!, owner, `${ownerPath}[${index}]`);
+			return;
+		}
+		if (!isObject(value)) return;
+		if (typeof value.$ref === "string" && candidates.includes(value.$ref)) {
+			sources.push({ scope: owner, path: ownerPath, form: "structured" });
+			if (sources.length >= MAX_REFERENCE_SOURCES) { truncated = true; return; }
+		}
+		for (const key of Object.keys(value).sort()) {
+			if (key === "response" || (key === "$ref" && typeof value[key] === "string")) continue;
+			visit(value[key]!, owner, ownerPath ? `${ownerPath}.${key}` : `${owner}.${key}`);
+			if (truncated) return;
+		}
+	};
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const state = readTemporalState(view, 0, scope);
+		for (const plane of ["artifacts", "contract", "working", "intents", "lazy"] as const) {
+			const value = state[plane];
+			if (value !== undefined) visit(value as JsonValue, scope, `${scope}.${plane}`);
+			if (truncated) break;
+		}
+		if (truncated) break;
+	}
+	sources.sort((left, right) => (left.form === right.form ? left.path.localeCompare(right.path) : left.form === "structured" ? -1 : 1));
+	return { sources, truncated };
+}
+
+function missingReferenceHint(view: TemporalState, path: string): StateReadHint[] | undefined {
+	const { sources, truncated } = findStateReferenceSources(view, path);
+	if (sources.length === 0) return undefined;
+	return [{
+		type: "dangling-reference",
+		message: `Reconcile the verified current values that reference this path${truncated ? "; additional sources may exist beyond the bounded scan" : ""}.`,
+		paths: sources.map(({ path: sourcePath }) => sourcePath),
+	}];
+}
+
 function projectValue(value: JsonValue, projection: StateReadProjection): ProjectedStateRead {
 	if (projection === "value") return { value: structuredClone(value) };
 	if (isObject(value)) {
@@ -185,15 +265,23 @@ export function readProjectedState(view: TemporalState, paths: readonly string[]
 		return { patch: patches.length === 1 ? patches[0]! : patches };
 	}
 	const projected = paths.map((path) => {
-		const { root, selectors } = parseValuePath(path);
-		const query = parseStateReadPath(root);
-		if (query.kind !== "state") throw new Error("Value and keys projections require a state path");
-		const readsLazy = selectors[0]?.kind === "key" && selectors[0].key === "lazy";
-		const state = readsLazy
-			? readTemporalState(view, query.offset, query.scope)
-			: projectStateForModel(readTemporalState(view, query.offset, query.scope));
-		if (readsLazy && !Object.hasOwn(state, "lazy")) state.lazy = {};
-		return projectValue(selectValue(state, selectors, path), projection);
+		try {
+			const { root, selectors } = parseValuePath(path);
+			const query = parseStateReadPath(root);
+			if (query.kind !== "state") throw new Error("Value and keys projections require a state path");
+			const readsLazy = selectors[0]?.kind === "key" && selectors[0].key === "lazy";
+			const state = readsLazy
+				? readTemporalState(view, query.offset, query.scope)
+				: projectStateForModel(readTemporalState(view, query.offset, query.scope));
+			if (readsLazy && !Object.hasOwn(state, "lazy")) state.lazy = {};
+			return projectValue(selectValue(state, selectors, path), projection);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const missing = /does not exist| is outside /.test(message);
+			const hint = missing && projection === "value" && paths.length === 1 ? missingReferenceHint(view, path) : undefined;
+			if (hint) return { value: null, hint };
+			throw new Error(message, error instanceof Error ? { cause: error } : undefined);
+		}
 	});
 	if (projected.length === 1) return projected[0]!;
 	if (projection === "value") return { value: projected.map((result) => (result as { value: JsonValue }).value) };

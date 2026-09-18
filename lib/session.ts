@@ -7,6 +7,16 @@ interface BranchEntry {
 	message?: { role?: unknown };
 }
 
+export interface SessionEntryLookup {
+	getLeafEntry(): (BranchEntry & { id?: string; parentId?: string | null }) | undefined;
+	getEntry(id: string): (BranchEntry & { id?: string; parentId?: string | null }) | undefined;
+}
+
+export interface PassiveStopBoundary {
+	at: number;
+	from?: number;
+}
+
 export interface SnapshotDiscovery {
 	candidates: unknown[];
 	errors: string[];
@@ -52,4 +62,39 @@ export function hasPriorConversation(branch: readonly BranchEntry[]): boolean {
 export function isNewSession(reason: unknown, branch: readonly BranchEntry[]): boolean {
 	if (reason === "new") return true;
 	return reason === "startup" && !hasPriorConversation(branch);
+}
+
+export function findAssistantToolBatch(session: SessionEntryLookup, toolCallId: string): string[] | undefined {
+	for (let cursor = session.getLeafEntry(); cursor; cursor = cursor.parentId ? session.getEntry(cursor.parentId) : undefined) {
+		if (cursor.type !== "message" || cursor.message?.role !== "assistant" || !Array.isArray((cursor.message as { content?: unknown }).content)) continue;
+		const calls = (cursor.message as { content: unknown[] }).content.filter((block): block is { type: "toolCall"; id: string; name: string } => {
+			return typeof block === "object" && block !== null
+				&& (block as { type?: unknown }).type === "toolCall"
+				&& typeof (block as { id?: unknown }).id === "string"
+				&& typeof (block as { name?: unknown }).name === "string";
+		});
+		if (calls.some(({ id }) => id === toolCallId)) return calls.map(({ name }) => name);
+	}
+	return undefined;
+}
+
+export function findPassiveStopBoundary(branch: readonly BranchEntry[], sessionId: string, entryType: string): PassiveStopBoundary | undefined {
+	for (const entry of [...branch].reverse()) {
+		try {
+			if (entry?.type !== "custom" || entry.customType !== entryType) continue;
+			const { at, from, reset, owner } = (entry.data as { at?: unknown; from?: unknown; reset?: unknown; owner?: unknown } | undefined) ?? {};
+			if (reset === true && owner === sessionId) return undefined;
+			if (typeof at === "number" && Number.isSafeInteger(at) && at >= 0) return {
+				at,
+				...(typeof from === "number" && Number.isSafeInteger(from) && from >= 0 ? { from } : {}),
+			};
+		} catch {
+			// A hostile unrelated branch entry cannot manufacture or suppress a valid marker.
+		}
+	}
+	return undefined;
+}
+
+export function retainsPhysicalSessionProjection(reason: unknown): boolean {
+	return reason === undefined || reason === "startup" || reason === "reload" || reason === "resume";
 }

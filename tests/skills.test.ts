@@ -43,42 +43,40 @@ function recordRead(h: ReturnType<typeof harness>, source: string, id = "skill-1
 	h.handlers.get("tool_execution_end")!({ toolCallId: id, toolName: "read", result: {}, isError: false }, h.ctx);
 }
 
-test("discovers the packaged optional memory-curation Skill without diagnostics", () => {
+test("discovers distinct operational and memory-curation Skills without diagnostics", () => {
 	const root = join(import.meta.dirname, "..", "skills");
 	const result = loadSkillsFromDir({ dir: root, source: "package:pi-state-flow" });
 	assert.deepEqual(result.diagnostics, []);
-	assert.equal(result.skills.length, 1);
-	assert.equal(result.skills[0].name, "state-flow-memory");
-	assert.match(result.skills[0].description, /after completing a major feature, important release, large body of work, campaign, project phase, or meaningful checkpoint/);
-	assert.match(result.skills[0].description, /even when the user did not explicitly ask for memory work/);
-	assert.match(result.skills[0].description, /not for unrelated routine turns or background maintenance/);
-	const body = readFileSync(result.skills[0].filePath, "utf8");
-	assert.match(body, /either an explicit curation request or a feature, release, campaign, project, or active-version phase boundary/);
-	assert.match(body, /`reframe`: useful, but expressed with unsupported certainty, authority, or breadth/);
-	assert.match(body, /These are audit decisions, not required stored labels/);
-	assert.match(body, /active commitments in `intents`/);
-	assert.match(body, /remove it when fulfilled, abandoned, superseded, or impossible/);
-	assert.match(body, /never auto-hydrate, rewrite, execute, or complete/);
-	assert.match(body, /fresh executor know what must still hold, what changed, what remains unresolved, and the exact next action without replaying the prior cognitive trajectory/);
-	assert.match(body, /Optimize decomposition for resumability as well as functional completion/);
-	assert.match(body, /array order in Lazy as semantic priority: earlier entries are higher priority/);
-	assert.match(body, /Keep a top-level collection as a direct array when its members are the domain values/);
-	assert.match(body, /use an object only when that item genuinely owns structured or nested fields/);
-	assert.match(body, /Do not add `items`, `owner`, `source`, or similar wrapper objects merely to describe the collection/);
-	assert.match(body, /compile it into its exact-path CWD artifact before acquiring a stale global Markdown source/);
-	assert.match(body, /verify it with a separate `read_state`, then delete or narrow the source/);
-	assert.match(body, /Do all readback before the terminal answer/);
-	assert.match(body, /Simultaneously pending CWD and global acquisitions must be compiled together in one atomic `patch_state` call/);
-	assert.match(body, /Write and verify the destination before deleting the source/);
-	assert.match(body, /Do not combine destination creation and source deletion merely because multi-scope publication is atomic/);
-	assert.match(body, /completed feature, release, campaign, project switch, or active-version change/);
-	assert.match(body, /Global is limited to established cross-project, user, or environment knowledge/);
-	assert.match(body, /inspect only the targeted global, CWD, or session projections with `read_state`/);
-	assert.match(body, /stored claim of acceptance is not verification/);
-	assert.match(body, /Never delete the only accepted copy/);
-	assert.match(body, /Removing a secret from active state does not erase prior offsets, Git history, or external copies/);
-	assert.match(body, /Report the bounded change, unresolved items, any partial migration/);
-	assert.match(body, /Stop after this reconciliation cohort, including when no change is warranted or a blocker remains/);
+	assert.deepEqual(result.skills.map((skill) => skill.name).sort(), ["state-flow-guide", "state-flow-memory"]);
+	const guide = result.skills.find((skill) => skill.name === "state-flow-guide")!;
+	const memory = result.skills.find((skill) => skill.name === "state-flow-memory")!;
+	assert.match(guide.description, /concrete read, patch, inheritance/);
+	assert.match(guide.description, /not for memory audits or unsolicited cleanup/);
+	const guideBody = readFileSync(guide.filePath, "utf8");
+	assert.match(guideBody, /installed runtime protocol and schemas take precedence/);
+	assert.match(guideBody, /Passive turns need no such call/);
+	assert.match(guideBody, /Missing history is not empty history/);
+	assert.match(guideBody, /`\$`-prefixed `read_state` paths inside ordinary strings/);
+	assert.match(guideBody, /Neither form proves authority or existence/);
+	assert.match(guideBody, /Never scan or resolve references merely to test them/);
+	assert.match(guideBody, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
+	assert.match(guideBody, /top-level diagnostic metadata/);
+	assert.match(guideBody, /proves provenance rather than staleness/);
+	assert.match(guideBody, /Never edit backing files, `response`, configuration, provenance, or runtime metadata/);
+	assert.match(memory.description, /active State Flow feature/);
+	assert.match(memory.description, /Not for routine turns, usage help, or background maintenance/);
+	const memoryBody = readFileSync(memory.filePath, "utf8");
+	assert.match(memoryBody, /Never give an assistant conclusion user authority/);
+	assert.match(memoryBody, /Remove fulfilled, abandoned, superseded, or impossible intents/);
+	assert.match(memoryBody, /Keep `lazy` shallow and priority-ordered/);
+	assert.match(memoryBody, /`\$`-prefixed `read_state` paths inside ordinary strings/);
+	assert.match(memoryBody, /Never scan or resolve references merely to find broken ones/);
+	assert.match(memoryBody, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
+	assert.match(memoryBody, /top-level hint as provenance and reconciliation guidance/);
+	assert.match(memoryBody, /Never combine destination creation with source deletion/);
+	assert.match(memoryBody, /Verify accepted content and a content-bound revision or receipt/);
+	assert.match(memoryBody, /fresh executor must recover constraints, results, open questions, commitments, and the next action/);
+	assert.match(memoryBody, /Stop after this review, including when nothing needs changing/);
 });
 
 test("curation compiles an acquired Skill before write-verify-delete barriers", async () => {

@@ -1,6 +1,49 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { isObject } from "./json.ts";
 
 export type { StateDocument } from "./state.ts";
+
+const PATCH_DISPLAY_SECTION_KEYS = new Set(["global", "cwd", "session", "artifacts", "contract", "working", "response", "final"]);
+
+/** Keep successful patch JSON valid while separating adjacent scopes and memory sections visually. */
+export function formatPatchStateArguments(args: unknown): string {
+	const seenAtIndent = new Set<number>();
+	return JSON.stringify(args, null, 2).split("\n").flatMap((line) => {
+		const indent = line.length - line.trimStart().length;
+		const match = /^(\s+)"([^"]+)":/.exec(line);
+		if (match === null || !PATCH_DISPLAY_SECTION_KEYS.has(match[2])) {
+			for (const seenIndent of seenAtIndent) if (seenIndent > indent) seenAtIndent.delete(seenIndent);
+			return [line];
+		}
+		const separator = seenAtIndent.has(indent) ? [""] : [];
+		seenAtIndent.add(indent);
+		return [...separator, line];
+	}).join("\n");
+}
+
+/** Normalize a bounded compatibility superset without advertising aliases in the model-facing contract. */
+export function normalizePatchStateArguments(args: unknown): any {
+	if (!isObject(args) || !Object.hasOwn(args, "final")) return args;
+	const value = args.final;
+	let final: boolean;
+	if (typeof value === "boolean") final = value;
+	else if (value === 1) final = true;
+	else if (value === 0) final = false;
+	else if (typeof value === "string" && value.trim().toLowerCase() === "true") final = true;
+	else if (typeof value === "string" && value.trim().toLowerCase() === "false") final = false;
+	else return args;
+	return { ...args, final };
+}
+
+/** Keep visible tool output separated from its heading without changing semantics. */
+export function separatedOutput(text: string): string {
+	return `\n${text.replace(/^\n+/, "")}`;
+}
+
+export function separatedFailure(error: unknown): Error {
+	const message = error instanceof Error ? error.message : String(error);
+	return new Error(separatedOutput(message), error instanceof Error ? { cause: error } : undefined);
+}
 
 function baselineMemoryProtocol(): string {
 	return "MEMORY: State Flow owns durable memory while enabled. Put established cross-project/user/environment knowledge in global, reusable project truth in cwd, and branch/run continuation in session. Treat every patch as reconciliation rather than append-only notes: use the narrowest scope; merge superseded fragments; remove obsolete progress. Exclude secrets, raw history, transient progress, speculation, and unsupported claims; retain uncertainty only when decision-relevant.";
@@ -26,7 +69,7 @@ WRITE: patch_state is the sole model-authored semantic mutation mechanism. Suppl
 
 FINAL: Every enabled iteration starts terminal-ineligible. Successful patch_state final:true permits a later turn_end without stopping later work; use {"final":true} when no state change is needed. Otherwise runtime preserves the answer and allows at most two fallback turns only for final:true; never restate it. A final-only call creates no transition. Runtime owns response.
 
-INTENTS: Store selected actions, not requirements, observations, possibilities, alternatives, or completed work. Preserve them across handoffs at the narrowest scope; detail may stay lazy. A {"$ref":"cwd.lazy.plan"} is an ordinary pointer: follow it with read_state only when needed; infer no dependency, hydration, execution, or completion.
+INTENTS: Keep chosen actions; detail may stay lazy. State refs use {"$ref":"cwd.lazy.plan"} or \`$cwd.lazy.plan\` in text. Resolve only when needed; infer no authority, hydration, execution, or completion. If that resolution proves a dangling state ref, fix/drop it in owning text; never scan for broken refs.
 
 SCOPES: global=cross-project; cwd=project and Skills; session=branch/run. Deleting an override may reveal its parent.
 

@@ -181,6 +181,7 @@ jobs:
               JSON.stringify(paths) !== JSON.stringify(localPaths) ||
               !paths.includes("dist/pi-state-flow/index.js") ||
               !paths.includes("dist/skills/state-flow-memory/SKILL.md") ||
+              !paths.includes("dist/skills/state-flow-guide/SKILL.md") ||
               !paths.includes("package.json")) {
             throw new Error("Published npm identity or packed manifest does not match the release tag.");
           }
