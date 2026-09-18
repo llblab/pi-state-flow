@@ -1610,6 +1610,10 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 	assert.equal(fixture.readState(resumed, 1).response, "");
 	assert.deepEqual(owned.filter((path) => !path.endsWith("config.json") && !path.endsWith("runtime.json") && !path.endsWith("meta.json"))
 		.map((path) => readFileSync(join(fixture.repositoryRoot, path))), before);
+	await resumed.prompt("/state-flow-start");
+	assert.equal(resumed.getActiveToolNames().includes("patch_state"), true);
+	assert.equal(fixture.readState(resumed).working.selected, "old");
+	assert.equal(fixture.readState(resumed).working.branch, "new");
 });
 
 test("real Pi persists without Git, resumes its file cohort and adopts Git without a semantic step", async (t) => {

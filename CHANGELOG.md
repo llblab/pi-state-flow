@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.16.1: Resumed activation hotfix
+
+- `Resumed activation`: Reasserts the selected session stream as a complete semantic cohort when `/state-flow-start` enables a resumed branch, so extension upgrades cannot misclassify retained session state as an omitted write while shared scopes still reconcile against their live owners.
+
 ## 0.16.0: Proportional State Flow guidance
 
 - `Operational Skill`: Adds the packaged `state-flow-guide` as an on-demand reference for concrete read, patch, inheritance, acquisition, finalization, and recovery problems without triggering memory audits or unsolicited cleanup.

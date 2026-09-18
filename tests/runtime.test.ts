@@ -657,6 +657,8 @@ test("file runtime starts without Git, retains locked pointers, resumes stopped 
 	assert.equal(resumed.resolveSnapshot().config.enabled, false);
 	assert.equal(resumed.readState().working.file, "second");
 	assert.equal(resumed.resolveSnapshot().meta.pendingPublication, undefined);
+	await resumed.commands.get("state-flow-start").handler("", resumed.ctx);
+	assert.equal(resumed.activeTools.includes("patch_state"), true);
 	const metaPath = sessionRuntimePaths(h.ctx.cwd, "harness-session", root).meta;
 	const metaBefore = readFileSync(metaPath);
 	// An older disabled marker cannot turn expired file history into a replacement origin.

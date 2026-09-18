@@ -782,8 +782,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				);
 			}
 			branchHasSnapshot = true;
+			// Activation reasserts the selected session stream as a complete cohort. A resumed
+			// branch may have no reusable temporal revision after an extension upgrade; a
+			// runtime-only write would then reject its selected session as an omitted change.
 			const publication = runtime.view
-				? runtime.promote(snapshot) ?? runtime.publish(snapshot)
+				? runtime.promote(snapshot) ?? runtime.publish(snapshot, true)
 				: runtime.initialize(snapshot, true, undefined, branchStartsWithoutRuntime);
 			recordPolicyPublication(publication, ctx);
 			installScopeStates();
