@@ -257,7 +257,11 @@ test("registers patch_state plus read-only read_state and exposes the lifecycle 
 	const h = harness();
 	assert.equal(h.registeredTools, 2);
 	assert.deepEqual([...h.tools.keys()].sort(), ["patch_state", "read_state"]);
-	assert.equal(h.tools.get("patch_state")!.executionMode, "sequential");
+	const patchState = h.tools.get("patch_state")!;
+	assert.equal(patchState.executionMode, "sequential");
+	assert.match(patchState.description, /Passive turns have no terminal barrier: never call patch_state only to set final:true/);
+	assert.match(patchState.promptGuidelines.join("\n"), /Only in an active State Flow episode/);
+	assert.match(patchState.promptGuidelines.join("\n"), /In passive mode, never call patch_state only to set final:true/);
 	assert.deepEqual([...h.commands.keys()], ["state-flow-start", "state-flow-status", "state-flow-stop"]);
 });
 test("passive bootstrap and tools are independently configurable and passive patches do not start an episode", async () => {

@@ -9,7 +9,6 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.match(protocol, /starts terminal-ineligible/);
 	assert.match(protocol, /all supplied scopes are validated and durably accepted as one atomic transition/);
 	assert.doesNotMatch(protocol, /unchanged/i);
-	assert.doesNotMatch(protocol, /state_flow/);
 	assert.doesNotMatch(protocol, /terminal reconciliation/i);
 	assert.doesNotMatch(protocol, /final:false|false-like|truthy|falsy/i);
 	assert.match(protocol, /every patch as reconciliation rather than append-only notes/);
@@ -28,12 +27,12 @@ test("bootstrap protocol retains the migration obligation through patch_state", 
 	assert.match(stateFlowProtocol(true), /through patch_state/);
 });
 
-test("final response is ordinary post-handler assistant text without State Flow comment parsing", () => {
+test("final response concatenates ordinary post-handler assistant text blocks", () => {
 	const response = finalizedAssistantResponse({
 		role: "assistant",
-		content: [{ type: "text", text: "Answer\n<!-- state_flow historical text -->" }],
+		content: [{ type: "text", text: "Answer" }, { type: "text", text: " continued." }],
 	} as any);
-	assert.equal(response, "Answer\n<!-- state_flow historical text -->");
+	assert.equal(response, "Answer continued.");
 });
 
 test("final response requires non-empty text and no late tool call", () => {

@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.16.3: Passive guidance and compatibility cleanup
+
+- `Passive finalization guidance`: Makes the always-available `patch_state` tool contract mode-aware, requiring `final:true` only for active episodes and explicitly forbidding final-only calls in passive turns so tool-level guidance no longer contradicts passive runtime context.
+- `Pi compatibility range`: Declares `0.84.4` as the minimum Pi SDK version without an upper peer-dependency bound, replaces stale candidate reports and historical run internals with a concise tested-stack contract, and removes dead legacy test scaffolding plus retired HTML-envelope fixtures without dropping supported storage migrations or current negative-boundary coverage.
+
 ## 0.16.2: Passive first-CWD memory hotfix
 
 - `Passive first-CWD memory`: Treats global-only storage as a valid passive-memory state before the current CWD has ever materialized, projecting an empty CWD overlay instead of warning that shared storage is incomplete; CWD-without-global storage still fails closed.

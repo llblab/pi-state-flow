@@ -394,13 +394,12 @@ test("failed restore installs no partial runtime and unavailable publication can
 	assert.equal(runtime.read().working.value, "old");
 });
 
-for (const legacy of [false]) test(`start retries the selected pointer branch after transient restore failure and the next terminal state is durable`, async () => {
+test("start retries the selected pointer branch after transient restore failure and the next terminal state is durable", async () => {
 	const h = harness();
 	const head = () => execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 	await start(h);
 	await commitTerminal(h, {}, { value: "old" }, "Old");
 	const selectedBranch = structuredClone(h.entries);
-	if (legacy) selectedBranch.at(-1).data = h.resolveSnapshot(selectedBranch.at(-1).data);
 	await commitTerminal(h, {}, { value: "unselected future" }, "Future");
 	h.ctx.sessionManager.getBranch = () => selectedBranch;
 	const before = head();

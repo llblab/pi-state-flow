@@ -26,7 +26,7 @@ The agent curates what matters; the extension validates, persists, and projects 
 
 ## Quick start
 
-Requires Pi `0.84.4–0.84.x` or `0.85.1–0.85.x` and Node.js `22.19.0` or newer. See the [SDK compatibility matrix](docs/compatibility.md) for exact tested stacks. Git is optional; using it requires a configured commit identity.
+Requires Pi `0.84.4` or newer and Node.js `22.19.0` or newer. There is no declared upper Pi version bound; see the [SDK compatibility matrix](docs/compatibility.md) for exact tested stacks. Git is optional; using it requires a configured commit identity.
 
 From npm:
 

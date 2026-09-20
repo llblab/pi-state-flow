@@ -414,7 +414,7 @@ test("removes abandoned private retry feedback from later bootstrap context", as
 	h.entries.push({ type: "message", message: user("Pre-Flow context", 1) });
 	await start(h, "Old request");
 	h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "<!-- state_flow invalid -->" }] },
+		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Unresolved draft." }] },
 	}, h.ctx);
 	h.handlers.get("message_end")!({
 		message: { role: "assistant", stopReason: "aborted", content: [] },

@@ -24,7 +24,7 @@ The child starts at step zero and a new temporal origin. Its copied tail is pres
 
 Initial copying requires a native fork start event, a regular canonical direct-parent session file, matching CWD/identity, a readable temporal source and an unused child namespace. Missing/unsafe evidence or CAS conflicts leave the copy unavailable rather than importing unrelated or newer private state. Explicit Start can retry an unaccepted copy in the same loaded fork after the cause is corrected.
 
-Selecting a copied parent checkpoint through the child's `/tree` does not make it child-owned: State Flow stays disabled without resetting existing child data. Select a child-owned checkpoint or resume the original session. Cold recovery before the first child checkpoint, startup paths lacking the fork event, in-memory parent locators and cross-CWD imports remain outside this slice. File-only copying requires an exact still-available source cohort. See the [contract](fork-contract.md) and [SDK evidence](compatibility.md#native-replacement-witnesses); do not rewrite UUIDs or delete pointers to force recovery.
+Selecting a copied parent checkpoint through the child's `/tree` does not make it child-owned: State Flow stays disabled without resetting existing child data. Select a child-owned checkpoint or resume the original session. Cold recovery before the first child checkpoint, startup paths lacking the fork event, in-memory parent locators and cross-CWD imports remain outside this slice. File-only copying requires an exact still-available source cohort. See the [contract](fork-contract.md) and [SDK compatibility boundary](compatibility.md#public-host-seams); do not rewrite UUIDs or delete pointers to force recovery.
 
 ## Configuration
 

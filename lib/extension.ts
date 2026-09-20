@@ -662,10 +662,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	pi.registerTool({
 		name: PATCH_STATE_TOOL_NAME,
 		label: "Patch State",
-		description: "The sole State Flow semantic mutation protocol. Supply any combination of global, cwd, and session patches; all supplied scopes commit atomically. Set final:true when the current iteration may finish at a later turn_end. final:true does not stop reasoning, tools, or later patch_state calls. Use {final:true} when no semantic update is needed. This call must be the only State Flow barrier in its assistant response.",
-		promptSnippet: "Atomically patch global/cwd/session; final:true permits a later turn_end",
+		description: "The sole State Flow semantic mutation protocol. Supply any combination of global, cwd, and session patches; all supplied scopes commit atomically. In an active State Flow episode, set final:true when the current iteration may finish at a later turn_end; use {final:true} when no semantic update is needed. Passive turns have no terminal barrier: never call patch_state only to set final:true. This call must be the only State Flow barrier in its assistant response.",
+		promptSnippet: "Atomically patch global/cwd/session; active episodes use final:true before turn_end",
 		promptGuidelines: [
-			"Use patch_state for durable semantic changes. Before a final answer, make the iteration terminal-eligible with final:true, optionally alongside atomic global/cwd/session patches.",
+			"Use patch_state for durable semantic changes. Only in an active State Flow episode, make the iteration terminal-eligible before a final answer with final:true, optionally alongside atomic global/cwd/session patches. In passive mode, never call patch_state only to set final:true.",
 			"Use patch_state as reconciliation, not append-only notes: place new knowledge at the narrowest valid scope and remove superseded or completed state from touched branches.",
 			"Call patch_state alone in an assistant response; after its acknowledgement, further reasoning, tools, and later patch_state calls remain allowed.",
 		],

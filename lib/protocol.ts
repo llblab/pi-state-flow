@@ -91,7 +91,7 @@ export function assistantToolCallCount(content: unknown): number {
 	return content.filter((block) => typeof block === "object" && block !== null && (block as { type?: unknown }).type === "toolCall").length;
 }
 
-/** The post-handler assistant message is authoritative; State Flow does not parse service comments. */
+/** The accepted post-handler assistant text is authoritative. */
 export function finalizedAssistantResponse(message: AgentMessage): string {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) {
 		throw new Error("Finalized State Flow turn does not contain an assistant response");
