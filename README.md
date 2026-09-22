@@ -26,7 +26,7 @@ The agent curates what matters; the extension validates, persists, and projects 
 
 ## Quick start
 
-Requires Pi `0.84.4` or newer and Node.js `22.19.0` or newer. There is no declared upper Pi version bound; see the [SDK compatibility matrix](docs/compatibility.md) for exact tested stacks. Git is optional; using it requires a configured commit identity.
+Requires Pi `0.87.0` or newer and Node.js `22.19.0` or newer. There is no declared upper Pi version bound; see the [SDK compatibility matrix](docs/compatibility.md) for exact tested stacks. Git is optional; using it requires a configured commit identity.
 
 From npm:
 
@@ -48,29 +48,29 @@ In Pi:
 
 Continue working normally. The agent receives the state protocol and uses `patch_state` to maintain memory.
 
-- `/state-flow-status`: Inspect the selected state, history, artifact freshness, and publication status.
-- `/state-flow-stop`: Disable updates on this branch without deleting retained state.
+- `/state-flow-status`: Inspect the selected effective state, bounded history, already-known runtime hints/invalidations, and recovery failures without scanning artifact sources or mutating state.
+- `/state-flow-stop`: Disable updates on this branch without deleting retained state. A new passive branch records only a disabled checkpoint in Pi, without initializing canonical storage.
 
-Active State Flow episodes remain **opt-in**, while passive durable memory bootstrap and tools are available by default. Passive turns never require `final:true`, continue automatically, or trigger State Flow compaction. Starting an active episode in an existing conversation keeps its context for one migration run; set `"autoStart": true` to promote genuinely new sessions automatically. See [configuration](docs/usage.md#configuration).
+Active State Flow episodes remain **opt-in**, while passive durable memory bootstrap and tools are available by default. Passive access does not start an episode or trigger State Flow compaction. Starting an active episode in an existing conversation keeps its context for one bootstrap run; set `"autoStart": true` to promote genuinely new sessions automatically. See [configuration](docs/usage.md#configuration).
 
 ## What carries forward
 
 The same semantic planes exist at every scope:
 
+- `intents`: Courses of action the agent has actually committed to pursue.
 - `contract`: Requirements, decisions, constraints, and interface commitments.
 - `working`: Observations, results, unresolved questions, and possible next steps.
-- `intents`: Courses of action the agent has actually committed to pursue.
-- `artifacts`: Source-addressed descriptions and reusable compiled knowledge.
+- `artifacts`: Source-addressed descriptions and reusable compiled knowledge, refreshed in their observed global/CWD/session owner; Skills belong to CWD.
 - `response`: The latest complete answer, captured by the runtime.
 - `lazy`: Durable, versioned memory omitted from ordinary context until explicitly read.
 
-Memory overlays **global → project CWD → session**. Put reusable cross-project knowledge in global, project knowledge in CWD, and private task continuation in session. Hot planes carry what must matter now; `lazy` retains what may matter later without hydrating its body into every prompt. An intent stays hot only while its course remains chosen and disappears when fulfilled, abandoned, superseded, or impossible. It may refer to supporting detail through a structured `{"$ref":"cwd.lazy.plan"}` value or a `$`-prefixed state path inside ordinary prose, such as `$effective.lazy.memory[7]`. Both remain semantic content interpreted by the agent: State Flow never parses, validates, hydrates, executes, or completes them automatically. The agent never scans references for breakage. Only when current work already follows one and a single value path is missing does State Flow perform a bounded exact reverse lookup. Matching durable sources produce a top-level `{value:null, hint:[...]}` sentinel whose typed hint names runtime-verified current owning paths and asks the agent to reconcile them. Keys, patch, batch, and unmatched reads retain ordinary all-or-error behavior; no match does not prove that the agent invented the path. The agent may then repair or remove a proven stale locator in its owning value.
+Memory overlays **global → project CWD → session**. Put reusable cross-project knowledge in global, project knowledge in CWD, and branch/run continuation in session. Hot planes carry what must matter now; `lazy` retains what may matter later without hydrating its body into every prompt. An intent stays hot only while its course remains chosen and disappears when fulfilled, abandoned, superseded, or impossible. It may refer to supporting detail through a structured `{"$ref":"cwd.lazy.plan"}` value or a `$`-prefixed state path inside ordinary prose, such as `$effective.lazy.memory[7]`. Both remain semantic content interpreted by the agent: State Flow never parses, validates, hydrates, executes, or completes them automatically. The agent never scans references for breakage. Only when current work already follows one and a single value path is missing does State Flow perform a bounded exact reverse lookup. Matching durable sources produce a top-level `{value:null, hint:[...]}` sentinel whose typed hint names runtime-verified current owning paths and asks the agent to reconcile them. Keys, patch, batch, and unmatched reads retain ordinary all-or-error behavior; no match does not prove that the agent invented the path. The agent may then repair or remove a proven stale locator in its owning value.
 
-**Resuming an existing Pi session restores its selected State Flow state and enablement.** A genuinely new session starts with an empty session layer and inherits only shared global/CWD memory; it does not resume another session's private work. Tree navigation follows the selected branch, not whichever state happens to be at Git `HEAD`.
+**Resuming an existing Pi session restores its selected State Flow state and enablement.** Only the session layer is session-local; global/CWD remain shared and current. Session files must match their retained runtime lineage, but another session's shared update does not invalidate continuation. A genuinely new session starts with an empty session layer rather than another session's work. Tree navigation follows the selected branch, not whichever state happens to be at Git `HEAD`.
 
-The agent uses `read_state` for exact current or historical paths. Unscoped paths read the effective overlay; `global`, `cwd`, and `session` address ownership directly; `[n]` selects one of up to seven prior accepted transition boundaries. Bounded array ranges and `value`, `keys`, or `patch` projections support progressive reads without hydrating whole lazy collections. Git-backed stores retain older committed history separately.
+The agent uses `read_state` for exact current or historical paths. Unscoped paths read the effective overlay; `global`, `cwd`, and `session` address ownership directly; `[n]` selects a retained accepted transition boundary up to the configured `historyLimit` (default 7). Bounded array ranges and `value`, `keys`, or `patch` projections support progressive reads without hydrating whole lazy collections. Discarded semantic history is unavailable and is not reconstructed from backup.
 
-Two packaged Skills keep guidance proportional: `state-flow-guide` resolves concrete operational questions about reading, patching, inheritance, acquisition, finalization, and recovery; `state-flow-memory` performs one bounded explicit or phase-boundary curation. Neither runs background maintenance.
+Two packaged Skills keep guidance proportional: `state-flow-guide` resolves concrete operational questions about reading, patching, inheritance, acquisition, completion, and recovery; `state-flow-memory` performs one bounded curation only on explicit request. Neither runs background maintenance. After a meaningful feature, release, or project boundary—or whenever retained state becomes noisy—ask: **“Review and clean State Flow state.”** The curation pass inspects ownership, removes only proven stale or duplicate semantics, preserves consequential knowledge, and stops after verification.
 
 ## Boundaries worth knowing
 
@@ -79,7 +79,7 @@ Two packaged Skills keep guidance proportional: `state-flow-guide` resolves conc
 - `Not live workspace truth`: Remembered observations can become stale; revalidate consequential facts before acting.
 - `Physical forks copy private memory`: Native fork replacement copies the selected session checkpoint/tail into a new owner while retaining current shared memory. The child starts its own history; older parent checkpoints are not child history. See [fork support and limits](docs/usage.md#fork-support-and-limits).
 - `Not a token or latency guarantee`: State and the current trajectory are not size-capped. Benefits depend on workload and memory quality; see [performance evidence](docs/performance.md).
-- `Use a dedicated store`: By default state lives in `~/.pi/agent/state-flow/`, separately from Knowledge Markdown. Git commits include the store's complete non-ignored worktree delta. Do not point it at an unrelated working repository.
+- `Use a dedicated store`: By default state lives in `~/.pi/agent/state-flow/`. Canonical files own semantics; optional settled-turn Git backup stages only State Flow-owned paths. Do not point the store at an unrelated working repository.
 - `Treat memory as private`: State and diagnostic logs may contain session content. Keep secrets out, and review data before configuring a remote. Removing a value does not erase Git history or other copies.
 
 Pi packages run with your user permissions. Without Git, current state and its proven hot history persist to files, but arbitrary older branches may be unavailable. See [storage and recovery](docs/usage.md#storage-and-recovery) before moving stores.

@@ -58,7 +58,8 @@ test("canonical scope hierarchy mirrors Pi project and session names without red
 		const paths = temporalScopePaths(cwd, "session-id", scope, root, "timestamp_session-id");
 		const directory = scope === "global" ? root : scope === "cwd" ? join(root, cwdScopeKey(cwd)) : join(root, cwdScopeKey(cwd), "timestamp_session-id");
 		assert.deepEqual(paths, { directory, checkpoint: join(directory, "checkpoint.json"), patches: join(directory, "patches.jsonl"), meta: join(directory, "meta.json") });
-		for (const path of [paths.checkpoint, paths.patches, paths.meta, join(directory, "state.json")]) assert.equal(isStateFlowOwnedPath(path, root), true);
+		for (const path of [paths.checkpoint, paths.patches, paths.meta]) assert.equal(isStateFlowOwnedPath(path, root), true);
+		assert.equal(isStateFlowOwnedPath(join(directory, "state.json"), root), false);
 		for (const name of ["config.json", "meta.json"]) {
 			assert.equal(isStateFlowOwnedPath(join(directory, name), root), name === "meta.json" ? true : scope === "session");
 		}
@@ -110,8 +111,8 @@ test("canonical writer persists anchored pairs and readers replay only tails wit
 	assert.equal(loadScopeStream(cwd, "other-session", "session", repository), undefined);
 	assert.throws(() => temporalStateFileUpdates(cwd, session, view, ["cwd", "cwd"], repository), /Duplicate temporal scope/);
 	writeFileSync(join(paths.directory, "state.json"), JSON.stringify(emptyState()));
-	assert.throws(() => loadScopeStream(cwd, session, "session", repository), /explicit migration/);
-	assert.throws(() => temporalStateFileUpdates(cwd, session, view, ["session"], repository), /explicit migration/);
+	assert.throws(() => loadScopeStream(cwd, session, "session", repository), /Unsupported State Flow storage format/);
+	assert.throws(() => temporalStateFileUpdates(cwd, session, view, ["session"], repository), /Unsupported State Flow storage format/);
 });
 
 test("canonical reads and file preparation reject symlinks and clean prepared siblings", (t) => {
@@ -170,31 +171,39 @@ test("temporal codec round-trips zero, seven, and repeatedly folded sparse tails
 	}
 });
 
+test("scope codecs preserve tails above the default while runtime configuration is threaded separately", () => {
+	const historyLimit = 12;
+	let view = temporalFixture();
+	for (let index = 1; index <= 10; index++) {
+		view = advanceTemporalState(view, [{ scope: "session", patch: { working: { index } } }], `L${index}`, historyLimit);
+	}
+	const sources = serializeScopeStream(view.scopes.session, "session");
+	const restored = parseScopeStream(sources.checkpoint, sources.patches, "session", undefined, serializeScopeMetadata({}, view.scopes.session, "session"));
+	assert.equal(restored!.patches.length, 10);
+	assert.deepEqual(restored, view.scopes.session);
+});
+
 test("checkpoint codec uses deterministic bytes, anchored state, and no redundant current snapshot", () => {
 	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { working: { z: 1, a: 2 }, response: "Done" } }], "T1");
 	const first = serializeScopeStream(view.scopes.session, "session");
 	const reordered = structuredClone(view.scopes.session);
 	reordered.patches[0]!.patch = { response: "Done", working: { a: 2, z: 1 } };
 	assert.deepEqual(serializeScopeStream(reordered, "session"), first);
-	assert.deepEqual(Object.keys(JSON.parse(first.checkpoint)).sort(), ["artifacts", "contract", "intents", "response", "working"]);
+	assert.deepEqual(Object.keys(JSON.parse(first.checkpoint)).sort(), ["artifacts", "contract", "intents", "lazy", "response", "working"]);
 	assert.equal(JSON.parse(first.checkpoint).response, "");
 	assert.equal(JSON.parse(first.patches).response, "Done");
 	assert.equal(Object.hasOwn(JSON.parse(first.patches), "transition"), false);
 	assert.deepEqual(first.temporal.checkpoint, view.scopes.session.checkpoint.through);
 });
 
-test("temporal codec migrates 0.14 checkpoints to empty intents without inferring from working", () => {
+test("temporal codec rejects predecessor checkpoints without rewriting them", () => {
 	const stream = temporalFixture().scopes.session;
-	stream.checkpoint.state.working.next = "possible, not committed";
 	const source = serializeScopeStream(stream, "session");
 	const checkpoint = JSON.parse(source.checkpoint);
 	delete checkpoint.intents;
 	const meta = serializeScopeMetadata({}, stream, "session");
-	const restored = parseScopeStream(JSON.stringify(checkpoint), source.patches, "session", undefined, meta)!;
-	assert.deepEqual(restored.checkpoint.state.intents, {});
-	assert.equal(restored.checkpoint.state.working.next, "possible, not committed");
-	assert.equal(Object.hasOwn(restored.checkpoint.state.intents, "next"), false);
-	assert.throws(() => parseScopeStream(JSON.stringify({ ...checkpoint, extra: true }), source.patches, "session", undefined, meta), /Invalid temporal/);
+	assert.throws(() => parseScopeStream(JSON.stringify(checkpoint), source.patches, "session", undefined, meta), /Invalid temporal/);
+	assert.throws(() => parseScopeStream(JSON.stringify(stream.checkpoint), JSON.stringify(stream.patches[0] ?? ""), "session"), /Unsupported State Flow session storage format/);
 });
 
 test("temporal codec rejects incomplete, legacy, malformed, oversized, and causally invalid replay inputs", () => {
@@ -208,7 +217,7 @@ test("temporal codec rejects incomplete, legacy, malformed, oversized, and causa
 	assert.throws(() => parseScopeStream(undefined, source.patches, "session"), /incomplete checkpoint\/tail/);
 	assert.throws(() => parseScopeStream("bad", "", "session"), /checkpoint contains invalid JSON/);
 	assert.throws(() => parseScopeStream(source.checkpoint, `${source.patches}bad`, "session"), /line 2/);
-	assert.throws(() => parseScopeStream(JSON.stringify(emptyState()), "", "session"), /checkpoint\/tail envelope/);
+	assert.throws(() => parseScopeStream(JSON.stringify(emptyState()), "", "session"), /Unsupported State Flow session storage format/);
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(8), "session", undefined, meta), /does not match/);
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(2), "session", undefined, meta), /does not match/);
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "global", undefined, meta), /session response/);
@@ -233,7 +242,10 @@ test("temporal codec validates semantic replay instead of merely accepting valid
 		const stream = structuredClone(view.scopes.session);
 		mutate(stream);
 		assert.throws(() => serializeScopeStream(stream, "session"), error);
-		assert.throws(() => parseScopeStream(JSON.stringify(stream.checkpoint), JSON.stringify(stream.patches[0]), "session"), error);
+		const meta = JSON.stringify({ version: 1, artifacts: {}, temporal: {
+			checkpoint: stream.checkpoint.through, patches: stream.patches.map((record) => record.transition),
+		} });
+		assert.throws(() => parseScopeStream(JSON.stringify(stream.checkpoint.state), JSON.stringify(stream.patches[0]!.patch), "session", undefined, meta), error);
 	}
 	assert.throws(() => parseScopeStream("{}", "", "unknown" as StateScope), /Unknown temporal scope/);
 });

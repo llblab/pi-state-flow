@@ -8,12 +8,11 @@ import { dirname, join, relative } from "node:path";
 import test, { type TestContext } from "node:test";
 import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
 import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
-import { adoptFileStateToGit, captureTemporalGitBase, loadTemporalRevision, publishTemporalStateToGit } from "../lib/git.ts";
 import { hashJson } from "../lib/json.ts";
-import { createSessionRuntime, emptySnapshot, resolveSessionRuntime } from "../lib/snapshot.ts";
+import { createSessionRuntime, emptySnapshot } from "../lib/snapshot.ts";
 import { emptyState } from "../lib/state.ts";
 import {
-	captureTemporalFileBase, detectGitCapability, initializeFileStore, isFileRevision,
+	captureTemporalFileBase, initializeFileStore, isFileRevision,
 	loadTemporalFileRevision, publishTemporalStateToFiles, withStoragePublicationLock,
 } from "../lib/storage.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState } from "../lib/temporal.ts";
@@ -27,7 +26,7 @@ function fixture(t: TestContext) {
 	const sessionId = "file-session";
 	const snapshot = emptySnapshot(true);
 	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const runtime = createSessionRuntime(snapshot, cwd, sessionId, view.lineage, "files");
+	const runtime = createSessionRuntime(snapshot, cwd, sessionId, view.lineage);
 	const base = captureTemporalFileBase(cwd, sessionId, root);
 	return { parent, root, cwd, sessionId, snapshot, view, runtime, base };
 }
@@ -36,25 +35,6 @@ function actualReference(cwd: string, sessionId: string, root: string): string {
 	return `file:${hashJson({ root, files: captureTemporalFileBases(cwd, sessionId, root).map(({ path, identity }) => [relative(root, path), identity]) })}`;
 }
 
-test("capability absence is executable ENOENT only, not exit failure, permission failure, or timeout", (t) => {
-	const { parent } = fixture(t);
-	const path = process.env.PATH;
-	process.env.PATH = parent;
-	try { assert.equal(detectGitCapability(), "files"); }
-	finally { process.env.PATH = path; }
-	assert.equal(detectGitCapability(), "git");
-	const spawn = childProcess.spawnSync;
-	try {
-		for (const code of [undefined, "EACCES", "ETIMEDOUT"]) {
-			childProcess.spawnSync = (() => ({ status: code ? null : 128, stdout: "", stderr: "broken Git", error: code ? Object.assign(new Error(code), { code }) : undefined })) as unknown as typeof spawn;
-			syncBuiltinESMExports();
-			assert.throws(detectGitCapability, /Cannot resolve Git capability/);
-		}
-	} finally {
-		childProcess.spawnSync = spawn;
-		syncBuiltinESMExports();
-	}
-});
 
 test("file cohorts persist sparse hot history, terminal responses, and config-only stop without executing Git", (t) => {
 	const f = fixture(t);
@@ -76,7 +56,7 @@ test("file cohorts persist sparse hot history, terminal responses, and config-on
 				...(n === 1 ? { intents: { current: "Persist in file-only mode" } } : {}),
 			} }], `T${n}`);
 			f.snapshot.meta.step = n;
-			f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files");
+			f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
 			publication = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [scope], publication.base, f.root, f.runtime);
 			retained.push(readTemporalState(f.view));
 			const restarted = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, publication.revision);
@@ -87,7 +67,7 @@ test("file cohorts persist sparse hot history, terminal responses, and config-on
 		assert.equal(readTemporalState(f.view).intents.current, "Persist in file-only mode");
 		assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, firstReference), /unavailable/);
 		f.view = advanceTemporalState(f.view, [{ scope: "session", patch: { response: "Final answer" } }], "terminal");
-		f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files");
+		f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
 		publication = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["session"], publication.base, f.root, f.runtime);
 		assert.equal(readTemporalState(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, publication.revision).view).response, "Final answer");
 		const noOp = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], publication.base, f.root, f.runtime);
@@ -95,8 +75,8 @@ test("file cohorts persist sparse hot history, terminal responses, and config-on
 		assert.equal(noOp.revision, publication.revision);
 		const semantics = publication.base.files.filter(({ path }) => path.endsWith("checkpoint.json") || path.endsWith("patches.jsonl"));
 		f.snapshot.config.enabled = false;
-		f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files");
-		const stopped = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], publication.base, f.root, f.runtime);
+		f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
+		const stopped = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], publication.base, f.root, f.runtime, f.sessionId, undefined, true);
 		const restored = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, stopped.revision);
 		assert.equal(restored.runtime.config.enabled, false);
 		assert.deepEqual(restored.view, f.view);
@@ -122,7 +102,7 @@ test("file cohorts persist scope provenance beside semantic state and reload it 
 		cwd: {},
 		session: {},
 	};
-	f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files", provenance.session);
+	f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, provenance.session);
 	const first = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime, f.sessionId, provenance);
 	const loaded = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, first.revision);
 	assert.deepEqual(loaded.provenance, provenance);
@@ -161,15 +141,12 @@ test("file references bind exact bytes, complete runtime identities and lineage,
 	for (const mutate of [
 		(meta: any) => { meta.identity.sessionId = "foreign"; },
 		(meta: any) => { meta.lineage = [{ id: "foreign", parent: null, position: 0 }]; },
-		(meta: any) => { meta.publication = "unconfirmed"; },
-		(meta: any) => { meta.temporalRevision = "a".repeat(40); },
 	]) {
 		const meta = JSON.parse(original.toString());
 		mutate(meta);
 		writeFileSync(paths.runtime, JSON.stringify(meta));
 		assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, actualReference(f.cwd, f.sessionId, f.root)), /identity|lineage|boundary|provenance|historical|origin|reachable/i);
 	}
-	assert.throws(() => resolveSessionRuntime(f.runtime, "a".repeat(40)), /Git publication provenance/);
 });
 
 test("file CAS rejects stale and foreign bases and omitted changes before writes", (t) => {
@@ -178,6 +155,10 @@ test("file CAS rejects stale and foreign bases and omitted changes before writes
 	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["session"], f.base, f.root, f.runtime), /omitted a changed stream/);
 	const p = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
 	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], f.base, f.root, f.runtime), /changed concurrently/);
+	const accepted = captureTemporalFileBases(f.cwd, f.sessionId, f.root);
+	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global"], p.base, f.root, f.runtime, f.sessionId, undefined, true), /Runtime-only publication cannot write/);
+	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], p.base, f.root, f.runtime, f.sessionId, { global: {}, cwd: {}, session: {} }, true), /Runtime-only publication cannot write/);
+	assert.deepEqual(captureTemporalFileBases(f.cwd, f.sessionId, f.root), accepted);
 	const path = temporalScopePaths(f.cwd, f.sessionId, "global", f.root).patches;
 	const concurrent = Buffer.from([0xff, 0xfe, 0x0a]);
 	writeFileSync(path, concurrent);
@@ -189,7 +170,7 @@ test("lazy corruption and stale-basis publication fail before damaging retained 
 	const f = fixture(t);
 	const initialized = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
 	const peer = advanceTemporalState(f.view, [{ scope: "session", patch: { lazy: { owner: "peer" } } }], "lazy-peer");
-	const peerRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, peer.lineage, "files");
+	const peerRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, peer.lineage);
 	const accepted = publishTemporalStateToFiles(f.cwd, f.sessionId, peer, ["session"], initialized.base, f.root, peerRuntime);
 
 	const corrupt = structuredClone(peer);
@@ -200,7 +181,7 @@ test("lazy corruption and stale-basis publication fail before damaging retained 
 	);
 
 	const stale = advanceTemporalState(f.view, [{ scope: "session", patch: { working: { hot: "stale" }, lazy: { owner: "stale" } } }], "lazy-stale");
-	const staleRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, stale.lineage, "files");
+	const staleRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, stale.lineage);
 	assert.throws(
 		() => publishTemporalStateToFiles(f.cwd, f.sessionId, stale, ["session"], initialized.base, f.root, staleRuntime),
 		/changed concurrently/,
@@ -210,17 +191,6 @@ test("lazy corruption and stale-basis publication fail before damaging retained 
 	assert.equal(readTemporalState(retained, 0, "session").working.hot, undefined);
 });
 
-test("file and Git publishers share worktree exclusion, and file recovery never steals locks", (t) => {
-	const f = fixture(t);
-	withStoragePublicationLock(f.root, () => {
-		assert.throws(() => captureTemporalFileBase(f.cwd, f.sessionId, f.root), /publication lock/);
-		assert.throws(() => captureTemporalGitBase(f.cwd, f.sessionId, f.root), /publication lock/);
-		assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime), /publication lock/);
-		assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, `file:${"a".repeat(64)}`), /publication lock/);
-		assert.equal(existsSync(join(f.root, "checkpoint.json")), false);
-	});
-	assert.equal(existsSync(join(f.root, ".state-flow-publication.lock")), false);
-});
 
 test("publication waits for a brief cooperating live owner", async (t) => {
 	const f = fixture(t);
@@ -251,7 +221,7 @@ test("file preparation rollback restores opaque originals and preserves conflict
 	writeFileSync(paths.checkpoint, opaque);
 	const base = captureTemporalFileBase(f.cwd, f.sessionId, f.root);
 	f.view = advanceTemporalState(f.view, [{ scope: "session", patch: { response: "New" } }], "T1");
-	f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files");
+	f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
 	const rename = fs.renameSync;
 	let injected = false;
 	fs.renameSync = (from, to) => {
@@ -279,91 +249,6 @@ test("file preparation rollback restores opaque originals and preserves conflict
 	assert.equal(existsSync(join(f.root, ".state-flow-publication.lock")), false);
 });
 
-test("file primitives work beside existing Git metadata but incomplete Git promotion fails closed", (t) => {
-	const f = fixture(t);
-	execFileSync("git", ["init", f.root], { stdio: "ignore" });
-	const gitConfig = readFileSync(join(f.root, ".git", "config"));
-	const p = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
-	assert.deepEqual(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, p.revision).view, f.view);
-	assert.deepEqual(readFileSync(join(f.root, ".git", "config")), gitConfig);
-	const gitRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
-	assert.throws(() => publishTemporalStateToGit(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], captureTemporalGitBase(f.cwd, f.sessionId, f.root), f.root, gitRuntime), /full-cohort Git adoption/);
-	assert.deepEqual(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, p.revision).view, f.view);
-});
-
-test("Git adoption captures full file cohorts over unborn or stale HEAD and rolls back failures without losing staging", (t) => {
-	const identity = { GIT_AUTHOR_NAME: "State Flow Tests", GIT_AUTHOR_EMAIL: "state-flow@example.invalid", GIT_COMMITTER_NAME: "State Flow Tests", GIT_COMMITTER_EMAIL: "state-flow@example.invalid" };
-	const previous = Object.fromEntries(Object.keys(identity).map((key) => [key, process.env[key]]));
-	Object.assign(process.env, identity);
-	t.after(() => { for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
-	for (const existingGit of [false, true]) {
-		const f = fixture(t);
-		const git = (...args: string[]) => execFileSync("git", ["-C", f.root, ...args], { encoding: "utf8" }).trim();
-		let oldHead: string | undefined;
-		if (existingGit) {
-			execFileSync("git", ["init", f.root], { stdio: "ignore" });
-			const initial = publishTemporalStateToGit(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], captureTemporalGitBase(f.cwd, f.sessionId, f.root), f.root,
-				createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage));
-			oldHead = initial.commit!;
-		}
-		let p = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], captureTemporalFileBase(f.cwd, f.sessionId, f.root), f.root, f.runtime);
-		for (let n = 1; n <= 8; n++) {
-			f.view = advanceTemporalState(f.view, (["global", "cwd", "session"] as const).map((scope) => ({ scope, patch: { working: { [scope]: n } } })), `F${n}`);
-			f.snapshot.meta.step = n;
-			f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, "files");
-			p = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], p.base, f.root, f.runtime);
-		}
-		// A valid differently formatted inherited stream must retain its exact bytes.
-		const checkpoint = temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root).checkpoint;
-		writeFileSync(checkpoint, readFileSync(checkpoint, "utf8") + "\n");
-		p = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], captureTemporalFileBase(f.cwd, f.sessionId, f.root), f.root, f.runtime);
-		const expected = Array.from({ length: 8 }, (_, offset) => readTemporalState(f.view, offset));
-		const scopeFiles = p.base.files.filter(({ path }) => path.endsWith("checkpoint.json") || path.endsWith("patches.jsonl"));
-		writeFileSync(join(f.root, "notes.md"), "unrelated notes");
-		let indexBefore: string | undefined;
-		if (existingGit) {
-			writeFileSync(join(f.root, "staged.txt"), "staged bytes");
-			git("add", "staged.txt");
-			writeFileSync(join(f.root, "staged.txt"), "unstaged bytes");
-			indexBefore = git("diff", "--cached", "--binary");
-		}
-		process.env.GIT_AUTHOR_NAME = "";
-		assert.throws(() => adoptFileStateToGit(f.cwd, f.sessionId, f.root, p.revision, f.snapshot), /Git command failed/);
-		process.env.GIT_AUTHOR_NAME = identity.GIT_AUTHOR_NAME;
-		assert.deepEqual(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, p.revision).view, f.view);
-		if (oldHead) assert.equal(git("rev-parse", "HEAD"), oldHead);
-		else assert.throws(() => git("rev-parse", "--verify", "HEAD"));
-		const adopted = adoptFileStateToGit(f.cwd, f.sessionId, f.root, p.revision, f.snapshot);
-		assert.equal(adopted.push?.status, "local");
-		assert.match(adopted.revision, /^[0-9a-f]{40}$/);
-		assert.deepEqual(adopted.view, f.view);
-		const cold = loadTemporalRevision(f.cwd, f.sessionId, f.root, adopted.revision);
-		const restored = { scopes: cold.scopes as typeof f.view.scopes, lineage: cold.runtime!.document.meta.lineage };
-		assert.deepEqual(Array.from({ length: 8 }, (_, offset) => readTemporalState(restored, offset)), expected);
-		assert.equal(cold.runtime!.document.meta.step, 8);
-		for (const file of scopeFiles) {
-			assert.deepEqual(readFileSync(file.path), file.bytes);
-			assert.deepEqual(execFileSync("git", ["-C", f.root, "show", `${adopted.revision}:${relative(f.root, file.path)}`]), file.bytes);
-		}
-		const tree = git("ls-tree", "-r", "--name-only", adopted.revision).split("\n");
-		for (const file of scopeFiles) assert.ok(tree.includes(relative(f.root, file.path)));
-		assert.ok(tree.includes("notes.md"));
-		assert.equal(readFileSync(join(f.root, "notes.md"), "utf8"), "unrelated notes");
-		assert.equal(git("status", "--porcelain=v1"), "");
-		if (indexBefore !== undefined) {
-			assert.ok(tree.includes("staged.txt"));
-			assert.equal(git("show", `${adopted.revision}:staged.txt`), "unstaged bytes");
-			assert.equal(readFileSync(join(f.root, "staged.txt"), "utf8"), "unstaged bytes");
-		}
-		assert.throws(() => adoptFileStateToGit(f.cwd, f.sessionId, f.root, p.revision, f.snapshot), /unavailable/);
-		assert.equal(git("rev-parse", "HEAD"), adopted.revision);
-		const filesAgain = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], captureTemporalFileBase(f.cwd, f.sessionId, f.root), f.root, f.runtime);
-		const reused = adoptFileStateToGit(f.cwd, f.sessionId, f.root, filesAgain.revision, f.snapshot);
-		assert.equal(reused.commit, undefined);
-		assert.equal(reused.revision, adopted.revision);
-		assert.equal(git("rev-parse", "HEAD"), adopted.revision);
-	}
-});
 
 test("file directory creation preserves nonempty directories and rejects symlink ancestors", (t) => {
 	const f = fixture(t);

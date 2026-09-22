@@ -1,10 +1,9 @@
-import { execFileSync } from "node:child_process";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { loadScopeStream, resolveSessionAddress, sessionRuntimePaths } from "./durable.ts";
-import { loadTemporalRevision } from "./git.ts";
+import { MAX_HISTORY_LIMIT } from "./history.ts";
 import { parseSessionRuntime } from "./snapshot.ts";
-import { validateTemporalState } from "./temporal.ts";
+import { validateScopeLineage } from "./temporal.ts";
 
 export type ContinuationTransport = "local" | "sdk" | "telegram" | string;
 
@@ -228,24 +227,16 @@ export function inspectStateFlowContinuationProvenance(
 		if (config === undefined && runtimeSource === undefined && meta === undefined) {
 			return { stateFlow: { enabled: false, restorable: true }, reason: "no State Flow session runtime" };
 		}
-		const runtime = parseSessionRuntime(config, runtimeSource, header.cwd, header.id, meta);
+		const runtime = parseSessionRuntime(config, runtimeSource, header.cwd, header.id);
 		if (!runtime) return { stateFlow: { enabled: false, restorable: true }, reason: "no State Flow session runtime" };
 		if (!runtime.config.enabled) return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow stopped on selected runtime" };
-		if (runtime.meta.publication === "files") {
-			const global = loadScopeStream(header.cwd, header.id, "global", repositoryRoot, sessionKey);
-			const cwd = loadScopeStream(header.cwd, header.id, "cwd", repositoryRoot, sessionKey);
-			const session = loadScopeStream(header.cwd, header.id, "session", repositoryRoot, sessionKey);
-			if (!global || !cwd || !session) throw new Error("incomplete file-only temporal cohort");
-			validateTemporalState({ lineage: runtime.meta.lineage, scopes: { global, cwd, session } });
-			return { stateFlow: { enabled: true, restorable: true }, reason: "exact file-only runtime cohort is restorable" };
-		}
-		const runtimePath = relative(resolve(repositoryRoot), runtimeSource === undefined ? paths.meta : paths.runtime);
-		if (runtimePath.startsWith("..")) throw new Error("runtime provenance escapes repository");
-		const owner = execFileSync("git", ["-C", repositoryRoot, "log", "-1", "--format=%H", "--", runtimePath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-		if (!owner) throw new Error("runtime owner commit is unavailable");
-		const restored = loadTemporalRevision(header.cwd, header.id, repositoryRoot, owner, sessionKey);
-		if (!restored.runtime || !restored.runtime.document.config.enabled) throw new Error("selected Git runtime is not enabled");
-		return { stateFlow: { enabled: true, restorable: true }, reason: `exact Git runtime ${owner.slice(0, 12)} is restorable` };
+		const global = loadScopeStream(header.cwd, header.id, "global", repositoryRoot, sessionKey);
+		const cwd = loadScopeStream(header.cwd, header.id, "cwd", repositoryRoot, sessionKey);
+		const session = loadScopeStream(header.cwd, header.id, "session", repositoryRoot, sessionKey);
+		if (!global || !cwd || !session) throw new Error("incomplete canonical temporal cohort");
+		// Shared streams are current, independently validated by their codecs, not frozen to this session's history.
+		validateScopeLineage(session, "session", runtime.meta.lineage, MAX_HISTORY_LIMIT);
+		return { stateFlow: { enabled: true, restorable: true }, reason: "canonical session lineage is valid beside current shared streams" };
 	} catch (error) {
 		return { stateFlow: { enabled: true, restorable: false }, reason: `State Flow runtime is ineligible: ${error instanceof Error ? error.message : String(error)}` };
 	}

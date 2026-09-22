@@ -10,9 +10,19 @@ test("index is only a composition and public-export boundary", async () => {
 	assert.match(source, /lib\/extension\.ts/);
 });
 
+test("public API and Skill domain expose no retired Skill converter", async () => {
+	const api = await import("../index.ts");
+	const skills = await import("../lib/skills.ts");
+	for (const module of [api, skills]) assert.equal(Object.hasOwn(module, "migrateLegacySkillCompilations"), false);
+	assert.equal(typeof api.hashSkillSource, "function");
+	assert.equal(api.hashSkillSource, skills.hashSkillSource);
+});
+
 test("extension composition delegates imperative mechanics to owning domains", async () => {
 	const source = await readFile(new URL("lib/extension.ts", root), "utf8");
-	assert.match(source, /new PublicationWorkerController/);
+	assert.doesNotMatch(source, /PublicationWorkerController|loadPublicationQueue|pushGitTarget/);
+	assert.doesNotMatch(source, /TurnBackupController/);
+	assert.match(source, /backupCurrentStateFlowFiles/);
 	assert.match(source, /new StateFlowDiagnosticWriter/);
 	assert.match(source, /findAssistantToolBatch/);
 	assert.match(source, /findPassiveStopBoundary/);
@@ -37,6 +47,26 @@ test("every lib domain has a mirrored test file", async () => {
 		.map((name) => name.replace(/\.ts$/, ".test.ts"));
 	const tests = new Set(await readdir(new URL("tests/", root)));
 	for (const domain of domains) assert.ok(tests.has(domain), `missing tests/${domain}`);
+});
+
+test("semantic core has no Git, backup, transport, or Pi lifecycle dependencies", async () => {
+	const semanticCore = ["json.ts", "state.ts", "history.ts", "temporal.ts", "query.ts", "transition.ts"];
+	const forbidden = ["git", "publication", "telegram", "extension", "runtime", "storage"];
+	for (const name of semanticCore) {
+		const source = await readFile(new URL(`lib/${name}`, root), "utf8");
+		assert.doesNotMatch(source, /from ["']@earendil-works\/pi-coding-agent/,
+			`${name} must remain independent from the Pi lifecycle SDK`);
+		for (const dependency of forbidden) {
+			assert.doesNotMatch(source, new RegExp(`from ["']\\./${dependency}\\.ts["']`),
+				`${name} must not depend on ${dependency}`);
+		}
+	}
+});
+
+test("canonical file persistence owns no Git capability or backup policy", async () => {
+	const source = await readFile(new URL("lib/storage.ts", root), "utf8");
+	assert.doesNotMatch(source, /from ["']\.\/git\.ts["']|from ["']\.\/publication\.ts["']/);
+	assert.doesNotMatch(source, /node:child_process|git --version|detectGitCapability/);
 });
 
 test("domain dependency graph is acyclic and never points at composition", async () => {

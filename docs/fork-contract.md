@@ -1,47 +1,42 @@
-# Physical fork: session-stream copy
+# Physical fork: retained session-stream copy
 
-Status: **locally implemented and validated; not released**. [Usage](usage.md#fork-support-and-limits) owns operation and recovery; [BACKLOG.md](../BACKLOG.md) owns the remaining 0.10.0 work.
+Status: **locally implemented and validated; not released**. [Usage](usage.md#fork-support-and-limits) owns operation and recovery; [BACKLOG.md](../BACKLOG.md) owns release tracking.
 
 ## Contract
 
-A physical Pi fork creates a new session with a separate copy of the source's session memory. Global and CWD memory remain the existing shared layers, not historical copies for the child.
+A physical Pi fork creates a fresh child session from a retained boundary in its direct parent's canonical session lineage:
 
 ```text
-B.global  = existing shared global
-B.cwd     = existing shared CWD
-B.session = copy of source session checkpoint + retained patch tail
+child.global  = current live global
+child.cwd     = current live CWD
+child.session = parent session selected at retained boundary
 ```
 
-- Resolve the source session stream at the native fork boundary. An earlier selection does not copy the parent's later live private state.
-- Copy the session checkpoint, retained tail of up to seven patches and matching session artifact provenance. Preserve replay records and transition identities rather than flattening them into a new materialized-only snapshot.
-- Adopt current proven live global/CWD streams and provenance without rewriting or pruning them. They need not equal the selected source revision's older shared layers.
-- Give B its own UUID, native session key, config/meta and durable checkpoint. Retain selected enablement/publication policy and any pending bootstrap requirement, but start at step zero without the parent's run specification, validation feedback, publication acknowledgement or process ownership.
-- Preserve A's private files, native trace and accepted history. Subsequent B session writes do not modify A's session layer.
-- Forking conversation/memory does not clone or roll back project files or tool effects.
+The adapter reads Pi's persisted direct-parent header, requires matching CWD and session identity, and selects the boundary only if it remains in the parent's retained canonical lineage. It never consults Git, a storage receipt, an older checkpoint entry, or the parent's newer private state.
 
-This is session inheritance, not an exact historical snapshot of the whole effective state. It adds no historical shared-owner reference or semantic mode.
+The child receives:
 
-## History and lifecycle
+- its own UUID, native session key, runtime metadata, and fresh lineage origin;
+- the selected parent session materialization and matching artifact provenance;
+- current live global/CWD values and provenance without rewinding them;
+- selected enablement and bootstrap lifecycle state, with step reset to zero and no inherited unfinished specification or validation diagnostic.
 
-`TemporalRuntime.prepareFork()` validates the source before any installation and returns a detached inspection snapshot plus a single-use copy operation. Git source inspection is immutable; file-only input is revalidated against its exact complete cohort. Installation captures a fresh live basis, uses existing stream adoption at a new origin, and publishes only the new session cohort under the existing CAS/exclusion rules. An occupied live or current-HEAD namespace is not a fresh target. Forking does not initialize missing shared storage or run migrations.
+The parent's private files and native trace remain unchanged. Later child session writes cannot modify the parent's private layer. Applying a smaller configured `historyLimit` may fold excess shared tails during child acceptance under file-cohort CAS, without changing current shared materialization or provenance. Without retention reduction, the shared files remain unchanged too. Forking semantic memory does not clone or roll back project files or tool effects.
 
-The checkpoint/tail copy retains replay data, but its length is not B's available hot-history depth. B begins at a new origin with `state[0]`; subsequent accepted transitions build its aligned `state[0..7]` window. Pre-origin records are not newly fabricated child transitions or indexes into independent local-scope clocks.
+Artifact provenance is current-only, not a historical registry. Any retained parent session patch touching an artifact after the selected boundary makes its current provenance unproven for that selection, even if a later patch restores an equal value. The child keeps the selected artifact semantics but omits that provenance until explicit reacquisition and compilation. Untouched artifact paths retain their evidence, including provenance-only refreshes of unchanged semantics; shared provenance remains live.
 
-B's own Git-backed runtime history begins with its first child-owned cohort. A's earlier Git history remains intact under A. Copied Pi checkpoint entries do not become B-owned historical references: selecting one cannot fall through to an older disabled marker and reset B. Select an owned child checkpoint or resume the parent instead.
+## Lifecycle and failure
 
-The adapter handles native `session_start` with reason `fork`, verifies a regular canonical parent header and matching CWD, then records the child checkpoint. A child-owned passive-projection reset prevents copied parent Stop markers from resurfacing after child reload/resume. Disabled sources remain disabled; ordinary activation policy is not overridden.
+`TemporalRuntime.prepareBoundaryFork()` prepares a detached, single-use copy from current canonical files. Acceptance publishes the fresh child origin before any runtime-only lifecycle write. Existing child storage, identity mismatch, missing parent files, malformed storage, concurrency conflict, or an expired boundary fails closed.
+
+A failed or expired selection never substitutes the parent's current/newer private state and never falls through to an older disabled marker. Explicit Start may retry the same unaccepted fork after missing identity or storage evidence is corrected. Child-owned checkpoints subsequently use ordinary retained-boundary reload/resume without rereading the parent header.
+
+A child-owned passive-projection reset prevents copied parent Stop markers from resurfacing after child reload. Disabled sources remain disabled; ordinary activation policy is not overridden. Nested forks require each direct parent boundary to remain retained; ancestry is not recursively reconstructed.
 
 ## Support boundary
 
-- Initial native copying requires a persisted direct-parent locator and a readable temporal source. The parent filename/key, header UUID and selected runtime identity must agree; no arbitrary session search or UUID aliasing occurs.
-- Source or publication failure leaves the selected reference intact. Explicit Start can retry an unaccepted copy in that same loaded fork instance after evidence or contention is corrected.
-- Cold recovery before the first child checkpoint, startup/CLI paths that do not emit the native fork reason, in-memory parent locators and arbitrary cross-CWD imports are not added by this slice. Existing child-owned checkpoints use normal reload/resume without rereading the parent header.
-- Nested copying works only where the selected pointer is owned by the direct parent; inherited pointers to earlier ancestors are not recursively resolved.
-- The file backend copies only an available exact current cohort. Expired file references do not authorize copying newer parent data. Legacy Git storage requires its existing explicit migration path rather than migration during fork.
-- Uncommitted shared streams, collisions and concurrent modifications retain the existing publication guards; failure does not authorize broadening the fork's writes.
+Supported copying requires a persisted regular parent session file, matching header UUID/CWD, current canonical scope/runtime files, and an available retained boundary. Arbitrary session search, UUID aliases, cross-CWD imports, in-memory-only parent locators, predecessor conversion, unlimited history, and Git recovery are unsupported.
 
 ## Evidence
 
-Both supported [SDK stacks](compatibility.md) pass the full suite. Native Git-backed witnesses cover selected private state versus newer parent/shared state, independent child mutation, owned reload/resume, disabled sources, Stop projection fencing, malformed parent identity/CWD and retry, inherited-pointer reset refusal, plus active-push replacement ownership.
-
-`tests/runtime.test.ts` covers an exact seven-record session copy with provenance, unchanged live shared files including unreferenced provenance, detached/single-use preparation, occupied live/HEAD targets, CAS races and file-only source expiration. `tests/continuation.test.ts` checks header-only reading and refusal of non-regular/symlink locators. These are synthetic fixtures, not production-session or arbitrary-host validation.
+Native integration tests cover retained private selection versus newer parent/shared state, fresh child origin, independent child mutation, child reload/resume, disabled sources, Stop projection fencing, malformed parent identity/CWD, retry, and expired-boundary refusal. Runtime tests cover single-use preparation, canonical child publication, live shared ownership, artifact provenance, occupied child storage, and retention reduction/increase without parent-private mutation or reconstructed history. Continuation tests cover header-only reading and refusal of non-regular or symlinked locators.

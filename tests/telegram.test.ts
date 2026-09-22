@@ -152,7 +152,15 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 		text: ["🧬 Effective: ", { type: "code", text: "#0" }],
 		size: 3,
 	});
-	assert.deepEqual(inspect.richMessages[0]?.blocks[4], {
+	assert.deepEqual(inspect.richMessages[0]?.blocks.slice(1).map((block) => "summary" in block ? block.summary : undefined), [
+		{ type: "code", text: "intents" },
+		{ type: "code", text: "contract" },
+		{ type: "code", text: "working" },
+		{ type: "code", text: "artifacts" },
+		{ type: "code", text: "response" },
+		{ type: "code", text: "lazy" },
+	]);
+	assert.deepEqual(inspect.richMessages[0]?.blocks[1], {
 		type: "details",
 		summary: { type: "code", text: "intents" },
 		blocks: [{ type: "pre", language: "json", text: '{\n  "current": "Validate release"\n}' }],

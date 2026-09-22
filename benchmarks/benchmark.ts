@@ -9,8 +9,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
-import { TemporalRuntime } from "../lib/runtime.ts";
 import { realPiFixture, resolvedSnapshot, runGit, type RealPiFixture } from "../tests/pi-harness.ts";
+import { loadGlobalState, loadSessionState } from "../tests/temporal-fixture.ts";
 import { distribution, measure, prompt, resourcesEnabled as resources, summarize, summarizeReads, type Metrics } from "./benchmark-session.ts";
 import type { ResumeProbeResult } from "./benchmark-resume.ts";
 
@@ -97,7 +97,7 @@ function probeAfterResume(fixture: RealPiFixture, session: AgentSession, stateFl
 	for (let sample = 0; sample < samples; sample++) {
 		const child = spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./benchmark-resume.ts", import.meta.url)), JSON.stringify({
 			root: fixture.root, repositoryRoot: fixture.repositoryRoot, cwd: fixture.cwd, source, sessionFile,
-			sessionId, leafId, revision: selected?.meta.durableBase, stateFlow, counter, size,
+			sessionId, leafId, stateFlow, counter, size,
 		})], { encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined }, timeout: 45_000, maxBuffer: 16 * 1024 * 1024 });
 		assert.equal(baselineFingerprint(paths), before, "post-resume probe changed baseline files");
 		assert.equal(session.sessionManager.getLeafId(), leafId);
@@ -120,13 +120,12 @@ function probeAfterResume(fixture: RealPiFixture, session: AgentSession, stateFl
 		assert.equal(result.stateFlow, stateFlow);
 		assert.equal(result.sessionId, sessionId);
 		assert.equal(result.selectedLeafId, leafId);
-		assert.equal(result.selectedRevision, selected?.meta.durableBase);
 		assert.equal(result.acceptedTransitions, stateFlow ? 2 : 0);
 		assert.equal(result.wholeRun.inferenceCount, stateFlow ? 3 : 2);
 		assert.ok(result.firstContextBytes > 0 && result.firstInference.ms >= 0 && result.firstInference.ms <= result.wholeRun.ms);
 		probes.push(result);
 	}
-	return { execution: "fresh-process clone", sampleCount: probes.length, selectedRevision: selected?.meta.durableBase, selectedLeafId: leafId,
+	return { execution: "fresh-process clone", sampleCount: probes.length, selectedLeafId: leafId,
 		baselineUnchanged: true, acceptedTransitionsPerProbe: stateFlow ? 2 : 0,
 		openSession: summarize(probes.map((probe) => probe.openSession)), resumeRuntime: summarize(probes.map((probe) => probe.resumeRuntime)),
 		firstInference: summarize(probes.map((probe) => probe.firstInference)), wholeRun: summarize(probes.map((probe) => probe.wholeRun)),
@@ -135,7 +134,7 @@ function probeAfterResume(fixture: RealPiFixture, session: AgentSession, stateFl
 
 test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_000 }, async (t) => {
 	for (const stateFlow of [false, true]) for (const size of stateFlow ? sizes : [0]) {
-		const fixture = await realPiFixture(t, { stateFlow, remotePublication: "off" });
+		const fixture = await realPiFixture(t, { stateFlow });
 		let session = await fixture.createSession();
 		t.after(() => session.dispose());
 		if (stateFlow) await session.prompt("/state-flow-start");
@@ -163,7 +162,6 @@ test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_0
 				if (stateFlow) {
 					assert.ok(session.getActiveToolNames().includes("patch_state"));
 					assert.equal(fixture.readState(session).working.counter, counter);
-					assert.equal(fixture.readState(session, 1).working.counter, counter);
 				}
 			}
 			const entry = { stateFlow, stateBytes: size, modelPatches: stateFlow ? counter : 0, userRuns: counter, acceptedTransitions, nativeEntries: entries, nativeFileBytes: statSync(sessionFile).size, recentRuns: summarize(recent), openSession: summarize(opens), resumeRuntime: summarize(resumes), lastContextBytes: recent.at(-1)!.lastContextBytes, contextBytesPerRun: recent.at(-1)!.totalContextBytes, inferencesPerRun: recent.at(-1)!.inferenceCount, nativeRead: summarizeReads(recent.map((run) => run.nativeRead)) };
@@ -196,7 +194,7 @@ function reply(child: ChildProcess): Promise<Reply> {
 
 test("two-process publication interleavings", { timeout: 180_000 }, async (t) => {
 	for (const sameCwd of [true, false]) for (const scope of ["session", "global"] as const) {
-		const fixture = await realPiFixture(t, { remotePublication: "off" });
+		const fixture = await realPiFixture(t, {});
 		const writers: Array<{ child: ChildProcess; cwd: string; id: string; revision?: string; accepted: number }> = [];
 		for (const id of ["writer-a", "writer-b"]) {
 			const cwd = sameCwd ? fixture.cwd : join(fixture.cwd, id);
@@ -205,7 +203,6 @@ test("two-process publication interleavings", { timeout: 180_000 }, async (t) =>
 			assert.equal((await reply(child)).ready, true);
 			writers.push({ child, cwd, id, accepted: 0 });
 		}
-		const initialCommits = Number(runGit(fixture.repositoryRoot, "rev-list", "--count", "HEAD"));
 		const results: Reply[] = [];
 		for (let round = 1; round <= rounds; round++) {
 			const waiting = writers.map(({ child }) => reply(child));
@@ -221,15 +218,17 @@ test("two-process publication interleavings", { timeout: 180_000 }, async (t) =>
 			const exited = once(writer.child, "exit");
 			writer.child.send("stop");
 			await exited;
-			if (!writer.revision) continue;
-			const restored = new TemporalRuntime(writer.cwd, writer.id, fixture.repositoryRoot);
-			const snapshot = restored.restore(writer.revision);
-			assert.equal(snapshot.meta.step, writer.accepted, "accepted publications lost after cold restore");
-			assert.equal(restored.read(0, scope).working.writer, writer.id, "scope/branch ownership changed");
 		}
-		const accepted = results.filter((r) => r.accepted).length;
-		assert.equal(Number(runGit(fixture.repositoryRoot, "rev-list", "--count", "HEAD")) - initialCommits, accepted, "commit count differs from accepted transitions");
+		const acceptedResults = results.filter((r) => r.accepted);
+		const accepted = acceptedResults.length;
 		assert.ok(accepted > 0, "no writer published usable evidence");
+		if (scope === "session") {
+			for (const writer of writers.filter(({ accepted }) => accepted > 0)) {
+				assert.equal(loadSessionState(writer.cwd, writer.id, fixture.repositoryRoot)?.working.writer, writer.id);
+			}
+		} else {
+			assert.ok(writers.some(({ id }) => loadGlobalState(fixture.repositoryRoot)?.working.writer === id));
+		}
 		const errors = results.flatMap((result) => result.error ? [result.error.replaceAll(fixture.root, "<fixture>")] : []);
 		const entry = { sameCwd, scope, attempts: results.length, accepted, failed: results.length - accepted, wallMs: distribution(results.map((r) => r.ms)), errors: Object.fromEntries([...new Set(errors)].map((error) => [error, errors.filter((value) => value === error).length])) };
 		(report.publishers as unknown[]).push(entry);

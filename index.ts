@@ -8,7 +8,7 @@ export {
   type SuccessfulArtifactRead
 } from "./lib/acquisition.ts";
 export {
-  classifyArtifactFreshness,
+  classifyArtifactCompilationNeed,
   compileArtifact,
   hashArtifactSource,
   isArtifactHash,
@@ -16,7 +16,6 @@ export {
   isArtifactRegistry,
   ORDINARY_ARTIFACT_COMPILER,
   parseArtifactProvenanceRegistry,
-  planArtifactInvalidation,
   projectArtifactForModel,
   projectArtifactsForModel,
   pruneArtifactProvenance,
@@ -28,10 +27,8 @@ export {
   validateArtifactRegistry,
   type ArtifactCompilationUpdate,
   type ArtifactCompilerOutput,
-  type ArtifactFreshness,
+  type ArtifactCompilationNeed,
   type ArtifactInvalidationNotice,
-  type ArtifactInvalidationOptions,
-  type ArtifactInvalidationPlan,
   type ArtifactInvalidationReason,
   type ArtifactInvalidationRequest,
   type ArtifactMetadata,
@@ -61,13 +58,6 @@ export {
   type NativeSessionHeader
 } from "./lib/continuation.ts";
 export {
-  discoverGlobalMarkdownSources,
-  getKnowledgeRoot,
-  GlobalMarkdownDiscovery,
-  type ArtifactSourceCandidate,
-  type GlobalMarkdownDiscoveryResult
-} from "./lib/discovery.ts";
-export {
   captureTemporalFileBases,
   cwdScopeKey,
   getDurableRepositoryRoot,
@@ -80,21 +70,13 @@ export {
   sessionStorageKey, temporalScopePaths,
   temporalStateFileUpdates, type ScopeStreamSources, type TemporalScopePaths
 } from "./lib/durable.ts";
-export { default, MAX_FALLBACK_ATTEMPTS, PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME, type StateFlowExtensionOptions } from "./lib/extension.ts";
-export {
-  captureTemporalGitBase,
-  isGitCommitAncestor,
-  loadTemporalRevision,
-  migrateLegacyStorageToGit,
-  publishTemporalStateToGit,
-  pushGitCommit,
-  resolveGitPushDestination, type GitPushResult, type TemporalGitBase,
-  type TemporalRevisionLoad
-} from "./lib/git.ts";
+export { default, PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME, type StateFlowExtensionOptions } from "./lib/extension.ts";
+export { backupCurrentStateFlowFiles } from "./lib/git.ts";
 export {
   createAcceptedTransition,
+  DEFAULT_HISTORY_LIMIT,
+  MAX_HISTORY_LIMIT,
   projectRecentTransitionsWithLimit,
-  RECENT_TRANSITION_LIMIT,
   validateRecentTransition, type AcceptedTransition, type RecentScopePatch,
   type RecentTransition,
   type RecentTransitionWindow
@@ -109,52 +91,7 @@ export {
   type StateFlowDiagnosticCategory,
   type StateFlowDiagnosticRecord
 } from "./lib/logging.ts";
-export {
-  DEFAULT_ARTIFACT_MAINTENANCE_MAX_READS,
-  DEFAULT_ARTIFACT_MAINTENANCE_MAX_SOURCE_BYTES,
-  DEFAULT_ARTIFACT_MAINTENANCE_MINIMUM_AGE_MS,
-  planArtifactMaintenance,
-  type ArtifactMaintenanceOptions,
-  type ArtifactMaintenancePlan,
-  type ArtifactMaintenanceRequest
-} from "./lib/maintenance.ts";
-export {
-  inspectMemoryPromotions, MEMORY_PROMOTION_STATUSES, MEMORY_PROMOTIONS_KEY, retainedMemoryScopes,
-  type MemoryPromotionDiagnostic,
-  type MemoryPromotionStatus
-} from "./lib/memory.ts";
-export {
-  acquirePublicationWorkerLease,
-  beginPublicationAttempt,
-  coalescePublicationTarget,
-  confirmPublicationTarget,
-  createPublicationQueue,
-  failPublicationAttempt,
-  loadPublicationQueue,
-  parsePublicationQueue,
-  parseRemotePublicationPolicyDocument,
-  publicationQueuePath,
-  recoverPublicationQueue,
-  remotePublicationDestinationKey,
-  removePublicationQueue,
-  resolveRemotePublicationPolicy,
-  runPublicationWorker,
-  savePublicationQueue,
-  serializePublicationQueue,
-  serializeRemotePublicationPolicyDocument,
-  validatePublicationQueue,
-  type CommitAncestor,
-  type PublicationPush,
-  type PublicationQueueReceipt,
-  type PublicationQueueState,
-  type PublicationQueueStatus,
-  type PublicationWorkerLease,
-  type PublicationWorkerResult,
-  type RemotePublicationDestination,
-  type RemotePublicationMode,
-  type RemotePublicationPolicy,
-  type RemotePublicationPolicyDocument
-} from "./lib/publication.ts";
+export { retainedMemoryScopes } from "./lib/memory.ts";
 export {
   planKnowledgeRehydration,
   type RehydrationOptions,
@@ -167,7 +104,6 @@ export { TemporalRuntime } from "./lib/runtime.ts";
 export {
   hasCompiledSkillArtifact,
   hashSkillSource,
-  migrateLegacySkillCompilations,
   SKILL_ARTIFACT_COMPILER,
   type SuccessfulSkillRead
 } from "./lib/skills.ts";

@@ -4,9 +4,14 @@ import { applyPatch, type JsonObject } from "../lib/json.ts";
 import { emptyState, overlayStates, type ScopedStates, type StateScope } from "../lib/state.ts";
 import {
 	advanceTemporalState,
+	adoptTemporalStreams,
+	constrainTemporalState,
 	createTemporalState,
 	readTemporalState,
+	selectScopeStreamAtBoundary,
+	selectTemporalStateBoundary,
 	validateTemporalState,
+	validateScopeLineage,
 	type TemporalState,
 } from "../lib/temporal.ts";
 import type { RecentScopePatch } from "../lib/history.ts";
@@ -51,6 +56,55 @@ test("one patch shifts current to history and reads return detached materializat
 	const returned = readTemporalState(next);
 	returned.working.value = 99;
 	assert.equal(readTemporalState(next).working.value, 1);
+});
+
+test("selects only retained causal boundaries without external history", () => {
+	let view = createTemporalState(initial(), "base", 3);
+	view = advanceTemporalState(view, [patch("session", 1)], "T1", 3);
+	view = advanceTemporalState(view, [patch("cwd", 2)], "T2", 3);
+	view = advanceTemporalState(view, [patch("global", 3)], "T3", 3);
+	const selected = selectTemporalStateBoundary(view, "T1", 3);
+	assert.deepEqual(selected.lineage.map(({ id }) => id), ["base", "T1"]);
+	assert.equal(readTemporalState(selected, 0, "session", 3).working.value, 1);
+	assert.equal(readTemporalState(selected, 0, "cwd", 3).working.value, undefined);
+	assert.equal(readTemporalState(selected, 0, "global", 3).working.value, undefined);
+	const selectedSession = selectScopeStreamAtBoundary(view.scopes.session, "session", view.lineage[1]!, 3);
+	assert.deepEqual(selectedSession.patches.map(({ transition }) => transition.id), ["T1"]);
+	assert.throws(() => selectScopeStreamAtBoundary(view.scopes.session, "session", { id: "expired", position: -1, parent: null }, 3), /temporal boundary|predates/);
+	assert.throws(() => selectTemporalStateBoundary(view, "expired", 3), /outside the retained temporal window/);
+	assert.throws(() => selectTemporalStateBoundary(view, "", 3), /identity must be non-empty/);
+});
+
+test("a caller-supplied history limit controls folding, validation, and reads", () => {
+	const historyLimit = 3;
+	let view = createTemporalState(initial(), "base", historyLimit);
+	for (let index = 1; index <= 6; index++) {
+		view = advanceTemporalState(view, [patch("session", index)], `T${index}`, historyLimit);
+	}
+	assert.equal(view.lineage.length, historyLimit + 1);
+	assert.deepEqual(view.scopes.session.patches.map((record) => record.transition.id), ["T4", "T5", "T6"]);
+	assert.equal(view.scopes.session.checkpoint.through.id, "T3");
+	assert.equal(readTemporalState(view, historyLimit, "session", historyLimit).working.value, 3);
+	assert.throws(() => readTemporalState(view, historyLimit + 1, undefined, historyLimit), /integer from 0 to 3/);
+	assert.throws(() => validateTemporalState(view, 2), /configured history limit 2|between one and 3 boundaries/);
+	const reduced = constrainTemporalState(view, 2);
+	assert.equal(reduced.lineage.length, 3);
+	assert.equal(reduced.scopes.session.patches.length, 2);
+	assert.equal(readTemporalState(reduced, 2, "session", 2).working.value, 4);
+});
+
+test("zero history folds every accepted transition directly into the checkpoint", () => {
+	let view = createTemporalState(initial(), "base", 0);
+	view = advanceTemporalState(view, [patch("session", 1)], "T1", 0);
+	view = advanceTemporalState(view, [patch("cwd", 2)], "T2", 0);
+	assert.equal(view.lineage.length, 1);
+	assert.equal(view.lineage[0]!.id, "T2");
+	assert.deepEqual(view.scopes.session.patches, []);
+	assert.deepEqual(view.scopes.cwd.patches, []);
+	assert.equal(readTemporalState(view, 0, "session", 0).working.value, 1);
+	assert.equal(readTemporalState(view, 0, "cwd", 0).working.value, 2);
+	assert.throws(() => readTemporalState(view, 1, undefined, 0), /integer from 0 to 0/);
+	assert.doesNotThrow(() => validateTemporalState(view, 0));
 });
 
 test("seven patches and repeated eighth-patch folding preserve every hot state exactly", () => {
@@ -164,6 +218,44 @@ test("fork identity and explicit parent links prevent equal-position branch subs
 	assert.throws(() => advanceTemporalState(left, [patch("cwd", 3)], "left"), /already been used/);
 });
 
+test("scope lineage permits sparse shared-only boundaries and inherited session streams", () => {
+	let view = advanceTemporalState(createTemporalState(initial(), "base"), [patch("global", 1)], "shared-first");
+	validateScopeLineage(view.scopes.session, "session", view.lineage);
+	view = advanceTemporalState(view, [patch("session", 2)], "session-second");
+	view = advanceTemporalState(view, [patch("cwd", 3)], "shared-third");
+	const before = structuredClone(view);
+	validateScopeLineage(view.scopes.session, "session", view.lineage);
+	assert.deepEqual(view, before);
+	const selected = selectScopeStreamAtBoundary(view.scopes.session, "session", view.lineage[1]!);
+	assert.deepEqual(selected.patches, [], "a shared-only boundary can select unchanged session state");
+	const folded = constrainTemporalState(view, 0);
+	validateScopeLineage(folded.scopes.session, "session", folded.lineage, 0);
+	const inherited = adoptTemporalStreams(view.scopes, "inherited-origin", 1);
+	validateScopeLineage(inherited.scopes.session, "session", inherited.lineage, 1);
+	const collision = structuredClone(inherited.scopes.session);
+	collision.patches[0]!.transition.id = "inherited-origin";
+	assert.throws(() => validateScopeLineage(collision, "session", inherited.lineage, 1), /Conflicting.*lineage/);
+});
+
+test("scope lineage refuses contradictory checkpoint or tail identities before selection", () => {
+	let view = advanceTemporalState(createTemporalState(initial(), "base"), [patch("global", 1)], "shared-first");
+	view = advanceTemporalState(view, [patch("session", 2)], "session-second");
+	for (const field of ["id", "parent"] as const) {
+		for (const limit of [0, 7]) {
+			const candidate = constrainTemporalState(view, limit);
+			const stream = candidate.scopes.session;
+			const boundary = limit === 0 ? stream.checkpoint.through : stream.patches[0]!.transition;
+			boundary[field] = "unrelated";
+			const before = structuredClone(candidate);
+			assert.throws(() => validateScopeLineage(stream, "session", candidate.lineage, limit), /Conflicting.*lineage/);
+			assert.deepEqual(candidate, before);
+		}
+	}
+	const future = structuredClone(view.scopes.session);
+	future.patches[0]!.transition.position++;
+	assert.throws(() => validateScopeLineage(future, "session", view.lineage), /beyond the active head/);
+});
+
 test("invalid semantic tails fail closed rather than being truncated or mutating the basis", () => {
 	const base = createTemporalState(initial(), "base");
 	assert.throws(() => advanceTemporalState(base, [patch("cwd", 1), patch("cwd", 2)], "duplicate"), /Duplicate/);
@@ -173,7 +265,7 @@ test("invalid semantic tails fail closed rather than being truncated or mutating
 	const next = advanceTemporalState(base, [patch("cwd", 1)], "T1");
 	const oversized = structuredClone(next);
 	oversized.scopes.cwd.patches = Array(8).fill(next.scopes.cwd.patches[0]);
-	assert.throws(() => validateTemporalState(oversized), /exceeds seven/);
+	assert.throws(() => validateTemporalState(oversized), /exceeds configured history limit 7/);
 	const lost = structuredClone(next);
 	lost.scopes.cwd.patches = [];
 	assert.throws(() => validateTemporalState(lost), /no semantic patch/);

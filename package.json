@@ -1,6 +1,6 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.16.3",
+  "version": "0.17.0",
   "private": false,
   "description": "Incremental scoped state/context/memory compiler for Pi, inspired by SKILL.state",
   "keywords": [
@@ -66,13 +66,16 @@
     "node": ">=22.19.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": ">=0.84.4",
-    "@earendil-works/pi-ai": ">=0.84.4",
-    "@earendil-works/pi-coding-agent": ">=0.84.4",
-    "@earendil-works/pi-tui": ">=0.84.4"
+    "@earendil-works/pi-agent-core": ">=0.87.0",
+    "@earendil-works/pi-ai": ">=0.87.0",
+    "@earendil-works/pi-coding-agent": ">=0.87.0",
+    "@earendil-works/pi-tui": ">=0.87.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-tui": "0.84.4",
+    "@earendil-works/pi-agent-core": "0.87.0",
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-tui": "0.87.0",
     "@types/node": "latest",
     "typescript": "latest"
   }

@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { isJsonValue, isObject, sameJson, validatePatch, type JsonObject } from "./json.ts";
 import type { ScopePatch, ScopedStates, StateScope } from "./state.ts";
 
-export const RECENT_TRANSITION_LIMIT = 7;
+export const DEFAULT_HISTORY_LIMIT = 7;
+export const MAX_HISTORY_LIMIT = 100;
 
 export interface RecentScopePatch {
 	scope: StateScope;
@@ -85,8 +86,8 @@ export function createAcceptedTransition(currentStates: ScopedStates, nextStates
 
 /** Preserve the configured per-scope budget, filtering in selected-lineage order. */
 export function projectRecentTransitionsWithLimit(limit: number, lineage: readonly RecentTransition[]): RecentTransitionWindow {
-	if (!Number.isSafeInteger(limit) || limit < 0 || limit > RECENT_TRANSITION_LIMIT) {
-		throw new Error(`Recent State Flow transition limit must be an integer from 0 to ${RECENT_TRANSITION_LIMIT}`);
+	if (!Number.isSafeInteger(limit) || limit < 0 || limit > MAX_HISTORY_LIMIT) {
+		throw new Error(`Recent State Flow transition limit must be an integer from 0 to ${MAX_HISTORY_LIMIT}`);
 	}
 	const remaining = { global: limit, cwd: limit, session: limit };
 	const result: RecentTransitionWindow = [];

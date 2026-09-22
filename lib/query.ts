@@ -1,5 +1,6 @@
+import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.ts";
 import { isObject, sameJson, type JsonValue } from "./json.ts";
-import { projectStateForModel, type MaterializedState, type ScopePatch, type StateScope } from "./state.ts";
+import { projectStateForModel, type ModelState, type ScopePatch, type StateScope } from "./state.ts";
 import { readTemporalState, type TemporalState, type TransitionBoundary } from "./temporal.ts";
 
 export type StateReadQuery =
@@ -7,7 +8,7 @@ export type StateReadQuery =
 	| { kind: "patch"; path: string; offset: number; scope: StateScope };
 
 export type StateReadResult =
-	| { path: string; boundary: TransitionBoundary; state: MaterializedState }
+	| { path: string; boundary: TransitionBoundary; state: ModelState }
 	| { path: string; boundary: TransitionBoundary; patch: ScopePatch & { response?: string } };
 
 export type StateReadProjection = "value" | "keys" | "patch";
@@ -38,26 +39,29 @@ type ValueSelector = { kind: "key"; key: string } | { kind: "index"; index: numb
 const PATH_PATTERN = /^(effective|global|cwd|session)(?:\[(\d+)\])?(?:\.patches(?:\[(\d+)\])?)?$/;
 
 /** Resolve a projection root without repeating the tool name in every path. */
-export function parseStateReadPath(path: string): StateReadQuery {
+export function parseStateReadPath(path: string, historyLimit = DEFAULT_HISTORY_LIMIT): StateReadQuery {
+	if (!Number.isSafeInteger(historyLimit) || historyLimit < 0 || historyLimit > MAX_HISTORY_LIMIT) {
+		throw new Error(`State Flow history limit must be an integer from 0 to ${MAX_HISTORY_LIMIT}`);
+	}
 	const match = PATH_PATTERN.exec(path);
 	if (!match) throw new Error("Invalid State Flow read path");
 	const [, root, rootOffset, patchOffset] = match;
 	if (path.includes(".patches") && rootOffset !== undefined) throw new Error("Index patches after .patches, not after the scope");
 	if (path.includes(".patches") && root === "effective") throw new Error("Patch history requires an explicit scope");
 	const offset = Number(patchOffset ?? rootOffset ?? "0");
-	if (!Number.isSafeInteger(offset) || offset < 0 || offset > 7) throw new Error("State Flow read path index must be an integer from 0 to 7");
+	if (!Number.isSafeInteger(offset) || offset < 0 || offset > historyLimit) throw new Error(`State Flow read path index must be an integer from 0 to ${historyLimit}`);
 	if (patchOffset !== undefined || path.endsWith(".patches")) {
 		return { kind: "patch", path, offset, scope: root as StateScope };
 	}
 	return { kind: "state", path, offset, ...(root === "effective" ? {} : { scope: root as StateScope }) };
 }
 
-export function readStatePath(view: TemporalState, path: string): StateReadResult {
-	const query = parseStateReadPath(path);
+export function readStatePath(view: TemporalState, path: string, historyLimit = DEFAULT_HISTORY_LIMIT): StateReadResult {
+	const query = parseStateReadPath(path, historyLimit);
 	if (query.kind === "state") {
 		const boundary = view.lineage[view.lineage.length - 1 - query.offset];
 		if (!boundary) throw new Error("Requested history predates the proven temporal origin");
-		return { path, boundary: structuredClone(boundary), state: projectStateForModel(readTemporalState(view, query.offset, query.scope)) };
+		return { path, boundary: structuredClone(boundary), state: projectStateForModel(readTemporalState(view, query.offset, query.scope, historyLimit)) };
 	}
 	const record = view.scopes[query.scope].patches.at(-1 - query.offset);
 	if (!record) throw new Error(`Requested ${query.scope} patch predates retained hot history`);
@@ -134,7 +138,7 @@ function inlineReferencePattern(path: string): RegExp {
 }
 
 /** Reactively locate exact durable sources for one failed state-path resolution. */
-export function findStateReferenceSources(view: TemporalState, path: string): { sources: StateReferenceSource[]; truncated: boolean } {
+export function findStateReferenceSources(view: TemporalState, path: string, historyLimit = DEFAULT_HISTORY_LIMIT): { sources: StateReferenceSource[]; truncated: boolean } {
 	const candidates = referenceCandidates(path);
 	const patterns = candidates.map(inlineReferencePattern);
 	const sources: StateReferenceSource[] = [];
@@ -166,7 +170,7 @@ export function findStateReferenceSources(view: TemporalState, path: string): { 
 		}
 	};
 	for (const scope of ["global", "cwd", "session"] as const) {
-		const state = readTemporalState(view, 0, scope);
+		const state = readTemporalState(view, 0, scope, historyLimit);
 		for (const plane of ["artifacts", "contract", "working", "intents", "lazy"] as const) {
 			const value = state[plane];
 			if (value !== undefined) visit(value as JsonValue, scope, `${scope}.${plane}`);
@@ -178,8 +182,8 @@ export function findStateReferenceSources(view: TemporalState, path: string): { 
 	return { sources, truncated };
 }
 
-function missingReferenceHint(view: TemporalState, path: string): StateReadHint[] | undefined {
-	const { sources, truncated } = findStateReferenceSources(view, path);
+function missingReferenceHint(view: TemporalState, path: string, historyLimit: number): StateReadHint[] | undefined {
+	const { sources, truncated } = findStateReferenceSources(view, path, historyLimit);
 	if (sources.length === 0) return undefined;
 	return [{
 		type: "dangling-reference",
@@ -202,8 +206,8 @@ function projectValue(value: JsonValue, projection: StateReadProjection): Projec
 	return { meta: { type: typeof value as "number" | "boolean" }, keys: [] };
 }
 
-function patchAtPath(view: TemporalState, root: string, selectors: readonly ValueSelector[], path: string): JsonValue {
-	const rootQuery = parseStateReadPath(root);
+function patchAtPath(view: TemporalState, root: string, selectors: readonly ValueSelector[], path: string, historyLimit: number): JsonValue {
+	const rootQuery = parseStateReadPath(root, historyLimit);
 	if (rootQuery.kind !== "state") throw new Error("Patch projection requires a state path");
 	const boundary = view.lineage.at(-1 - rootQuery.offset);
 	if (!boundary) throw new Error("Requested history predates the proven temporal origin");
@@ -213,8 +217,8 @@ function patchAtPath(view: TemporalState, root: string, selectors: readonly Valu
 	} else {
 		const before = view.lineage.at(-2 - rootQuery.offset);
 		if (before) {
-			const current = readTemporalState(view, rootQuery.offset);
-			const previous = readTemporalState(view, rootQuery.offset + 1);
+			const current = readTemporalState(view, rootQuery.offset, undefined, historyLimit);
+			const previous = readTemporalState(view, rootQuery.offset + 1, undefined, historyLimit);
 			patch = diffObjects(previous, current);
 		}
 	}
@@ -234,7 +238,7 @@ function patchAtPath(view: TemporalState, root: string, selectors: readonly Valu
 		}
 		if (Array.isArray(patch)) return selectValue(patch, selectors.slice(index), path);
 		if (!isObject(patch)) {
-			const result = readStatePath(view, root);
+			const result = readStatePath(view, root, historyLimit);
 			if (!("state" in result)) throw new Error("Patch projection requires a state path");
 			return selectValue(result.state, selectors, path);
 		}
@@ -255,30 +259,30 @@ function diffObjects(previous: JsonValue, current: JsonValue): JsonValue {
 }
 
 /** Project exact current/historical state paths without exposing temporal metadata. */
-export function readProjectedState(view: TemporalState, paths: readonly string[], projection: StateReadProjection = "value"): ProjectedStateRead {
+export function readProjectedState(view: TemporalState, paths: readonly string[], projection: StateReadProjection = "value", historyLimit = DEFAULT_HISTORY_LIMIT): ProjectedStateRead {
 	if (paths.length === 0) throw new Error("read_state requires at least one path");
 	if (projection === "patch") {
 		const patches = paths.map((path) => {
 			const { root, selectors } = parseValuePath(path);
-			return patchAtPath(view, root, selectors, path);
+			return patchAtPath(view, root, selectors, path, historyLimit);
 		});
 		return { patch: patches.length === 1 ? patches[0]! : patches };
 	}
 	const projected = paths.map((path) => {
 		try {
 			const { root, selectors } = parseValuePath(path);
-			const query = parseStateReadPath(root);
+			const query = parseStateReadPath(root, historyLimit);
 			if (query.kind !== "state") throw new Error("Value and keys projections require a state path");
 			const readsLazy = selectors[0]?.kind === "key" && selectors[0].key === "lazy";
 			const state = readsLazy
-				? readTemporalState(view, query.offset, query.scope)
-				: projectStateForModel(readTemporalState(view, query.offset, query.scope));
+				? readTemporalState(view, query.offset, query.scope, historyLimit)
+				: projectStateForModel(readTemporalState(view, query.offset, query.scope, historyLimit));
 			if (readsLazy && !Object.hasOwn(state, "lazy")) state.lazy = {};
 			return projectValue(selectValue(state, selectors, path), projection);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const missing = /does not exist| is outside /.test(message);
-			const hint = missing && projection === "value" && paths.length === 1 ? missingReferenceHint(view, path) : undefined;
+			const hint = missing && projection === "value" && paths.length === 1 ? missingReferenceHint(view, path, historyLimit) : undefined;
 			if (hint) return { value: null, hint };
 			throw new Error(message, error instanceof Error ? { cause: error } : undefined);
 		}

@@ -1,13 +1,63 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyPatch, canonicalJson, validatePatch } from "../index.ts";
-import { sameJson } from "../lib/json.ts";
+import { presentationJson, sameJson } from "../lib/json.ts";
+
+test("presentation JSON preserves intentional insertion order without relaxing JSON validation", () => {
+	assert.equal(presentationJson({ intents: {}, contract: {}, working: {} }), '{"intents":{},"contract":{},"working":{}}');
+	assert.throws(() => presentationJson({ invalid: undefined }), /finite, acyclic JSON/);
+});
 
 test("recursively merges patches and applies null deletion", () => {
 	const state = { inventory: { a: "item", b: "other" }, attempts: ["x"] };
 	const next = applyPatch(state, { inventory: { a: null, c: "new" } });
 	assert.deepEqual(next, { inventory: { b: "other", c: "new" }, attempts: ["x"] });
 	assert.deepEqual(state, { inventory: { a: "item", b: "other" }, attempts: ["x"] });
+});
+
+test("public patch results stay detached from basis and caller patch containers", () => {
+	const state = { keep: { nested: { value: 0 } }, items: [{ note: "kept" }, { note: "old" }] };
+	const patch = { items: { "[1]": { note: "changed" } }, added: { notes: [{ text: "caller" }] } };
+	const next = applyPatch(state, patch) as typeof state & { added: { notes: Array<{ text: string }> } };
+	next.keep.nested.value = 9;
+	next.items[0]!.note = "draft";
+	patch.added.notes[0]!.text = "changed outside";
+	assert.equal(state.keep.nested.value, 0);
+	assert.equal(state.items[0]!.note, "kept");
+	assert.equal(next.added.notes[0]!.text, "caller");
+	next.added.notes[0]!.text = "changed inside";
+	assert.equal(patch.added.notes[0]!.text, "changed outside");
+	const prototypeData = applyPatch({}, JSON.parse('{"__proto__":{}}'));
+	assert.notEqual(prototypeData.__proto__, Object.prototype, "ordinary prototype-named data cannot borrow the global prototype");
+	(prototypeData.__proto__ as { isolated?: boolean }).isolated = true;
+	assert.equal(({} as { isolated?: boolean }).isolated, undefined);
+	assert.equal(Object.getPrototypeOf(prototypeData), Object.prototype);
+});
+
+test("preserves prototype-named merge semantics and signed zero during path copying", () => {
+	const next = applyPatch({ value: 0 }, JSON.parse('{"__proto__":{"absent":null},"value":-0}'));
+	assert.equal(Object.hasOwn(next, "__proto__"), true);
+	assert.deepEqual(next.__proto__, {});
+	assert.notEqual(next.__proto__, Object.prototype);
+	assert.equal(Object.is(next.value, -0), true);
+	const array = applyPatch({ values: [0] }, { values: { "[0]": -0 } });
+	assert.equal(Object.is((array.values as number[])[0], -0), true);
+});
+
+test("copies cold data once at the public boundary while patching owned paths", () => {
+	const state = { cold: { payload: "COLD-COW-MARKER" }, hot: { items: [{ value: 0 }, { value: 1 }] } };
+	const clone = globalThis.structuredClone;
+	let coldCopies = 0;
+	globalThis.structuredClone = ((value: unknown, options?: any) => {
+		if (JSON.stringify(value)?.includes("COLD-COW-MARKER")) coldCopies++;
+		return clone(value, options);
+	}) as typeof structuredClone;
+	let next: ReturnType<typeof applyPatch>;
+	try { next = applyPatch(state, { cold: {}, hot: { items: { "[1]": { value: 2 } } } }); }
+	finally { globalThis.structuredClone = clone; }
+	assert.equal(coldCopies, 1, "internal path updates must not repeatedly deep-copy the detached cold subtree");
+	assert.deepEqual(next, { cold: { payload: "COLD-COW-MARKER" }, hot: { items: [{ value: 0 }, { value: 2 }] } });
+	assert.notEqual(next.cold, state.cold);
 });
 
 test("patches existing array indices recursively without adding an edit language", () => {

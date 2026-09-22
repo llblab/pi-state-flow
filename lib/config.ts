@@ -3,6 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getDurableRepositoryRoot } from "./durable.ts";
+import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.ts";
 import { isObject } from "./json.ts";
 
 export interface StateFlowConfig {
@@ -15,7 +16,7 @@ export interface StateFlowConfig {
 	logging: boolean;
 	/** Show successful patch_state arguments in the interactive tool row. */
 	showSuccessfulPatches: boolean;
-	remotePublication?: "off" | "turn-end" | "transition";
+	historyLimit: number;
 }
 
 /** Read the repository-global config once at extension load/reload. Missing config uses defaults; invalid config never falls back. */
@@ -29,6 +30,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 		passiveTools: true,
 		logging: false,
 		showSuccessfulPatches: true,
+		historyLimit: DEFAULT_HISTORY_LIMIT,
 	};
 	let value: unknown;
 	try {
@@ -37,7 +39,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 	} catch (error) {
 		throw new Error(`Cannot read State Flow configuration: ${path}`, { cause: error });
 	}
-	const allowed = new Set(["autoStart", "passiveBootstrap", "passiveTools", "logging", "showSuccessfulPatches", "remotePublication"]);
+	const allowed = new Set(["autoStart", "passiveBootstrap", "passiveTools", "logging", "showSuccessfulPatches", "historyLimit"]);
 	if (!isObject(value) || Object.keys(value).some((key) => !allowed.has(key))) {
 		throw new Error(`State Flow configuration contains unknown settings: ${path}`);
 	}
@@ -46,9 +48,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 	if (Object.hasOwn(value, "passiveTools") && typeof value.passiveTools !== "boolean") throw new Error(`State Flow passiveTools must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "logging") && typeof value.logging !== "boolean") throw new Error(`State Flow logging must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "showSuccessfulPatches") && typeof value.showSuccessfulPatches !== "boolean") throw new Error(`State Flow showSuccessfulPatches must be a boolean: ${path}`);
-	if (Object.hasOwn(value, "remotePublication") && value.remotePublication !== "off" && value.remotePublication !== "turn-end" && value.remotePublication !== "transition") {
-		throw new Error(`State Flow remotePublication must be off, turn-end, or transition: ${path}`);
-	}
+	if (Object.hasOwn(value, "historyLimit") && (!Number.isSafeInteger(value.historyLimit) || (value.historyLimit as number) < 0 || (value.historyLimit as number) > MAX_HISTORY_LIMIT)) throw new Error(`State Flow historyLimit must be an integer from 0 to ${MAX_HISTORY_LIMIT}: ${path}`);
 	return {
 		directory,
 		autoStart: value.autoStart === true,
@@ -56,6 +56,6 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 		passiveTools: value.passiveTools !== false,
 		logging: value.logging === true,
 		showSuccessfulPatches: value.showSuccessfulPatches !== false,
-		...(value.remotePublication === undefined ? {} : { remotePublication: value.remotePublication as "off" | "turn-end" | "transition" }),
+		historyLimit: typeof value.historyLimit === "number" ? value.historyLimit : DEFAULT_HISTORY_LIMIT,
 	};
 }

@@ -6,9 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, runtimeContextMessage, withoutPrivateValidation } from "../lib/context.ts";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
+import { createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, projectSystemProtocol, runtimeContextMessage } from "../lib/context.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
-import { startEpisode } from "../lib/episode.ts";
+import { completeRun, startEpisode } from "../lib/episode.ts";
 import { emptyState, type MaterializedState } from "../lib/state.ts";
 import { commitScopedTerminal, commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
@@ -19,11 +20,42 @@ const message = (role: string, text: string, timestamp: number, customType?: str
 	...(customType ? { customType } : {}),
 }) as any;
 
+test("refreshes only owned system protocol without mutating native frames", () => {
+	for (const tailProtocol of ["OLD-TAIL", null]) for (const protocol of [undefined, "PASSIVE", "ACTIVE"]) {
+		const head = { role: "system" as const, content: "FOREIGN-HEAD", sections: { state_flow: "OLD-HEAD", foreign: "KEEP" }, toolsAdded: [], timestamp: 1 };
+		const request = user("USER-DATA", 2);
+		const tail = { role: "system" as const, content: "FOREIGN-TAIL", sections: { state_flow: tailProtocol, foreign_tail: "KEEP-TAIL" }, toolsRemoved: [], timestamp: 3 };
+		const reply = message("assistant", "UNFINISHED", 4);
+		const messages: AgentMessage[] = [head, request, tail, reply];
+		const before = structuredClone(messages);
+		for (const frame of [head, tail]) { Object.freeze(frame.sections); Object.freeze(frame); }
+		Object.freeze(messages);
+		const projected = projectSystemProtocol(messages, protocol);
+		const current = getCurrentSystemMessage(projected)!;
+		assert.equal(current.sections?.state_flow, protocol === undefined ? undefined : `<state_flow>\n${protocol}\n</state_flow>`);
+		assert.equal(current.sections?.foreign, "KEEP");
+		assert.equal(current.sections?.foreign_tail, "KEEP-TAIL");
+		assert.equal(current.content, "FOREIGN-HEAD\n\nFOREIGN-TAIL");
+		assert.equal(projected[1], request);
+		assert.equal(projected[3], reply);
+		assert.deepEqual(projected.map((frame) => [frame.role, frame.timestamp]), messages.map((frame) => [frame.role, frame.timestamp]));
+		assert.deepEqual(messages, before);
+		assert.equal(projectSystemProtocol(projected, protocol), projected, "unchanged protocol reuses the projection");
+		assert.ok(projected[0]?.role === "system" && projected[2]?.role === "system");
+		assert.equal(projected[0].toolsAdded, head.toolsAdded);
+		assert.equal(projected[2].toolsRemoved, tail.toolsRemoved);
+	}
+	const conversation = [user("No native system frame", 1)];
+	assert.equal(projectSystemProtocol(conversation, "ACTIVE"), conversation, "projection must not invent native system authority");
+	const alreadyCurrent: AgentMessage[] = [{ role: "system", content: "", sections: { state_flow: "<state_flow>\nACTIVE\n</state_flow>" }, timestamp: 1 }, user("request", 2), { role: "system", content: "foreign update", timestamp: 3 }];
+	assert.equal(projectSystemProtocol(alreadyCurrent, "ACTIVE"), alreadyCurrent, "do not relocate an unchanged section over native deltas");
+});
+
 test("ordinary context derives compact lineage from cached runtime without Git queries", async () => {
 	const h = harness();
 	await start(h, "Continue");
 	await commitTerminal(h, {}, { verified: true }, "Accepted");
-	h.handlers.get("before_agent_start")!({ prompt: "Continue", systemPrompt: "base" }, h.ctx);
+	h.beforeAgentStart("Continue");
 	const spawn = childProcess.spawnSync;
 	childProcess.spawnSync = (() => { throw new Error("Ordinary inference queried a process"); }) as typeof spawn;
 	syncBuiltinESMExports();
@@ -45,7 +77,7 @@ test("ordinary context derives compact lineage from cached runtime without Git q
 test("enabled context projects the complete overlay once in ordinary and bootstrap runs", async (t) => {
 	const observations: Array<{ bootstrap: boolean; bytes: number; copies: number }> = [];
 	for (const bootstrap of [false, true]) for (const bytes of [8192, 1048576]) {
-		const h = harness({ remotePublication: "off" });
+		const h = harness();
 		if (bootstrap) h.entries.push({ type: "message", message: user("Existing request", 1) });
 		await start(h, "Current request");
 		await h.tools.get("patch_state")!.execute("seed-context", {
@@ -56,7 +88,7 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 				intents: { current: { action: "Continue accepted work", detail: { $ref: "session.lazy.plan" } } },
 				lazy: { plan: { steps: ["hidden until read"] } },
 				artifacts: { "/context/source": { description: "Retained route", compilation: { decision: "Keep semantic metadata" } } },
-			}, final: true,
+			},
 		}, undefined, undefined, h.ctx);
 		const state = h.readState();
 		const snapshot = h.resolveSnapshot();
@@ -65,7 +97,7 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		const persistent = message("custom", "policy", 0, "foreign-policy");
 		const old = user("Existing request", 1);
 		const current = user("Current request", 2);
-		const messages = [persistent, old, current, message("custom", "retry", 3, "state-flow-validation")];
+		const messages = [persistent, old, current];
 		const originalMessages = structuredClone(messages);
 		const clone = globalThis.structuredClone;
 		let copies = 0;
@@ -79,7 +111,9 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		try { projected = h.handlers.get("context")!({ messages }); }
 		finally { observedClone.mock.restore(); }
 		const text = projected.messages[0].content[0].text as string;
-		const context = JSON.parse(text.slice(text.indexOf("\n") + 1));
+		const serialized = text.slice(text.indexOf("\n") + 1);
+		const context = JSON.parse(serialized);
+		assert.match(serialized, /"state":\{"intents":.*,"contract":.*,"working":.*,"artifacts":.*,"response":/);
 		assert.deepEqual(context.state, state);
 		assert.deepEqual(context.state.intents.current, { action: "Continue accepted work", detail: { $ref: "session.lazy.plan" } });
 		assert.equal(Object.hasOwn(context.state, "lazy"), false);
@@ -98,15 +132,14 @@ test("current run trajectory allocates no arrays of discarded ordinary history",
 	const observations: Array<{ pairs: number; allocatedLengths: number[]; retained: number }> = [];
 	for (const pairs of [0, 200]) {
 		const persistent = message("custom", "policy", 0, "foreign-policy");
-		const privateFeedback = message("custom", "retry", 1, "state-flow-validation");
-		const prefix = [persistent, privateFeedback];
+		const prefix = [persistent];
 		for (let index = 0; index < pairs; index++) prefix.push(user(`Old request ${index}`, index + 2), message("assistant", `Old answer ${index}`, index + 2));
 		const current = user("Current request", 1000);
 		const call = toolAssistant("current-read");
 		const result = { role: "toolResult", toolCallId: "current-read", toolName: "read", content: [{ type: "text", text: "Current evidence" }], timestamp: 1001 } as AgentMessage;
 		const foreign = message("custom", "current policy", 1002, "foreign-current");
 		const steering = user("Refinement", 1003);
-		const messages: AgentMessage[] = [...prefix, current, call as AgentMessage, result, foreign, privateFeedback, steering];
+		const messages: AgentMessage[] = [...prefix, current, call as AgentMessage, result, foreign, steering];
 		const original = structuredClone(messages);
 		const allocated: AgentMessage[][] = [];
 		// Observe source-derived slice/filter arrays without replacing global Array methods.
@@ -125,27 +158,48 @@ test("current run trajectory allocates no arrays of discarded ordinary history",
 	assert.ok(observations.every(({ allocatedLengths, retained }) => allocatedLengths.reduce((sum, length) => sum + length, 0) <= retained), JSON.stringify(observations));
 });
 
-test("projects the current run and persistent non-private custom context", () => {
+test("projects the current run and persistent custom context", () => {
 	const persistent = message("custom", "policy", 1, "policy");
-	const privateFeedback = message("custom", "retry", 4, "state-flow-validation");
 	const first = user("current", 3);
 	const later = user("current", 5);
 	const steering = user("refinement", 6);
-	const messages = [persistent, user("old", 2), first, privateFeedback, later, steering];
+	const messages = [persistent, user("old", 2), first, later, steering];
 	for (const [specification, anchor, expected, timestamp] of [
 		["current", 3, [persistent, first, later, steering], 3],
-		["current", undefined, [persistent, later, steering], 5],
-		["current", 99, [persistent, later, steering], 5],
-		["missing", 3, [persistent, steering], 6],
+		["current", undefined, messages, undefined],
+		["current", 99, messages, undefined],
+		["current", NaN, messages, undefined],
+		["current", Infinity, messages, undefined],
+		["missing", 3, [persistent, first, later, steering], 3],
+		["missing", undefined, messages, undefined],
+		["refinement", undefined, [persistent, steering], 6],
 	] as const) {
 		const result = currentRunTrajectory(messages, specification, anchor);
 		assert.deepEqual(result.messages, expected);
 		assert.equal(result.anchorTimestamp, timestamp);
 	}
-	const noUser = [privateFeedback, persistent, message("assistant", "retained", 7)];
-	assert.deepEqual(currentRunTrajectory(noUser, "missing", undefined), { messages: noUser.slice(1) });
+	const collision = [persistent, user("old", 2), first, user("Different text at the same timestamp", 3), steering];
+	assert.deepEqual(currentRunTrajectory(collision, "current", 3), { messages: collision }, "text equality cannot disambiguate a colliding captured identity");
+	const noUser = [persistent, message("assistant", "retained", 7)];
+	assert.deepEqual(currentRunTrajectory(noUser, "missing", undefined), { messages: noUser });
 	assert.deepEqual(currentRunTrajectory([], "missing", undefined), { messages: [] });
 	assert.deepEqual(currentRunTrajectory([first, user("", 8)], "", undefined), { messages: [user("", 8)], anchorTimestamp: 8 });
+});
+
+test("captured run identity retains normalized user content, image, tools and steering", () => {
+	const persistent = message("custom", "Persistent foreign context", 1, "foreign-policy");
+	const original = message("user", "Original task\n\n[Image: dimensions normalized by the host.]", 3);
+	original.content.push({ type: "image", data: "AA==", mimeType: "image/png" });
+	const call = toolAssistant("normalized-read");
+	const result = { role: "toolResult", toolCallId: "normalized-read", toolName: "read", content: [{ type: "text", text: "Earlier tool evidence" }], timestamp: 4 } as AgentMessage;
+	const steering = user("Refine the original task", 5);
+	const messages = [persistent, user("Old request", 2), original, call as AgentMessage, result, steering];
+	const before = structuredClone(messages);
+	const projected = currentRunTrajectory(messages, "Original task", 3);
+	assert.deepEqual(projected.messages, [persistent, original, call, result, steering]);
+	assert.equal(projected.anchorTimestamp, 3);
+	assert.ok(projected.messages.every((entry) => messages.includes(entry)), "retain native message identity");
+	assert.deepEqual(messages, before);
 });
 
 test("builds runtime context as synthetic user data without system-prompt interpolation", () => {
@@ -170,7 +224,27 @@ test("builds runtime context as synthetic user data without system-prompt interp
 	assert.match(text, /Legacy route|Current route/);
 	assert.doesNotMatch(text, /sha256|legacy-v1|forged|2026-01-01/);
 	assert.doesNotMatch(text, /validation_feedback/);
-	assert.throws(() => runtimeContextMessage(startEpisode(false), emptyState()), /requires an active specification/);
+});
+
+test("projects accepted memory without resurrecting a completed specification for boundary continuation", () => {
+	const snapshot = startEpisode(false);
+	snapshot.meta.specification = "Completed original task";
+	completeRun(snapshot);
+	const state = { ...emptyState(), working: { accepted: true }, response: "Accepted answer", lazy: { detail: "not projected" } };
+	const before = structuredClone({ snapshot, state });
+	const context = runtimeContextMessage(snapshot, state);
+	assert.equal(context.role, "user");
+	const text = (context.content as any[])[0].text as string;
+	const projected = JSON.parse(text.slice(text.indexOf("\n") + 1));
+	assert.equal(Object.hasOwn(projected, "specification"), false);
+	assert.equal(projected.state.working.accepted, true);
+	assert.equal(projected.state.response, "Accepted answer");
+	assert.equal(Object.hasOwn(projected.state, "lazy"), false);
+	assert.doesNotMatch(text, /Completed original task|not projected/);
+	assert.deepEqual({ snapshot, state }, before);
+	const messages = [user("Earlier request", 1), user("Original run", 2), message("custom", "Boundary continuation", 3, "foreign-continuation")];
+	assert.deepEqual(currentRunTrajectory(messages, undefined, undefined).messages, messages, "no specification or native capture must preserve available context");
+	assert.deepEqual(currentRunTrajectory(messages, undefined, 2).messages, messages.slice(1), "the native run anchor remains usable without a specification");
 });
 
 test("projects bounded lazy navigation without hydrating lazy bodies or partial catalogs", () => {
@@ -200,35 +274,48 @@ test("projects bounded lazy navigation without hydrating lazy bodies or partial 
 	});
 });
 
-test("removes only private State Flow validation messages", () => {
-	const validation = message("custom", "retry", 1, "state-flow-validation");
-	const other = message("custom", "policy", 2, "policy");
-	assert.deepEqual(withoutPrivateValidation([validation, other]), [other]);
-});
-
-test("passive projection retains the active run, later results, steering, and foreign context without private feedback or completed history", () => {
+test("passive projection retains the active run, later results, steering, and foreign context without completed history", () => {
 	const persistent = message("custom", "Persistent policy", 1, "foreign-policy");
 	const active = message("user", "Active request", 10);
 	const call = toolAssistant("pending");
 	const foreign = message("custom", "Current policy", 11, "foreign-current");
-	const feedback = message("custom", "Retired finalization", 12, "state-flow-validation");
 	const result = { role: "toolResult", toolCallId: "pending", toolName: "read", content: [{ type: "text", text: "Late result" }], timestamp: 21 } as any;
 	const steering = message("user", "Refinement", 22);
 	const continuation = createPassiveContinuation(emptyState(), 20, active.timestamp);
 	const prefix = [persistent, message("user", "Completed request", 2), message("assistant", "Completed answer", 3)];
 	assert.deepEqual(passiveContinuationMessages([...prefix, active, foreign, call], continuation), [continuation.handoff, persistent, active, foreign, call]);
-	assert.deepEqual(passiveContinuationMessages([...prefix, active, foreign, feedback, call, result, steering], continuation), [continuation.handoff, persistent, active, foreign, call, result, steering]);
-	assert.deepEqual(passiveContinuationMessages([persistent, steering], continuation), [continuation.handoff, persistent, steering], "a missing active anchor must not resurrect a completed prefix");
+	assert.deepEqual(passiveContinuationMessages([...prefix, active, foreign, call, result, steering], continuation), [continuation.handoff, persistent, active, foreign, call, result, steering]);
+	assert.deepEqual(passiveContinuationMessages([persistent, steering], continuation), [continuation.handoff, persistent, steering], "an unavailable raw anchor must not reconstruct discarded entries");
+});
+
+for (const boundary of ["missing", "ambiguous", "nonfinite"] as const) test(`passive Stop preserves available native context for the ${boundary} active boundary`, () => {
+	const persistent = message("custom", "Persistent foreign context", 1, "foreign-policy");
+	const summary = { role: "compactionSummary", summary: "Native summary of the split turn", tokensBefore: 6000, timestamp: 15 } as AgentMessage;
+	const call = toolAssistant("kept-read") as AgentMessage;
+	const result = { role: "toolResult", toolCallId: "kept-read", toolName: "read", content: [{ type: "text", text: "Kept tool evidence" }], timestamp: 16 } as AgentMessage;
+	const late = { ...result, toolCallId: "late-read", timestamp: 21 };
+	const steering = user("Post-stop refinement", 22);
+	const prefix = [persistent, summary, ...(boundary === "ambiguous" ? [user("One user", 10), user("Another user", 10)] : []), call, result];
+	const continuation = createPassiveContinuation(emptyState(), 20, boundary === "nonfinite" ? NaN : 10);
+	const beforeContinuation = structuredClone(continuation);
+	for (const suffix of [[], [late], [late, steering]]) {
+		const available = [...prefix, ...suffix];
+		const before = structuredClone(available);
+		const projected = passiveContinuationMessages(available, continuation);
+		assert.deepEqual(projected, [continuation.handoff, ...available]);
+		assert.ok(projected.slice(1).every((entry, index) => entry === available[index]), "preserve native message identity and order");
+		assert.deepEqual(available, before);
+		assert.deepEqual(continuation, beforeContinuation);
+	}
 });
 
 test("idle and legacy passive cutoffs retain only later conversation plus foreign custom context", () => {
 	const persistent = message("custom", "Persistent policy", 1, "foreign-policy");
-	const feedback = message("custom", "Retired finalization", 21, "state-flow-validation");
 	const later = message("user", "Later request", 22);
 	const continuation = createPassiveContinuation(emptyState(), 20);
 	const prefix = [persistent, message("user", "Completed request", 2), message("assistant", "Completed answer", 3)];
 	assert.deepEqual(passiveContinuationMessages(prefix, continuation), [continuation.handoff, persistent]);
-	assert.deepEqual(passiveContinuationMessages([...prefix, later, feedback], continuation), [continuation.handoff, persistent, later]);
+	assert.deepEqual(passiveContinuationMessages([...prefix, later], continuation), [continuation.handoff, persistent, later]);
 });
 
 test("keeps existing context for one bootstrap run and commits its terminal handoff", async () => {
@@ -243,7 +330,7 @@ test("keeps existing context for one bootstrap run and commits its terminal hand
 	assert.equal(projected.messages[2].content[0].text, "Continue");
 	await commitTerminal(h, { goal: "Existing goal" }, { next: "continue" });
 	const snapshot = h.entries.at(-1)!.data;
-	assert.equal(h.resolveSnapshot(snapshot).meta.bootstrap, false);
+	assert.notEqual(h.resolveSnapshot(snapshot).meta.bootstrap, true);
 	assert.equal(Object.hasOwn(snapshot, "state"), false);
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), {
 		artifacts: {},
@@ -251,13 +338,14 @@ test("keeps existing context for one bootstrap run and commits its terminal hand
 		working: { next: "continue" },
 		intents: {},
 		response: "Done",
+		lazy: {},
 	});
 });
 test("rotates the user-authority turn specification while retaining committed state", async () => {
 	const h = harness();
 	await start(h, "First request");
 	await commitTerminal(h, { mode: "stable" }, { phase: "one" });
-	const next = h.handlers.get("before_agent_start")!({ prompt: "Second request", systemPrompt: "base" }, h.ctx);
+	const next = h.beforeAgentStart("Second request");
 	assert.doesNotMatch(next.systemPrompt, /First request|Second request/);
 	assert.equal(h.resolveSnapshot().meta.specification, "Second request");
 	const projected = h.handlers.get("context")!({
@@ -271,14 +359,16 @@ test("rotates the user-authority turn specification while retaining committed st
 		working: { phase: "one" },
 		intents: {},
 		response: "Done",
+		lazy: {},
 	});
 });
 test("never interpolates user-controlled specification text into the system prompt", async () => {
 	const h = harness();
 	const prompt = "UNTRUSTED-SPEC-DO-NOT-ELEVATE";
 	const started = await start(h, prompt);
+	assert.equal(started.handlerResult, undefined, "protocol sections must not force the entire native prompt");
 	assert.doesNotMatch(started.systemPrompt, /UNTRUSTED-SPEC-DO-NOT-ELEVATE/);
-	assert.match(started.systemPrompt, /State Flow is enabled/);
+	assert.match(started.systemPromptOptions.sections.state_flow!, /State Flow is enabled/);
 	const projected = h.handlers.get("context")!({ messages: [user(prompt, 1)] });
 	assert.match(projected.messages[0].content[0].text, /UNTRUSTED-SPEC-DO-NOT-ELEVATE/);
 });
@@ -344,7 +434,7 @@ test("projects only the latest seven compact accepted transitions", async () => 
 	const h = harness();
 	await start(h, "Current task");
 	for (let index = 0; index < 10; index++) await commitTerminal(h, {}, { index });
-	h.handlers.get("before_agent_start")!({ prompt: "Current task", systemPrompt: "base" }, h.ctx);
+	h.beforeAgentStart("Current task");
 	const projected = h.handlers.get("context")!({ messages: [user("Current task", 1)] });
 	const text = projected.messages[0].content[0].text as string;
 	const runtime = JSON.parse(text.slice(text.indexOf("\n") + 1));
@@ -366,7 +456,7 @@ test("new sessions project durable causality without old conversation trajectori
 
 	const second = harness({ cwd, repositoryRoot, sessionId: "second-session", autoStart: true });
 	second.handlers.get("session_start")!({ reason: "new" }, second.ctx);
-	second.handlers.get("before_agent_start")!({ prompt: "Continue", systemPrompt: "base" }, second.ctx);
+	second.beforeAgentStart("Continue");
 	const projected = second.handlers.get("context")!({ messages: [user("Continue", 2)] });
 	const text = projected.messages[0].content[0].text as string;
 	assert.match(text, /"decision":"durable"/);
@@ -375,7 +465,7 @@ test("new sessions project durable causality without old conversation trajectori
 	assert.equal(projected.messages.some((item: any) => item.content?.[0]?.text === "Persist project decision"), false);
 });
 
-test("tree restoration reads all three scopes from the linked revision", async () => {
+test("tree restoration selects private state while shared scopes remain proven or live", async () => {
 	const h = harness();
 	await start(h, "Branch task");
 	const commitAll = (value: string) => commitScopedTerminal(h, [
@@ -388,49 +478,24 @@ test("tree restoration reads all three scopes from the linked revision", async (
 	await commitAll("abandoned-future");
 	h.entries.splice(0, h.entries.length, ...base);
 	h.handlers.get("session_tree")!({}, h.ctx);
-	h.handlers.get("before_agent_start")!({ prompt: "Branch task", systemPrompt: "base" }, h.ctx);
+	h.beforeAgentStart("Branch task");
 	const projected = h.handlers.get("context")!({ messages: [user("Branch task", 1)] });
 	const text = projected.messages[0].content[0].text as string;
-	assert.match(text, /"globalBranch":"base"/);
-	assert.match(text, /"cwdBranch":"base"/);
+	const sharedSelected = text.includes('"globalBranch":"base"') && text.includes('"cwdBranch":"base"');
+	const sharedLive = text.includes('"globalBranch":"abandoned-future"') && text.includes('"cwdBranch":"abandoned-future"');
+	assert.equal(sharedSelected || sharedLive, true);
 	assert.match(text, /"sessionBranch":"base"/);
-	assert.doesNotMatch(text, /abandoned-future/);
+	assert.doesNotMatch(text, /"sessionBranch":"abandoned-future"/);
 
 	await commitTerminal(h, {}, { sessionBranch: "restored-next" });
 	assert.equal(h.resolveSnapshot().meta.validation, undefined);
 	assert.doesNotMatch(JSON.stringify(h.sentMessages), /cannot publish/);
 	// Untouched shared scopes are adopted from the live basis while the restored session continues.
-	h.handlers.get("before_agent_start")!({ prompt: "Branch task", systemPrompt: "base" }, h.ctx);
+	h.beforeAgentStart("Branch task");
 	const adopted = h.handlers.get("context")!({ messages: [user("Branch task", 2)] });
 	const adoptedText = adopted.messages[0].content[0].text as string;
 	assert.match(adoptedText, /"globalBranch":"abandoned-future"/);
 	assert.match(adoptedText, /"cwdBranch":"abandoned-future"/);
 	assert.match(adoptedText, /"sessionBranch":"restored-next"/);
 	assert.doesNotMatch(adoptedText, /"sessionBranch":"abandoned-future"/);
-});
-
-test("removes abandoned private retry feedback from later bootstrap context", async () => {
-	const h = harness();
-	h.entries.push({ type: "message", message: user("Pre-Flow context", 1) });
-	await start(h, "Old request");
-	h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Unresolved draft." }] },
-	}, h.ctx);
-	h.handlers.get("message_end")!({
-		message: { role: "assistant", stopReason: "aborted", content: [] },
-	}, h.ctx);
-	h.handlers.get("before_agent_start")!({ prompt: "New request", systemPrompt: "base" }, h.ctx);
-	const staleFeedback = {
-		role: "custom",
-		customType: "state-flow-validation",
-		content: "stale retry instruction",
-		display: false,
-		timestamp: 3,
-	};
-	const projected = h.handlers.get("context")!({
-		messages: [user("Pre-Flow context", 1), user("Old request", 2), staleFeedback, user("New request", 4)],
-	});
-	assert.equal(projected.messages.includes(staleFeedback), false);
-	assert.equal(projected.messages.some((message: any) => message.content === "stale retry instruction"), false);
-	assert.equal(projected.messages.some((message: any) => message.content?.[0]?.text === "Pre-Flow context"), true);
 });

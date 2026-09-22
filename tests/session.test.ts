@@ -62,17 +62,20 @@ test("manual defaults ignore existing CWD state while configured new sessions in
 	assert.equal(automatic.statuses.at(-1), "<accent>state-flow</accent> <dim>#0</dim>");
 	assert.deepEqual(automatic.resolveSnapshot().config, { enabled: true });
 	assert.equal(automatic.resolveSnapshot().meta.step, 0);
-	assert.deepEqual(automatic.entries.at(-1)!.data, { revision: automatic.resolveSnapshot().meta.durableBase });
+	const checkpoint = automatic.entries.at(-1)!.data;
+	assert.equal(typeof checkpoint.boundary, "string");
+	assert.equal(checkpoint.enabled, true);
+	assert.equal(checkpoint.step, 0);
 	assert.equal(Object.hasOwn(automatic.entries.at(-1)!.data, "state"), false);
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), emptyState());
-	automatic.handlers.get("before_agent_start")!({ prompt: "Continue", systemPrompt: "base" }, automatic.ctx);
+	automatic.beforeAgentStart("Continue");
 	const projected = automatic.handlers.get("context")!({ messages: [user("Continue", 1)] });
 	assert.match(projected.messages[0].content[0].text, /"project":"cwd"/);
 	assert.match(projected.messages[0].content[0].text, /"shared":"global"/);
 	assert.match(projected.messages[0].content[0].text, /"next":"resume"/);
 });
 
-test("two Pi sessions in one CWD persist distinct Git-backed session layers", async () => {
+test("two Pi sessions in one CWD persist distinct canonical session layers", async () => {
 	const first = harness({ cwd: "/tmp/state-flow-shared-cwd", sessionId: "session-a" });
 	await start(first);
 	await commitTerminal(first, { owner: "session-a" }, { next: "first" });

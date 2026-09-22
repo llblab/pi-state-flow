@@ -40,6 +40,11 @@ test("path grammar rejects ambiguous, unknown, and out-of-range forms", () => {
 		assert.throws(() => parseStateReadPath(path));
 	}
 	assert.deepEqual(parseStateReadPath("cwd.patches[7]"), { kind: "patch", path: "cwd.patches[7]", offset: 7, scope: "cwd" });
+	assert.deepEqual(parseStateReadPath("session[12]", 12), { kind: "state", path: "session[12]", offset: 12, scope: "session" });
+	assert.throws(() => parseStateReadPath("session[13]", 12), /integer from 0 to 12/);
+	assert.deepEqual(parseStateReadPath("session", 0), { kind: "state", path: "session", offset: 0, scope: "session" });
+	assert.throws(() => parseStateReadPath("session[1]", 0), /integer from 0 to 0/);
+	assert.throws(() => parseStateReadPath("session", 101), /history limit.*0 to 100/);
 });
 
 test("projected reads return pure values, strict ranges, and minimal structural keys", () => {

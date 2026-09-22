@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { freemem, loadavg } from "node:os";
 import type { AgentSession, ReadToolDetails } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall, type Context } from "@earendil-works/pi-ai";
-import type { MaterializedState } from "../lib/state.ts";
+import type { ModelState } from "../lib/state.ts";
 import type { RealPiFixture } from "../tests/pi-harness.ts";
 
 assert.ok([undefined, "0", "1"].includes(process.env.BENCH_RESOURCES), "BENCH_RESOURCES must be 0 or 1");
@@ -87,7 +87,7 @@ export interface PromptCase {
 	source: string;
 	sourceFileBytes: number;
 	firstInference?: boolean;
-	expectedFirstState?: MaterializedState;
+	expectedFirstState?: ModelState;
 }
 export async function prompt(fixture: RealPiFixture, session: AgentSession, options: PromptCase) {
 	const { stateFlow, counter, size, source, sourceFileBytes } = options;
@@ -137,7 +137,7 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 		...(stateFlow ? [(context: Context) => {
 			observe(context.messages);
 			assertRead(context);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { counter, ...(counter === 1 ? { payload: "x".repeat(size) } : {}) } }, final: true }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { counter, ...(counter === 1 ? { payload: "x".repeat(size) } : {}) } } }), { stopReason: "toolUse" });
 		}] : []),
 		(context) => { observe(context.messages); assertRead(context); return fauxAssistantMessage(`Accepted ${counter}`); },
 	]);

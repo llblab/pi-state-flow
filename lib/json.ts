@@ -10,46 +10,56 @@ function isIndexedArrayPatch(value: JsonObject): boolean {
 	return keys.length > 0 && keys.every((key) => ARRAY_INDEX_SELECTOR.test(key));
 }
 
-function applyArrayPatch(state: JsonValue[], patch: JsonObject): JsonValue[] {
-	const next = structuredClone(state);
+function applyOwnedValue(current: JsonValue | undefined, value: JsonValue, owned: boolean): JsonValue {
+	// Preserve inherited-object merge semantics without borrowing prototype objects.
+	if (!owned && current !== null && typeof current === "object") current = structuredClone(current);
+	return Array.isArray(current) && isObject(value) && isIndexedArrayPatch(value)
+		? applyOwnedArrayPatch(current, value)
+		: isObject(current) && isObject(value)
+			? applyOwnedPatch(current, value)
+			: structuredClone(value);
+}
+
+function applyOwnedArrayPatch(state: JsonValue[], patch: JsonObject): JsonValue[] {
+	let next = state;
 	for (const [selector, value] of Object.entries(patch)) {
-		const match = ARRAY_INDEX_SELECTOR.exec(selector)!;
-		const index = Number(match[1]);
+		const index = Number(ARRAY_INDEX_SELECTOR.exec(selector)![1]);
 		if (!Number.isSafeInteger(index) || index >= next.length) {
 			throw new Error(`State patch array index ${selector} is out of bounds for length ${next.length}`);
 		}
 		if (value === null) throw new Error(`State patch array index ${selector} cannot be deleted; replace the whole array instead`);
-		const current = next[index]!;
-		next[index] = Array.isArray(current) && isObject(value) && isIndexedArrayPatch(value)
-			? applyArrayPatch(current, value)
-			: isObject(current) && isObject(value)
-				? applyPatch(current, value)
-				: structuredClone(value);
+		const owns = Object.hasOwn(next, index);
+		const current = next[index];
+		const materialized = applyOwnedValue(current, value, owns);
+		if (owns && Object.is(current, materialized)) continue;
+		if (next === state) next = state.slice();
+		next[index] = materialized;
 	}
 	return next;
 }
 
-export function applyPatch(state: JsonObject, patch: JsonObject): JsonObject {
-	const next: JsonObject = structuredClone(state);
+function applyOwnedPatch(state: JsonObject, patch: JsonObject): JsonObject {
+	let next = state;
 	for (const [key, value] of Object.entries(patch)) {
+		const owns = Object.hasOwn(next, key);
 		if (value === null) {
+			if (!owns) continue;
+			if (next === state) next = { ...state };
 			delete next[key];
 			continue;
 		}
 		const current = next[key];
-		const materialized = Array.isArray(current) && isObject(value) && isIndexedArrayPatch(value)
-			? applyArrayPatch(current, value)
-			: isObject(current) && isObject(value)
-				? applyPatch(current, value)
-				: structuredClone(value);
-		Object.defineProperty(next, key, {
-			value: materialized,
-			enumerable: true,
-			configurable: true,
-			writable: true,
-		});
+		const materialized = applyOwnedValue(current, value, owns);
+		if (owns && Object.is(current, materialized)) continue;
+		if (next === state) next = { ...state };
+		Object.defineProperty(next, key, { value: materialized, enumerable: true, configurable: true, writable: true });
 	}
 	return next;
+}
+
+/** Detach at the mutable public boundary; share untouched paths only inside the owned draft. */
+export function applyPatch(state: JsonObject, patch: JsonObject): JsonObject {
+	return applyOwnedPatch(structuredClone(state), patch);
 }
 
 export function isObject(value: JsonValue | unknown): value is JsonObject {
@@ -64,6 +74,12 @@ export function validatePatch(value: unknown): asserts value is JsonObject {
 export function canonicalJson(value: JsonValue | unknown): string {
 	if (!isJsonValue(value)) throw new Error("Value must be finite, acyclic JSON data");
 	return JSON.stringify(orderValue(value));
+}
+
+/** Deterministic-by-construction presentation JSON; preserves intentional object insertion order. */
+export function presentationJson(value: JsonValue | unknown): string {
+	if (!isJsonValue(value)) throw new Error("Value must be finite, acyclic JSON data");
+	return JSON.stringify(value);
 }
 
 export function sameJson(left: JsonValue | unknown, right: JsonValue | unknown): boolean {

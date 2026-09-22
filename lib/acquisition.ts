@@ -1,8 +1,11 @@
 import {
-	classifyArtifactFreshness,
-	type ArtifactInvalidationReason,
-	type ArtifactInvalidationRequest,
-	type ArtifactSourceIdentity,
+  classifyArtifactCompilationNeed,
+  inspectRegisteredArtifactPaths,
+  sameArtifactSourceFingerprint,
+  type ArtifactInvalidationReason,
+  type ArtifactInvalidationRequest,
+  type ArtifactSourceFingerprint,
+  type ArtifactSourceIdentity,
 } from "./artifact.ts";
 import { isObject } from "./json.ts";
 
@@ -35,7 +38,7 @@ export interface ArtifactAcquisitionOptions {
 	/** Caller-assessed semantic sufficiency; only relevant to a concrete relevant gap. */
 	materializedSufficient?: boolean;
 	explicitRefresh?: boolean;
-	/** Runtime-owned freshness evidence retained beside the semantic artifact. */
+	/** Runtime-owned compilation evidence retained beside the semantic artifact. */
 	provenance?: unknown;
 }
 
@@ -45,6 +48,7 @@ export interface SuccessfulArtifactRead extends ArtifactInvalidationRequest {}
 interface PendingRead {
 	toolName: string;
 	args: unknown;
+	fingerprint?: ArtifactSourceFingerprint;
 }
 
 function readPath(toolName: unknown, args: unknown): string | undefined {
@@ -84,7 +88,12 @@ export class ArtifactReadTracker {
 		const path = readPath(pending.toolName, pending.args);
 		if (path === undefined) return;
 		const candidate = this.#candidates.get(path);
-		if (candidate !== undefined) this.successful.set(path, structuredClone(candidate));
+		if (candidate === undefined || pending.fingerprint === undefined) return;
+		const observation = inspectRegisteredArtifactPaths([path])[0];
+		if (observation?.kind !== "present" || !sameArtifactSourceFingerprint(pending.fingerprint, observation.fingerprint)) return;
+		const finalObservation = inspectRegisteredArtifactPaths([path])[0];
+		if (finalObservation?.kind !== "present" || !sameArtifactSourceFingerprint(observation.fingerprint, finalObservation.fingerprint)) return;
+		this.successful.set(path, structuredClone({ ...candidate, sourceFingerprint: finalObservation.fingerprint }));
 	}
 
 	#record(toolCallId: string, toolName: string, args: unknown): void {
@@ -92,14 +101,20 @@ export class ArtifactReadTracker {
 			this.#pending.delete(toolCallId);
 			return;
 		}
-		this.#pending.set(toolCallId, { toolName, args });
+		const path = readPath(toolName, args);
+		const observation = path !== undefined && this.#candidates.has(path) ? inspectRegisteredArtifactPaths([path])[0] : undefined;
+		this.#pending.set(toolCallId, {
+			toolName,
+			args,
+			...(observation?.kind === "present" ? { fingerprint: observation.fingerprint } : {}),
+		});
 	}
 }
 
 /**
  * Apply one materialized-first source acquisition policy.
  *
- * Freshness invalidation always wins. Otherwise routine use and a new session
+ * Required recompilation always wins. Otherwise routine use and a new session
  * stay on materialized state; only a concrete source need permits rereading.
  */
 export function decideArtifactAcquisition(
@@ -108,15 +123,15 @@ export function decideArtifactAcquisition(
 	compiler: string,
 	options: ArtifactAcquisitionOptions,
 ): ArtifactAcquisitionDecision {
-	const freshness = classifyArtifactFreshness(
+	const need = classifyArtifactCompilationNeed(
 		source,
 		metadata,
 		compiler,
 		options.explicitRefresh ?? false,
 		options.provenance,
 	);
-	if (freshness.kind === "requires-compilation") {
-		return { kind: "read-source", reason: freshness.reason };
+	if (need.kind === "requires-compilation") {
+		return { kind: "read-source", reason: need.reason };
 	}
 
 	switch (options.intent) {

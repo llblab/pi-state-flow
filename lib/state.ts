@@ -3,19 +3,19 @@ import {
 	projectArtifactsForModel,
 	updateArtifactRegistry,
 	type ArtifactCompilationUpdate,
+	type ArtifactModelHints,
 	type ArtifactRegistry,
 } from "./artifact.ts";
-import { applyPatch, isJsonValue, isObject, type JsonObject, type JsonValue } from "./json.ts";
+import { applyPatch, isObject, type JsonObject } from "./json.ts";
 
 /** The canonical semantic state shape shared by global, CWD, and session scopes. */
 export type MaterializedState = JsonObject & {
-	artifacts: ArtifactRegistry;
+	intents: JsonObject;
 	contract: JsonObject;
 	working: JsonObject;
-	intents: JsonObject;
+	artifacts: ArtifactRegistry;
 	response: string;
-	/** Absent is the canonical empty lazy plane and preserves predecessor-store compatibility. */
-	lazy?: JsonValue;
+	lazy: JsonObject;
 };
 
 /** Compatibility name for callers that still treat materialized state as a document. */
@@ -28,6 +28,7 @@ export interface StatePatch extends JsonObject {
 	working: JsonObject;
 	intents: JsonObject;
 	response: string;
+	lazy: JsonObject;
 }
 
 export type StateScope = "global" | "cwd" | "session";
@@ -38,7 +39,7 @@ export interface ScopePatch {
 	contract?: JsonObject;
 	working?: JsonObject;
 	intents?: JsonObject;
-	lazy?: JsonValue;
+	lazy?: JsonObject;
 }
 
 export interface ScopedPatch {
@@ -68,7 +69,7 @@ export interface ScopedStates {
 }
 
 export function emptyState(): MaterializedState {
-	return { artifacts: {}, contract: {}, working: {}, intents: {}, response: "" } as MaterializedState;
+	return { intents: {}, contract: {}, working: {}, artifacts: {}, response: "", lazy: {} };
 }
 
 export function isMaterializedState(value: unknown): value is MaterializedState {
@@ -78,18 +79,11 @@ export function isMaterializedState(value: unknown): value is MaterializedState 
 		&& isObject(value.working)
 		&& isObject(value.intents)
 		&& typeof value.response === "string"
-		&& (!Object.hasOwn(value, "lazy") || (isJsonValue(value.lazy) && value.lazy !== null))
+		&& isObject(value.lazy)
 		&& Object.keys(value).every((key) => key === "artifacts" || key === "contract" || key === "working" || key === "intents" || key === "response" || key === "lazy");
 }
 
 export const isStateDocument = isMaterializedState;
-
-/** Upgrade one exact pre-intents materialized state without inferring commitments. */
-export function migratePreIntentState(value: unknown): MaterializedState | undefined {
-	if (!isObject(value) || Object.hasOwn(value, "intents")) return undefined;
-	const candidate = { ...structuredClone(value), intents: {} };
-	return isMaterializedState(candidate) ? candidate : undefined;
-}
 
 /** Atomically replace compiled and removed artifacts inside one materialized scope. */
 export function updateMaterializedArtifacts(
@@ -109,8 +103,22 @@ export function overlayStates(...scopes: readonly MaterializedState[]): Material
 	}, emptyState());
 }
 
-/** Model-visible projection: runtime artifact bookkeeping never reaches ordinary context. */
-export function projectStateForModel(state: MaterializedState): MaterializedState {
-	const { lazy: _lazy, ...hot } = structuredClone(state);
-	return { ...hot, artifacts: projectArtifactsForModel(state.artifacts) } as MaterializedState;
+export type ModelState = JsonObject & {
+	intents: JsonObject;
+	contract: JsonObject;
+	working: JsonObject;
+	artifacts: ArtifactRegistry;
+	response: string;
+};
+
+/** Model-visible projection: lazy bodies and runtime artifact bookkeeping stay out of ordinary context. */
+export function projectStateForModel(state: MaterializedState, artifactHints: ArtifactModelHints = {}): ModelState {
+	const cloned = structuredClone(state);
+	return {
+		intents: cloned.intents,
+		contract: cloned.contract,
+		working: cloned.working,
+		artifacts: projectArtifactsForModel(cloned.artifacts, artifactHints),
+		response: cloned.response,
+	};
 }

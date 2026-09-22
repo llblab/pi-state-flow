@@ -1,10 +1,10 @@
 # Lazy state through progressive `read_state`
 
-**Status**: Implemented architecture for the next minor release. Final release validation and publication remain open.
+This document describes the implemented lazy-state contract. [BACKLOG.md](../BACKLOG.md) owns release readiness; [temporal acceptance](temporal-acceptance.md) maps behavior to executable evidence.
 
 ## Thesis
 
-State Flow should add `lazy` as a fifth semantic plane in every scope. Lazy values are ordinary JSON: durable and versioned with the same causal lineage as hot state, but excluded from ordinary baseline hydration.
+State Flow provides `lazy` as a required object-root semantic plane in every scope. Nested lazy values are ordinary JSON: durable and versioned with the same causal lineage as hot state, but excluded from ordinary baseline hydration.
 
 The model-facing surface remains small:
 
@@ -34,19 +34,19 @@ The model-facing surface remains small:
 
 ## Semantic model
 
-Each scope may contain six semantic planes:
+Each scope contains six semantic planes in intent-first presentation order:
 
 ```text
 global | CWD | session
-├── artifacts
+├── intents
 ├── contract
 ├── working
-├── intents
+├── artifacts
 ├── response (session-owned where applicable)
 └── lazy
 ```
 
-`artifacts`, `contract`, `working`, `intents`, and `response` remain hot. `intents` may keep compact active direction while referring to large supporting detail in `lazy`. `lazy` differs only in projection policy:
+`intents`, `contract`, `working`, `artifacts`, and `response` remain hot. `intents` may keep compact active direction while referring to large supporting detail in `lazy`. `lazy` differs only in projection policy:
 
 - It is canonical semantic JSON, validated and versioned with its owning scope.
 - It is excluded from the ordinary baseline effective-state body.
@@ -61,7 +61,7 @@ State Flow preserves all forms exactly as ordinary JSON. It does not scan prose,
 
 Reference repair is reactive, not a maintenance scan. The agent does not enumerate, audit, or resolve references merely to test them. Only after one requested `read_state` value path is missing does State Flow perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` and `$path` matches. If found, the tool returns `{value:null, hint:[{type:"dangling-reference", message, paths}]}`. `hint` is explicit top-level metadata rather than state data; its action message asks for reconciliation and its path array contains at most three runtime-verified current owners. The null sentinel is never returned alone for this case. Keys, patch, and multi-path reads keep ordinary all-or-error semantics; no durable match retains the missing-path error and does not prove the agent invented the path. The agent may then reconcile a proven stale owning value while preserving surrounding meaning. This applies equally to `$ref` objects and contextual references in prose. Effective-state absence alone does not identify the owner, and unavailable history, inaccessible external resources, or transient read failure do not prove that a durable reference is broken.
 
-Valid lazy values include:
+The `lazy` root must be an object. Its nested values may include arrays, objects, and scalars, for example:
 
 ```json
 ["important thought", "next thought"]
@@ -136,7 +136,7 @@ Errors use the normal tool-error channel rather than successful JSON containing 
 
 ### Path and range model
 
-Every path has an explicit root and addresses:
+Unscoped semantic paths alias current effective state. Explicit roots and selectors address:
 
 - `effective` for the current composed overlay or an indexed historical effective root.
 - `global`, `cwd`, and `session` for explicit current or historical scopes.
@@ -156,11 +156,11 @@ cwd.lazy.memory[10:20]
 session[3].lazy.investigation
 ```
 
-Indices are zero-based. Negative indices, open-ended ranges, steps, predicates, wildcards, unions, and cross-array expressions are rejected in the first version.
+Indices are zero-based. Negative indices, open-ended ranges, steps, predicates, wildcards, unions, and cross-array expressions are rejected.
 
 A range must fit entirely within the current array. If an array has length 10, `[0:10]` and `[10:10]` are valid, while `[0:15]` and `[11:11]` fail. The fallback `..` spelling has identical semantics. A successful result always contains exactly the requested range. State Flow never returns a shorter successful range with truncation metadata.
 
-The implementation must reuse or compatibly extend existing member escaping rather than inventing a second object-path language.
+All projections use the same strict member grammar; no separate lazy path language exists.
 
 ## Projections
 
@@ -396,8 +396,7 @@ Array index selectors extend recursive addressing:
         "[4]": "corrected fifth thought"
       }
     }
-  },
-  "final": true
+  }
 }
 ```
 
@@ -425,8 +424,7 @@ Nested addressing remains ordinary patch structure:
         }
       }
     }
-  },
-  "final": true
+  }
 }
 ```
 
@@ -440,24 +438,23 @@ Lazy mutations inherit existing guarantees:
 - One lock/CAS publication cohort.
 - Atomic hot-plus-lazy multi-scope changes.
 - Scope-local deletion and effective revelation semantics.
-- Exact revision selection on restore and branch navigation.
+- Exact retained-boundary selection on restore and branch navigation.
 - Read-only discovery with no commit, timestamp update, or transition.
 
-The first implementation keeps lazy trees co-located in the existing scope semantic files. A local Git-backed probe with incompressible 1 KiB, 100 KiB, and 1 MiB lazy payloads observed 0.33–0.42 s publication, 0.24–0.30 s cold restoration, and approximately linear loose-store growth; the 1 MiB case occupied about 2.2 MiB including the worktree and loose Git history. This does not justify sharding before real workload evidence. A future path-sharded or content-addressed optimization must expose one logical State Flow revision, preserve symlink and ownership safety, and keep normalized semantic JSON authoritative while indexes and caches remain rebuildable projections.
+Lazy trees are co-located in canonical scope checkpoints/tails and use the same bounded lineage as hot state. Git-era publication and cold-restoration measurements do not describe this implementation. The [performance guide](performance.md) owns current synthetic workloads and measurement limits. No separate lazy index or sharded authority exists; any future layout change requires measured need and must preserve canonical semantics, ownership, and one causal lineage.
 
 ## Failure semantics
 
 - A nonexistent path, wrong target kind, malformed selector, or out-of-bounds index/range is a tool error.
 - One invalid member of a path batch fails the entire read before returning partial success.
 - One invalid indexed patch fails the entire mutation before publication.
-- A malformed lazy subtree fails closed at the smallest affected path and reports that path.
-- Missing or corrupt optional indexes cannot make canonical lazy JSON disappear.
-- Read failures create no semantic transition and do not affect ordinary hot state.
-- Mechanical index rebuilds create no semantic transition.
+- Malformed canonical lazy data fails the dependent scope/runtime load without rewriting retained bytes; it is not silently discarded to manufacture valid hot state.
+- Invalid reads and rejected patches create no semantic transition and preserve accepted hot state.
+- Independent scopes remain usable only where the ordinary filesystem/recovery contract proves their authority.
 
 ## Normative invariants
 
-1. **Ordinary JSON**: Lazy values contain domain semantics, never mandatory State Flow record wrappers.
+1. **Object root, ordinary JSON children**: Every scope has a lazy object whose nested values contain domain semantics, never mandatory State Flow record wrappers.
 2. **Semantic snapshots**: `value` contains only the selected state snapshot and `patch` only the selected semantic patch; `keys` alone adds closed structural `meta` before `keys`.
 3. **Exact success**: A successful read returns everything requested; it never truncates or paginates silently.
 4. **Runtime-owned concurrency**: Revisions, locks, and CAS remain internal unless explicitly needed for diagnostics.
@@ -468,7 +465,7 @@ The first implementation keeps lazy trees co-located in the existing scope seman
 9. **Explicit frontier crossing**: Only a visible hot-state patch promotes a lazy consequence.
 10. **Patch remains patch**: Array indices extend recursive addressing without introducing an edit-command language.
 11. **Index safety**: Array indices are interpreted only against one captured basis under lock/CAS.
-12. **Failure isolation**: Lazy corruption or unavailable indexes do not damage valid hot state.
+12. **Failure preservation**: Invalid reads or patches preserve accepted bytes; canonical corruption fails closed rather than granting partial authority.
 
 ## Validation contract
 
@@ -487,27 +484,14 @@ Before release, implementation evidence must prove:
 - `effective.lazy` follows global → CWD → session overlay while explicit scope paths preserve ownership.
 - Reads create no semantic transition, Git commit, publication, freshness update, or future activation.
 - Whole-array replacement and indexed scalar, array, object, nested, multi-index, and stale-basis patches remain atomic.
-- Restore, fork, file-only, and Git-backed paths select lazy state from the same owning State Flow revision.
-- Corrupt lazy data or optional indexes do not damage ordinary hot State Flow.
-- Legacy stores and legacy `read_state` inputs either migrate deterministically or fail actionably.
+- Restore and fork select lazy state from the same retained canonical boundary as the rest of the owning session scope.
+- Malformed canonical lazy data fails closed without rewriting the store; rejected queries and patches preserve accepted hot state.
+- Unsupported predecessor stores and retired `read_state` inputs fail actionably without rewriting retained bytes.
 
-## Remaining evolution decisions
+## Limits and change authority
 
-- Exact member escaping beyond the current strict grammar for names containing separators or brackets.
-- A measured real-workload threshold that would justify replacing the initial co-located semantic layout.
-- Cold Git-history access beyond retained hot history.
+Retained hot history is the entire semantic history available to these readers; cold Git-history access is unsupported. Names must fit the shared path grammar. Generalized querying, sharding, mandatory record objects, metadata envelopes, pagination, and a second mutation language are not implied future work and require a separate evidence-backed design decision.
 
-These decisions cannot introduce mandatory record objects, default metadata envelopes, pagination, typed queries, search, ranking, or a second mutation language without a new design decision.
-
-## Next minor release sequence
-
-1. Extend the existing path parser with canonical escaping, ordered batches, strict indices, and half-open ranges.
-2. Implement semantic-snapshot `value`, structural `meta` + `keys`, and semantic `patch` reads over current hot state first.
-3. Add indexed recursive array patching through the existing lock/CAS barrier.
-4. Add `lazy` to scope validation, persistence, history, restore, and explicit scoped reads.
-5. Add the read-only `effective.lazy` overlay and bounded baseline navigation hint.
-6. Add migration, corruption, stale-basis, restore, fork, file-only, Git-backed, and concurrency coverage.
-7. Measure repository growth, publication latency, restoration latency, and package/store size before selecting any sharded layout.
-8. Update runtime protocol and user documentation, run full validation, and release through the repository's guarded minor-release flow.
+The [canonical backlog](../BACKLOG.md) owns remaining implementation and release gates. This contract is not a parallel delivery plan.
 
 The stopping rule is conceptual economy: ordinary JSON, one effective lazy overlay, pure state and patch snapshots, one narrow structural `meta` + `keys` projection, recursive patches with indexed array addressing, and one mutation/publication barrier.

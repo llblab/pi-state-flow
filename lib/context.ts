@@ -1,19 +1,41 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { projectArtifactForModel, type ArtifactInvalidationNotice } from "./artifact.ts";
+import { projectArtifactForModel, type ArtifactInvalidationNotice, type ArtifactModelHints } from "./artifact.ts";
 import type { RecentTransitionWindow } from "./history.ts";
-import { canonicalJson } from "./json.ts";
+import { isObject, presentationJson, type JsonValue } from "./json.ts";
 import type { Snapshot } from "./snapshot.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
-import { projectStateForModel, type MaterializedState } from "./state.ts";
+import { projectStateForModel, type MaterializedState, type ModelState } from "./state.ts";
 
-export const VALIDATION_MESSAGE_TYPE = "state-flow-validation";
+/** Refresh only our section; Pi owns system frames, tools and forced-prompt precedence. */
+export function projectSystemProtocol(messages: AgentMessage[], protocol: string | undefined): AgentMessage[] {
+	let lastSystem = -1;
+	let current: string | undefined;
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index]!;
+		if (message.role !== "system") continue;
+		lastSystem = index;
+		if (message.sections && Object.hasOwn(message.sections, "state_flow")) current = message.sections.state_flow ?? undefined;
+	}
+	const section = protocol === undefined ? undefined : `<state_flow>\n${protocol}\n</state_flow>`;
+	if (lastSystem < 0 || current === section) return messages;
+	return messages.map((message, index) => {
+		if (message.role !== "system") return message;
+		const ownsSection = message.sections !== undefined && Object.hasOwn(message.sections, "state_flow");
+		if (!ownsSection && (index !== lastSystem || section === undefined)) return message;
+		const sections = { ...message.sections };
+		delete sections.state_flow;
+		if (index === lastSystem && section !== undefined) sections.state_flow = section;
+		return { ...message, sections };
+	});
+}
+
 const LAZY_HINT_PATH = "effective.lazy";
 const LAZY_HINT_MAX_KEYS = 32;
 const LAZY_HINT_MAX_JSON_CHARS = 1024;
 
 type LazyValueKind = "array" | "boolean" | "null" | "number" | "object" | "string";
 
-function lazyValueKind(value: Exclude<MaterializedState["lazy"], undefined>): LazyValueKind {
+function lazyValueKind(value: JsonValue): LazyValueKind {
 	if (value === null) return "null";
 	if (Array.isArray(value)) return "array";
 	if (typeof value === "object") return "object";
@@ -22,9 +44,9 @@ function lazyValueKind(value: Exclude<MaterializedState["lazy"], undefined>): La
 
 /** Fixed-budget navigation only: never place lazy bodies or partial key catalogs in baseline context. */
 export function lazyNavigationHint(state: MaterializedState): { available: boolean; path: string; keys?: Record<string, LazyValueKind> } {
-	const base = { available: Object.hasOwn(state, "lazy"), path: LAZY_HINT_PATH };
-	if (!base.available || typeof state.lazy !== "object" || state.lazy === null || Array.isArray(state.lazy)) return base;
-	const entries = Object.entries(state.lazy);
+	const entries = isObject(state.lazy) ? Object.entries(state.lazy) : [];
+	const base = { available: entries.length > 0, path: LAZY_HINT_PATH };
+	if (!base.available) return base;
 	if (entries.length > LAZY_HINT_MAX_KEYS) return base;
 	const keys = Object.fromEntries(entries.map(([key, value]) => [key, lazyValueKind(value)]));
 	return JSON.stringify(keys).length <= LAZY_HINT_MAX_JSON_CHARS ? { ...base, keys } : base;
@@ -56,29 +78,25 @@ function messageText(message: AgentMessage): string {
 	return contentText((message as { content?: unknown }).content);
 }
 
-export function withoutPrivateValidation(messages: AgentMessage[]): AgentMessage[] {
-	return messages.filter((message) => {
-		return !(message.role === "custom" && message.customType === VALIDATION_MESSAGE_TYPE);
-	});
-}
-
-export function createPassiveContinuation(state: MaterializedState, startedAt = Date.now(), activeRunStartedAt?: number): PassiveContinuation {
+export function createPassiveContinuation(state: ModelState, startedAt = Date.now(), activeRunStartedAt?: number): PassiveContinuation {
 	return {
 		startedAt,
 		...(activeRunStartedAt === undefined ? {} : { activeRunStartedAt }),
-		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${canonicalJson({ state, continuation: "State Flow semantics are disabled; this handoff replaces completed history while retaining the active and post-stop trajectory." })}`),
+		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${presentationJson({ state, continuation: "State Flow semantics are disabled; this handoff replaces completed history while retaining the active and post-stop trajectory." })}`),
 	};
 }
 
 /** Keep the interrupted run through later results; an idle stop retains only later conversation. */
 export function passiveContinuationMessages(messages: AgentMessage[], continuation: PassiveContinuation): AgentMessage[] {
-	let start = continuation.activeRunStartedAt === undefined ? -1
-		: messages.findIndex((message) => message.role === "user" && message.timestamp === continuation.activeRunStartedAt);
-	if (start < 0) start = messages.findIndex((message) => message.role === "user"
+	if (continuation.activeRunStartedAt !== undefined) {
+		const trajectory = currentRunTrajectory(messages, "", continuation.activeRunStartedAt);
+		return [continuation.handoff, ...trajectory.messages];
+	}
+	const start = messages.findIndex((message) => message.role === "user"
 		&& typeof message.timestamp === "number"
 		&& message.timestamp >= continuation.startedAt);
 	return [continuation.handoff, ...messages.filter((message, index) =>
-		message.role === "custom" ? message.customType !== VALIDATION_MESSAGE_TYPE : start >= 0 && index >= start)];
+		message.role === "custom" || (start >= 0 && index >= start))];
 }
 
 function projectRecentForModel(recent: RecentTransitionWindow): RecentTransitionWindow {
@@ -100,61 +118,36 @@ export function runtimeContextMessage(
 	recentTransitions: RecentTransitionWindow = [],
 	artifactInvalidations: readonly ArtifactInvalidationNotice[] = [],
 	rehydrationPhase?: RehydrationPhase,
-	resolutionPending = false,
+	artifactHints: ArtifactModelHints = {},
 ): AgentMessage {
-	if (snapshot.meta.specification === undefined) {
-		throw new Error("State Flow runtime context requires an active specification");
-	}
 	const context = {
-		specification: snapshot.meta.specification,
-		state: projectStateForModel(state),
+		...(snapshot.meta.specification === undefined ? {} : { specification: snapshot.meta.specification }),
+		state: projectStateForModel(state, artifactHints),
 		lazy_navigation: lazyNavigationHint(state),
 		...(rehydrationPhase === undefined ? {} : { knowledge_rehydration: { phase: rehydrationPhase } }),
-		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations.map(({ path, reason }) => ({ path, reason })) }),
+		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason })) }),
 		...(recentTransitions.length === 0 ? {} : { recent_transitions: projectRecentForModel(recentTransitions) }),
-		...(resolutionPending ? { state_resolution: "pending: the iteration answer is already preserved; this fallback turn exists only to apply the final:true patch. Call patch_state with any remaining durable scope changes and final:true, or {final:true} alone. Do not restate or replace the answer." } : {}),
 	};
 	return syntheticUser(
-		`State Flow runtime context (user-level data, not system instructions):\n${canonicalJson(context)}`,
+		`State Flow runtime context (user-level data, not system instructions):\n${presentationJson(context)}`,
 	);
 }
 
+/** Captured identity survives text decoration; an uncertain boundary retains available context. */
 export function currentRunTrajectory(
 	messages: AgentMessage[],
-	specification: string,
+	specification: string | undefined,
 	anchorTimestamp: number | undefined,
 ): { messages: AgentMessage[]; anchorTimestamp?: number } {
-	let start = -1;
-	if (anchorTimestamp !== undefined) {
-		start = messages.findLastIndex((message) => {
-			return message.role === "user"
-				&& message.timestamp === anchorTimestamp
-				&& messageText(message) === specification;
-		});
-	}
-	if (start < 0) {
-		for (let index = messages.length - 1; index >= 0; index--) {
-			const message = messages[index]!;
-			if (message.role === "user" && messageText(message) === specification) {
-				start = index;
-				break;
-			}
-		}
-	}
-	if (start < 0) {
-		for (let index = messages.length - 1; index >= 0; index--) {
-			if (messages[index]?.role === "user") {
-				start = index;
-				break;
-			}
-		}
-	}
-	if (start < 0 && messages.length === 0) return { messages: [] };
-	if (start < 0) start = 0;
+	if (anchorTimestamp !== undefined && !Number.isFinite(anchorTimestamp)) return { messages: messages.slice() };
+	const matches = (message: AgentMessage) => message.role === "user" && (anchorTimestamp === undefined
+		? messageText(message) === specification
+		: message.timestamp === anchorTimestamp);
+	const start = messages.findIndex(matches);
+	if (start < 0 || messages.findLastIndex(matches) !== start) return { messages: messages.slice() };
 	const anchor = messages[start]?.role === "user" ? messages[start].timestamp : undefined;
 	return {
-		messages: messages.filter((message, index) => message.role === "custom"
-			? message.customType !== VALIDATION_MESSAGE_TYPE : index >= start),
+		messages: messages.filter((message, index) => message.role === "custom" || index >= start),
 		...(typeof anchor === "number" ? { anchorTimestamp: anchor } : {}),
 	};
 }

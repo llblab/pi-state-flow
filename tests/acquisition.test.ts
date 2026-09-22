@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { ArtifactReadTracker, decideArtifactAcquisition } from "../lib/acquisition.ts";
 
@@ -39,6 +42,21 @@ test("requires rereading when the observed source hash changed", () => {
 	}), { kind: "read-source", reason: "source-changed" });
 });
 
+test("fingerprint invalidation overrides materialized sufficiency across acquisition intents", () => {
+	const source = { path: "/registered.txt", sourceFingerprint: { size: 5, mtimeNs: "10" } };
+	const semantic = { description: "Retained compilation" };
+	for (const intent of ["routine", "new-session", "relevant-gap"] as const) {
+		for (const [provenance, reason] of [
+			[{ sourceFingerprint: { size: 6, mtimeNs: "10" } }, "source-changed"],
+			[undefined, "invalid-metadata"],
+			[{ sourceFingerprint: { size: 5, mtimeNs: "bad" } }, "invalid-metadata"],
+		] as const) assert.deepEqual(decideArtifactAcquisition(source, semantic, "artifact-v1", { intent, materializedSufficient: true, provenance }), { kind: "read-source", reason });
+		assert.deepEqual(decideArtifactAcquisition(source, semantic, "artifact-v1", {
+			intent, materializedSufficient: true, provenance: { sourceFingerprint: source.sourceFingerprint },
+		}), { kind: "use-materialized", reason: intent === "relevant-gap" ? "materialized-sufficient" : "no-concrete-need" });
+	}
+});
+
 test("does not treat a new session alone as a reason to reread", () => {
 	assert.deepEqual(decideArtifactAcquisition(source, metadata(), "artifact-v1", {
 		intent: "new-session",
@@ -72,24 +90,33 @@ test("allows only an explicitly selected maintenance read", () => {
 	}), { kind: "read-source", reason: "maintenance" });
 });
 
-test("correlates only successful exact-path reads with current invalidation candidates", () => {
+test("accepts only successful exact-path reads whose source fingerprint stays stable", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-acquisition-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const path = join(root, "source.md");
+	writeFileSync(path, "stable");
+	const candidate = { path, scope: "session" as const, hash, reason: "source-changed" as const };
 	const tracker = new ArtifactReadTracker();
-	tracker.setCandidates([{ ...source, reason: "source-changed" }]);
-	tracker.recordStart("failed", "read", { path: source.path });
+	tracker.setCandidates([candidate]);
+	tracker.recordStart("failed", "read", { path });
 	tracker.recordEnd("failed", "read", true);
-	tracker.recordStart("unrelated", "read", { path: "/knowledge/other.md" });
+	tracker.recordStart("unrelated", "read", { path: join(root, "other.md") });
 	tracker.recordEnd("unrelated", "read", false);
-	const mutable = { path: "/knowledge/other.md" };
-	tracker.recordStart("matched", "read", mutable);
-	tracker.recordCall("matched", "read", mutable);
-	mutable.path = source.path;
-	tracker.recordEnd("matched", "read", false);
-	assert.deepEqual([...tracker.successful.values()], [{ ...source, reason: "source-changed" }]);
+	tracker.recordStart("raced", "read", { path });
+	writeFileSync(path, "changed during read");
+	tracker.recordEnd("raced", "read", false);
+	assert.equal(tracker.successful.size, 0);
+	tracker.recordCall("stable", "read", { path });
+	tracker.recordEnd("stable", "read", false);
+	const accepted = tracker.successful.get(path);
+	assert.deepEqual(accepted && { path: accepted.path, scope: accepted.scope, reason: accepted.reason }, { path, scope: "session", reason: "source-changed" });
+	assert.match(accepted?.hash ?? "", /^sha256:[0-9a-f]{64}$/);
+	assert.equal(accepted?.sourceFingerprint?.size, 19);
 	tracker.clear();
 	assert.equal(tracker.successful.size, 0);
 });
 
-test("freshness invalidation overrides otherwise sufficient materialized state", () => {
+test("required compilation overrides otherwise sufficient materialized state", () => {
 	for (const [stored, compiler, explicitRefresh, reason] of [
 		[undefined, "artifact-v1", false, "new"],
 		[{ description: "invalid", hash: "sha256:invalid" }, "artifact-v1", false, "invalid-metadata"],

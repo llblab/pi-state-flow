@@ -36,7 +36,7 @@ test("benchmark checkpoints retain prefix costs and release measurement ownershi
 
 for (const stateFlow of [false, true]) {
 	test(`benchmark native read bytes distinguish complete, byte-truncated and line-truncated output (${stateFlow ? "enabled" : "native"})`, { timeout: 30_000 }, async (t) => {
-		const fixture = await realPiFixture(t, { stateFlow, remotePublication: "off" });
+		const fixture = await realPiFixture(t, { stateFlow });
 		const session = await fixture.createSession();
 		t.after(() => session.dispose());
 		if (stateFlow) await session.prompt("/state-flow-start");

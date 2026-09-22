@@ -31,7 +31,7 @@ test("compact history preserves supplied lineage order and configured per-scope 
 	assert.deepEqual(projectRecentTransitionsWithLimit(1, lineage).map(({ id }) => id), ["z", "y", "a"]);
 	assert.deepEqual(projectRecentTransitionsWithLimit(0, lineage), []);
 	assert.deepEqual(projectRecentTransitionsWithLimit(7, lineage), lineage);
-	for (const limit of [-1, 8, 0.5]) assert.throws(() => projectRecentTransitionsWithLimit(limit, lineage), /integer from 0 to 7/);
+	for (const limit of [-1, 101, 0.5]) assert.throws(() => projectRecentTransitionsWithLimit(limit, lineage), /integer from 0 to 100/);
 	const cohort = { id: "cohort", at: 100, transitions: [recent("unused", 0, "global").transitions[0]!, recent("unused", 0).transitions[0]!] };
 	const projected = projectRecentTransitionsWithLimit(1, [...lineage, cohort]);
 	assert.deepEqual(projected.map(({ id }) => id), ["y", "cohort"]);

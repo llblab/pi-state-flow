@@ -1,27 +1,16 @@
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "../lib/artifact.ts";
-import { isLocalGitRepository } from "../lib/git.ts";
-import { inspectSnapshotRevision } from "../lib/runtime.ts";
-import { emptySnapshot, isFileRevision, parsePiCheckpoint, type Snapshot } from "../lib/snapshot.ts";
-import { loadScopeStream, parseScopeProvenance, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
+import type { ArtifactProvenanceRegistry } from "../lib/artifact.ts";
+import { TemporalRuntime } from "../lib/runtime.ts";
+import { emptySnapshot, parseRetainedPiCheckpoint, type Snapshot } from "../lib/snapshot.ts";
+import { loadScopeStream, parseScopeProvenance, temporalScopePaths } from "../lib/durable.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 import type { MaterializedState, StateScope } from "../lib/state.ts";
 
 /** Explicit test-only projection; raw Pi checkpoint data is never replaced or normalized. */
 export function resolveCheckpoint(data: unknown, cwd: string, sessionId: string, root: string, sessionKey = sessionId): Snapshot {
-	const parsed = parsePiCheckpoint(data);
-	if ("disabled" in parsed) return emptySnapshot();
-	if (!("revision" in parsed)) return parsed;
-	const snapshot = inspectSnapshotRevision(cwd, sessionId, root, parsed.revision, undefined, sessionKey).snapshot;
-	if (isFileRevision(parsed.revision)) return snapshot;
-	try {
-		if (isLocalGitRepository(root)) return snapshot;
-		execFileSync("git", ["-C", root, "merge-base", "--is-ancestor", parsed.revision, "@{upstream}"], { stdio: "ignore" });
-	} catch {
-		snapshot.meta.pendingPublication = { commit: parsed.revision, error: "Durable publication intent is unconfirmed" };
-	}
-	return snapshot;
+	const retained = parseRetainedPiCheckpoint(data);
+	if ("disabled" in retained) return emptySnapshot();
+	return new TemporalRuntime(cwd, sessionId, root, sessionKey).prepareBoundaryRestore(retained).snapshot;
 }
 
 export * from "../lib/durable.ts";
@@ -50,13 +39,6 @@ function optionalSource(path: string): string | undefined {
 
 /** Test-only provenance projection from the canonical scope `meta.json` files. */
 export function loadScopeProvenance(cwd: string, sessionId: string, scope: StateScope, root: string, sessionKey = sessionId): ArtifactProvenanceRegistry {
-	if (scope === "session") {
-		const paths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
-		const source = optionalSource(paths.meta);
-		if (source === undefined) return {};
-		const document = JSON.parse(source) as { meta?: { artifacts?: unknown } };
-		return parseArtifactProvenanceRegistry(document.meta?.artifacts, "State Flow session artifact provenance");
-	}
 	const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 	return parseScopeProvenance(optionalSource(paths.meta), paths.meta);
 }

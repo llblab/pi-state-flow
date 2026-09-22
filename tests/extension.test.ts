@@ -7,99 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStorageKey, temporalScopePaths } from "../lib/durable.ts";
-import { getKnowledgeRoot } from "../lib/discovery.ts";
+import { captureTemporalFileBases, cwdScopeKey, getDurableRepositoryRoot, sessionRuntimePaths, sessionStorageKey, temporalScopePaths } from "../lib/durable.ts";
 import { hashArtifactSource } from "../lib/artifact.ts";
-import { MAX_FALLBACK_ATTEMPTS, normalizePatchStateArguments } from "../lib/extension.ts";
-import { resolveGitPushDestination } from "../lib/git.ts";
-import { acquirePublicationWorkerLease, loadPublicationQueue, publicationQueuePath, savePublicationQueue } from "../lib/publication.ts";
-import { interceptGitPushes } from "./push-fixture.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
+import { emptyState } from "../lib/state.ts";
+import { writeCwdState, writeGlobalState } from "./storage-fixture.ts";
 import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
-
-test("push timeout preserves the exact failed target without a retry loop, then a later activation can recover it", { timeout: 10_000 }, async (t) => {
-	t.mock.timers.enable({ apis: ["setTimeout"] });
-	const pushes = interceptGitPushes(t);
-	const h = harness({ remotePublication: "turn-end" });
-	await start(h);
-	assert.equal(pushes.length, 1);
-	await pushes[0].ready;
-	const path = publicationQueuePath(resolveGitPushDestination(h.repositoryRoot)!);
-	const before = loadPublicationQueue(path)!;
-	const selected = h.resolveSnapshot();
-	t.mock.timers.tick(15_000);
-	await pushes[0].closed;
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	const failed = loadPublicationQueue(path)!;
-	assert.equal(failed.target, before.target);
-	assert.equal(failed.status, "failed");
-	assert.equal(failed.attempt, 1);
-	assert.match(failed.error!, /timed out after 15000ms/);
-	assert.equal(existsSync(`${path}.worker.lock`), false);
-	assert.equal(pushes.length, 1);
-	assert.deepEqual(h.resolveSnapshot(), selected);
-	h.handlers.get("agent_settled")!({}, h.ctx);
-	assert.equal(pushes.length, 2);
-	await pushes[1].ready;
-	assert.equal(pushes[1].requested.args.at(-1), `${before.target}:${before.destination.ref}`);
-	pushes[1].child.stdin.end("0");
-	await pushes[1].closed;
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	assert.equal(loadPublicationQueue(path), undefined);
-	assert.equal(existsSync(`${path}.worker.lock`), false);
-	assert.deepEqual(h.resolveSnapshot(), selected);
-	await h.handlers.get("session_shutdown")!({ reason: "quit" }, h.ctx);
-});
-
-test("shutdown waits at most 2000ms, retains an unconfirmed live lease, and fences late completion and relaunch", { timeout: 15_000, skip: process.platform === "win32" }, async (t) => {
-	t.mock.timers.enable({ apis: ["setTimeout"] });
-	const pushes = interceptGitPushes(t);
-	const h = harness({ remotePublication: "turn-end" });
-	await start(h);
-	const first = pushes[0];
-	await first.ready;
-	const path = publicationQueuePath(resolveGitPushDestination(h.repositoryRoot)!);
-	const leaseBytes = readFileSync(`${path}.worker.lock`);
-	const before = loadPublicationQueue(path)!;
-	execFileSync("git", ["-C", h.repositoryRoot, "commit", "--allow-empty", "-m", "newer pending target"]);
-	const target = execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-	savePublicationQueue(path, { ...before, target }, before);
-	const queueBytes = readFileSync(path);
-	const kill = process.kill.bind(process);
-	// Simulate rejected termination for only this owned child; lease liveness probes still use the OS.
-	t.mock.method(process, "kill", ((pid: number, signal?: string | number) => {
-		if (pid === -first.child.pid! && signal === "SIGKILL") throw Object.assign(new Error("Synthetic kill refusal"), { code: "EPERM" });
-		return kill(pid, signal);
-	}) as typeof process.kill);
-	const shutdown = h.handlers.get("session_shutdown")!({ reason: "reload" }, h.ctx) as Promise<void>;
-	assert.equal(h.handlers.get("session_shutdown")!({ reason: "reload" }, h.ctx), shutdown);
-	let settled = false;
-	void shutdown.then(() => { settled = true; });
-	t.mock.timers.tick(1999);
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	assert.equal(settled, false);
-	t.mock.timers.tick(1);
-	await shutdown;
-	assert.equal(settled, true);
-	assert.match(h.notifications.at(-1)!, /unconfirmed after 2000ms/);
-	assert.equal(first.child.exitCode, null);
-	assert.equal(first.child.signalCode, null);
-	assert.deepEqual(readFileSync(`${path}.worker.lock`), leaseBytes);
-	assert.equal(acquirePublicationWorkerLease(path), undefined);
-	assert.deepEqual(readFileSync(path), queueBytes);
-	h.handlers.get("agent_settled")!({}, h.ctx);
-	assert.equal(pushes.length, 1);
-	first.child.stdin.end("0"); // A late successful exit is still not permission for the old generation to acknowledge the queue.
-	await first.closed;
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	assert.equal(first.child.exitCode, 0);
-	assert.equal(pushes.length, 1, "Late cleanup must never launch another push from the disposed generation");
-	assert.deepEqual(readFileSync(path), queueBytes);
-	assert.equal(existsSync(`${path}.worker.lock`), false);
-	const replacement = acquirePublicationWorkerLease(path);
-	assert.ok(replacement);
-	replacement.release();
-});
 
 test("fresh explicit start is local-only; ordinary startup/status and old pointers never create storage", async (t) => {
 	const agentDir = mkdtempSync(join(tmpdir(), "state-flow-fresh-"));
@@ -108,14 +21,13 @@ test("fresh explicit start is local-only; ordinary startup/status and old pointe
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	t.after(() => { if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous; });
 	const repositoryRoot = getDurableRepositoryRoot();
-	const knowledgeRoot = getKnowledgeRoot();
+	const unrelatedRoot = join(agentDir, "unrelated");
 	assert.equal(repositoryRoot, join(agentDir, "state-flow"));
-	assert.equal(knowledgeRoot, join(agentDir, "knowledge"));
-	mkdirSync(knowledgeRoot);
-	const source = join(knowledgeRoot, "unrelated.md");
+	mkdirSync(unrelatedRoot);
+	const source = join(unrelatedRoot, "unrelated.md");
 	const bytes = Buffer.from([0xff, 0x61, 0x0a]);
 	writeFileSync(source, bytes);
-	const h = harness({ repositoryRoot, useDefaultKnowledgeRoot: true, initializeRepository: false });
+	const h = harness({ repositoryRoot, initializeRepository: false });
 	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await h.commands.get("state-flow-status").handler("", h.ctx);
 	assert.equal(existsSync(repositoryRoot), false);
@@ -125,19 +37,19 @@ test("fresh explicit start is local-only; ordinary startup/status and old pointe
 	const oldConfig = process.env.GIT_CONFIG_GLOBAL;
 	process.env.GIT_CONFIG_GLOBAL = config;
 	t.after(() => { if (oldConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = oldConfig; });
-	execFileSync("git", ["init", knowledgeRoot], { stdio: "ignore" });
-	const git = (...args: string[]) => execFileSync("git", ["-C", knowledgeRoot, ...args], { encoding: "utf8" }).trim();
-	writeFileSync(join(knowledgeRoot, "checkpoint.json"), "unrelated owned-name witness");
+	execFileSync("git", ["init", unrelatedRoot], { stdio: "ignore" });
+	const git = (...args: string[]) => execFileSync("git", ["-C", unrelatedRoot, ...args], { encoding: "utf8" }).trim();
+	writeFileSync(join(unrelatedRoot, "checkpoint.json"), "unrelated owned-name witness");
 	git("add", ".");
 	git("commit", "-m", "source fixture");
 	const sourceHead = git("rev-parse", "HEAD");
-	writeFileSync(join(knowledgeRoot, "staged.txt"), "staged witness");
+	writeFileSync(join(unrelatedRoot, "staged.txt"), "staged witness");
 	git("add", "staged.txt");
-	const sourceIndex = readFileSync(join(knowledgeRoot, ".git", "index"));
+	const sourceIndex = readFileSync(join(unrelatedRoot, ".git", "index"));
 	await start(h);
 	assert.equal(git("rev-parse", "HEAD"), sourceHead);
-	assert.deepEqual(readFileSync(join(knowledgeRoot, ".git", "index")), sourceIndex);
-	assert.equal(readFileSync(join(knowledgeRoot, "checkpoint.json"), "utf8"), "unrelated owned-name witness");
+	assert.deepEqual(readFileSync(join(unrelatedRoot, ".git", "index")), sourceIndex);
+	assert.equal(readFileSync(join(unrelatedRoot, "checkpoint.json"), "utf8"), "unrelated owned-name witness");
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	assert.equal(h.notifications.some((message) => /push is pending/.test(message)), false);
 	const context = h.handlers.get("context")!({ messages: [user("Inspect", 1)] }, h.ctx);
@@ -146,77 +58,33 @@ test("fresh explicit start is local-only; ordinary startup/status and old pointe
 		.map((block: any) => block.text)
 		.find((text: unknown) => typeof text === "string" && text.startsWith("State Flow runtime context"));
 	assert.ok(contextText);
-	assert.deepEqual(JSON.parse(contextText.slice(contextText.indexOf("\n") + 1)).artifact_invalidations, [{
-		path: source,
-		reason: "new",
-	}]);
+	assert.equal(JSON.parse(contextText.slice(contextText.indexOf("\n") + 1)).artifact_invalidations, undefined);
 	// Source identity and runtime bookkeeping never reach ordinary model context.
 	assert.equal(contextText.includes(hashArtifactSource(bytes)), false);
 	assert.deepEqual(readFileSync(source), bytes);
 	writeFileSync(join(repositoryRoot, "store-only.md"), "not a Knowledge source");
 	await h.commands.get("state-flow-status").handler("", h.ctx);
 	assert.doesNotMatch(h.notifications.at(-1)!, /store-only\.md/);
-	assert.match(h.notifications.at(-1)!, /unrelated\.md/);
-	const custom = harness({ repositoryRoot: join(agentDir, "custom-store"), useDefaultKnowledgeRoot: true, initializeRepository: false });
+	assert.doesNotMatch(h.notifications.at(-1)!, /unrelated\.md/);
+	const custom = harness({ repositoryRoot: join(agentDir, "custom-store"), initializeRepository: false });
 	await start(custom);
 	await custom.commands.get("state-flow-status").handler("", custom.ctx);
-	assert.match(custom.notifications.at(-1)!, /unrelated\.md/);
+	assert.doesNotMatch(custom.notifications.at(-1)!, /unrelated\.md/);
 	assert.equal(existsSync(join(custom.repositoryRoot, "checkpoint.json")), true);
 	const checkpoint = structuredClone(h.entries.at(-1));
-	const resumed = harness({ repositoryRoot, knowledgeRoot, initializeRepository: false });
+	const resumed = harness({ repositoryRoot, initializeRepository: false });
 	resumed.entries.push(checkpoint);
 	resumed.handlers.get("session_start")!({ reason: "resume" }, resumed.ctx);
 	await resumed.commands.get("state-flow-status").handler("", resumed.ctx);
 	assert.doesNotMatch(resumed.notifications.at(-1)!, /Publication: pending/);
 	const missingRoot = join(agentDir, "new-store");
-	const old = harness({ repositoryRoot: missingRoot, knowledgeRoot, initializeRepository: false });
+	const old = harness({ repositoryRoot: missingRoot, initializeRepository: false });
 	old.entries.push(checkpoint);
 	old.handlers.get("session_start")!({ reason: "resume" }, old.ctx);
 	await old.commands.get("state-flow-start").handler("", old.ctx);
 	assert.equal(existsSync(missingRoot), false);
 	assert.deepEqual(old.entries, [checkpoint]);
-	assert.match(old.notifications.at(-1)!, /original Git history/);
-});
-
-test("explicit activation defers artifact discovery until the next enabled inference", async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-deferred-discovery-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const knowledgeRoot = join(root, "knowledge");
-	mkdirSync(knowledgeRoot);
-	const repositoryRoot = join(root, "store");
-	mkdirSync(repositoryRoot);
-	const h = harness({ repositoryRoot, knowledgeRoot });
-	await h.commands.get("state-flow-start").handler("", h.ctx);
-	const lateSource = join(knowledgeRoot, "late.md");
-	writeFileSync(lateSource, "Created after the activation command returned.\n");
-
-	h.handlers.get("before_agent_start")!({ prompt: "Use current knowledge", systemPrompt: "base" }, h.ctx);
-	const projected = h.handlers.get("context")!({ messages: [user("Use current knowledge", Date.now())] }, h.ctx);
-	assert.match(JSON.stringify(projected.messages), new RegExp(lateSource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-	assert.match(JSON.stringify(projected.messages), /\\\"reason\\\":\\\"new\\\"/);
-});
-
-test("final-only resolution cannot bypass an acquired invalidated artifact", async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-artifact-resolution-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const knowledgeRoot = join(root, "knowledge");
-	mkdirSync(knowledgeRoot);
-	const source = join(knowledgeRoot, "routing.md");
-	writeFileSync(source, "Routing source.\n");
-	const repositoryRoot = join(root, "store");
-	mkdirSync(repositoryRoot);
-	const h = harness({ repositoryRoot, knowledgeRoot });
-	await start(h, "Acquire routing");
-	const input = { path: source };
-	h.handlers.get("tool_call")!({ toolCallId: "artifact-read", toolName: "read", input }, h.ctx);
-	h.handlers.get("tool_execution_end")!({ toolCallId: "artifact-read", toolName: "read", result: {}, isError: false }, h.ctx);
-	await assert.rejects(
-		h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx),
-		/Every successfully read invalidated artifact must have a global compiler output/,
-	);
-	await h.tools.get("patch_state")!.execute("compile", {
-		global: { artifacts: { [source]: { description: "Routing source" } } }, final: true,
-	}, undefined, undefined, h.ctx);
+	assert.match(old.notifications.at(-1)!, /canonical files/);
 });
 
 test("live storage paths mirror Pi CWD and session file names without appended hashes", async (t) => {
@@ -259,9 +127,9 @@ test("registers patch_state plus read-only read_state and exposes the lifecycle 
 	assert.deepEqual([...h.tools.keys()].sort(), ["patch_state", "read_state"]);
 	const patchState = h.tools.get("patch_state")!;
 	assert.equal(patchState.executionMode, "sequential");
-	assert.match(patchState.description, /Passive turns have no terminal barrier: never call patch_state only to set final:true/);
-	assert.match(patchState.promptGuidelines.join("\n"), /Only in an active State Flow episode/);
-	assert.match(patchState.promptGuidelines.join("\n"), /In passive mode, never call patch_state only to set final:true/);
+	assert.match(patchState.description, /one or more global, cwd, or session patches/);
+	assert.match(patchState.promptGuidelines.join("\n"), /ordinary answers need no finalization call/);
+	assert.doesNotMatch(patchState.promptGuidelines.join("\n"), /final:true|terminal-eligible/);
 	assert.deepEqual([...h.commands.keys()], ["state-flow-start", "state-flow-status", "state-flow-stop"]);
 });
 test("passive bootstrap and tools are independently configurable and passive patches do not start an episode", async () => {
@@ -278,8 +146,9 @@ test("passive bootstrap and tools are independently configurable and passive pat
 		const h = harness({ repositoryRoot: seed.repositoryRoot, cwd: seed.ctx.cwd, sessionId: `passive-${passiveBootstrap}-${passiveTools}`, initializeRepository: false, passiveBootstrap, passiveTools });
 		h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 		assert.equal(h.activeTools.includes("patch_state"), passiveTools);
-		const bootstrapResult = h.handlers.get("before_agent_start")!({ prompt: "ordinary", systemPrompt: "base" }, h.ctx);
-		assert.equal(bootstrapResult !== undefined, passiveBootstrap);
+		const bootstrapResult = h.beforeAgentStart("ordinary");
+		assert.equal(bootstrapResult.handlerResult, undefined);
+		assert.equal(bootstrapResult.systemPrompt.includes("State Flow passive memory is available"), passiveBootstrap);
 		const projected = h.handlers.get("context")!({ messages: [] }, h.ctx);
 		assert.equal(projected !== undefined, passiveBootstrap);
 		if (passiveBootstrap) {
@@ -287,18 +156,158 @@ test("passive bootstrap and tools are independently configurable and passive pat
 			assert.match(JSON.stringify(projected), /Validate release/);
 			assert.doesNotMatch(JSON.stringify(projected), /\"steps\":\[\"validate\"\]/);
 		}
+		const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+		const beforeStop = files();
+		await h.commands.get("state-flow-stop").handler("", h.ctx);
+		await h.commands.get("state-flow-stop").handler("", h.ctx);
+		assert.deepEqual(h.entries.at(-1).data, { disabled: true });
+		assert.deepEqual(files(), beforeStop, "pre-runtime Stop never publishes the passive view");
+		h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
+		assert.deepEqual(files(), beforeStop);
+		assert.equal(h.activeTools.includes("patch_state"), passiveTools);
 		if (passiveTools) {
 			const read = await h.tools.get("read_state")!.execute("read", { path: "working.shared" });
 			assert.match(read.content[0].text, /durable/);
 			const intent = await h.tools.get("read_state")!.execute("intent", { path: "intents.release" });
 			assert.match(intent.content[0].text, /cwd\.lazy\.releasePlan/);
-			await h.tools.get("patch_state")!.execute("write", { session: { intents: { local: "Continue locally" } }, final: true }, undefined, undefined, h.ctx);
+			await h.tools.get("patch_state")!.execute("write", { session: { intents: { local: "Continue locally" } } }, undefined, undefined, h.ctx);
 			assert.equal(h.resolveSnapshot().config.enabled, false);
 			assert.equal(h.compactRequests.length, 0);
 			assert.equal(h.resolveSnapshot().meta.step, 1);
 			const local = await h.tools.get("read_state")!.execute("local-intent", { path: "session.intents.local" });
 			assert.match(local.content[0].text, /Continue locally/);
 		}
+	}
+});
+
+for (const activate of ["start", "passive-patch"] as const) {
+	test(`pre-runtime Stop preserves global-only memory before ${activate} establishes session state`, async () => {
+		const h = harness({ initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+		writeGlobalState({ ...emptyState(), working: { shared: "global" } }, h.repositoryRoot);
+		const id = h.ctx.sessionManager.getSessionId();
+		const files = () => captureTemporalFileBases(h.ctx.cwd, id, h.repositoryRoot);
+		const before = files();
+		h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+		assert.equal(h.readState(0, "global").working.shared, "global");
+		await h.commands.get("state-flow-stop").handler("", h.ctx);
+		await h.commands.get("state-flow-stop").handler("", h.ctx);
+		assert.deepEqual(h.entries.at(-1).data, { disabled: true });
+		assert.deepEqual(files(), before);
+		assert.equal(existsSync(temporalScopePaths(h.ctx.cwd, id, "cwd", h.repositoryRoot).directory), false);
+		h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
+		assert.deepEqual(files(), before);
+		assert.equal(h.readState(0, "global").working.shared, "global");
+		if (activate === "start") await h.commands.get("state-flow-start").handler("", h.ctx);
+		await h.tools.get("patch_state")!.execute("local", { session: { working: { local: "retained" } } }, undefined, undefined, h.ctx);
+		assert.equal(h.resolveSnapshot().config.enabled, activate === "start");
+		assert.equal(h.resolveSnapshot().meta.step, 1);
+		assert.ok("boundary" in h.entries.at(-1).data);
+		const semanticPaths = (["global", "cwd", "session"] as const).flatMap((scope) => {
+			const paths = temporalScopePaths(h.ctx.cwd, id, scope, h.repositoryRoot);
+			return [paths.checkpoint, paths.patches, paths.meta];
+		});
+		const semanticBytes = semanticPaths.map((path) => readFileSync(path));
+		await h.commands.get("state-flow-stop").handler("", h.ctx);
+		assert.ok("boundary" in h.entries.at(-1).data, "an accepted session no longer uses the pre-runtime marker");
+		assert.deepEqual(semanticPaths.map((path) => readFileSync(path)), semanticBytes);
+		h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
+		assert.equal(h.readState(0, "session").working.local, "retained");
+		assert.equal(h.resolveSnapshot().config.enabled, false);
+		assert.equal(h.resolveSnapshot().meta.step, 1);
+		assert.equal(h.compactRequests.length, 0);
+		assert.equal(existsSync(join(h.repositoryRoot, ".git")), false);
+	});
+}
+
+for (const invalid of ["cwd-without-global", "malformed-global", "incomplete-global"] as const) {
+	test(`pre-runtime Stop leaves ${invalid} storage untouched`, async () => {
+		const h = harness({ initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+		if (invalid === "cwd-without-global") writeCwdState(h.ctx.cwd, { ...emptyState(), working: { project: "retained" } }, h.repositoryRoot);
+		else {
+			const checkpoint = writeGlobalState(emptyState(), h.repositoryRoot);
+			if (invalid === "malformed-global") writeFileSync(checkpoint, "{broken\n");
+			else rmSync(temporalScopePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), "global", h.repositoryRoot).patches);
+		}
+		const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+		const before = files();
+		h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+		assert.match(h.notifications.at(-1)!, /passive memory is unavailable/);
+		await h.commands.get("state-flow-stop").handler("", h.ctx);
+		assert.deepEqual(h.entries.at(-1).data, { disabled: true });
+		assert.deepEqual(files(), before);
+		await h.commands.get("state-flow-start").handler("", h.ctx);
+		if (invalid === "cwd-without-global") {
+			assert.equal(h.resolveSnapshot().config.enabled, true, "explicit Start may initialize a wholly absent global scope");
+			assert.equal(h.readState(0, "cwd").working.project, "retained");
+		} else {
+			assert.match(h.notifications.at(-1)!, /could not initialize/);
+			assert.deepEqual(files(), before);
+			assert.deepEqual(h.entries.at(-1).data, { disabled: true });
+		}
+	});
+}
+
+test("failed branch restoration keeps passive shared reads without authorizing private reads or writes", async () => {
+	for (const [passiveBootstrap, passiveTools] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+		const h = harness({ initializeRepository: false, passiveBootstrap, passiveTools });
+		await start(h);
+		const expired = structuredClone(h.entries);
+		const patch = h.tools.get("patch_state")!;
+		for (let index = 1; index <= 9; index++) {
+			await patch.execute(`seed-${index}`, {
+				global: { working: { shared: "retained" } },
+				session: { working: { private: index } },
+			}, undefined, undefined, h.ctx);
+		}
+		const retained = structuredClone(h.entries);
+		const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+		const before = files();
+		h.ctx.sessionManager.getBranch = () => expired;
+		h.handlers.get("session_tree")!({}, h.ctx);
+		assert.match(h.notifications.at(-1)!, /outside the retained temporal window/);
+		assert.deepEqual(files(), before);
+		if (passiveTools) {
+			const shared = await h.tools.get("read_state")!.execute("shared", { path: "global.working.shared" });
+			assert.deepEqual(JSON.parse(shared.content[0].text), { value: "retained" });
+			await assert.rejects(h.tools.get("read_state")!.execute("private", { path: "session.working" }), /selected branch is unavailable/);
+		}
+		assert.throws(() => h.readState(0, "session"), /unavailable/);
+		for (const scope of ["global", "cwd", "session"]) {
+			await assert.rejects(patch.execute("refused", { [scope]: { working: { unsafe: true } } }, undefined, undefined, h.ctx), /selected branch is unavailable|tools are disabled/);
+		}
+		await assert.rejects(h.commands.get("state-flow-stop").handler("", h.ctx), /selected branch is unavailable/);
+		await h.commands.get("state-flow-start").handler("", h.ctx);
+		assert.match(h.notifications.at(-1)!, /selected branch is unavailable/);
+		await h.commands.get("state-flow-status").handler("", h.ctx);
+		assert.match(h.notifications.at(-1)!, /Temporal materialization unavailable:.*outside the retained temporal window/);
+		assert.deepEqual(files(), before, "refused lifecycle and model writes must preserve every canonical file");
+		assert.deepEqual(h.entries, retained, "failed selections must not publish substitute Pi checkpoints");
+		h.ctx.sessionManager.getBranch = () => retained;
+		h.handlers.get("session_tree")!({}, h.ctx);
+		assert.equal(h.readState(0, "session").working.private, 9);
+		await patch.execute("continued", { session: { working: { continued: true } } }, undefined, undefined, h.ctx);
+		assert.equal(h.readState(0, "session").working.continued, true);
+	}
+});
+
+test("removes proven-missing registered artifacts from every owning scope without directory discovery", async () => {
+	const h = harness();
+	await start(h);
+	const paths = {
+		global: join(h.repositoryRoot, "global-source.bin"),
+		cwd: join(h.repositoryRoot, "cwd-source.txt"),
+		session: join(h.repositoryRoot, "session-source.md"),
+	} as const;
+	for (const path of Object.values(paths)) writeFileSync(path, "registered source");
+	await h.tools.get("patch_state")!.execute("register", {
+		global: { artifacts: { [paths.global]: { description: "Global source" } } },
+		cwd: { artifacts: { [paths.cwd]: { description: "CWD source" } } },
+		session: { artifacts: { [paths.session]: { description: "Session source" } } },
+	}, undefined, undefined, h.ctx);
+	for (const path of Object.values(paths)) rmSync(path);
+	h.beforeAgentStart("Observe removals");
+	for (const [scope, path] of Object.entries(paths) as ["global" | "cwd" | "session", string][]) {
+		assert.equal(h.readState(0, scope).artifacts[path], undefined);
 	}
 });
 
@@ -418,6 +427,35 @@ test("lets ordinary tool-bearing responses run without comments or intermediate 
 	assert.equal(h.resolveSnapshot().meta.step, 0);
 });
 
+test("ordinary direct and tool-followed answers complete without a finalization inference", async () => {
+	for (const withTool of [false, true]) {
+		const h = harness();
+		await start(h, withTool ? "Use a tool then answer" : "Answer directly");
+		if (withTool) {
+			h.handlers.get("message_end")!({ message: toolAssistant("read-before-answer") }, h.ctx);
+			h.handlers.get("turn_end")!({ message: toolAssistant("read-before-answer") }, h.ctx);
+		}
+		const message = finalMessage(withTool ? "Tool-informed answer." : "Direct answer.");
+		h.handlers.get("message_end")!({ message }, h.ctx);
+		h.handlers.get("turn_end")!({ message }, h.ctx);
+		assert.equal(h.readState().response, withTool ? "Tool-informed answer." : "Direct answer.");
+		assert.equal(h.sentMessages.length, 0, "completion must not schedule a repair inference");
+	}
+});
+
+test("multiple patch barriers can precede one ordinary answer", async () => {
+	const h = harness();
+	await start(h, "Patch twice then answer");
+	await h.tools.get("patch_state")!.execute("first", { session: { working: { first: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state")!.execute("second", { session: { working: { second: true } } }, undefined, undefined, h.ctx);
+	const message = finalMessage("Both changes are retained.");
+	h.handlers.get("message_end")!({ message }, h.ctx);
+	h.handlers.get("turn_end")!({ message }, h.ctx);
+	assert.deepEqual(h.readState().working, { first: true, second: true });
+	assert.equal(h.readState().response, "Both changes are retained.");
+	assert.equal(h.sentMessages.length, 0);
+});
+
 test("global memory is always available while State Flow is enabled", async () => {
 	const h = harness();
 	const started = await start(h, "Durable preference");
@@ -430,7 +468,7 @@ test("global memory is always available while State Flow is enabled", async () =
 });
 
 test("patch_state commits global, CWD, and session as one model-facing atomic barrier", async () => {
-	const h = harness({ remotePublication: "off" });
+	const h = harness();
 	await start(h, "Atomic scope cohort");
 	const beforeStep = h.resolveSnapshot().meta.step;
 	const result = await h.tools.get("patch_state")!.execute("atomic", {
@@ -454,7 +492,7 @@ test("patch_state materializes session state before the next inference and respo
 	const patchState = h.tools.get("patch_state")!;
 	const result = await patchState.execute(
 		"patch-1",
-		{ session: { working: { verified: "intermediate" } }, final: true },
+		{ session: { working: { verified: "intermediate" } } },
 		undefined,
 		undefined,
 		h.ctx,
@@ -473,7 +511,6 @@ test("patch_state materializes session state before the next inference and respo
 			working: { verified: "intermediate" },
 			response: null,
 		},
-		final: true,
 	};
 	const rendered = patchState.renderResult(
 		result,
@@ -485,7 +522,7 @@ test("patch_state materializes session state before the next inference and respo
 	assert.ok(visibleText.startsWith("\n"), "successful patch JSON should follow the tool heading after one blank line");
 	assert.doesNotMatch(visibleText, /State materialized|session scope/);
 	assert.match(visibleText, /"global": \{[\s\S]+\n\n  "cwd": \{[\s\S]+\n\n  "session": \{/);
-	assert.match(visibleText, /"artifacts": \{[\s\S]+\n\n    "contract": \{[\s\S]+\n\n    "working": \{[\s\S]+\n\n    "response": null[\s\S]+\n\n  "final": true/);
+	assert.match(visibleText, /"artifacts": \{[\s\S]+\n\n    "contract": \{[\s\S]+\n\n    "working": \{[\s\S]+\n\n    "response": null/);
 	assert.deepEqual(JSON.parse(visibleText), visibleArgs);
 	const renderedError = patchState.renderResult(
 		{ content: [{ type: "text", text: "WebSocket error" }] },
@@ -565,7 +602,7 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 });
 
 test("tool preflight walks only the selected native suffix for matching calls, without rebuilding a branch", async (t) => {
-	const h = harness({ remotePublication: "off" });
+	const h = harness();
 	await start(h);
 	const gate = h.handlers.get("tool_call")!;
 	const observations: Array<{ pastRuns: number; branchEntries: number; visited: string[]; expected: string[] }> = [];
@@ -577,14 +614,14 @@ test("tool preflight walks only the selected native suffix for matching calls, w
 		}
 		const assistant = manager.appendMessage(fauxAssistantMessage([
 			fauxToolCall("read", { path: "not-executed.txt" }, { id: "read-1" }),
-			fauxToolCall("patch_state", { final: true }, { id: "patch-1" }),
+			fauxToolCall("patch_state", {}, { id: "patch-1" }),
 		], { stopReason: "toolUse" }));
 		const custom = manager.appendCustomEntry("foreign-context", { retained: true });
 		const result = manager.appendMessage({ role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "Blocked sibling" }], isError: true, timestamp: Date.now() });
 		const selected = manager.appendCustomEntry("foreign-after-result", { retained: true });
 		const abandoned = manager.appendMessage(fauxAssistantMessage([
-			fauxToolCall("patch_state", { final: true }, { id: "patch-1" }),
-			fauxToolCall("patch_state", { final: true }, { id: "patch-2" }),
+			fauxToolCall("patch_state", {}, { id: "patch-1" }),
+			fauxToolCall("patch_state", {}, { id: "patch-2" }),
 		], { stopReason: "toolUse" }));
 		manager.branch(selected);
 		const before = structuredClone(manager.getEntries());
@@ -632,14 +669,13 @@ test("tool preflight walks only the selected native suffix for matching calls, w
 });
 
 test("patch_state tolerates shared-scope drift while preserving the session layer", async () => {
-	const a = harness({ remotePublication: "off" });
+	const a = harness();
 	await start(a, "Session A");
 	await a.tools.get("patch_state")!.execute("a-initial", { session: { working: { owner: "A" } } }, undefined, undefined, a.ctx);
 	const b = harness({
 		repositoryRoot: a.repositoryRoot,
 		cwd: a.ctx.cwd,
 		sessionId: "harness-session-b",
-		remotePublication: "off",
 		initializeRepository: false,
 	});
 	await start(b, "Session B");
@@ -659,102 +695,10 @@ function finalMessage(text: string) {
 	return { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] };
 }
 
-test("a primary draft without eligibility is preserved as the response and final-only fallback resolution keeps it", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "No durable work");
-	const primary = h.handlers.get("message_end")!({ message: finalMessage("Preserved answer.") }, h.ctx);
-	assert.equal(primary, undefined, "the primary draft is never intercepted");
-	assert.equal(h.sentMessages.length, 1, "the fallback steer starts the resolution turn");
-	h.handlers.get("turn_end")!({ message: finalMessage("Preserved answer.") }, h.ctx);
-	assert.equal(h.readState().response, "Preserved answer.");
-
-	const beforeStep = h.resolveSnapshot().meta.step;
-	const resolution = await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
-	assert.deepEqual(resolution.details, { final: true });
-	assert.equal(h.resolveSnapshot().meta.step, beforeStep);
-	const fallback = h.handlers.get("message_end")!({ message: finalMessage("Fallback text.") }, h.ctx);
-	assert.deepEqual(fallback.message.content, [], "fallback messages never become the response");
-	assert.equal(h.sentMessages.length, 1, "the resolved fallback needs no further steering");
-	h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
-	assert.equal(h.readState().response, "Preserved answer.");
-	assert.equal(h.resolveSnapshot().meta.step, 1);
-});
-
-test("the preserved answer stands after two fallback turns without final:true", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "Bound fallback attempts");
-	const nonTerminal = await h.tools.get("patch_state")!.execute("non-terminal", { final: false }, undefined, undefined, h.ctx);
-	assert.deepEqual(nonTerminal.details, { final: false });
-	assert.equal(h.sentMessages.length, 0, "an inert non-terminal call does not start fallback resolution");
-	const primary = h.handlers.get("message_end")!({ message: finalMessage("Primary answer.") }, h.ctx);
-	assert.equal(primary, undefined);
-	h.handlers.get("turn_end")!({ message: finalMessage("Primary answer.") }, h.ctx);
-	assert.equal(h.readState().response, "Primary answer.");
-	for (let attempt = 1; attempt <= MAX_FALLBACK_ATTEMPTS; attempt++) {
-		const fallback = h.handlers.get("message_end")!({ message: finalMessage(`Fallback ${attempt}`) }, h.ctx);
-		assert.deepEqual(fallback.message.content, []);
-		h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
-	}
-	assert.equal(h.sentMessages.length, MAX_FALLBACK_ATTEMPTS, "each fallback turn consumes at most one steering message");
-	assert.equal(h.notifications.filter((message) => /no final:true patch arrived after 2 fallback turns/.test(message)).length, 1);
-	assert.equal(h.activeTools.includes("patch_state"), true);
-	assert.equal(h.readState().response, "Primary answer.");
-	assert.equal(h.resolveSnapshot().meta.step, 1);
-});
-
-test("fallback resolution state resets with the next enabled iteration", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "First iteration");
-	h.handlers.get("message_end")!({ message: finalMessage("First primary") }, h.ctx);
-	h.handlers.get("turn_end")!({ message: finalMessage("First primary") }, h.ctx);
-	for (let attempt = 0; attempt < MAX_FALLBACK_ATTEMPTS; attempt++) {
-		const fallback = h.handlers.get("message_end")!({ message: finalMessage(`First fallback ${attempt}`) }, h.ctx);
-		h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
-	}
-	assert.equal(h.sentMessages.length, MAX_FALLBACK_ATTEMPTS);
-	h.handlers.get("before_agent_start")!({ prompt: "Next iteration", systemPrompt: "base" }, h.ctx);
-	h.handlers.get("message_end")!({ message: finalMessage("Next primary") }, h.ctx);
-	assert.equal(h.sentMessages.length, MAX_FALLBACK_ATTEMPTS + 1, "the next iteration starts a fresh fallback resolution");
-});
-
-test("an atomic fallback patch applies while the preserved answer stands", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "Remember this");
-	const primary = h.handlers.get("message_end")!({ message: finalMessage("Preserved draft.") }, h.ctx);
-	assert.equal(primary, undefined);
-	h.handlers.get("turn_end")!({ message: finalMessage("Preserved draft.") }, h.ctx);
-	await h.tools.get("patch_state")!.execute("patch", { session: { working: { next: "ship" } }, final: true }, undefined, undefined, h.ctx);
-	const fallback = h.handlers.get("message_end")!({ message: finalMessage("Fallback text.") }, h.ctx);
-	assert.deepEqual(fallback.message.content, []);
-	h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
-	assert.equal(h.readState().working.next, "ship");
-	assert.equal(h.readState().response, "Preserved draft.");
-});
-
-test("a failed later patch does not revoke terminal eligibility", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "Two decisions");
-	await h.tools.get("patch_state")!.execute("accepted", { session: { working: { first: true } }, final: true }, undefined, undefined, h.ctx);
-	await assert.rejects(
-		h.tools.get("patch_state")!.execute("failed", { session: { working: { first: true } } }, undefined, undefined, h.ctx),
-		/must materially update state or required provenance/,
-	);
-	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Still final.") }, h.ctx), undefined);
-});
-
-test("a host-rejected patch_state call does not revoke terminal eligibility", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "Host validation");
-	await h.tools.get("patch_state")!.execute("accepted", { session: { working: { first: true } }, final: true }, undefined, undefined, h.ctx);
-	h.handlers.get("tool_execution_end")!({ toolCallId: "schema-failure", toolName: "patch_state", isError: true }, h.ctx);
-	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Still final.") }, h.ctx), undefined);
-});
-
 test("length and provider-error endings never become accepted responses", async () => {
 	for (const stopReason of ["length", "error"]) {
-		const h = harness({ remotePublication: "off" });
+		const h = harness();
 		await start(h, `Stop reason ${stopReason}`);
-		await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
 		const message = { ...finalMessage("Incomplete output."), stopReason };
 		assert.equal(h.handlers.get("message_end")!({ message }, h.ctx), undefined);
 		h.handlers.get("turn_end")!({ message }, h.ctx);
@@ -763,143 +707,29 @@ test("length and provider-error endings never become accepted responses", async 
 	}
 });
 
-test("accepts canonical atomic scope patches plus an inert false compatibility call", async () => {
-	const h = harness({ remotePublication: "off" });
+test("accepts only canonical materially changing atomic scope patches", async () => {
+	const h = harness();
 	await start(h, "Resolve me");
 	const execute = (input: unknown) => h.tools.get("patch_state")!.execute("invalid", input, undefined, undefined, h.ctx);
-	for (const input of [
-		null,
-		[],
-		{},
-		{ unchanged: true },
-		{ scope: "session", patch: { working: { value: true } } },
-		{ session: {} },
-		{ session: { working: { value: true } }, extra: "forbidden" },
-		{ global: null },
-	]) await assert.rejects(execute(input));
-	const nonTerminal = await execute({ final: false });
-	assert.deepEqual(nonTerminal.details, { final: false });
-
-	const primary = h.handlers.get("message_end")!({ message: finalMessage("Still unresolved.") }, h.ctx);
-	assert.equal(primary, undefined, "the unresolved draft is preserved instead of intercepted");
-	h.handlers.get("turn_end")!({ message: finalMessage("Still unresolved.") }, h.ctx);
-	assert.equal(h.readState().response, "Still unresolved.");
-	await h.tools.get("patch_state")!.execute("valid", { final: true }, undefined, undefined, h.ctx);
-	const fallback = h.handlers.get("message_end")!({ message: finalMessage("Resolved.") }, h.ctx);
-	assert.deepEqual(fallback.message.content, [], "fallback messages stay out of the response");
-	h.handlers.get("turn_end")!({ message: fallback.message }, h.ctx);
-	assert.equal(h.readState().response, "Still unresolved.");
-});
-
-test("bounded final aliases normalize without raw JavaScript truthiness", () => {
-	for (const value of [true, 1, "true", " TRUE "]) {
-		assert.deepEqual(normalizePatchStateArguments({ final: value }), { final: true });
-	}
-	for (const value of [false, 0, "false", " FALSE "]) {
-		assert.deepEqual(normalizePatchStateArguments({ final: value }), { final: false });
-	}
-	for (const value of [null, "yes", "", [], {}, 2]) {
-		assert.deepEqual(normalizePatchStateArguments({ final: value }), { final: value });
-	}
-	assert.equal(normalizePatchStateArguments(null), null);
-});
-
-test("a scoped final:false patch applies without latching or clearing terminal eligibility", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "Non-terminal patch");
-	const beforeStep = h.resolveSnapshot().meta.step;
-	const first = await h.tools.get("patch_state")!.execute("false-patch", {
-		cwd: { working: { currentRelease: "0.10.2" } }, final: false,
-	}, undefined, undefined, h.ctx);
-	assert.deepEqual(first.details, { scopes: ["cwd"], final: false, step: beforeStep + 1 });
-	assert.equal(h.readState(0, "cwd").working.currentRelease, "0.10.2");
-	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Not eligible yet.") }, h.ctx), undefined);
-	assert.equal(h.sentMessages.length, 1);
-
-	const latched = harness({ remotePublication: "off" });
-	await start(latched, "Latched patch");
-	await latched.tools.get("patch_state")!.execute("latch", { final: true }, undefined, undefined, latched.ctx);
-	await latched.tools.get("patch_state")!.execute("false-after-latch", {
-		session: { working: { continued: true } }, final: false,
-	}, undefined, undefined, latched.ctx);
-	assert.equal(latched.handlers.get("message_end")!({ message: finalMessage("Still eligible.") }, latched.ctx), undefined);
-	assert.equal(latched.sentMessages.length, 0);
-});
-
-test("terminal eligibility remains latched through later tools, patches, and repeated final calls", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "Latch terminal eligibility");
-	const beforeStep = h.resolveSnapshot().meta.step;
-	await h.tools.get("patch_state")!.execute("first-final", { final: true }, undefined, undefined, h.ctx);
-	assert.equal(h.resolveSnapshot().meta.step, beforeStep);
-	h.handlers.get("message_end")!({ message: toolAssistant("later-read") }, h.ctx);
-	await h.tools.get("patch_state")!.execute("later-patch", {
-		session: { working: { afterFinal: true } },
-	}, undefined, undefined, h.ctx);
-	assert.equal(h.resolveSnapshot().meta.step, beforeStep + 1);
-	await h.tools.get("patch_state")!.execute("repeated-final", { final: true }, undefined, undefined, h.ctx);
-	assert.equal(h.resolveSnapshot().meta.step, beforeStep + 1);
-	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Latched.") }, h.ctx), undefined);
-});
-
-test("a new enabled iteration resets terminal eligibility", async () => {
-	const h = harness({ remotePublication: "off" });
-	await start(h, "First iteration");
-	await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
-	const first = finalMessage("First complete answer.");
-	h.handlers.get("message_end")!({ message: first }, h.ctx);
-	h.handlers.get("turn_end")!({ message: first }, h.ctx);
-	h.handlers.get("before_agent_start")!({ prompt: "Second iteration", systemPrompt: "base" }, h.ctx);
-	const primary = h.handlers.get("message_end")!({ message: finalMessage("Second unresolved draft.") }, h.ctx);
-	assert.equal(primary, undefined, "the second iteration starts ineligible and preserves its draft");
-	assert.equal(h.sentMessages.length, 1, "fallback resolution starts for the second iteration");
-	assert.equal(h.readState().response, "First complete answer.");
-	h.handlers.get("turn_end")!({ message: finalMessage("Second unresolved draft.") }, h.ctx);
-	assert.equal(h.readState().response, "Second unresolved draft.");
-});
-
-test("one atomic final patch resolves simultaneous global artifact and CWD Skill obligations", async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-mixed-obligations-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const knowledgeRoot = join(root, "knowledge");
-	const skill = join(root, "skills", "mixed", "SKILL.md");
-	mkdirSync(knowledgeRoot, { recursive: true });
-	mkdirSync(join(root, "skills", "mixed"), { recursive: true });
-	const artifact = join(knowledgeRoot, "routing.md");
-	writeFileSync(artifact, "Routing guidance.\n");
-	writeFileSync(skill, "# Mixed\n\nCompile with global knowledge.\n");
-	const repositoryRoot = join(root, "store");
-	mkdirSync(repositoryRoot);
-	const h = harness({ repositoryRoot, knowledgeRoot, remotePublication: "off" });
-	await start(h, "Acquire both sources");
-	for (const [toolCallId, path] of [["artifact", artifact], ["skill", skill]]) {
-		h.handlers.get("tool_call")!({ toolCallId, toolName: "read", input: { path } }, h.ctx);
-		h.handlers.get("tool_execution_end")!({ toolCallId, toolName: "read", result: {}, isError: false }, h.ctx);
-	}
-	const result = await h.tools.get("patch_state")!.execute("compile-both", {
-		global: { artifacts: { [artifact]: { description: "Global routing guidance" } } },
-		cwd: { artifacts: { [skill]: {
-			description: "Mixed-obligation Skill",
-			kind: "skill",
-			compilation: { route: "combine global and CWD compilation" },
-		} } },
-		final: true,
-	}, undefined, undefined, h.ctx);
-	assert.deepEqual(result.details, { scopes: ["global", "cwd"], final: true, step: 1 });
-	assert.equal(h.readState(0, "global").artifacts[artifact]!.description, "Global routing guidance");
-	assert.equal(h.readState(0, "cwd").artifacts[skill]!.kind, "skill");
-	assert.equal(h.handlers.get("message_end")!({ message: finalMessage("Both compiled.") }, h.ctx), undefined);
+	for (const input of [null, [], {}, { final: false }, { unchanged: true },
+		{ scope: "session", patch: { working: { value: true } } }, { session: {} },
+		{ session: { working: { value: true } }, extra: "forbidden" }, { global: null }]) await assert.rejects(execute(input));
+	await execute({ session: { working: { value: true } } });
+	const message = finalMessage("Resolved directly.");
+	h.handlers.get("message_end")!({ message }, h.ctx);
+	h.handlers.get("turn_end")!({ message }, h.ctx);
+	assert.equal(h.readState().response, "Resolved directly.");
 });
 
 test("stop removes State Flow semantics while retaining a bounded passive continuation", async () => {
-	const h = harness({ remotePublication: "off" });
+	const h = harness();
 	await start(h, "Establish bounded state");
 	await h.tools.get("patch_state")!.execute("state", { session: { working: { continuation: "keep this" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
 
 	assert.equal(h.activeTools.includes("patch_state"), false);
 	assert.equal(h.activeTools.includes("read_state"), false);
-	assert.equal(h.handlers.get("before_agent_start")!({ prompt: "Continue", systemPrompt: "base" }, h.ctx), undefined);
+	assert.deepEqual(h.beforeAgentStart("Continue").systemPromptOptions.sections, {});
 
 	const projected = h.handlers.get("context")!({ messages: [
 		user("Ancient raw history that must stay hidden", 1),
@@ -914,7 +744,7 @@ test("stop removes State Flow semantics while retaining a bounded passive contin
 });
 
 test("reload, startup, resume, and tree restoration preserve only the same physical session handoff", async () => {
-	const h = harness({ remotePublication: "off" });
+	const h = harness();
 	await start(h, "Remember state");
 	await h.tools.get("patch_state")!.execute("state", { session: { working: { continuation: "reload" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
@@ -937,7 +767,7 @@ test("reload, startup, resume, and tree restoration preserve only the same physi
 });
 
 test("idle Stop does not retain the last run anchor and legacy markers keep their cutoff on reload", async () => {
-	const h = harness({ remotePublication: "off" });
+	const h = harness();
 	await start(h, "Completed request");
 	h.handlers.get("message_end")!({ message: user("Completed request", 1) }, h.ctx);
 	await commitTerminal(h, {}, { done: true }, "Completed answer");
@@ -958,7 +788,7 @@ test("idle Stop does not retain the last run anchor and legacy markers keep thei
 });
 
 test("repeated stop retains one passive handoff without adding another marker", async () => {
-	const h = harness({ remotePublication: "off" });
+	const h = harness();
 	await start(h, "Remember state");
 	await h.tools.get("patch_state")!.execute("state", { session: { working: { continuation: "repeat" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
@@ -970,7 +800,7 @@ test("repeated stop retains one passive handoff without adding another marker", 
 });
 
 test("start uses the passive boundary for one active bootstrap instead of resurrecting raw history", async () => {
-	const h = harness({ remotePublication: "off" });
+	const h = harness();
 	await start(h, "Remember state");
 	await h.tools.get("patch_state")!.execute("state", { session: { working: { continuation: "restart" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
@@ -988,7 +818,7 @@ test("start uses the passive boundary for one active bootstrap instead of resurr
 	assert.equal(h.readState().response, frozenResponse);
 
 	await h.commands.get("state-flow-start")!.handler("", h.ctx);
-	const protocol = h.handlers.get("before_agent_start")!({ prompt: "Restart State Flow", systemPrompt: "base" }, h.ctx);
+	const protocol = h.beforeAgentStart("Restart State Flow");
 	assert.match(protocol.systemPrompt, /State Flow is enabled/);
 	const projected = h.handlers.get("context")!({ messages: [...oldMessages, ...postStopMessages] }, h.ctx);
 	assert.equal(h.activeTools.includes("patch_state"), true);
@@ -998,11 +828,10 @@ test("start uses the passive boundary for one active bootstrap instead of resurr
 	assert.match(JSON.stringify(projected.messages), /Post-stop answer/);
 	assert.doesNotMatch(JSON.stringify(projected.messages), /OLD-/);
 
-	await h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx);
 	const final = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Active again." }] };
 	h.handlers.get("message_end")!({ message: final }, h.ctx);
 	h.handlers.get("turn_end")!({ message: final }, h.ctx);
-	h.handlers.get("before_agent_start")!({ prompt: "Later", systemPrompt: "base" }, h.ctx);
+	h.beforeAgentStart("Later");
 	const later = h.handlers.get("context")!({ messages: [user("Later", afterStop + 3)] }, h.ctx);
 	assert.match(later.messages[0].content[0].text, /State Flow runtime context/);
 	assert.doesNotMatch(JSON.stringify(later.messages), /exit handoff/);

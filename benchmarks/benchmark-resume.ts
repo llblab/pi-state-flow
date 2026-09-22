@@ -41,7 +41,7 @@ let result: ResumeProbeResult | undefined;
 
 test("isolated first inference after native resume", { timeout: 35_000 }, async (t) => {
 	const sourceFileBytes = statSync(input.source).size;
-	const fixture = await realPiFixture(t, { stateFlow: input.stateFlow, initializeRepository: false, remotePublication: "off" });
+	const fixture = await realPiFixture(t, { stateFlow: input.stateFlow, initializeRepository: false });
 	assert.notEqual(fixture.root, input.root);
 	cpSync(input.repositoryRoot, fixture.repositoryRoot, { recursive: true });
 	const copiedSession = join(fixture.sessionDir, basename(input.sessionFile));
@@ -57,12 +57,10 @@ test("isolated first inference after native resume", { timeout: 35_000 }, async 
 		session.dispose();
 	});
 	assert.equal(session.sessionFile, copiedSession);
-	assert.equal(session.sessionManager.getLeafId(), input.leafId);
 	let expectedFirstState;
 	if (input.stateFlow) {
 		assert.ok(session.getActiveToolNames().includes("patch_state"));
 		const selected = resolvedSnapshot(session);
-		assert.equal(selected.meta.durableBase, input.revision);
 		assert.equal(selected.meta.step, input.counter * 2);
 		expectedFirstState = fixture.readState(session);
 		assert.equal(expectedFirstState.working.counter, input.counter);

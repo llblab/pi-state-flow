@@ -13,13 +13,14 @@ import {
 	type AgentSession,
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeResult,
+	type InlineExtension,
 	type SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { fauxProvider, InMemoryCredentialStore, type FauxProviderHandle } from "@earendil-works/pi-ai";
+import { fauxProvider, InMemoryCredentialStore, type FauxModelDefinition, type FauxProviderHandle } from "@earendil-works/pi-ai";
 import stateFlowExtension from "../index.ts";
-import type { MaterializedState, StateScope } from "../lib/state.ts";
+import type { ModelState, StateScope } from "../lib/state.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
-import type { PiCheckpoint, Snapshot } from "../lib/snapshot.ts";
+import type { RetainedPiCheckpoint, Snapshot } from "../lib/snapshot.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 
 const checkpointStores = new WeakMap<AgentSession, { root: string; sessionKey: string }>();
@@ -40,7 +41,7 @@ export interface RealPiFixture {
 	modelRuntime: ModelRuntime;
 	notifications: string[];
 	statuses: Array<string | undefined>;
-	readState(session: AgentSession, offset?: number, scope?: StateScope): MaterializedState;
+	readState(session: AgentSession, offset?: number, scope?: StateScope): ModelState;
 	createRuntime(reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSessionRuntime>;
 	createSession(reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSession>;
 	createSessionAt(cwd: string, reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSession>;
@@ -52,8 +53,10 @@ export async function realPiFixture(t: TestContext, options: {
 	autoStart?: boolean;
 	passiveBootstrap?: boolean;
 	passiveTools?: boolean;
-	remotePublication?: "off" | "turn-end" | "transition";
 	stateFlow?: boolean;
+	extensions?: InlineExtension[];
+	models?: FauxModelDefinition[];
+	tools?: string[];
 	contextWindow?: number;
 	compaction?: { enabled: boolean; keepRecentTokens: number; reserveTokens?: number };
 } = {}): Promise<RealPiFixture> {
@@ -65,9 +68,8 @@ export async function realPiFixture(t: TestContext, options: {
 	const agentDir = join(root, "agent");
 	const sessionDir = join(root, "sessions");
 	for (const path of [repositoryRoot, cwd, agentDir, join(agentDir, "knowledge"), sessionDir]) mkdirSync(path, { recursive: true });
-	if (options.autoStart !== undefined || options.remotePublication !== undefined) writeFileSync(join(repositoryRoot, "config.json"), JSON.stringify({
+	if (options.autoStart !== undefined) writeFileSync(join(repositoryRoot, "config.json"), JSON.stringify({
 		...(options.autoStart === undefined ? {} : { autoStart: options.autoStart }),
-		...(options.remotePublication === undefined ? {} : { remotePublication: options.remotePublication }),
 	}));
 	if (options.initializeRepository !== false) {
 		execFileSync("git", ["init", "-b", "main", repositoryRoot], { stdio: "ignore" });
@@ -83,12 +85,12 @@ export async function realPiFixture(t: TestContext, options: {
 	const faux = fauxProvider({
 		provider: `state-flow-integration-${process.pid}-${Math.random().toString(16).slice(2)}`,
 		...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }),
-		...(options.contextWindow === undefined ? {} : { models: [{ id: "state-flow-test", contextWindow: options.contextWindow, maxTokens: Math.max(1, Math.floor(options.contextWindow / 4)) }] }),
+		...(options.models !== undefined ? { models: options.models } : options.contextWindow === undefined ? {} : { models: [{ id: "state-flow-test", contextWindow: options.contextWindow, maxTokens: Math.max(1, Math.floor(options.contextWindow / 4)) }] }),
 	});
 	modelRuntime.registerNativeProvider(faux.provider);
 	const notifications: string[] = [];
 	const statuses: Array<string | undefined> = [];
-	const accessors = new Map<string, { read(offset?: number, scope?: StateScope): MaterializedState }>();
+	const accessors = new Map<string, { read(offset?: number, scope?: StateScope): ModelState }>();
 
 	async function createSessionResult(
 		sessionCwd: string,
@@ -109,10 +111,13 @@ export async function realPiFixture(t: TestContext, options: {
 			noPromptTemplates: true,
 			noThemes: true,
 			noContextFiles: true,
-			extensionFactories: options.stateFlow === false ? [] : [{
-				name: "state-flow-integration",
-				factory: (pi) => stateFlowExtension(pi, { agentDir, repositoryRoot, knowledgeRoot: join(agentDir, "knowledge"), passive: { bootstrap: options.passiveBootstrap ?? false, tools: options.passiveTools ?? false }, onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
-			}],
+			extensionFactories: [
+				...(options.stateFlow === false ? [] : [{
+					name: "state-flow-integration",
+					factory: (pi: Parameters<typeof stateFlowExtension>[0]) => stateFlowExtension(pi, { agentDir, repositoryRoot, passive: { bootstrap: options.passiveBootstrap ?? false, tools: options.passiveTools ?? false }, onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
+				}]),
+				...(options.extensions ?? []),
+			],
 		});
 		await resourceLoader.reload();
 		if (resourceLoader.getExtensions().errors.length > 0) {
@@ -127,7 +132,7 @@ export async function realPiFixture(t: TestContext, options: {
 			settingsManager,
 			sessionManager: manager,
 			sessionStartEvent,
-			tools: options.stateFlow === false ? ["read"] : ["read", "patch_state", "read_state"],
+			tools: options.tools ?? (options.stateFlow === false ? ["read"] : ["read", "patch_state", "read_state"]),
 		});
 		const { session } = result;
 		await session.bindExtensions({
@@ -190,10 +195,10 @@ export function nativeSessionKey(session: AgentSession): string {
 	return resolveSessionAddress(session.sessionManager.getSessionFile(), session.sessionManager.getSessionId(), session.sessionManager.getHeader()?.timestamp).key;
 }
 
-export function snapshots(session: AgentSession): Array<{ id: string; data: PiCheckpoint }> {
+export function snapshots(session: AgentSession): Array<{ id: string; data: RetainedPiCheckpoint }> {
 	return session.sessionManager.getBranch()
 		.filter((entry): entry is any => entry.type === "custom" && entry.customType === SNAPSHOT_ENTRY_TYPE)
-		.map((entry: any) => ({ id: entry.id, data: entry.data as PiCheckpoint }));
+		.map((entry: any) => ({ id: entry.id, data: entry.data as RetainedPiCheckpoint }));
 }
 
 export function resolvedSnapshot(session: AgentSession, data: unknown = snapshots(session).at(-1)?.data): Snapshot {

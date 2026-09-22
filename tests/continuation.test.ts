@@ -16,7 +16,10 @@ import {
 	type ContinuationProjectIdentity,
 	type ContinuationSessionCandidate,
 } from "../lib/continuation.ts";
-import { resolveSessionAddress, sessionRuntimePaths } from "../lib/durable.ts";
+import { captureTemporalFileBases, resolveSessionAddress, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
+import { createAcceptedTransition } from "../lib/history.ts";
+import { TemporalRuntime } from "../lib/runtime.ts";
+import { emptySnapshot } from "../lib/snapshot.ts";
 import { realPiFixture } from "./pi-harness.ts";
 
 const context: ContinuationHostContext = {
@@ -177,36 +180,14 @@ test("discovers deterministic JSONL headers, isolates malformed files, and mutat
 	}
 });
 
-test("inspects exact Git-backed State Flow provenance without changing repository state", async (t) => {
-	const f = await realPiFixture(t, { autoStart: true });
-	const session = await f.createSession("new");
-	t.after(() => session.dispose());
-	f.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" }),
-		fauxAssistantMessage("Git provenance established."),
-	]);
-	await session.prompt("Establish continuation provenance");
-	const header = readNativeSessionHeader(session.sessionManager.getSessionFile()!);
-	const beforeHead = execFileSync("git", ["-C", f.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
-	const beforeStatus = execFileSync("git", ["-C", f.repositoryRoot, "status", "--porcelain=v1"], { encoding: "utf8" });
-	const result = inspectStateFlowContinuationProvenance(header, f.repositoryRoot);
-	assert.deepEqual(result.stateFlow, { enabled: true, restorable: true });
-	assert.match(result.reason, /exact Git runtime/);
-	assert.equal(execFileSync("git", ["-C", f.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }), beforeHead);
-	assert.equal(execFileSync("git", ["-C", f.repositoryRoot, "status", "--porcelain=v1"], { encoding: "utf8" }), beforeStatus);
-});
-
-test("inspects exact file-only provenance and fails malformed runtime closed", async (t) => {
+test("inspects exact canonical provenance and fails malformed runtime closed", async (t) => {
 	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
 	const originalPath = process.env.PATH;
 	process.env.PATH = f.root;
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	try {
-		f.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("patch_state", { final: true }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("File provenance established."),
-		]);
+		f.faux.setResponses([fauxAssistantMessage("File provenance established.")]);
 		await session.prompt("Establish file continuation provenance");
 	} finally {
 		process.env.PATH = originalPath;
@@ -214,9 +195,25 @@ test("inspects exact file-only provenance and fails malformed runtime closed", a
 	const header = readNativeSessionHeader(session.sessionManager.getSessionFile()!);
 	const good = inspectStateFlowContinuationProvenance(header, f.repositoryRoot);
 	assert.deepEqual(good.stateFlow, { enabled: true, restorable: true });
-	assert.match(good.reason, /exact file-only runtime cohort/);
+	assert.match(good.reason, /canonical session lineage is valid beside current shared streams/);
 	const address = resolveSessionAddress(header.file, header.id, header.timestamp);
 	const meta = sessionRuntimePaths(header.cwd, header.id, f.repositoryRoot, address.key).meta;
+	const other = new TemporalRuntime(header.cwd, "other", f.repositoryRoot);
+	const snapshot = emptySnapshot(true);
+	other.initialize(snapshot, true);
+	const before = other.states();
+	const next = structuredClone(before);
+	next.session.working.owner = "other";
+	snapshot.meta.step++;
+	other.publish(snapshot, true, createAcceptedTransition(before, next));
+	const ownPaths = temporalScopePaths(header.cwd, header.id, "session", f.repositoryRoot, address.key);
+	const otherPaths = temporalScopePaths(header.cwd, "other", "session", f.repositoryRoot);
+	for (const key of ["checkpoint", "patches", "meta"] as const) writeFileSync(ownPaths[key], readFileSync(otherPaths[key]));
+	const mixedFiles = captureTemporalFileBases(header.cwd, header.id, f.repositoryRoot, address.key);
+	const mixed = inspectStateFlowContinuationProvenance(header, f.repositoryRoot);
+	assert.deepEqual(mixed.stateFlow, { enabled: true, restorable: false });
+	assert.match(mixed.reason, /Conflicting State Flow temporal lineage/);
+	assert.deepEqual(captureTemporalFileBases(header.cwd, header.id, f.repositoryRoot, address.key), mixedFiles);
 	writeFileSync(meta, "{broken\n");
 	const brokenBytes = readFileSync(meta);
 	const broken = inspectStateFlowContinuationProvenance(header, f.repositoryRoot);
@@ -224,6 +221,47 @@ test("inspects exact file-only provenance and fails malformed runtime closed", a
 	assert.match(broken.reason, /ineligible/);
 	assert.deepEqual(readFileSync(meta), brokenBytes);
 });
+
+for (const scope of ["global", "cwd"] as const) for (const limit of [0, 7]) {
+	test(`continuation accepts independent ${scope} drift beside session lineage at limit ${limit}`, (t) => {
+		const f = fixture(t);
+		const root = join(f.root, "store");
+		const a = new TemporalRuntime(f.root, "a", root, undefined, limit);
+		const snapshot = emptySnapshot(true);
+		a.initialize(snapshot, true);
+		let before = a.states();
+		let next = structuredClone(before);
+		next.session.working.owner = "A";
+		snapshot.meta.step++;
+		a.publish(snapshot, true, createAcceptedTransition(before, next));
+		before = a.states();
+		next = structuredClone(before);
+		next[scope].working.shared = "A";
+		snapshot.meta.step++;
+		a.publish(snapshot, true, createAcceptedTransition(before, next));
+		const checkpoint = a.retainedCheckpoint(snapshot);
+		assert.ok("boundary" in checkpoint);
+		const b = new TemporalRuntime(f.root, "b", root, undefined, limit);
+		const other = emptySnapshot(true);
+		b.initialize(other, true);
+		before = b.states();
+		next = structuredClone(before);
+		next[scope].working.shared = "B";
+		other.meta.step++;
+		b.publish(other, true, createAcceptedTransition(before, next));
+		const file = join(f.sessions, "a.jsonl");
+		writeSession(file, "a", f.root);
+		const header = readNativeSessionHeader(file);
+		const files = captureTemporalFileBases(f.root, "a", root);
+		const inspected = inspectStateFlowContinuationProvenance(header, root);
+		assert.deepEqual(captureTemporalFileBases(f.root, "a", root), files, "inspection cannot publish or repair");
+		assert.deepEqual(inspected.stateFlow, { enabled: true, restorable: true }, inspected.reason);
+		const restored = new TemporalRuntime(f.root, "a", root, undefined, limit);
+		restored.restoreBoundary(checkpoint);
+		assert.deepEqual(restored.read(0, "session").working, { owner: "A" });
+		assert.deepEqual(restored.read(0, scope).working, { shared: "B" });
+	});
+}
 
 test("combines frozen headers with host-owned lifecycle and State Flow provenance", (t) => {
 	const f = fixture(t);

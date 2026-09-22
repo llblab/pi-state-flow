@@ -1,6 +1,5 @@
 // Domain: exact file-cohort publication, current-only recovery, and cooperating worktree exclusion.
 // Excludes: temporal algebra, Pi lifecycle, Git objects/remotes, and backend fallback policy.
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
@@ -9,26 +8,16 @@ import {
 	serializeScopeMetadata, sessionRuntimePaths, temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
 	type DurableFileBase, type OwnedFileUpdate,
 } from "./durable.ts";
-import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
+import type { ArtifactProvenanceRegistry } from "./artifact.ts";
+import { MAX_HISTORY_LIMIT } from "./history.ts";
 import { hashJson, sameJson } from "./json.ts";
 import { RevisionUnavailableError, isFileRevision, parseSessionRuntime, serializeSessionRuntime, type FileRevision, type SessionRuntime } from "./snapshot.ts";
-import { planLegacyStorageMigration } from "./migration.ts";
 export { isFileRevision, type FileRevision } from "./snapshot.ts";
 import type { StateScope } from "./state.ts";
 import { validateTemporalState, type TemporalState } from "./temporal.ts";
 
 const SCOPES = ["global", "cwd", "session"] as const;
 export interface TemporalFileBase { files: DurableFileBase[] }
-
-/** Probe once at a lifecycle boundary, never on cached state reads. Only spawn ENOENT is absence. */
-export function detectGitCapability(): "git" | "files" {
-	const result = spawnSync("git", ["--version"], { encoding: "utf8", timeout: 15_000 });
-	if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOENT") return "files";
-	if (result.error || result.status !== 0) {
-		throw new RevisionUnavailableError(`Cannot resolve Git capability: ${result.error?.message ?? result.stderr ?? `exit ${result.status}`}`);
-	}
-	return "git";
-}
 
 export function assertStorageDirectory(path: string): void {
 	const root = resolve(path);
@@ -72,7 +61,7 @@ export function acquirePublicationLock(path: string, unavailable: (cause: unknow
 	}
 }
 
-/** Git writers also acquire this lock before their common-Git-directory lock. */
+/** Canonical writers and bounded backup capture share exclusion; no Git work runs under this lock. */
 export function withStoragePublicationLock<T>(repositoryRoot: string, action: (root: string) => T): T {
 	const root = resolve(repositoryRoot);
 	assertStorageDirectory(root);
@@ -96,7 +85,7 @@ export function assertTemporalFileBase(expected: TemporalFileBase, current: Temp
 	})) throw new Error("Temporal State Flow base or scope identity changed concurrently");
 }
 
-/** One shared publication plan for Git and files; neither backend invents semantic changes. */
+/** Plan exact canonical updates; lifecycle-only writes exclude semantic files and provenance. */
 export function planTemporalPublication(
 	cwd: string, sessionId: string, view: TemporalState, scopes: readonly StateScope[],
 	current: TemporalFileBase, root: string, runtime?: SessionRuntime, runtimeOnly = false, sessionKey = sessionId,
@@ -104,11 +93,10 @@ export function planTemporalPublication(
 ): { updates: OwnedFileUpdate[]; changedScopes: StateScope[] } {
 	const candidates = temporalStateFileUpdates(cwd, sessionId, view, scopes, root, sessionKey);
 	const files = new Map(current.files.map((file) => [file.path, file]));
-	if (runtimeOnly && scopes.length !== 0) throw new Error("Runtime-only publication cannot write semantic scopes");
+	if (runtimeOnly && (scopes.length !== 0 || provenance !== undefined)) throw new Error("Runtime-only publication cannot write semantic scopes or artifact provenance");
 	const changedScopes: StateScope[] = [];
 	for (const scope of SCOPES) {
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
-		if (files.get(resolve(paths.directory, "state.json"))!.identity !== "missing") throw new Error("Legacy State Flow storage requires explicit migration");
 		const previous = parseScopeStream(files.get(paths.checkpoint)!.content, files.get(paths.patches)!.content, scope,
 			scope === "cwd" ? cwd : undefined, files.get(paths.meta)!.content);
 		if (runtimeOnly || (previous !== undefined && sameJson(previous, view.scopes[scope]))) continue;
@@ -129,7 +117,7 @@ export function planTemporalPublication(
 		}
 	}
 	const runtimePaths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
-	const previousRuntime = parseSessionRuntime(files.get(runtimePaths.config)!.content, files.get(runtimePaths.runtime)!.content, cwd, sessionId, files.get(runtimePaths.meta)!.content);
+	const previousRuntime = parseSessionRuntime(files.get(runtimePaths.config)!.content, files.get(runtimePaths.runtime)!.content, cwd, sessionId);
 	if (previousRuntime !== undefined && changedScopes.length > 0 && runtime === undefined) throw new Error("Temporal semantic publication requires its session runtime cohort");
 	const runtimeUpdates: OwnedFileUpdate[] = [];
 	if (runtime !== undefined) {
@@ -137,12 +125,6 @@ export function planTemporalPublication(
 		if (!sameJson(runtime.meta.lineage, view.lineage)) throw new Error("Runtime lineage does not match the temporal cohort");
 		if (files.get(runtimePaths.config)!.content !== sources.config || files.get(runtimePaths.runtime)!.content !== sources.runtime) {
 			runtimeUpdates.push({ path: runtimePaths.config, content: sources.config }, { path: runtimePaths.runtime, content: sources.runtime });
-		}
-		if (files.get(runtimePaths.runtime)!.identity === "missing" && files.get(runtimePaths.meta)!.content !== undefined
-			&& previousRuntime !== undefined && !provenanceUpdates.some(({ path }) => path === runtimePaths.meta)) {
-			const registry = provenance?.session ?? parseArtifactProvenanceRegistry(previousRuntime.meta.artifacts, "State Flow session artifact provenance");
-			const content = serializeScopeMetadata(registry, view.scopes.session, "session", undefined, files.get(runtimePaths.meta)!.content);
-			runtimeUpdates.push({ path: runtimePaths.meta, content });
 		}
 	}
 	const changedPaths = new Set(changedScopes.flatMap((scope) => {
@@ -174,17 +156,16 @@ function decodeFileCohort(cwd: string, sessionId: string, root: string, base: Te
 	const scopes = {} as TemporalState["scopes"];
 	for (const scope of SCOPES) {
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
-		if (files.get(resolve(paths.directory, "state.json")) !== undefined) throw new Error("Legacy State Flow storage requires explicit migration");
 		const stream = parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope,
 			scope === "cwd" ? cwd : undefined, files.get(paths.meta));
 		if (!stream) throw new Error("Incomplete file-only temporal scope cohort");
 		scopes[scope] = stream;
 	}
 	const paths = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
-	const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), cwd, sessionId, files.get(paths.meta));
-	if (!runtime || runtime.meta.publication !== "files") throw new Error("File-only recovery requires file publication provenance, not a Git self reference");
+	const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), cwd, sessionId);
+	if (!runtime) throw new Error("Canonical recovery requires a complete session runtime");
 	const view = { scopes, lineage: runtime.meta.lineage };
-	validateTemporalState(view);
+	validateTemporalState(view, MAX_HISTORY_LIMIT);
 	const provenance: Record<StateScope, ArtifactProvenanceRegistry> = {
 		global: parseScopeProvenance(files.get(temporalScopePaths(cwd, sessionId, "global", root, sessionKey).meta), temporalScopePaths(cwd, sessionId, "global", root, sessionKey).meta),
 		cwd: parseScopeProvenance(files.get(temporalScopePaths(cwd, sessionId, "cwd", root, sessionKey).meta), temporalScopePaths(cwd, sessionId, "cwd", root, sessionKey).meta),
@@ -207,17 +188,16 @@ export function loadTemporalFileRevision(cwd: string, sessionId: string, root: s
 	});
 }
 
-/** Publish a validated full runtime/scoped cohort; no Git commands, success receipts, or pending pushes. */
+/** Publish a validated canonical cohort; runtimeOnly owns only session config/runtime files. */
 export function publishTemporalStateToFiles(
 	cwd: string, sessionId: string, view: TemporalState, scopes: readonly StateScope[],
 	base: TemporalFileBase, root: string, runtime: SessionRuntime, sessionKey = sessionId,
-	provenance?: Readonly<Record<StateScope, ArtifactProvenanceRegistry>>,
+	provenance?: Readonly<Record<StateScope, ArtifactProvenanceRegistry>>, runtimeOnly = false,
 ): { base: TemporalFileBase; revision: FileRevision; changed: boolean } {
 	return withStoragePublicationLock(root, (locked) => {
-		if (runtime.meta.publication !== "files") throw new Error("File publication requires explicit file provenance");
 		const current = { files: captureTemporalFileBases(cwd, sessionId, locked, sessionKey) };
 		assertTemporalFileBase(base, current);
-		const { updates } = planTemporalPublication(cwd, sessionId, view, scopes, current, locked, runtime, false, sessionKey, provenance);
+		const { updates } = planTemporalPublication(cwd, sessionId, view, scopes, current, locked, runtime, runtimeOnly, sessionKey, provenance);
 		const next = { files: temporalFileReceipts(current, updates) };
 		decodeFileCohort(cwd, sessionId, locked, next, sessionKey);
 		const revision = fileRevision(next, locked);
@@ -239,12 +219,4 @@ function publishFileUpdates(bases: readonly DurableFileBase[], updates: readonly
 		}
 		throw error;
 	}
-}
-
-/** In-store format conversion only; no Git history or cross-repository import. */
-export function migrateLegacyStorageToFiles(cwd: string, sessionId: string, root: string, sessionKey = sessionId): void {
-	withStoragePublicationLock(root, (locked) => {
-		const plan = planLegacyStorageMigration(cwd, sessionId, locked, undefined, sessionKey);
-		if (plan.updates.length) publishFileUpdates(plan.bases, plan.updates, locked);
-	});
 }

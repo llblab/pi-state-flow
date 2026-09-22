@@ -1,781 +1,307 @@
 import assert from "node:assert/strict";
-import childProcess, { execFileSync } from "node:child_process";
-import { EventEmitter, getEventListeners } from "node:events";
-import { PassThrough } from "node:stream";
-import fs, { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
-import test, { type TestContext } from "node:test";
-import {
-	cwdPatchesPath,
-	cwdStatePath,
-	durablePaths,
-	loadScopeStream,
-	temporalScopePaths,
-	sessionRuntimePaths,
-	sessionPatchesPath,
-	sessionStatePath,
-	parseScopeStream,
-	serializeScopeMetadata,
-	serializeScopeStream,
-	temporalStateFileUpdates,
-	writeOwnedFileUpdates,
-} from "../lib/durable.ts";
-import {
-	captureTemporalGitBase,
-	loadTemporalRevision,
-	publishTemporalStateToGit,
-	migrateLegacyStorageToGit,
-	pushGitCommit,
-	pushGitTarget,
-	initializeGitRepository,
-	isGitCommitAncestor,
-	resolveGitPushDestination,
-} from "../lib/git.ts";
-import { createPublicationQueue, loadPublicationQueue, publicationQueuePath, removePublicationQueue, savePublicationQueue } from "../lib/publication.ts";
-import { writeCwdState, writeGlobalState, writeSessionState } from "./storage-fixture.ts";
-import { emptyState, type ScopedStates } from "../lib/state.ts";
-import { advanceTemporalState, createTemporalState, readTemporalState, type ScopeStream, type TemporalState } from "../lib/temporal.ts";
-import { applyPatch, type JsonObject } from "../lib/json.ts";
-import type { RecentScopePatch } from "../lib/history.ts";
-import { createSessionRuntime, emptySnapshot, resolveSessionRuntime, serializeSessionRuntime } from "../lib/snapshot.ts";
+import { join, relative, sep } from "node:path";
+import test from "node:test";
+import { backupCurrentStateFlowFiles } from "../lib/git.ts";
+import { captureTemporalFileBases, isStateFlowOwnedPath } from "../lib/durable.ts";
+import { createAcceptedTransition } from "../lib/history.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
-import { harness, start } from "./harness.ts";
-import { interceptGitPushes } from "./push-fixture.ts";
+import { emptySnapshot } from "../lib/snapshot.ts";
 
-function run(repository: string, ...args: string[]): string {
-	return execFileSync("git", ["-C", repository, ...args], { encoding: "utf8" }).trim();
+function git(root: string, ...args: string[]): string {
+	return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
 }
 
-function ownerlessLegacyScopeSource(stream: ScopeStream): { checkpoint: string; patches: string } {
-	return {
-		checkpoint: `${JSON.stringify(stream.checkpoint)}\n`,
-		patches: stream.patches.map((record) => `${JSON.stringify(record)}\n`).join(""),
-	};
-}
-
-function fixture(t: TestContext, temporal = false): { repository: string; remote: string; cwd: string } {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-git-"));
+test("backup requires the exact State Flow root to be a Git repository", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-no-git-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const repository = join(root, "repository");
-	const remote = join(root, "remote.git");
-	execFileSync("git", ["init", "-b", "main", repository], { stdio: "ignore" });
-	run(repository, "config", "user.name", "State Flow Tests");
-	run(repository, "config", "user.email", "state-flow@example.invalid");
-	writeFileSync(join(repository, "README.md"), "fixture\n");
-	run(repository, "add", "README.md");
-	run(repository, "commit", "-m", "fixture");
-	execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" });
-	run(repository, "remote", "add", "origin", remote);
-	run(repository, "push", "-u", "origin", "main");
+	assert.throws(() => backupCurrentStateFlowFiles(root), /Git command failed|repository/);
+});
+
+test("settled backup commits only State Flow-owned current files", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	git(root, "init");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "unrelated.txt"), "baseline\n");
+	git(root, "add", "unrelated.txt");
+	git(root, "commit", "-m", "baseline");
+	const before = git(root, "rev-parse", "HEAD");
+	writeFileSync(join(root, "checkpoint.json"), "{\"accepted\":true}\n");
+	writeFileSync(join(root, "unrelated.txt"), "caller edit\n");
+	const commit = backupCurrentStateFlowFiles(root);
+	assert.match(commit ?? "", /^[0-9a-f]{40,64}$/);
+	assert.notEqual(commit, before);
+	assert.equal(git(root, "show", "HEAD:checkpoint.json"), '{"accepted":true}');
+	assert.equal(git(root, "show", "HEAD:unrelated.txt"), "baseline");
+	assert.equal(readFileSync(join(root, "unrelated.txt"), "utf8"), "caller edit\n");
+	assert.equal(backupCurrentStateFlowFiles(root), undefined);
+});
+
+for (const outcome of ["success", "unchanged", "index-lock"] as const) test(`backup preserves unrelated staged data on ${outcome}`, (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-index-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	git(root, "init");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	for (const path of ["notes.txt", "deleted.txt", "checkpoint.json", "patches.jsonl"]) writeFileSync(join(root, path), "baseline\n");
+	git(root, "add", ".");
+	git(root, "commit", "-m", "baseline");
+	const head = git(root, "rev-parse", "HEAD");
+	writeFileSync(join(root, "notes.txt"), "staged version\n");
+	writeFileSync(join(root, "new.txt"), "index-only addition\n");
+	git(root, "add", "notes.txt", "new.txt");
+	writeFileSync(join(root, "notes.txt"), "unstaged version\n");
+	rmSync(join(root, "new.txt"));
+	git(root, "rm", "deleted.txt");
+	const unrelated = ["notes.txt", "deleted.txt", "new.txt"];
+	const stages = () => git(root, "ls-files", "--stage", "-z", "--", ...unrelated);
+	const changes = () => git(root, "diff", "--cached", "--name-status", "--", ...unrelated);
+	const beforeStages = stages();
+	const beforeChanges = changes();
+	if (outcome !== "unchanged") {
+		writeFileSync(join(root, "checkpoint.json"), "accepted canonical bytes\n");
+		git(root, "rm", "patches.jsonl");
+	}
+	const beforeIndex = readFileSync(join(root, ".git", "index"));
+	if (outcome === "index-lock") {
+		const lock = join(root, ".git", "index.lock");
+		writeFileSync(lock, "caller-owned lock\n");
+		assert.throws(() => backupCurrentStateFlowFiles(root), /index\.lock/);
+		assert.equal(readFileSync(lock, "utf8"), "caller-owned lock\n");
+		assert.equal(git(root, "rev-parse", "HEAD"), head);
+		assert.deepEqual(readFileSync(join(root, ".git", "index")), beforeIndex);
+	} else {
+		const commit = backupCurrentStateFlowFiles(root);
+		if (outcome === "unchanged") {
+			assert.equal(commit, undefined);
+			assert.equal(git(root, "rev-parse", "HEAD"), head);
+			assert.deepEqual(readFileSync(join(root, ".git", "index")), beforeIndex);
+		} else {
+			assert.notEqual(commit, undefined);
+			assert.equal(git(root, "show", "HEAD:checkpoint.json"), "accepted canonical bytes");
+			assert.equal(git(root, "ls-tree", "--name-only", "HEAD", "--", "patches.jsonl"), "");
+			assert.equal(git(root, "diff", "--cached", "--", "checkpoint.json", "patches.jsonl"), "");
+			assert.equal(backupCurrentStateFlowFiles(root), undefined);
+		}
+	}
+	assert.equal(stages(), beforeStages);
+	assert.equal(changes(), beforeChanges);
+	assert.equal(git(root, "show", ":notes.txt"), "staged version");
+	assert.equal(git(root, "show", ":new.txt"), "index-only addition");
+	assert.equal(readFileSync(join(root, "notes.txt"), "utf8"), "unstaged version\n");
+	assert.equal(existsSync(join(root, "new.txt")), false);
+	assert.equal(existsSync(join(root, "deleted.txt")), false);
+	if (outcome !== "unchanged") assert.equal(readFileSync(join(root, "checkpoint.json"), "utf8"), "accepted canonical bytes\n");
+});
+
+for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]] as const) test(`backup releases canonical writers during ${phase} (failure=${fail}) and commits one captured cohort`, { timeout: 30_000 }, async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-concurrency-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "notes.txt"), "baseline\n");
+	git(root, "add", "notes.txt");
+	git(root, "commit", "-m", "baseline");
 	const cwd = join(root, "project");
-	if (!temporal) writeCwdState(cwd, emptyState(), repository);
-	return { repository, remote, cwd };
-}
-
-test("asynchronous push uses an exact target, preserves remote fast-forward protection, and rejects cancelled or symbolic targets", { timeout: 20_000 }, async (t) => {
-	const { repository, remote } = fixture(t, true);
-	const first = run(repository, "rev-parse", "HEAD");
-	run(repository, "commit", "--allow-empty", "-m", "next push");
-	const target = run(repository, "rev-parse", "HEAD");
-	const destination = resolveGitPushDestination(repository)!;
-	await pushGitTarget(repository, destination, target);
-	assert.equal(run(remote, "rev-parse", destination.ref), target);
-	await assert.rejects(pushGitTarget(repository, destination, first), /Git push failed/);
-	assert.equal(run(remote, "rev-parse", destination.ref), target);
-	const pushes = interceptGitPushes(t);
-	for (const invalid of ["HEAD", [target], [[target]], { toString: () => target }]) {
-		await assert.rejects(pushGitTarget(repository, destination, invalid as any), /exact commit/);
-	}
-	await assert.rejects(pushGitTarget(repository, destination, target, AbortSignal.abort()), /aborted/);
-	assert.equal(pushes.length, 0);
-});
-
-test("asynchronous push hard-kills a blocked child at the 15000ms budget and removes its abort listener", { timeout: 10_000 }, async (t) => {
-	const { repository } = fixture(t, true);
-	const destination = resolveGitPushDestination(repository)!;
-	const target = run(repository, "rev-parse", "HEAD");
-	t.mock.timers.enable({ apis: ["setTimeout"] });
-	const pushes = interceptGitPushes(t);
-	const controller = new AbortController();
-	const finished = assert.rejects(pushGitTarget(repository, destination, target, controller.signal), /timed out after 15000ms/);
-	await pushes[0].ready;
-	t.mock.timers.tick(14_999);
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	assert.equal(pushes[0].child.signalCode, null);
-	assert.equal(pushes[0].child.exitCode, null);
-	t.mock.timers.tick(1);
-	await finished;
-	assert.equal(pushes[0].child.signalCode, "SIGKILL");
-	assert.equal(getEventListeners(controller.signal, "abort").length, 0);
-	controller.abort();
-	t.mock.timers.tick(15_000);
-	assert.equal(pushes.length, 1);
-});
-
-test("asynchronous push bounds an inherited diagnostic pipe that remains open after child exit", { timeout: 5_000 }, async (t) => {
-	t.mock.timers.enable({ apis: ["setTimeout"] });
-	const stderr = new PassThrough();
-	const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null, stderr });
-	stderr.once("close", () => child.emit("close", 0, null));
-	t.mock.method(childProcess, "spawn", (() => child) as unknown as typeof childProcess.spawn);
-	syncBuiltinESMExports();
-	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); stderr.destroy(); });
-	const finished = assert.rejects(pushGitTarget("/unused", { remote: "origin", ref: "refs/heads/main" }, "a".repeat(40)), /timed out after 15000ms/);
-	child.exitCode = 0;
-	child.emit("exit", 0, null);
-	assert.equal(stderr.destroyed, false);
-	t.mock.timers.tick(15_000);
-	await finished;
-	assert.equal(stderr.destroyed, true);
-});
-
-test("asynchronous push rejects spawn failure without waiting for a nonexistent child's exit", { timeout: 5_000 }, async (t) => {
-	const spawn = childProcess.spawn;
-	t.mock.method(childProcess, "spawn", ((_command: any, _args: any, options: any) =>
-		spawn("/state-flow-missing-test-executable", [], options)) as typeof spawn);
-	syncBuiltinESMExports();
-	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-	const controller = new AbortController();
-	await assert.rejects(pushGitTarget("/unused", { remote: "origin", ref: "refs/heads/main" }, "a".repeat(40), controller.signal), /ENOENT/);
-	assert.equal(getEventListeners(controller.signal, "abort").length, 0);
-});
-
-test("inspects exact Git ancestry without moving HEAD or the worktree", (t) => {
-	const { repository } = fixture(t, true);
-	const first = run(repository, "rev-parse", "HEAD");
-	writeFileSync(join(repository, "README.md"), "second\n");
-	run(repository, "add", "README.md");
-	run(repository, "commit", "-m", "second");
-	const second = run(repository, "rev-parse", "HEAD");
-	assert.equal(isGitCommitAncestor(repository, first, second), true);
-	assert.equal(isGitCommitAncestor(repository, second, first), false);
-	assert.equal(run(repository, "rev-parse", "HEAD"), second);
-	assert.equal(readFileSync(join(repository, "README.md"), "utf8"), "second\n");
-});
-
-test("explicit repository initialization rejects unsafe roots and supports real worktrees", (t) => {
-	const { repository } = fixture(t, true);
-	const nested = join(repository, "dedicated");
-	const head = run(repository, "rev-parse", "HEAD");
-	fs.mkdirSync(nested);
-	assert.throws(() => captureTemporalGitBase(repository, "session", nested), /root mismatch/);
-	initializeGitRepository(nested);
-	assert.throws(() => run(nested, "rev-parse", "--verify", "HEAD"));
-	assert.throws(() => run(nested, "config", "--local", "--get", "user.name"));
-	assert.equal(run(nested, "rev-parse", "--show-toplevel"), nested);
-	assert.equal(run(repository, "rev-parse", "HEAD"), head);
-	const nonempty = join(repository, "nonempty");
-	fs.mkdirSync(nonempty);
-	writeFileSync(join(nonempty, "notes.md"), "preserve");
-	initializeGitRepository(nonempty);
-	assert.equal(run(nonempty, "rev-parse", "--show-toplevel"), nonempty);
-	assert.equal(readFileSync(join(nonempty, "notes.md"), "utf8"), "preserve");
-	assert.equal(run(nonempty, "ls-files"), "");
-	assert.equal(run(repository, "rev-parse", "HEAD"), head);
-	const link = join(repository, "link");
-	fs.symlinkSync(nested, link);
-	assert.throws(() => initializeGitRepository(link), /regular directory/);
-	const worktree = join(dirname(repository), "worktree");
-	run(repository, "worktree", "add", "-b", "other", worktree);
-	initializeGitRepository(worktree);
-	assert.equal(run(worktree, "rev-parse", "HEAD"), head);
-});
-
-test("local-only push validates commits and does not hide branch or remote errors", (t) => {
-	const { repository } = fixture(t, true);
-	const commit = run(repository, "rev-parse", "HEAD");
-	run(repository, "remote", "remove", "origin");
-	assert.deepEqual(pushGitCommit(repository, commit), { status: "local", commit });
-	assert.equal(pushGitCommit(repository, "a".repeat(40)).status, "pending");
-	assert.equal(pushGitCommit(repository, "HEAD").status, "pending");
-	run(repository, "config", "branch.main.remote", "missing");
-	assert.equal(pushGitCommit(repository, commit).status, "pending");
-	run(repository, "config", "--unset", "branch.main.remote");
-	run(repository, "checkout", "--detach");
-	assert.equal(pushGitCommit(repository, commit).status, "pending");
-});
-
-test("Git publication cannot omit uncommitted streams merely because live files match the view", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "draft");
-	const initial = captureTemporalGitBase(cwd, "draft", repository);
-	const updates = temporalStateFileUpdates(cwd, "draft", view, ["global", "cwd", "session"], repository);
-	for (const scope of ["global", "cwd", "session"] as const) {
-		const paths = temporalScopePaths(cwd, "draft", scope, repository);
-		updates.push({ path: paths.meta, content: serializeScopeMetadata({}, view.scopes[scope], scope, scope === "cwd" ? cwd : undefined) });
-	}
-	writeOwnedFileUpdates(updates, initial.files, repository);
-	const live = captureTemporalGitBase(cwd, "draft", repository);
-	assert.throws(() => publishTemporalStateToGit(cwd, "draft", view, ["session"], live, repository), /omitted an uncommitted stream/);
-	assert.equal(run(repository, "rev-parse", "HEAD"), initial.head);
-	const published = publishTemporalStateToGit(cwd, "draft", view, ["global", "cwd", "session"], live, repository);
-	assert.deepEqual(loadTemporalRevision(cwd, "draft", repository, published.commit!).scopes, view.scopes);
-});
-
-test("temporal Git writer preserves all hot states through sparse folding and cold revision reads", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "temporal-git";
-	let states: ScopedStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
-	let view = createTemporalState(states, "origin");
-	let base = captureTemporalGitBase(cwd, session, repository);
-	const initialized = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], base, repository);
-	base = initialized.base;
-	const coldRevision = initialized.commit!;
-	const origin = structuredClone(view);
-	const snapshots = [structuredClone(states)];
-	writeFileSync(join(repository, "staged.txt"), "unrelated staging\n");
-	run(repository, "add", "staged.txt");
-	writeFileSync(join(repository, "dirty.txt"), "unrelated dirty file\n");
-	for (let index = 1; index <= 10; index++) {
-		const changes: RecentScopePatch[] = [{ scope: "session", patch: { response: `Answer ${index}` } }];
-		if (index % 2 === 0) changes.push({ scope: "cwd", patch: { working: { project: index } } });
-		if (index % 3 === 0) changes.push({ scope: "global", patch: { working: { shared: index } } });
-		view = advanceTemporalState(view, changes, `T${index}`);
-		states = structuredClone(states);
-		for (const change of changes) states[change.scope] = applyPatch(states[change.scope], change.patch as JsonObject) as ScopedStates["session"];
-		snapshots.push(states);
-		const publication = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], base, repository);
-		assert.equal(publication.push?.status, "pushed");
-		base = publication.base;
-		const allowed = new Set(changes.flatMap(({ scope }) => {
-			const paths = temporalScopePaths(cwd, session, scope, repository);
-			return [paths.checkpoint, paths.patches, paths.meta].map((path) => path.slice(repository.length + 1));
-		}));
-		for (const path of run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!).split("\n")) {
-			const completeDelta = index === 1 && (path === "staged.txt" || path === "dirty.txt");
-			assert.ok(completeDelta || allowed.has(path), `unchanged scope or unexpected file was committed: ${path}`);
-		}
-		const loaded: TemporalState = { lineage: view.lineage, scopes: {
-			global: loadScopeStream(cwd, session, "global", repository)!,
-			cwd: loadScopeStream(cwd, session, "cwd", repository)!,
-			session: loadScopeStream(cwd, session, "session", repository)!,
-		} };
-		for (let offset = 0; offset < loaded.lineage.length; offset++) {
-			for (const scope of ["global", "cwd", "session"] as const) assert.deepEqual(readTemporalState(loaded, offset, scope), snapshots.at(-1 - offset)![scope]);
-		}
-	}
-	assert.equal(loadScopeStream(cwd, session, "session", repository)!.checkpoint.state.response, "Answer 3");
-	assert.throws(() => readTemporalState(view, 8), /integer from 0 to 7/);
-	const before = { head: run(repository, "rev-parse", "HEAD"), status: run(repository, "status", "--short") };
-	const cold = loadTemporalRevision(cwd, session, repository, coldRevision);
-	const restored: TemporalState = { lineage: origin.lineage, scopes: { global: cold.scopes.global!, cwd: cold.scopes.cwd!, session: cold.scopes.session! } };
-	assert.deepEqual(readTemporalState(restored), emptyState());
-	assert.deepEqual({ head: run(repository, "rev-parse", "HEAD"), status: run(repository, "status", "--short") }, before);
-	assert.equal(run(repository, "status", "--short"), "");
-	assert.equal(run(repository, "diff", "--cached", "--name-status"), "");
-	const noOp = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], base, repository);
-	assert.equal(noOp.commit, undefined);
-	assert.equal(run(repository, "rev-parse", "HEAD"), before.head);
-});
-
-test("session config/runtime publish atomically with temporal files and config-only stop creates no semantic step", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "runtime-session";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
+	const a = new TemporalRuntime(cwd, "writer-a", root);
 	const snapshot = emptySnapshot(true);
-	const runtime = createSessionRuntime(snapshot, cwd, session, view.lineage);
-	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository, runtime);
-	const paths = sessionRuntimePaths(cwd, session, repository);
-	assert.deepEqual(JSON.parse(readFileSync(paths.config, "utf8")), runtime.config);
-	assert.deepEqual(JSON.parse(readFileSync(paths.runtime, "utf8")), runtime.meta);
-	assert.deepEqual(JSON.parse(readFileSync(paths.meta, "utf8")), {
-		version: 1, artifacts: {}, temporal: { checkpoint: view.scopes.session.checkpoint.through, patches: [] },
-	});
-	const semanticPaths = (["global", "cwd", "session"] as const).flatMap((scope) => {
-		const pair = temporalScopePaths(cwd, session, scope, repository);
-		return [pair.checkpoint, pair.patches];
-	});
-	const semanticBefore = semanticPaths.map((path) => readFileSync(path));
-	snapshot.config.enabled = false;
-	const stopped = createSessionRuntime(snapshot, cwd, session, view.lineage);
-	const second = publishTemporalStateToGit(cwd, session, view, [], first.base, repository, stopped);
-	assert.ok(second.commit);
-	assert.deepEqual(semanticPaths.map((path) => readFileSync(path)), semanticBefore);
-	const changed = run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", second.commit!).split("\n");
-	assert.deepEqual(changed, [paths.config.slice(repository.length + 1)]);
-	const original = loadTemporalRevision(cwd, session, repository, first.commit!);
-	const stop = loadTemporalRevision(cwd, session, repository, second.commit!);
-	assert.equal(original.runtime!.document.config.enabled, true);
-	assert.equal(stop.runtime!.document.config.enabled, false);
-	assert.equal(stop.runtime!.document.meta.step, 0);
-	assert.deepEqual(stop.runtime!.document.meta.lineage, view.lineage);
-	assert.equal(stop.runtime!.revision, second.commit);
-	writeFileSync(join(repository, "unrelated.md"), "Knowledge-only advance\n");
-	run(repository, "add", "unrelated.md");
-	run(repository, "commit", "-m", "knowledge-only advance");
-	const head = run(repository, "rev-parse", "HEAD");
-	const afterKnowledge = loadTemporalRevision(cwd, session, repository, head);
-	assert.equal(afterKnowledge.base.head, head);
-	assert.equal(afterKnowledge.runtime!.revision, second.commit);
-	assert.equal(resolveSessionRuntime(afterKnowledge.runtime!.document, afterKnowledge.runtime!.revision).snapshot.meta.durableBase, second.commit);
-});
-
-test("semantic runtime publication binds lineage and recovers the existing publication target after push failure", (t) => {
-	const { repository, remote, cwd } = fixture(t, true);
-	const session = "runtime-publication";
-	const origin = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const snapshot = emptySnapshot(true);
-	const runtime = createSessionRuntime(snapshot, cwd, session, origin.lineage);
-	const first = publishTemporalStateToGit(cwd, session, origin, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository, runtime);
-	const next = advanceTemporalState(origin, [{ scope: "session", patch: { response: "Accepted" } }], "T1");
-	assert.throws(() => publishTemporalStateToGit(cwd, session, next, ["session"], first.base, repository), /requires its session runtime cohort/);
-	assert.throws(() => publishTemporalStateToGit(cwd, session, next, ["session"], first.base, repository, runtime), /Runtime lineage does not match/);
-	snapshot.meta.step = 1;
-	const acceptedRuntime = createSessionRuntime(snapshot, cwd, session, next.lineage);
-	run(repository, "remote", "set-url", "origin", join(repository, "missing.git"));
-	const accepted = publishTemporalStateToGit(cwd, session, next, ["session"], first.base, repository, acceptedRuntime);
-	assert.equal(accepted.push?.status, "pending");
-	const persisted = loadTemporalRevision(cwd, session, repository, accepted.commit!);
-	const restored = resolveSessionRuntime(persisted.runtime!.document, persisted.runtime!.revision);
-	assert.equal(restored.publicationTarget, accepted.commit);
-	assert.equal(restored.snapshot.meta.step, 1);
-	assert.deepEqual(restored.lineage, next.lineage);
-	assert.equal(persisted.scopes.session!.patches.length, 1);
-	run(repository, "remote", "set-url", "origin", remote);
-	assert.equal(pushGitCommit(repository, restored.publicationTarget).status, "pushed");
-	assert.equal(run(repository, "rev-parse", "HEAD"), accepted.commit);
-	const noOp = publishTemporalStateToGit(cwd, session, next, [], accepted.base, repository, acceptedRuntime);
-	assert.equal(noOp.commit, undefined);
-});
-
-test("large Git-backed checkpoint, tail and runtime blobs survive cold reads and later publication", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "large-blobs";
-	const payload = "λ🧭".repeat(196_608);
-	assert.ok(payload.length < 1024 * 1024 && Buffer.byteLength(payload) > 1024 * 1024);
-	const states = { global: emptyState(), cwd: emptyState(), session: { ...emptyState(), working: { payload } } };
-	const origin = createTemporalState(states, "large-origin");
-	const snapshot = emptySnapshot(true);
-	const first = publishTemporalStateToGit(cwd, session, origin, ["global", "cwd", "session"],
-		captureTemporalGitBase(cwd, session, repository), repository, createSessionRuntime(snapshot, cwd, session, origin.lineage), session, false);
-	assert.deepEqual(loadTemporalRevision(cwd, session, repository, first.commit!).scopes, origin.scopes);
-	const next = advanceTemporalState(origin, [{ scope: "session", patch: { working: { extra: payload } } }], "large-tail");
-	snapshot.meta.step = 1;
-	const second = publishTemporalStateToGit(cwd, session, next, ["session"], first.base, repository,
-		createSessionRuntime(snapshot, cwd, session, next.lineage), session, false);
-	assert.deepEqual(loadTemporalRevision(cwd, session, repository, second.commit!).scopes, next.scopes);
-	snapshot.config.enabled = false;
-	snapshot.meta.specification = payload;
-	const stoppedRuntime = createSessionRuntime(snapshot, cwd, session, next.lineage);
-	stoppedRuntime.meta.temporalRevision = second.commit;
-	const stopped = publishTemporalStateToGit(cwd, session, next, [], second.base, repository, stoppedRuntime, session, false);
-	const before = captureTemporalGitBase(cwd, session, repository);
-	const restored = loadTemporalRevision(cwd, session, repository, stopped.commit!);
-	assert.deepEqual(restored.scopes, next.scopes);
-	assert.equal(restored.runtime!.document.meta.specification, payload);
-	assert.equal(restored.runtime!.document.config.enabled, false);
-	assert.equal(restored.runtime!.document.meta.step, 1);
-	assert.deepEqual(loadTemporalRevision(cwd, session, repository, first.commit!).scopes, origin.scopes);
-	assert.deepEqual(captureTemporalGitBase(cwd, session, repository), before, "cold inspection must not move the branch or rewrite live files");
-});
-
-test("historical reads batch exact literal canonical paths", { skip: process.platform === "win32" }, (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const literalCwd = `${cwd}/literal[*?]\tline\nnext`;
-	const session = "literal-paths";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "literal-origin");
-	const runtime = createSessionRuntime(emptySnapshot(true), literalCwd, session, view.lineage);
-	const first = publishTemporalStateToGit(literalCwd, session, view, ["global", "cwd", "session"],
-		captureTemporalGitBase(literalCwd, session, repository), repository, runtime, session, false);
-	const revision = first.commit!;
-	const spawn = childProcess.spawnSync;
-	const trees = new Map<string, number>();
-	const blobs = new Map<string, number>();
-	t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
-		const argv = args[1] as string[];
-		if (args[0] === "git" && argv[1] === repository) {
-			if (argv[2] === "ls-tree") trees.set(argv[4], (trees.get(argv[4]) ?? 0) + 1);
-			if (argv[2] === "show") blobs.set(argv[3], (blobs.get(argv[3]) ?? 0) + 1);
-		}
-		const result = spawn(...args);
-		return result;
-	}) as typeof spawn);
-	syncBuiltinESMExports();
-	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-	const literal = process.env.GIT_LITERAL_PATHSPECS;
-	process.env.GIT_LITERAL_PATHSPECS = "1";
-	t.after(() => {
-		if (literal === undefined) delete process.env.GIT_LITERAL_PATHSPECS;
-		else process.env.GIT_LITERAL_PATHSPECS = literal;
-	});
-	const loaded = loadTemporalRevision(literalCwd, session, repository, revision);
-	assert.deepEqual(loaded.scopes, view.scopes);
-	assert.equal(loaded.runtime!.revision, first.commit);
-	assert.deepEqual([...trees.keys()], [revision]);
-	for (const count of trees.values()) assert.equal(count, 1, "One bounded tree query per immutable revision");
-	for (const [path, count] of blobs) {
-		assert.equal(count, 1, `Duplicate blob read: ${path}`);
-		assert.equal(path.endsWith("README.md"), false);
-	}
-	assert.equal(run(repository, "rev-parse", "HEAD"), revision);
-});
-
-test("historical tree catalogs reject incomplete, malformed, and duplicate records without changing selected files", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "tree-catalog-validation";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const runtime = createSessionRuntime(emptySnapshot(true), cwd, session, view.lineage);
-	const published = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"],
-		captureTemporalGitBase(cwd, session, repository), repository, runtime, session, false);
-	const before = captureTemporalGitBase(cwd, session, repository);
-	const spawn = childProcess.spawnSync;
-	let corrupt: (listing: string) => string = (listing) => listing;
-	t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
-		const result = spawn(...args);
-		const argv = args[1] as string[];
-		return args[0] === "git" && argv[2] === "ls-tree" ? { ...result, stdout: corrupt(String(result.stdout)) } : result;
-	}) as typeof spawn);
-	syncBuiltinESMExports();
-	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-	for (const variant of [
-		(listing: string) => listing.slice(0, -1),
-		(listing: string) => listing.replace("\t", " "),
-		(listing: string) => listing + listing.slice(0, listing.indexOf("\0") + 1),
-	]) {
-		corrupt = variant;
-		assert.throws(() => loadTemporalRevision(cwd, session, repository, published.commit!), /Historical Git tree/);
-		assert.deepEqual(captureTemporalGitBase(cwd, session, repository), before);
-	}
-});
-
-test("publication anchors selected streams with one tree query and never reuses a previous revision's modes", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "tree-catalog-publication";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const snapshot = emptySnapshot(true);
-	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"],
-		captureTemporalGitBase(cwd, session, repository), repository, createSessionRuntime(snapshot, cwd, session, view.lineage), session, false);
-	const next = advanceTemporalState(view, [{ scope: "session", patch: { response: "Next" } }], "next");
-	snapshot.meta.step = 1;
-	const spawn = childProcess.spawnSync;
-	const trees: string[] = [];
-	t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
-		const argv = args[1] as string[];
-		if (args[0] === "git" && argv[2] === "ls-tree") trees.push(argv[4]);
-		return spawn(...args);
-	}) as typeof spawn);
-	syncBuiltinESMExports();
-	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-	const second = publishTemporalStateToGit(cwd, session, next, ["session"], first.base, repository,
-		createSessionRuntime(snapshot, cwd, session, next.lineage), session, false);
-	assert.deepEqual(trees, [first.commit]);
-	const blob = run(repository, "rev-parse", `${second.commit}:checkpoint.json`);
-	run(repository, "update-index", "--cacheinfo", `120000,${blob},checkpoint.json`);
-	run(repository, "commit", "-m", "changed mode at a later HEAD");
-	const current = captureTemporalGitBase(cwd, session, repository);
-	const third = advanceTemporalState(next, [{ scope: "session", patch: { response: "Third" } }], "third");
-	snapshot.meta.step = 2;
-	trees.length = 0;
-	assert.throws(() => publishTemporalStateToGit(cwd, session, third, ["session"], current, repository,
-		createSessionRuntime(snapshot, cwd, session, third.lineage), session, false), /not a regular blob/);
-	assert.deepEqual(trees, [current.head]);
-	assert.deepEqual(captureTemporalGitBase(cwd, session, repository), current);
-});
-
-test("historical temporal reads reject symlink modes even when their blob contains valid checkpoint JSON", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "temporal-history-mode";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const base = captureTemporalGitBase(cwd, session, repository);
-	publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], base, repository);
-	const blob = run(repository, "rev-parse", "HEAD:checkpoint.json");
-	run(repository, "update-index", "--cacheinfo", `120000,${blob},checkpoint.json`);
-	run(repository, "commit", "-m", "malformed historical symlink fixture");
-	const revision = run(repository, "rev-parse", "HEAD");
-	assert.throws(() => loadTemporalRevision(cwd, session, repository, revision), /not a regular blob/);
-	assert.equal(run(repository, "rev-parse", "HEAD"), revision);
-});
-
-test("temporal publication rejects omitted changes, foreign session bases, and stale streams before writes", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "temporal-cas";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const base = captureTemporalGitBase(cwd, session, repository);
-	assert.throws(() => publishTemporalStateToGit(cwd, session, view, ["session"], base, repository), /omitted a changed stream/);
-	assert.throws(() => publishTemporalStateToGit(cwd, "other-session", view, ["global", "cwd", "session"], base, repository), /scope identity changed/);
-	assert.equal(loadScopeStream(cwd, session, "global", repository), undefined);
-	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], base, repository);
-	const next = advanceTemporalState(view, [{ scope: "session", patch: { response: "next" } }], "T1");
-	assert.throws(() => publishTemporalStateToGit(cwd, session, next, ["session"], base, repository), /changed concurrently/);
-	assert.throws(() => publishTemporalStateToGit(cwd, session, next, [], first.base, repository), /omitted a changed stream/);
-	assert.equal(loadScopeStream(cwd, session, "session", repository)!.patches.length, 0);
-});
-
-test("temporal publication reconciles a Knowledge-only HEAD advance as commit ancestry", (t) => {
-	const { repository, remote, cwd } = fixture(t, true);
-	const session = "knowledge-advance";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository);
-	writeFileSync(join(repository, "knowledge.md"), "independent knowledge\n");
-	run(repository, "add", "knowledge.md");
-	run(repository, "commit", "-m", "knowledge: update");
-	const knowledgeCommit = run(repository, "rev-parse", "HEAD");
-	const next = advanceTemporalState(view, [{ scope: "cwd", patch: { working: { next: "continue" } } }], "T1");
-	const publication = publishTemporalStateToGit(cwd, session, next, ["cwd"], first.base, repository);
-	assert.equal(run(repository, "rev-parse", `${publication.commit}^`), knowledgeCommit);
-	const paths = temporalScopePaths(cwd, session, "cwd", repository);
-	assert.deepEqual(run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!).split("\n").sort(),
-		[paths.meta, paths.patches].map((path) => path.slice(repository.length + 1)).sort());
-	assert.equal(readFileSync(join(repository, "knowledge.md"), "utf8"), "independent knowledge\n");
-	assert.equal(run(remote, "rev-parse", "refs/heads/main"), publication.commit);
-});
-
-test("canonical CAS preserves concurrent uncommitted and committed bytes even in an omitted scope", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "concurrent-scopes";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository);
-	const next = advanceTemporalState(view, [{ scope: "cwd", patch: { working: { writer: "state-flow" } } }], "T1");
-	const path = temporalScopePaths(cwd, session, "global", repository).patches;
-	const concurrent = Buffer.from([0xff, 0xfe, 0x0a]);
-	writeFileSync(path, concurrent);
-	for (const committed of [false, true]) {
-		if (committed) {
-			run(repository, "add", "--", path);
-			run(repository, "commit", "-m", "concurrent global bytes");
-		}
-		const head = run(repository, "rev-parse", "HEAD");
-		assert.throws(() => publishTemporalStateToGit(cwd, session, next, ["cwd"], first.base, repository), /changed concurrently/);
-		assert.deepEqual(readFileSync(path), concurrent);
-		assert.equal(run(repository, "rev-parse", "HEAD"), head);
-	}
-});
-
-test("the extension accepts a local durable commit without regenerating on push failure", async (t) => {
-	const h = harness();
-	await start(h, "Persist durable state");
-	run(h.repositoryRoot, "remote", "set-url", "origin", join(h.repositoryRoot, "missing.git"));
-	await h.tools.get("patch_state")!.execute("accept", {
-		cwd: { working: { accepted: true } }, final: true,
-	}, undefined, undefined, h.ctx);
-	const terminal = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted." }] };
-	assert.equal(h.handlers.get("message_end")!({ message: terminal }, h.ctx), undefined);
-	h.handlers.get("turn_end")!({ message: terminal }, h.ctx);
-
-	assert.equal(h.resolveSnapshot().meta.step, 2);
-	assert.deepEqual(h.entries.at(-1)!.data, { revision: run(h.repositoryRoot, "rev-parse", "HEAD") });
-	assert.equal(h.sentMessages.length, 0);
-	assert.doesNotMatch(h.notifications.at(-1)!, /push is pending/i);
-	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /Remote publication policy: turn-end/);
-	assert.match(h.notifications.at(-1)!, /"accepted": true/);
-});
-
-test("retargets a queue orphaned by a journal lineage rewrite without failing turn_end", async (t) => {
-	const h = harness();
-	await start(h, "Persist durable state");
-	const destination = resolveGitPushDestination(h.repositoryRoot)!;
-	const orphan = run(h.repositoryRoot, "commit-tree", run(h.repositoryRoot, "rev-parse", "HEAD^{tree}"), "-m", "orphaned journal lineage");
-	const path = publicationQueuePath(destination);
-	const existing = loadPublicationQueue(path);
-	if (existing) removePublicationQueue(path, existing);
-	savePublicationQueue(path, createPublicationQueue(destination, orphan));
-	await h.tools.get("patch_state")!.execute("terminal", { cwd: { working: { accepted: true } }, final: true }, undefined, undefined, h.ctx);
-	const message = { role: "assistant" as const, stopReason: "stop", content: [{ type: "text", text: "Accepted." }] };
-	const result = h.handlers.get("message_end")!({ message }, h.ctx) ?? { message };
-	h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
-
-	assert.equal(h.notifications.some((notice) => /could not reconcile/i.test(notice)), false);
-	assert.equal(loadPublicationQueue(path)?.target, run(h.repositoryRoot, "rev-parse", "HEAD"));
-});
-
-test("temporal publication rejects changed prepared output and rollback preserves external bytes", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "prepared-receipt";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository);
-	const next = advanceTemporalState(view, [{ scope: "cwd", patch: { working: { writer: "state-flow" } } }], "T1");
-	const { checkpoint: state, patches } = temporalScopePaths(cwd, session, "cwd", repository);
-	const base = first.base;
-	const before = run(repository, "rev-parse", "HEAD");
-	const concurrent = JSON.stringify({ ...emptyState(), working: { writer: "external" } });
-	writeFileSync(join(repository, ".git", "index.lock"), "held by another writer\n");
-	const rename = fs.renameSync;
-	let injected = false;
-	fs.renameSync = (from, to) => {
-		rename(from, to);
-		if (!injected && to === patches) {
-			injected = true;
-			writeFileSync(state, concurrent);
-		}
+	a.initialize(snapshot, true);
+	const baseline = backupCurrentStateFlowFiles(root)!;
+	const publish = (generation: number) => {
+		const before = a.states();
+		const next = structuredClone(before);
+		for (const scope of ["global", "cwd", "session"] as const) next[scope].working.generation = generation;
+		snapshot.meta.step++;
+		a.publish(snapshot, true, createAcceptedTransition(before, next));
 	};
-	syncBuiltinESMExports();
-	try {
-		assert.throws(() => publishTemporalStateToGit(cwd, session, next, ["cwd"], base, repository), (error: unknown) => {
-			assert.ok(error instanceof AggregateError);
-			assert.match(String(error.errors[0]), /file conflict/);
-			assert.match(String(error.errors[1]), /file conflict/);
-			return true;
-		});
-	} finally {
-		fs.renameSync = rename;
-		syncBuiltinESMExports();
-	}
-	assert.equal(injected, true);
-	assert.equal(readFileSync(state, "utf8"), concurrent);
-	assert.equal(run(repository, "rev-parse", "HEAD"), before);
-	assert.equal(existsSync(join(repository, ".git", "state-flow-publication.lock")), false);
-});
-
-test("linked worktree publishers share common-Git-directory exclusion", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const linked = join(dirname(repository), "linked");
-	run(repository, "worktree", "add", "-b", "linked", linked);
-	const session = "common-lock";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const base = captureTemporalGitBase(cwd, session, linked);
-	const lock = join(repository, ".git", "state-flow-publication.lock");
-	writeFileSync(lock, "common owner\n");
-	assert.throws(() => captureTemporalGitBase(cwd, session, linked), /publication lock is unavailable/);
-	assert.throws(() => publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], base, linked), /publication lock is unavailable/);
-	assert.throws(() => migrateLegacyStorageToGit(cwd, session, linked), /publication lock is unavailable/);
-	assert.equal(existsSync(join(linked, "checkpoint.json")), false);
-	assert.equal(readFileSync(lock, "utf8"), "common owner\n");
-});
-
-test("local temporal acceptance can return an immutable target without remote push", (t) => {
-	const { repository, remote, cwd } = fixture(t, true);
-	const remoteBefore = execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const publication = publishTemporalStateToGit(
-		cwd, "queued", view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, "queued", repository),
-		repository, undefined, "queued", false,
-	);
-	assert.ok(publication.commit);
-	assert.equal(publication.push, undefined);
-	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
-	assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteBefore);
-});
-
-test("accepted temporal publication retains prepared receipts rather than adopting bytes changed during push", (t) => {
-	const { repository, remote, cwd } = fixture(t, true);
-	const session = "push-receipt";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const path = temporalScopePaths(cwd, session, "global", repository).checkpoint;
-	const concurrent = "concurrent bytes after acceptance";
-	writeFileSync(join(remote, "hooks", "post-receive"), `#!/bin/sh\nprintf '%s' '${concurrent}' > '${path}'\n`, { mode: 0o755 });
-	const publication = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository);
-	assert.equal(publication.push?.status, "pushed");
-	assert.equal(readFileSync(path, "utf8"), concurrent);
-	const receipt = publication.base.files.find((file) => file.path === path)!;
-	assert.deepEqual(JSON.parse(receipt.content!), view.scopes.global.checkpoint.state);
-	assert.deepEqual(receipt.bytes, Buffer.from(receipt.content!));
-	assert.deepEqual(JSON.parse(run(repository, "show", `${publication.commit}:checkpoint.json`)), view.scopes.global.checkpoint.state);
-	const next = advanceTemporalState(view, [{ scope: "session", patch: { response: "Next" } }], "T1");
-	assert.throws(() => publishTemporalStateToGit(cwd, session, next, ["session"], publication.base, repository), /changed concurrently/);
-	assert.equal(readFileSync(path, "utf8"), concurrent);
-	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
-});
-
-test("a malformed batch after valid index records rolls back exact files and caller index, then retries once", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "failed-index-cohort";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "index-origin");
-	const snapshot = emptySnapshot(true);
-	const first = publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"],
-		captureTemporalGitBase(cwd, session, repository), repository, createSessionRuntime(snapshot, cwd, session, view.lineage), session, false);
-	writeFileSync(join(repository, "staged.bin"), Buffer.from([0xff, 0x00, 0x0a]));
-	run(repository, "add", "staged.bin");
-	writeFileSync(join(repository, "README.md"), "retained unstaged edit\n");
-	const before = captureTemporalGitBase(cwd, session, repository);
-	const callerIndex = readFileSync(join(repository, ".git", "index"));
-	const next = advanceTemporalState(view, [{ scope: "session", patch: { response: "Retried once" } }], "next");
-	snapshot.meta.step = 1;
-	const runtime = createSessionRuntime(snapshot, cwd, session, next.lineage);
-	const spawn = childProcess.spawnSync;
-	let corrupt = true;
-	let injected = false;
-	let refUpdates = 0;
-	const privateIndexes = new Set<string>();
-	t.mock.method(childProcess, "spawnSync", ((...args: Parameters<typeof spawn>) => {
-		const argv = args[1] as string[];
-		const options = args[2] as childProcess.SpawnSyncOptions;
-		if (args[0] === "git" && argv[1] === repository) {
-			if (argv[2] === "update-ref") refUpdates++;
-			if (options.env?.GIT_INDEX_FILE) privateIndexes.add(options.env.GIT_INDEX_FILE);
-			if (corrupt && argv[2] === "update-index" && argv.includes("--index-info")) {
-				injected = true;
-				assert.ok(String(options.input).split("\0").filter(Boolean).length > 1);
-				return spawn(args[0], argv, { ...options, input: `${options.input}not-an-index-record\0` });
+	publish(1);
+	const capturedBefore = captureTemporalFileBases(cwd, a.sessionId, root);
+	writeFileSync(join(root, "notes.txt"), "staged caller version\n");
+	git(root, "add", "notes.txt");
+	writeFileSync(join(root, "notes.txt"), "unstaged caller version\n");
+	const callerIndex = git(root, "ls-files", "--stage", "-z", "--", "notes.txt");
+	const indexBefore = readFileSync(join(root, ".git", "index"));
+	const release = join(root, "release-backup-test");
+	const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+		import childProcess from "node:child_process";
+		import { existsSync, readFileSync } from "node:fs";
+		import { syncBuiltinESMExports } from "node:module";
+		import { join } from "node:path";
+		import { backupCurrentStateFlowFiles } from ${JSON.stringify(new URL("../lib/git.ts", import.meta.url).href)};
+		const { root, release, phase, fail } = JSON.parse(process.argv[1]);
+		const original = childProcess.spawnSync;
+		const lockedCommands = [];
+		let paused = false;
+		childProcess.spawnSync = (command, args, options) => {
+			const lock = join(root, ".state-flow-publication.lock");
+			if (command === "git" && existsSync(lock) && readFileSync(lock, "utf8").trim() === String(process.pid)) lockedCommands.push(args);
+			if (command === "git" && args.includes(phase) && !paused) {
+				paused = true;
+				process.send({ phase: "paused" });
+				const until = Date.now() + 15000;
+				while (!existsSync(release) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+				if (!existsSync(release)) throw new Error("Backup test was not released");
+				if (fail) return { status: 1, stdout: "", stderr: "controlled backup failure" };
 			}
-		}
-		return spawn(...args);
-	}) as typeof spawn);
-	syncBuiltinESMExports();
-	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-	const publish = () => publishTemporalStateToGit(cwd, session, next, ["session"], before, repository, runtime, session, false);
-	assert.throws(publish, /malformed index info/);
-	assert.equal(injected, true);
-	assert.equal(refUpdates, 0);
-	assert.deepEqual(captureTemporalGitBase(cwd, session, repository), before);
-	assert.deepEqual(readFileSync(join(repository, ".git", "index")), callerIndex);
-	assert.deepEqual(readFileSync(join(repository, "staged.bin")), Buffer.from([0xff, 0x00, 0x0a]));
-	assert.equal(readFileSync(join(repository, "README.md"), "utf8"), "retained unstaged edit\n");
-	for (const path of privateIndexes) assert.equal(existsSync(dirname(path)), false);
-	corrupt = false;
-	const retried = publish();
-	assert.equal(run(repository, "rev-parse", `${retried.commit}^`), first.commit);
-	assert.deepEqual(loadTemporalRevision(cwd, session, repository, retried.commit!).scopes, next.scopes);
-	assert.equal(refUpdates, 1);
-	assert.equal(run(repository, "status", "--porcelain=v1"), "");
-	for (const path of privateIndexes) assert.equal(existsSync(dirname(path)), false);
+			return original(command, args, options);
+		};
+		syncBuiltinESMExports();
+		let result;
+		try { result = { commit: backupCurrentStateFlowFiles(root) }; }
+		catch (error) { result = { error: error.message }; }
+		process.send({ phase: "complete", ...result, lockedCommands }, () => process.disconnect());
+	`, JSON.stringify({ root, release, phase, fail })], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+	const messages: any[] = [];
+	child.on("message", (message) => messages.push(message));
+	let stderr = "";
+	child.stderr!.on("data", (data) => { stderr += data; });
+	const completed = once(child, "close");
+	t.after(() => { if (child.exitCode === null) child.kill(); });
+	let capturedAfter: ReturnType<typeof captureTemporalFileBases> = [];
+	try {
+		const [ready] = await once(child, "message", { signal: AbortSignal.timeout(15_000) });
+		assert.equal((ready as any).phase, "paused", JSON.stringify(ready));
+		publish(2);
+		const later = new TemporalRuntime(join(root, "later-project"), "later-session", root);
+		later.initialize(emptySnapshot(true), true);
+		capturedAfter = [...captureTemporalFileBases(cwd, a.sessionId, root), ...captureTemporalFileBases(later.cwd, later.sessionId, root)];
+	} finally {
+		writeFileSync(release, "resume\n");
+		const [code] = await completed;
+		assert.equal(code, 0, stderr);
+	}
+	const result = messages.at(-1);
+	assert.equal(result.phase, "complete");
+	assert.deepEqual(result.lockedCommands, [], "no Git command may execute under the backup's canonical lock");
+	assert.equal(a.read().working.generation, 2);
+	for (const file of capturedAfter) if (file.bytes) assert.deepEqual(readFileSync(file.path), file.bytes);
+	assert.equal(git(root, "ls-files", "--stage", "-z", "--", "notes.txt"), callerIndex);
+	assert.equal(readFileSync(join(root, "notes.txt"), "utf8"), "unstaged caller version\n");
+	const verify = (commit: string, files: ReturnType<typeof captureTemporalFileBases>) => {
+		const expected = new Map(files.filter((file) => file.bytes !== undefined).map((file) => [relative(root, file.path).split(sep).join("/"), file.bytes]));
+		const owned = git(root, "ls-tree", "-r", "--name-only", "-z", commit).split("\0").filter((path) => path && isStateFlowOwnedPath(join(root, path), root));
+		assert.deepEqual(owned.sort(), [...expected.keys()].sort());
+		for (const [path, bytes] of expected) assert.deepEqual(execFileSync("git", ["-C", root, "show", `${commit}:${path}`]), bytes, path);
+	};
+	if (fail) {
+		assert.match(result.error, /controlled backup failure/);
+		assert.equal(git(root, "rev-parse", "HEAD"), baseline);
+		assert.deepEqual(readFileSync(join(root, ".git", "index")), indexBefore);
+	} else {
+		assert.equal(result.error, undefined);
+		verify(result.commit, phase === "add" ? capturedBefore : capturedAfter);
+	}
+	assert.equal(existsSync(join(root, ".state-flow-publication.lock")), false);
+	assert.equal(existsSync(join(root, ".git", "state-flow-backup.lock")), false);
+	const next = backupCurrentStateFlowFiles(root);
+	assert.equal(next === undefined, !fail && phase === "read-tree");
+	verify(next ?? result.commit, capturedAfter);
 });
 
-test("State Flow commits capture the complete non-ignored worktree delta and keep the caller index clean", (t) => {
-	const { repository, cwd } = fixture(t, true);
-	const session = "delta-session";
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	// Tracked history for an old session in this CWD and for an unrelated old CWD project.
-	publishTemporalStateToGit(cwd, "old-session", view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, "old-session", repository), repository);
-	const oldCwd = join(dirname(repository), "old-project");
-	publishTemporalStateToGit(oldCwd, "old-session", view, ["global", "cwd", "session"], captureTemporalGitBase(oldCwd, "old-session", repository), repository);
-	publishTemporalStateToGit(cwd, session, view, ["global", "cwd", "session"], captureTemporalGitBase(cwd, session, repository), repository);
+test("backup preserves Git ignore/filter policy, literal paths, and opaque snapshot bytes", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-policy-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "meta.json"), "tracked metadata\n");
+	git(root, "add", "meta.json");
+	git(root, "commit", "-m", "tracked metadata");
+	writeFileSync(join(root, ".gitignore"), "meta.json\n");
+	writeFileSync(join(root, ".gitattributes"), "checkpoint.json filter=backup-test\n*.jsonl -text\n");
+	const filter = "process.stdout.write('filtered:' + require('node:fs').readFileSync(0, 'utf8'))";
+	git(root, "config", "filter.backup-test.clean", `${JSON.stringify(process.execPath.replaceAll("\\", "/"))} -e ${JSON.stringify(filter)}`);
+	git(root, "config", "filter.backup-test.required", "true");
+	writeFileSync(join(root, "meta.json"), "current tracked metadata\n");
+	writeFileSync(join(root, "checkpoint.json"), "captured root\n");
+	const cwd = join(root, "--project[1]--");
+	mkdirSync(cwd);
+	writeFileSync(join(cwd, ".gitattributes"), "checkpoint.json -filter\n");
+	writeFileSync(join(cwd, "checkpoint.json"), "literal child\n");
+	writeFileSync(join(cwd, "meta.json"), "ignored metadata\n");
+	const opaque = Buffer.from([0xff, 0xfe, 0, 10]);
+	writeFileSync(join(root, "patches.jsonl"), opaque);
+	const commit = backupCurrentStateFlowFiles(root)!;
+	assert.equal(git(root, "show", `${commit}:checkpoint.json`), "filtered:captured root");
+	assert.equal(git(root, "show", `${commit}:--project[1]--/checkpoint.json`), "literal child");
+	assert.equal(git(root, "show", `${commit}:meta.json`), "current tracked metadata");
+	assert.deepEqual(execFileSync("git", ["-C", root, "show", `${commit}:patches.jsonl`]), opaque);
+	assert.equal(git(root, "ls-tree", "--name-only", "-r", commit).includes("--project[1]--/meta.json"), false);
+	assert.equal(git(root, "ls-tree", "--name-only", "-r", commit).includes(".gitattributes"), false);
+	assert.equal(readFileSync(join(root, "checkpoint.json"), "utf8"), "captured root\n");
+	assert.equal(backupCurrentStateFlowFiles(root), undefined);
+});
 
-	// Manual directory deletions, a tracked edit, a new non-ignored file, and an ignored file.
-	const oldSessionDirectory = temporalScopePaths(cwd, "old-session", "session", repository).directory;
-	const oldCwdDirectory = temporalScopePaths(oldCwd, "old-session", "cwd", repository).directory;
-	rmSync(oldSessionDirectory, { recursive: true, force: true });
-	rmSync(oldCwdDirectory, { recursive: true, force: true });
-	writeFileSync(join(repository, "README.md"), "edited\n");
-	writeFileSync(join(repository, "notes.md"), "new notes\n");
-	writeFileSync(join(repository, ".gitignore"), "ignored.txt\n");
-	writeFileSync(join(repository, "ignored.txt"), "ignored\n");
+test("backup inventories only canonical namespace levels and records removed owned directories", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-inventory-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	const cwd = join(root, "--project--");
+	const session = join(cwd, "session");
+	for (const directory of [session, join(session, "unrelated"), join(cwd, ".private"), join(root, "unrelated")]) mkdirSync(directory, { recursive: true });
+	for (const directory of [root, cwd, session]) writeFileSync(join(directory, "checkpoint.json"), "{}\n");
+	writeFileSync(join(session, "unrelated", "source.txt"), "Not a backup source");
+	const visited: string[] = [];
+	const original = fs.readdirSync;
+	fs.readdirSync = ((path: any, options: any) => { visited.push(String(path)); return original(path, options); }) as typeof original;
+	syncBuiltinESMExports();
+	try { assert.ok(backupCurrentStateFlowFiles(root)); }
+	finally { fs.readdirSync = original; syncBuiltinESMExports(); }
+	assert.deepEqual(visited.sort(), [root, cwd, session].sort());
+	rmSync(session, { recursive: true });
+	const removed = backupCurrentStateFlowFiles(root)!;
+	assert.ok(removed);
+	assert.equal(git(root, "ls-tree", "--name-only", "-r", removed).includes("session/"), false);
+	assert.equal(readFileSync(join(cwd, "checkpoint.json"), "utf8"), "{}\n");
+});
 
-	const next = advanceTemporalState(view, [{ scope: "session", patch: { working: { delta: "committed" } } }], "T1");
-	const publication = publishTemporalStateToGit(cwd, session, next, ["session"], captureTemporalGitBase(cwd, session, repository), repository);
-	assert.ok(publication.commit);
-	assert.equal(publication.push?.status, "pushed");
-	const changed = run(repository, "diff-tree", "--no-commit-id", "--name-only", "-r", publication.commit!).split("\n");
-	assert.ok(changed.includes("README.md"));
-	assert.ok(changed.includes("notes.md"));
-	assert.ok(changed.includes(".gitignore"));
-	assert.ok(!changed.includes("ignored.txt"));
-	const tree = run(repository, "ls-tree", "-r", "--name-only", publication.commit!).split("\n");
-	assert.ok(!tree.some((path) => path.startsWith(relative(repository, oldSessionDirectory)) || path.startsWith(relative(repository, oldCwdDirectory))));
-	assert.equal(run(repository, "show", `${publication.commit}:README.md`), "edited");
-	assert.equal(run(repository, "show", `${publication.commit}:notes.md`), "new notes");
-	assert.equal(run(repository, "status", "--porcelain=v1"), "");
+for (const kind of ["symlink", "directory"] as const) test(`backup refuses an owned ${kind} without altering Git or following source bodies`, (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-unsafe-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	const path = join(root, "checkpoint.json");
+	writeFileSync(path, "{}\n");
+	const head = backupCurrentStateFlowFiles(root)!;
+	const index = readFileSync(join(root, ".git", "index"));
+	rmSync(path);
+	const outside = join(root, "unrelated-source.txt");
+	writeFileSync(outside, "Caller-owned source\n");
+	if (kind === "symlink") symlinkSync(outside, path, "file");
+	else { mkdirSync(path); writeFileSync(join(path, "unrelated-source.txt"), "Must not stage a directory"); }
+	assert.throws(() => backupCurrentStateFlowFiles(root), /not a regular file/);
+	assert.equal(git(root, "rev-parse", "HEAD"), head);
+	assert.deepEqual(readFileSync(join(root, ".git", "index")), index);
+	assert.equal(readFileSync(outside, "utf8"), "Caller-owned source\n");
+	assert.equal(existsSync(join(root, ".state-flow-publication.lock")), false);
+	assert.equal(existsSync(join(root, ".git", "state-flow-backup.lock")), false);
+});
 
-	// A stale active base stays a fail-closed write conflict and changes nothing.
-	const stale = captureTemporalGitBase(cwd, session, repository);
-	const active = temporalScopePaths(cwd, session, "session", repository).checkpoint;
-	const activeBefore = readFileSync(active, "utf8");
-	writeFileSync(active, `${activeBefore}\n`);
-	const conflictView = advanceTemporalState(next, [{ scope: "session", patch: { working: { delta: "conflict" } } }], "T2");
-	assert.throws(() => publishTemporalStateToGit(cwd, session, conflictView, ["session"], stale, repository), /changed concurrently/);
-	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
-	writeFileSync(active, activeBefore);
-
-	// A failed caller-index synchronization rolls the commit back and preserves the user worktree.
-	const failureBase = captureTemporalGitBase(cwd, session, repository);
-	writeFileSync(join(repository, "README.md"), "user edit during failure\n");
-	writeFileSync(join(repository, ".git", "index.lock"), "held by another writer\n");
-	assert.throws(() => publishTemporalStateToGit(cwd, session, conflictView, ["session"], failureBase, repository), /index\.lock/);
-	assert.equal(run(repository, "rev-parse", "HEAD"), publication.commit);
-	assert.equal(readFileSync(join(repository, "README.md"), "utf8"), "user edit during failure\n");
-	assert.equal(readFileSync(join(repository, ".git", "index.lock"), "utf8"), "held by another writer\n");
-	rmSync(join(repository, ".git", "index.lock"));
-	assert.equal(run(repository, "status", "--porcelain=v1"), "M README.md");
+for (const owned of [false, true]) test(`unborn backup preserves caller-only index data (owned files=${owned})`, (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-unborn-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	git(root, "init");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "notes.txt"), "index-only content\n");
+	git(root, "add", "notes.txt");
+	rmSync(join(root, "notes.txt"));
+	const before = git(root, "ls-files", "--stage", "-z", "--", "notes.txt");
+	if (owned) writeFileSync(join(root, "checkpoint.json"), "{}\n");
+	const commit = backupCurrentStateFlowFiles(root);
+	assert.equal(commit !== undefined, owned);
+	assert.equal(git(root, "ls-files", "--stage", "-z", "--", "notes.txt"), before);
+	assert.equal(git(root, "show", ":notes.txt"), "index-only content");
+	assert.equal(existsSync(join(root, "notes.txt")), false);
+	if (owned) assert.equal(git(root, "ls-tree", "--name-only", "HEAD"), "checkpoint.json");
 });

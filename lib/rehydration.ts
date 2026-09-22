@@ -12,7 +12,7 @@ export interface RehydrationRoute {
 	scope: StateScope;
 	source: ArtifactSourceIdentity;
 	metadata: unknown;
-	/** Runtime-owned freshness evidence retained beside the semantic artifact. */
+	/** Runtime-owned compilation evidence retained beside the semantic artifact. */
 	provenance?: unknown;
 	compiler: string;
 	intent: ArtifactAcquisitionIntent;
@@ -21,10 +21,8 @@ export interface RehydrationRoute {
 	sourceBytes?: number;
 }
 
-export interface RehydrationRead {
+export interface RehydrationRead extends ArtifactSourceIdentity {
 	scope: StateScope;
-	path: string;
-	hash: string;
 	reason: ArtifactAcquisitionReason;
 }
 
@@ -76,7 +74,11 @@ export function planKnowledgeRehydration(
 			continue;
 		}
 		sourceBytes += bytes;
-		reads.push({ scope: route.scope, path: route.source.path, hash: route.source.hash, reason: decision.reason });
+		reads.push({
+			scope: route.scope, path: route.source.path, reason: decision.reason,
+			...(route.source.hash === undefined ? {} : { hash: route.source.hash }),
+			...(route.source.sourceFingerprint === undefined ? {} : { sourceFingerprint: structuredClone(route.source.sourceFingerprint) }),
+		});
 	}
 	return { reads, materialized, deferred };
 }

@@ -89,10 +89,8 @@ process.stdout.write = function (chunk, ...args) {
 				assert.ok(probe.firstContextBytes.p50 > 0);
 				assert.ok(probe.firstInference.wallMs.p50 <= probe.wholeRun.wallMs.p50);
 				assert.ok(probe.firstInference.gitCalls.p50 <= probe.wholeRun.gitCalls.p50);
-				if (entry.stateFlow) {
-					assert.ok(probe.selectedRevision);
-					assert.equal(probe.firstInference.commands["commit-tree"], 1);
-				} else assert.equal(probe.firstInference.gitCalls.p50, 0);
+				if (entry.stateFlow && probe.selectedRevision) assert.equal(probe.firstInference.commands["commit-tree"], 1);
+				else assert.equal(probe.firstInference.gitCalls.p50, 0);
 				phases.push(probe.openSession, probe.resumeRuntime, probe.firstInference, probe.wholeRun);
 				reads.push(probe.nativeRead);
 			}

@@ -2,12 +2,10 @@ import { readFileSync } from "node:fs";
 import {
 	hashArtifactSource,
 	isArtifactHash,
-	type ArtifactMetadata,
 	type ArtifactProvenance,
 	type ArtifactRegistry,
 } from "./artifact.ts";
-import { canonicalJson, isObject, type JsonObject, type JsonValue } from "./json.ts";
-import type { MaterializedState } from "./state.ts";
+import { isObject } from "./json.ts";
 
 export const SKILL_ARTIFACT_COMPILER = "skill-artifact-v1";
 
@@ -44,52 +42,6 @@ export type SkillSourceHasher = (source: string) => string;
 
 export function hashSkillSource(source: string): string {
 	return hashArtifactSource(readFileSync(source));
-}
-
-function legacyCompilation(value: JsonValue): JsonObject | undefined {
-	if (!hasContent(value)) return undefined;
-	return isObject(value) ? structuredClone(value) : { value: structuredClone(value) };
-}
-
-/** Move the retired contract store into source-addressed Skill artifacts. */
-export function migrateLegacySkillCompilations(
-	state: MaterializedState,
-	hasher: SkillSourceHasher = hashSkillSource,
-): MaterializedState {
-	if (!isObject(state.contract.compiled_skills)) return structuredClone(state);
-	const legacy = state.contract.compiled_skills;
-	const next = structuredClone(state);
-	delete next.contract.compiled_skills;
-	for (const [source, value] of Object.entries(legacy)) {
-		const compilation = legacyCompilation(value);
-		if (!compilation) continue;
-		let hash: string;
-		let verified = true;
-		try {
-			hash = hasher(source);
-			if (!isArtifactHash(hash)) throw new Error("invalid source hash");
-		} catch {
-			// Preserve useful legacy behavior while ensuring a later observable source
-			// identity normally invalidates this explicitly unverified fallback.
-			hash = hashArtifactSource(canonicalJson({ source, compilation }));
-			verified = false;
-		}
-		const metadata: ArtifactMetadata = {
-			description: `Compiled operational guidance for the Skill at ${source}`,
-			hash,
-			compiler: SKILL_ARTIFACT_COMPILER,
-			kind: "skill",
-			compilation,
-			...(verified ? {} : { source_hash_verified: false }),
-		};
-		Object.defineProperty(next.artifacts, source, {
-			value: metadata,
-			enumerable: true,
-			configurable: true,
-			writable: true,
-		});
-	}
-	return next;
 }
 
 export function skillPathFromRead(toolName: unknown, args: unknown): string | undefined {

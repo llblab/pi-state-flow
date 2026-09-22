@@ -29,6 +29,29 @@ test("resume bootstrap stays materialized-first and selects only concrete or sta
 	]);
 });
 
+test("rehydration preserves observed fingerprints without inventing hashes or trusting missing evidence", () => {
+	const fingerprint = { size: 5, mtimeNs: "10" };
+	const routes = [
+		route("/current", { source: { path: "/current", sourceFingerprint: fingerprint }, metadata: { description: "Current" }, provenance: { sourceFingerprint: fingerprint } }),
+		route("/changed", { scope: "cwd", source: { path: "/changed", sourceFingerprint: fingerprint }, metadata: { description: "Changed" }, provenance: { sourceFingerprint: { size: 6, mtimeNs: "10" } } }),
+		route("/missing", { scope: "session", source: { path: "/missing", sourceFingerprint: fingerprint }, metadata: { description: "Unproven" } }),
+	];
+	for (const phase of ["step", "resume-bootstrap"] as const) {
+		const before = structuredClone(routes);
+		const plan = planKnowledgeRehydration(phase, routes, { maxReads: 3 });
+		assert.deepEqual(plan, {
+			reads: [
+				{ scope: "cwd", path: "/changed", sourceFingerprint: fingerprint, reason: "source-changed" },
+				{ scope: "session", path: "/missing", sourceFingerprint: fingerprint, reason: "invalid-metadata" },
+			],
+			materialized: ["/current"], deferred: [],
+		});
+		assert.equal(Object.hasOwn(plan.reads[0]!, "hash"), false);
+		(plan.reads[0] as any).sourceFingerprint.size = 99;
+		assert.deepEqual(routes, before);
+	}
+});
+
 test("new bootstrap never imports another session route", () => {
 	const plan = planKnowledgeRehydration("new-bootstrap", [
 		route("/knowledge/global.md", { intent: "relevant-gap", materializedSufficient: false }),

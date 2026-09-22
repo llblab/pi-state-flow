@@ -13,7 +13,6 @@ import {
 	SkillReadTracker,
 	skillPathFromRead,
 } from "../lib/skills.ts";
-import { MAX_FALLBACK_ATTEMPTS } from "../lib/extension.ts";
 import { commitTerminal, harness, start } from "./harness.ts";
 
 const skillRoot = mkdtempSync(join(tmpdir(), "pi-state-flow-skills-"));
@@ -54,7 +53,8 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 	assert.match(guide.description, /not for memory audits or unsolicited cleanup/);
 	const guideBody = readFileSync(guide.filePath, "utf8");
 	assert.match(guideBody, /installed runtime protocol and schemas take precedence/);
-	assert.match(guideBody, /Passive turns need no such call/);
+	assert.match(guideBody, /ordinary completion requires no finalization patch/);
+	assert.doesNotMatch(guideBody, /final:true|fallback/);
 	assert.match(guideBody, /Missing history is not empty history/);
 	assert.match(guideBody, /`\$`-prefixed `read_state` paths inside ordinary strings/);
 	assert.match(guideBody, /Neither form proves authority or existence/);
@@ -63,8 +63,9 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 	assert.match(guideBody, /top-level diagnostic metadata/);
 	assert.match(guideBody, /proves provenance rather than staleness/);
 	assert.match(guideBody, /Never edit backing files, `response`, configuration, provenance, or runtime metadata/);
-	assert.match(memory.description, /active State Flow feature/);
-	assert.match(memory.description, /Not for routine turns, usage help, or background maintenance/);
+	assert.match(memory.description, /only on explicit user request/);
+	assert.doesNotMatch(memory.description, /active State Flow feature/);
+	assert.match(memory.description, /Not for routine turns, automatic phase-boundary audits, usage help, or background maintenance/);
 	const memoryBody = readFileSync(memory.filePath, "utf8");
 	assert.match(memoryBody, /Never give an assistant conclusion user authority/);
 	assert.match(memoryBody, /Remove fulfilled, abandoned, superseded, or impossible intents/);
@@ -73,13 +74,15 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 	assert.match(memoryBody, /Never scan or resolve references merely to find broken ones/);
 	assert.match(memoryBody, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
 	assert.match(memoryBody, /top-level hint as provenance and reconciliation guidance/);
-	assert.match(memoryBody, /Never combine destination creation with source deletion/);
-	assert.match(memoryBody, /Verify accepted content and a content-bound revision or receipt/);
+	assert.match(memoryBody, /one atomic multi-scope `patch_state` for destination and source changes/);
+	assert.match(memoryBody, /Write and verify accepted content plus a content-bound revision or receipt/);
+	assert.match(memoryBody, /before deleting or narrowing the State Flow source in a later patch/);
+	assert.match(memoryBody, /Preserve it when acceptance is ambiguous/);
 	assert.match(memoryBody, /fresh executor must recover constraints, results, open questions, commitments, and the next action/);
 	assert.match(memoryBody, /Stop after this review, including when nothing needs changing/);
 });
 
-test("curation compiles an acquired Skill before write-verify-delete barriers", async () => {
+test("requested curation compiles an acquired Skill with one atomic scope move", async () => {
 	const h = harness();
 	await start(h);
 	const patchState = h.tools.get("patch_state")!;
@@ -96,22 +99,17 @@ test("curation compiles an acquired Skill before write-verify-delete barriers", 
 		/newly read Skill must be compiled|successfully read Skill must have a CWD artifact compiler output/,
 	);
 	assert.equal(h.readState().working.unrelated, undefined);
-	await patchState.execute("compile", {
-		cwd: { artifacts: { [source]: compilerOutput("Curate one requested cohort") } },
-	}, undefined, undefined, h.ctx);
-	await patchState.execute("after-compilation", {
-		session: { working: { unrelated: true } },
-	}, undefined, undefined, h.ctx);
-	await patchState.execute("destination", {
-		cwd: { contract: { projectRule: "project-only" } },
-	}, undefined, undefined, h.ctx);
-	const destination = await readState.execute("verify-destination", {
-		path: "cwd.contract.projectRule",
-	}, undefined, undefined, h.ctx);
-	assert.equal(JSON.parse(destination.content[0].text).value, "project-only");
-	await patchState.execute("delete-source", {
+	await patchState.execute("compile-and-move", {
 		global: { contract: { projectRule: null } },
+		cwd: { contract: { projectRule: "project-only" }, artifacts: { [source]: compilerOutput("Curate one requested cohort") } },
 	}, undefined, undefined, h.ctx);
+	const owners = await readState.execute("verify-owners", {
+		paths: ["global.contract", "cwd.contract"],
+	}, undefined, undefined, h.ctx);
+	assert.deepEqual(JSON.parse(owners.content[0].text).value, [{}, { projectRule: "project-only" }]);
+	assert.equal(h.readState(1, "global").contract.projectRule, "project-only");
+	assert.equal(h.readState(1, "cwd").contract.projectRule, undefined);
+	assert.deepEqual(h.readState(0, "cwd").artifacts[source], compilerOutput("Curate one requested cohort"));
 	const effective = await readState.execute("verify-effective", {
 		path: "contract.projectRule",
 	}, undefined, undefined, h.ctx);
@@ -235,6 +233,20 @@ test("ordinary answers cannot bypass missing Skill artifacts", async () => {
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 });
 
+test("a pending Skill compilation reports reconciliation failure without a repair inference", async () => {
+	const h = harness();
+	await start(h);
+	const source = skillFile("pending-answer");
+	h.handlers.get("tool_execution_start")!({ toolCallId: "pending", toolName: "read", args: { path: source } }, h.ctx);
+	h.handlers.get("tool_execution_end")!({ toolCallId: "pending", toolName: "read", isError: false }, h.ctx);
+	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Answer with pending compilation." }] };
+	h.handlers.get("message_end")!({ message }, h.ctx);
+	h.handlers.get("turn_end")!({ message }, h.ctx);
+	assert.equal(h.readState().response, "Answer with pending compilation.");
+	assert.equal(h.sentMessages.length, 0, "pending acquisition must not schedule terminal repair");
+	assert.equal(h.notifications.some((notice) => /could not reconcile/.test(notice)), false);
+});
+
 test("retains compatibility with execution-start updates after interception", async () => {
 	const h = harness();
 	await start(h);
@@ -269,61 +281,6 @@ test("falls back to intercepted input when a successful execution omits args", a
 	assert.equal(result.message.content[0].text, "Done");
 });
 
-test("a Skill acquired after terminal eligibility preserves the primary answer and resolves through the fallback", async () => {
-	const h = harness();
-	await start(h);
-	await h.tools.get("patch_state")!.execute(
-		"early-resolution", { session: { working: { inspected: true } }, final: true }, undefined, undefined, h.ctx,
-	);
-	const source = skillFile("late-obligation");
-	recordRead(h, source);
-	const draft = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Too early." }] };
-	assert.equal(h.handlers.get("message_end")!({ message: draft }, h.ctx), undefined, "final validation failure preserves the draft");
-	h.handlers.get("turn_end")!({ message: draft }, h.ctx);
-	assert.equal(h.readState().response, "Too early.");
-	await patchCwdArtifacts(h, { [source]: compilerOutput("compiled after the late read") });
-	const fallback = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Complete." }] };
-	const suppressed = h.handlers.get("message_end")!({ message: fallback }, h.ctx);
-	assert.deepEqual(suppressed.message.content, [], "the fallback turn is suppressed");
-	h.handlers.get("turn_end")!({ message: suppressed.message }, h.ctx);
-	assert.equal(loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source].kind, "skill", "the late Skill compilation is persisted");
-	assert.equal(h.readState().response, "Too early.");
-});
-
-test("a late Skill obligation that outlives the fallback budget keeps the preserved answer", async () => {
-	const h = harness();
-	await start(h);
-	await h.tools.get("patch_state")!.execute(
-		"early-resolution", { session: { working: { inspected: true } }, final: true }, undefined, undefined, h.ctx,
-	);
-	const source = skillFile("late-exhaustion");
-	recordRead(h, source);
-	const primary = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Preserved before compilation." }] };
-	assert.equal(h.handlers.get("message_end")!({ message: primary }, h.ctx), undefined);
-	h.handlers.get("turn_end")!({ message: primary }, h.ctx);
-	assert.equal(h.readState().response, "Preserved before compilation.");
-	for (let attempt = 1; attempt <= MAX_FALLBACK_ATTEMPTS; attempt++) {
-		const fallback = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `Fallback ${attempt}.` }] };
-		const suppressed = h.handlers.get("message_end")!({ message: fallback }, h.ctx);
-		assert.deepEqual(suppressed.message.content, []);
-		h.handlers.get("turn_end")!({ message: suppressed.message }, h.ctx);
-	}
-	assert.equal(h.readState().response, "Preserved before compilation.");
-	assert.equal(h.notifications.filter((message) => /no final:true patch arrived after 2 fallback turns/.test(message)).length, 1);
-});
-
-test("final-only resolution cannot bypass a successful Skill compilation obligation", async () => {
-	const h = harness();
-	await start(h);
-	const source = skillFile("final-obligation");
-	recordRead(h, source);
-	await assert.rejects(
-		h.tools.get("patch_state")!.execute("final", { final: true }, undefined, undefined, h.ctx),
-		/Every successfully read Skill must have a CWD artifact compiler output/,
-	);
-	await patchCwdArtifacts(h, { [source]: compilerOutput("compiled after rejected final") });
-});
-
 test("does not require compilation for a failed Skill read", async () => {
 	const h = harness();
 	await start(h);
@@ -344,7 +301,7 @@ test("a reread refreshes the runtime-owned source hash and replaces stale compil
 	const firstHash = loadCwdProvenance(h.ctx.cwd, h.repositoryRoot)[source]!.sourceHash;
 
 	writeFileSync(source, "second");
-	h.handlers.get("before_agent_start")!({ prompt: "Refresh", systemPrompt: "base" }, h.ctx);
+	h.beforeAgentStart("Refresh");
 	recordRead(h, source, "second");
 	await commitTerminal(h, {}, {}, "Second", { [source]: compilerOutput("second") });
 	const refreshed = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source];
@@ -356,11 +313,11 @@ test("a reread refreshes the runtime-owned source hash and replaces stale compil
 	assert.equal(refreshed.compilation?.routing, "second");
 });
 
-test("rejects model attempts to forge runtime-owned Skill freshness fields", async () => {
+test("rejects model attempts to forge runtime-owned Skill provenance fields", async () => {
 	const h = harness();
 	await start(h);
 	const source = skillFile("forged");
 	recordRead(h, source);
 	const forged = { ...compilerOutput(), hash: hashArtifactSource("forged") };
-	await assert.rejects(patchCwdArtifacts(h, { [source]: forged }), /cannot set runtime-owned provenance/);
+	await assert.rejects(patchCwdArtifacts(h, { [source]: forged }), /cannot set runtime-owned field/);
 });

@@ -46,10 +46,10 @@ function compileReadArtifacts(
 	for (const read of successfulArtifactReads) {
 		const output = patch.artifacts[read.path];
 		if (!isObject(output)) {
-			throw new Error(`Every successfully read invalidated artifact must have a global compiler output at artifacts[exact candidate path]; missing: ${read.path}`);
+			throw new Error(`Successfully read invalidated artifact requires compiler output at ${read.scope ?? "global"}.artifacts[${JSON.stringify(read.path)}]`);
 		}
 		const compiled = compileArtifact({
-			source: { path: read.path, hash: read.hash },
+			source: { path: read.path, scope: read.scope, hash: read.hash, sourceFingerprint: read.sourceFingerprint },
 			compiler: ORDINARY_ARTIFACT_COMPILER,
 			output: output as ArtifactCompilerOutput,
 		});
@@ -131,8 +131,8 @@ function validateScopePatch(scope: unknown, patch: unknown): asserts patch is Sc
 			throw new Error(`Scoped State Flow patch field ${key} must be a JSON object`);
 		}
 	}
-	if (Object.hasOwn(patch, "lazy") && patch.lazy === null) {
-		throw new Error("Scoped State Flow patch field lazy cannot be null");
+	if (Object.hasOwn(patch, "lazy") && !isObject(patch.lazy)) {
+		throw new Error("Scoped State Flow patch field lazy must be a JSON object");
 	}
 	if (isObject(patch.artifacts)) validateModelArtifactPatch(patch.artifacts);
 }
@@ -144,7 +144,7 @@ function completePatch(patch: ScopePatch, response: string): StatePatch {
 		working: patch.working ?? {},
 		intents: patch.intents ?? {},
 		response,
-		...(Object.hasOwn(patch, "lazy") ? { lazy: structuredClone(patch.lazy!) } : {}),
+		lazy: structuredClone(patch.lazy ?? {}),
 	};
 }
 
@@ -172,7 +172,8 @@ function stageScopedSemanticTransition(
 	}
 
 	const cwdPatch = patches.get("cwd") ?? {};
-	const nextStates = structuredClone(currentStates);
+	const artifactReads = [...successfulArtifactReads];
+	const nextStates = { ...currentStates };
 	const provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>> = { global: {}, cwd: {}, session: {} };
 	for (const scope of SCOPES) {
 		const authored = patches.get(scope) ?? {};
@@ -180,8 +181,13 @@ function stageScopedSemanticTransition(
 			? acceptedResponse
 			: currentStates[scope].response;
 		const patch = completePatch(authored, response);
-		const nextState = applyPatch(structuredClone(currentStates[scope]), patch) as MaterializedState;
-		compileReadArtifacts(nextState, { artifacts: scope === "global" ? authored.artifacts ?? {} : {} }, scope === "global" ? successfulArtifactReads : [], provenanceUpdates.global);
+		const nextState = applyPatch(currentStates[scope], patch) as MaterializedState;
+		compileReadArtifacts(
+			nextState,
+			{ artifacts: authored.artifacts ?? {} },
+			artifactReads.filter((read) => (read.scope ?? "global") === scope),
+			provenanceUpdates[scope],
+		);
 		compileReadSkills(nextState, { artifacts: scope === "cwd" ? cwdPatch.artifacts ?? {} : {} }, scope === "cwd" ? successfulSkillReads : [], provenanceUpdates.cwd);
 		validateMaterializedTransition(nextState);
 		nextStates[scope] = nextState;
@@ -197,22 +203,6 @@ function stageScopedSemanticTransition(
 		causalBasis,
 		committed: false,
 	};
-}
-
-/** Validate that final eligibility has no pending acquisition/compilation obligation. */
-export function validateFinalEligibility(
-	currentStates: ScopedStates,
-	successfulSkillReads: Iterable<SuccessfulSkillRead>,
-	causalBasis: string,
-	successfulArtifactReads: Iterable<SuccessfulArtifactRead> = [],
-): void {
-	stageScopedSemanticTransition(
-		currentStates,
-		{ transitions: [] },
-		successfulSkillReads,
-		causalBasis,
-		successfulArtifactReads,
-	);
 }
 
 /** Stage one canonical atomic scope cohort without changing the finalized response. */
