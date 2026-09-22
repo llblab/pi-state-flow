@@ -4,7 +4,7 @@
 
 **Incremental scoped context/memory compiler for Pi.**
 
-Keep decisions, constraints, verified findings, and next steps without sending every completed tool exchange back to the model. State Flow compiles curated context and memory into explicit state; Pi still owns the conversation, the native tool loop, and the complete inspectable trace.
+Long-running work needs continuity: what the agent chose to do, which constraints still apply, what it verified, and what remains unresolved. State Flow gives that knowledge an explicit, inspectable home instead of relying only on repeated conversation history.
 
 > Inspired by [SKILL.state](https://arxiv.org/html/2608.26263v2).
 
@@ -20,25 +20,22 @@ Updated state + Answer
           Next request
 ```
 
-During a request, the model retains the current tool trajectory. Between requests, State Flow replaces completed ordinary conversation history in model context with the current state and recent transitions. It does not delete Pi's session history.
+- **Intent first.** Active commitments stay visible alongside constraints, findings and unresolved work.
+- **Less completed history in model context.** Active mode replaces completed ordinary exchanges with current memory and compact recent transitions. It preserves the available current-run trajectory and other extensions' persistent custom context.
+- **An ordinary finish.** The agent patches memory when something useful changes, then answers normally. No finalization patch or extra State Flow reasoning loop.
+- **Files first.** Accepted state persists without Git. Optional Git backup cannot veto or roll back a state update.
 
-The agent curates what matters; the extension validates, persists, and projects the accepted state. This is working memory, not automatic proof that a remembered fact is true.
+Memory is curated knowledge, not proof: an accurately stored observation can still become stale.
 
-## Quick start
+## Get started
 
-Requires Pi `0.87.0` or newer and Node.js `22.19.0` or newer. There is no declared upper Pi version bound; see the [SDK compatibility matrix](docs/compatibility.md) for exact tested stacks. Git is optional; using it requires a configured commit identity.
-
-From npm:
+Requires **Pi 0.87.0+** and **Node.js 22.19.0+**. The open-ended Pi peer range is not a claim that every future SDK version has been tested; see [compatibility](docs/compatibility.md).
 
 ```bash
 pi install npm:@llblab/pi-state-flow
 ```
 
-From git:
-
-```bash
-pi install git:github.com/llblab/pi-state-flow
-```
+Or install from source with `pi install git:github.com/llblab/pi-state-flow`.
 
 In Pi:
 
@@ -46,51 +43,96 @@ In Pi:
 /state-flow-start
 ```
 
-Continue working normally. The agent receives the state protocol and uses `patch_state` to maintain memory.
+Then work normally. Starting in an existing conversation preserves its context for one complete bootstrap run so the agent can compile what matters.
 
-- `/state-flow-status`: Inspect the selected effective state, bounded history, already-known runtime hints/invalidations, and recovery failures without scanning artifact sources or mutating state.
-- `/state-flow-stop`: Disable updates on this branch without deleting retained state. A new passive branch records only a disabled checkpoint in Pi, without initializing canonical storage.
+- `/state-flow-start` — Enable active memory projection on the current branch.
+- `/state-flow-status` — Inspect effective memory, retained history and known recovery issues without scanning artifact sources or changing state.
+- `/state-flow-stop` — End active episode semantics without deleting memory. An interrupted run keeps its frozen handoff and available tool trajectory.
 
-Active State Flow episodes remain **opt-in**, while passive durable memory bootstrap and tools are available by default. Passive access does not start an episode or trigger State Flow compaction. Starting an active episode in an existing conversation keeps its context for one bootstrap run; set `"autoStart": true` to promote genuinely new sessions automatically. See [configuration](docs/usage.md#configuration).
+**Active mode is opt-in. Passive memory is available by default:** existing memory can be projected and explicitly read or patched without an active episode or State Flow compaction. Stop returns to that configured passive behavior; it does not erase memory or necessarily remove memory tools. Set `autoStart` to promote genuinely new sessions automatically. See [configuration and lifecycle](docs/usage.md#configuration).
 
-## What carries forward
+## Memory with explicit ownership
 
-The same semantic planes exist at every scope:
+Every scope uses the same six planes, in this order:
 
-- `intents`: Courses of action the agent has actually committed to pursue.
-- `contract`: Requirements, decisions, constraints, and interface commitments.
-- `working`: Observations, results, unresolved questions, and possible next steps.
-- `artifacts`: Source-addressed descriptions and reusable compiled knowledge, refreshed in their observed global/CWD/session owner; Skills belong to CWD.
-- `response`: The latest complete answer, captured by the runtime.
-- `lazy`: Durable, versioned memory omitted from ordinary context until explicitly read.
+- **`intents`** — Courses of action actually chosen, not every possible task. Remove them when fulfilled, abandoned or superseded.
+- **`contract`** — Durable requirements, decisions, constraints and interface commitments.
+- **`working`** — Current observations, verified results, uncertainties and next checks.
+- **`artifacts`** — Descriptions and compiled knowledge keyed by exact source path. Refreshes belong to the source's registered scope; Skills belong to CWD.
+- **`response`** — The latest complete answer, captured by the runtime rather than authored in a model patch.
+- **`lazy`** — Supporting memory available through explicit reads, with its body omitted from ordinary baseline projection.
 
-Memory overlays **global → project CWD → session**. Put reusable cross-project knowledge in global, project knowledge in CWD, and branch/run continuation in session. Hot planes carry what must matter now; `lazy` retains what may matter later without hydrating its body into every prompt. An intent stays hot only while its course remains chosen and disappears when fulfilled, abandoned, superseded, or impossible. It may refer to supporting detail through a structured `{"$ref":"cwd.lazy.plan"}` value or a `$`-prefixed state path inside ordinary prose, such as `$effective.lazy.memory[7]`. Both remain semantic content interpreted by the agent: State Flow never parses, validates, hydrates, executes, or completes them automatically. The agent never scans references for breakage. Only when current work already follows one and a single value path is missing does State Flow perform a bounded exact reverse lookup. Matching durable sources produce a top-level `{value:null, hint:[...]}` sentinel whose typed hint names runtime-verified current owning paths and asks the agent to reconcile them. Keys, patch, batch, and unmatched reads retain ordinary all-or-error behavior; no match does not prove that the agent invented the path. The agent may then repair or remove a proven stale locator in its owning value.
+Ownership overlays **global → CWD → session**:
 
-**Resuming an existing Pi session restores its selected State Flow state and enablement.** Only the session layer is session-local; global/CWD remain shared and current. Session files must match their retained runtime lineage, but another session's shared update does not invalidate continuation. A genuinely new session starts with an empty session layer rather than another session's work. Tree navigation follows the selected branch, not whichever state happens to be at Git `HEAD`.
+- **Global:** Reusable cross-project knowledge and preferences.
+- **CWD:** Reusable knowledge for this project.
+- **Session:** This branch's commitments and continuation.
 
-The agent uses `read_state` for exact current or historical paths. Unscoped paths read the effective overlay; `global`, `cwd`, and `session` address ownership directly; `[n]` selects a retained accepted transition boundary up to the configured `historyLimit` (default 7). Bounded array ranges and `value`, `keys`, or `patch` projections support progressive reads without hydrating whole lazy collections. Discarded semantic history is unavailable and is not reconstructed from backup.
+A scope-local deletion can reveal a lower-scope value again. Scope changes ownership and precedence, not instruction authority. Remembered text never becomes a system instruction.
 
-Two packaged Skills keep guidance proportional: `state-flow-guide` resolves concrete operational questions about reading, patching, inheritance, acquisition, completion, and recovery; `state-flow-memory` performs one bounded curation only on explicit request. Neither runs background maintenance. After a meaningful feature, release, or project boundary—or whenever retained state becomes noisy—ask: **“Review and clean State Flow state.”** The curation pass inspects ownership, removes only proven stale or duplicate semantics, preserves consequential knowledge, and stops after verification.
+### Small patches, precise reads
 
-## Boundaries worth knowing
+`patch_state` accepts one or more scope patches atomically. For example:
 
-- `Not a second agent loop`: State Flow adds memory to Pi; it does not run background reasoning or replace session controls.
-- `Not a transcript archive in the prompt`: Prefer ordinary Pi when each request needs all historical exchanges verbatim.
-- `Not live workspace truth`: Remembered observations can become stale; revalidate consequential facts before acting.
-- `Physical forks copy private memory`: Native fork replacement copies the selected session checkpoint/tail into a new owner while retaining current shared memory. The child starts its own history; older parent checkpoints are not child history. See [fork support and limits](docs/usage.md#fork-support-and-limits).
-- `Not a token or latency guarantee`: State and the current trajectory are not size-capped. Benefits depend on workload and memory quality; see [performance evidence](docs/performance.md).
-- `Use a dedicated store`: By default state lives in `~/.pi/agent/state-flow/`. Canonical files own semantics; optional settled-turn Git backup stages only State Flow-owned paths. Do not point the store at an unrelated working repository.
-- `Treat memory as private`: State and diagnostic logs may contain session content. Keep secrets out, and review data before configuring a remote. Removing a value does not erase Git history or other copies.
+```json
+{
+  "session": {
+    "intents": {
+      "verifyRelease": { "action": "Check the release build before publishing" }
+    },
+    "contract": { "runtime": "Node.js >=22.19.0" },
+    "working": { "build": "Not checked yet" }
+  }
+}
+```
 
-Pi packages run with your user permissions. Without Git, current state and its proven hot history persist to files, but arbitrary older branches may be unavailable. See [storage and recovery](docs/usage.md#storage-and-recovery) before moving stores.
+The keys immediately inside a scope are `intents`, `contract`, `working`, `artifacts` and `lazy`. Project-specific grouping belongs **inside** those planes, not in keys such as `project.contract`. Unknown-key errors name the actual rejected key and list the permitted fields.
 
-## Read more
+During an active episode, a material patch is an inference barrier: sibling tool calls are blocked, and the next inference receives the accepted memory. Ordinary answers need no bookkeeping patch; `response` is runtime-owned.
 
-- [Usage and recovery](docs/usage.md): Configuration, session behavior, diagnostics, privacy, and storage recovery.
-- [Architecture](docs/architecture.md): Semantic state, temporal history, barriers, artifacts, and integration contracts.
-- [Performance](docs/performance.md): Reproducible workloads, measured costs, and what the measurements do not prove.
-- [Documentation index](docs/README.md): All maintained guides, including the temporal acceptance map.
+`read_state` retrieves only the requested value:
 
-For development, run `npm install` and `npm run validate`. `npm run benchmark` runs the opt-in synthetic workload in `benchmarks/`, separate from the normal test suite. In a source checkout, see `benchmarks/README.md` for lifecycle/publisher selection.
+```json
+{ "path": "session.intents" }
+```
 
-Project context: [AGENTS.md](AGENTS.md) · [BACKLOG.md](BACKLOG.md) · [CHANGELOG.md](CHANGELOG.md).
+Unscoped paths address effective memory. Explicit scopes, retained boundaries such as `effective[1].working`, array ranges and `keys`/`patch` projections support targeted inspection. The default history window is **7 accepted transitions**, configurable from **0 to 100**; discarded history is unavailable, not reconstructed from Git. See [progressive memory](docs/lazy-state.md) and [tool contracts](docs/architecture.md#model-tools).
+
+## Persistence without a Git dependency
+
+State normally lives under `~/.pi/agent/state-flow/`, independently of registered artifact sources. Each scope's canonical `checkpoint.json`, `patches.jsonl` and `meta.json` own its current state and retained history. Session configuration and runtime metadata remain separate.
+
+**Git is backup, not storage authority.** When the store is already a Git repository, an accepted active turn may produce a best-effort backup. Git backup needs a configured commit identity; canonical state does not. If backup fails, State Flow preserves accepted state and warns the user. It does not fall back between competing storage backends or wait for a remote push.
+
+Resume and tree navigation select the retained session boundary while global/CWD memory stays shared and current. New sessions get their own session layer; supported native forks copy selected session memory into a new owner. Expired or contradictory boundaries fail closed instead of silently substituting newer private state. See [fork limits](docs/usage.md#fork-support-and-limits).
+
+**Upgrading from older storage formats:** 0.17 accepts only its canonical file contract and has no in-place predecessor converter. Preserve your store and read the [format/recovery boundary](docs/usage.md#moving-a-store-and-the-017-format-boundary) before changing versions or locations. A new path does not move existing memory automatically.
+
+## Keep memory useful
+
+Two packaged Skills provide on-demand guidance:
+
+- **`state-flow-guide`** — Concrete questions about reads, patches, scope inheritance, source acquisition and recovery.
+- **`state-flow-memory`** — Bounded curation when explicitly requested. Ask: **“Review and clean State Flow state.”**
+
+Normal handoffs reconcile touched memory; dedicated cleanup is not an automatic audit after every task. Preserve consequential uncertainty, verify ownership before removing data, and verify external destination acceptance before deleting a transferred source. Semantic references are navigation hints, not automatic hydration, execution or dependency tracking.
+
+## Where the boundary stays
+
+- **Not a second agent.** No background reasoning, scheduler or replacement for Pi's session controls.
+- **Not live workspace truth.** Revalidate consequential observations before acting. Restored memory does not undo external tool effects.
+- **Not a token or latency guarantee.** State and the active trajectory are not size-capped; benefits depend on workload and curation. [Performance evidence](docs/performance.md) separates measured copying work from end-to-end cost.
+- **Not a transcript replacement.** Pi retains its full inspectable trace. Use ordinary Pi context when the model needs every historical exchange verbatim.
+- **Not secret storage.** Memory, diagnostic logs and backups may contain sensitive content. Deletion from current state does not erase older histories or remote copies. Use a dedicated store and review what you retain.
+
+## Documentation and development
+
+- [Usage and recovery](docs/usage.md) — Configuration, lifecycle, diagnostics and safe storage operations.
+- [Architecture](docs/architecture.md) — Semantic model, temporal boundaries, artifacts and public integration contracts.
+- [SDK compatibility](docs/compatibility.md) — Tested stacks and verification limits.
+- [Acceptance map](docs/temporal-acceptance.md) — Properties tied to concrete tests.
+- [Documentation index](docs/README.md) — All maintained guides.
+
+For development, run `npm install` and `npm run validate`. The opt-in `npm run benchmark` workload is separate from the normal suite; see `benchmarks/README.md` in a source checkout.
+
+Project context: [AGENTS.md](AGENTS.md), [BACKLOG.md](BACKLOG.md), [CHANGELOG.md](CHANGELOG.md).

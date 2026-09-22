@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.17.1: precise patch diagnostics and clearer onboarding
+
+- `Patch diagnostics`: Unknown scope-patch keys are reported by their exact JSON-quoted name, with permitted fields listed in intent-first order: intents, contract, working, artifacts, lazy. Accepted patch structure and runtime-owned response protection are unchanged. Thanks to @Jipok for the feedback in #5.
+- `README`: Rebuilds the introduction around intent-first memory, explicit scope ownership, small patches and precise reads. Clarifies opt-in active versus default passive behavior, file-authoritative persistence, optional Git backup and the 0.17 format boundary without promising token savings or automatic migration.
+
 ## 0.17.0: canonical memory and native Pi integration
 
 - `Pi 0.87 integration`: Aligns SDK pins and lockfile. Native sections compose with companion hooks and refresh on in-run mode changes; context edits and image profiles remain SDK-owned. User anchors survive normalization, steering and in-run Start/Stop; uncertain boundaries retain available summaries/tools without restoring omitted input. Owned compaction keeps the complete accepted run, skips foreign prefixes and awaits completion/refusal before deferred follow-ups. Native trace remains intact.

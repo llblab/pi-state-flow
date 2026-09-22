@@ -10,7 +10,7 @@ The current repository-local stack uses Linux/x64, Node 26.8.1, Git 2.55.0, and 
 
 | Pi SDK stack | Validation | Evidence status |
 | --- | --- | --- |
-| 0.87.0 | Build, typecheck, import, package dry-run, 437/437 tests | Current full-suite baseline |
+| 0.87.0 | Build, typecheck, import, package dry-run, 438/438 tests | Current full-suite baseline |
 | 0.84.4 | Historical full-suite baseline | Unsupported by State Flow 0.17.0 |
 | 0.85.1 | Historical full-suite baseline | Unsupported by State Flow 0.17.0 |
 

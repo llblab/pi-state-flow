@@ -35,7 +35,7 @@ export interface StagedScopedTransition {
 }
 
 const SCOPES = new Set<StateScope>(["global", "cwd", "session"]);
-const PATCH_KEYS = new Set(["artifacts", "contract", "working", "intents", "lazy"]);
+const PATCH_KEYS = new Set(["intents", "contract", "working", "artifacts", "lazy"]);
 
 function compileReadArtifacts(
 	nextState: StateDocument,
@@ -123,7 +123,7 @@ function validateScopePatch(scope: unknown, patch: unknown): asserts patch is Sc
 	validatePatch(patch);
 	for (const key of Object.keys(patch)) {
 		if (!PATCH_KEYS.has(key)) {
-			throw new Error(`Scoped State Flow patches cannot modify ${key}; only artifacts, contract, working, intents, and lazy are model-owned`);
+			throw new Error(`Unknown State Flow patch key ${JSON.stringify(key)}; expected one of: ${[...PATCH_KEYS].join(", ")}`);
 		}
 	}
 	for (const key of ["artifacts", "contract", "working", "intents"] as const) {

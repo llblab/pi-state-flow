@@ -128,6 +128,26 @@ test("model-facing intent behavior distinguishes possibilities, commitments, han
 	assert.deepEqual(state.cwd.lazy, { plan: { steps: ["validate", "publish"] } });
 });
 
+test("unknown patch keys report the exact quoted key and intent-first allowed fields", () => {
+	const current = states();
+	const before = structuredClone(current);
+	for (const scope of ["global", "cwd", "session"] as const) {
+		for (const key of ["beacon.contract", "contrcat", "notes", "quoted\"key\n", "response"]) {
+			const patch = { [key]: {} };
+			const expected = `Unknown State Flow patch key ${JSON.stringify(key)}; expected one of: intents, contract, working, artifacts, lazy`;
+			assert.throws(() => stageAtomicScopePatches(current, { [scope]: patch }, [], "origin"), { message: expected });
+			assert.throws(() => stageScopedTransition(current, { transitions: [{ scope, patch }], response: "Answer" }, [], "origin"), { message: expected });
+			assert.deepEqual(current, before);
+		}
+		const stage = stageAtomicScopePatches(current, { [scope]: {
+			intents: { next: "Verify the release" }, contract: { project: { rule: true } },
+			working: { checked: true }, artifacts: {}, lazy: { detail: "On demand" },
+		} }, [], "origin");
+		assert.deepEqual(stage.nextStates[scope].contract.project, { rule: true });
+		assert.equal(stage.nextStates[scope].intents.next, "Verify the release");
+	}
+});
+
 test("rejects an invalid member without mutating any scope in the atomic cohort", () => {
 	const state = states();
 	const before = structuredClone(state);
