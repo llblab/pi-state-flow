@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.17.2: incremental memory model documentation
+
+- `README`: Explains the combination of durable state between user runs and native working context within each run. Clarifies global/CWD/session composition into effective memory, configurable historical access and optional Git backups, with a simpler flow diagram and a compact semantic-plane reference. Runtime behavior is unchanged.
+
 ## 0.17.1: precise patch diagnostics and clearer onboarding
 
 - `Patch diagnostics`: Unknown scope-patch keys are reported by their exact JSON-quoted name, with permitted fields listed in intent-first order: intents, contract, working, artifacts, lazy. Accepted patch structure and runtime-owned response protection are unchanged. Thanks to @Jipok for the feedback in #5.
