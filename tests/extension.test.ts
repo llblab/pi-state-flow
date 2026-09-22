@@ -180,6 +180,30 @@ test("passive bootstrap and tools are independently configurable and passive pat
 	}
 });
 
+for (const scope of ["global", "cwd"] as const) test(`first passive patch_state adopts another session's untouched ${scope} update`, async () => {
+	const seed = harness();
+	seed.handlers.get("session_start")!({ reason: "new" }, seed.ctx);
+	await start(seed);
+	const h = harness({ repositoryRoot: seed.repositoryRoot, cwd: seed.ctx.cwd, sessionId: `passive-drift-${scope}`, initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await seed.tools.get("patch_state")!.execute("neighbor", {
+		[scope]: { working: { neighbor: "shared update" } },
+		session: { working: { private: "neighbor only" } },
+	}, undefined, undefined, seed.ctx);
+	const files = () => captureTemporalFileBases(seed.ctx.cwd, seed.ctx.sessionManager.getSessionId(), seed.repositoryRoot);
+	const winner = files();
+	await h.tools.get("patch_state")!.execute("first-passive", { session: { working: { mine: "private update" } } }, undefined, undefined, h.ctx);
+	const read = await h.tools.get("read_state")!.execute("accepted", { paths: [`${scope}.working`, "session.working"] });
+	assert.deepEqual(JSON.parse(read.content[0].text).value, [{ neighbor: "shared update" }, { mine: "private update" }]);
+	assert.equal(h.resolveSnapshot().config.enabled, false);
+	assert.equal(h.resolveSnapshot().meta.step, 1);
+	assert.equal(h.compactRequests.length, 0);
+	assert.deepEqual(files(), winner);
+	h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
+	const restored = await h.tools.get("read_state")!.execute("restored", { paths: [`${scope}.working`, "session.working"] });
+	assert.deepEqual(restored.content, read.content);
+});
+
 for (const activate of ["start", "passive-patch"] as const) {
 	test(`pre-runtime Stop preserves global-only memory before ${activate} establishes session state`, async () => {
 		const h = harness({ initializeRepository: false, passiveBootstrap: true, passiveTools: true });

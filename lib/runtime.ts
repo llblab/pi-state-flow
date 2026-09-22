@@ -438,7 +438,8 @@ export class TemporalRuntime {
 		let basis = this.view;
 		let base: TemporalFileBase = this.base;
 		let basisProvenance = this.provenanceByScope;
-		if (this.semanticRevision) {
+		// First passive writes also reconcile their selected basis; origin-only acceptance keeps its strict CAS.
+		if (this.semanticRevision || accepted !== undefined || provenanceScopes.length > 0) {
 			const changedScopes = new Set<StateScope>([
 				...(accepted?.transitions ?? []).map(({ scope }) => scope),
 				...provenanceScopes,

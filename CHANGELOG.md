@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.17.3: passive shared-memory concurrency
+
+- `Passive concurrency`: First passive semantic or compilation-evidence writes now adopt untouched global/CWD updates made by another session after memory was loaded. Targeted shared-scope changes still reject stale writes with scope-specific diagnostics, and competing private-session writes remain fenced. No automatic patch replay, episode activation, storage-format change or weaker publication CAS is introduced.
+
 ## 0.17.2: incremental memory model documentation
 
 - `README`: Explains the combination of durable state between user runs and native working context within each run. Clarifies global/CWD/session composition into effective memory, configurable historical access and optional Git backups, with a simpler flow diagram and a compact semantic-plane reference. Runtime behavior is unchanged.

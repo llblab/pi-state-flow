@@ -277,6 +277,83 @@ function publishScopedPatch(
 	return runtime.publish(snapshot, true, createAcceptedTransition(before, after, id));
 }
 
+for (const scope of ["global", "cwd"] as const) for (const write of ["session", "provenance", "target"] as const) {
+	test(`first passive ${write} publication reconciles or fences foreign ${scope} drift`, (t) => {
+		const root = mkdtempSync(join(tmpdir(), "state-flow-passive-drift-"));
+		t.after(() => rmSync(root, { recursive: true, force: true }));
+		const cwd = join(root, "extensions");
+		const otherScope = scope === "global" ? "cwd" : "global";
+		const source = join(root, "source.txt");
+		const a = new TemporalRuntime(cwd, "session-a", root);
+		const aSnapshot = emptySnapshot(true);
+		a.initialize(aSnapshot, true);
+		const seed = a.states();
+		const seeded = structuredClone(seed);
+		seeded[otherScope].artifacts[source] = { description: "Known source" };
+		seeded.session.working.private = "session-a only";
+		a.publish(aSnapshot, true, createAcceptedTransition(seed, seeded));
+		const b = new TemporalRuntime(cwd, "session-b", root);
+		const snapshot = emptySnapshot();
+		assert.equal(b.loadPassive(), true);
+		publishScopedPatch(a, aSnapshot, scope, { neighbor: "accepted" }, "foreign-shared-update");
+		const winnerFiles = captureTemporalFileBases(cwd, a.sessionId, root);
+		const beforeFiles = captureTemporalFileBases(cwd, b.sessionId, root);
+		const before = b.states();
+		const evidence = { sourceFingerprint: { size: 2, mtimeNs: "2" }, compilerRevision: "artifact-v1" };
+		const stage = stageAtomicScopePatches(before, {
+			[write === "target" ? scope : "session"]: { working: { mine: "accepted" } },
+		}, [], b.causalBasis());
+		const publish = () => write === "provenance"
+			? b.publish(snapshot, false, undefined, { provenance: { [otherScope]: { [source]: evidence } } })
+			: commitScopedTransition(snapshot, before, stage, (accepted, next) => {
+				b.publish(next, accepted !== undefined, accepted);
+			}, b.causalBasis(), { finalizeRun: false });
+		if (write === "target") {
+			assert.throws(publish, new RegExp(`cannot publish the ${scope === "cwd" ? "CWD" : scope} patch`));
+			assert.deepEqual(captureTemporalFileBases(cwd, b.sessionId, root), beforeFiles);
+			assert.deepEqual(b.states(), before);
+			assert.equal(snapshot.meta.step, 0);
+			return;
+		}
+		assert.ok(publish());
+		assert.equal(snapshot.config.enabled, false);
+		assert.equal(b.read(0, scope).working.neighbor, "accepted");
+		assert.equal(b.read(0, "session").working.private, undefined);
+		if (write === "session") {
+			assert.equal(b.read(0, "session").working.mine, "accepted");
+			assert.equal(snapshot.meta.step, 1);
+		} else {
+			assert.deepEqual(b.artifactProvenance(otherScope)[source], evidence);
+			assert.equal(snapshot.meta.step, 0);
+		}
+		const protectedPaths = temporalScopePaths(cwd, a.sessionId, scope, root);
+		const privatePaths = sessionRuntimePaths(cwd, a.sessionId, root);
+		const protectedFiles = (files: typeof winnerFiles) => files.filter(({ path }) =>
+			path.startsWith(`${dirname(privatePaths.runtime)}/`) || Object.values(protectedPaths).includes(path));
+		assert.deepEqual(protectedFiles(captureTemporalFileBases(cwd, a.sessionId, root)), protectedFiles(winnerFiles));
+		const checkpoint = b.retainedCheckpoint(snapshot);
+		assert.ok("boundary" in checkpoint);
+		const restored = new TemporalRuntime(cwd, b.sessionId, root);
+		restored.prepareBoundaryRestore(checkpoint).restore();
+		assert.deepEqual(restored.states(), b.states());
+		assert.deepEqual(restored.artifactProvenance(otherScope), b.artifactProvenance(otherScope));
+	});
+}
+
+test("first passive publication still fences another writer of the same private session", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-passive-private-race-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const cwd = join(root, "extensions");
+	new TemporalRuntime(cwd, "seed", root).initialize(emptySnapshot(), true);
+	const passive = new TemporalRuntime(cwd, "same-session", root);
+	passive.loadPassive();
+	const competing = new TemporalRuntime(cwd, passive.sessionId, root);
+	competing.initialize(emptySnapshot(), true);
+	const files = captureTemporalFileBases(cwd, passive.sessionId, root);
+	assert.throws(() => publishScopedPatch(passive, emptySnapshot(), "session", { stale: true }, "stale-private"), /base or scope identity changed concurrently/);
+	assert.deepEqual(captureTemporalFileBases(cwd, passive.sessionId, root), files);
+});
+
 function removeSharedPair(root: string, cwd: string, scope: "global" | "cwd"): void {
 	const paths = temporalScopePaths(cwd, "session-a", scope, root);
 	rmSync(paths.checkpoint);
