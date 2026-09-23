@@ -55,7 +55,7 @@ process.stdout.write = function (chunk, ...args) {
 		});
 		assert.equal(child.error, undefined);
 		assert.equal(child.signal, null);
-		assert.equal(child.status, mutate ? 1 : 0, child.stderr);
+		assert.equal(child.status, mutate ? 1 : 0, child.stdout + child.stderr);
 		const match = child.stdout.match(/BENCH_RESULT (\{[^\n]+\})/);
 		assert.ok(match, child.stdout + child.stderr);
 		const report = JSON.parse(match[1]!);

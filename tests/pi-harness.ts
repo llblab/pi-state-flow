@@ -62,7 +62,8 @@ export async function realPiFixture(t: TestContext, options: {
 	compaction?: { enabled: boolean; keepRecentTokens: number; reserveTokens?: number };
 } = {}): Promise<RealPiFixture> {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-real-pi-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
+	// Settled-turn backup pushes are intentionally asynchronous and can briefly outlive session disposal.
+	t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	const repositoryRoot = join(root, "knowledge");
 	const remote = join(root, "remote.git");
 	const cwd = join(root, "project");
