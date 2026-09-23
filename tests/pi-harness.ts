@@ -22,6 +22,8 @@ import type { ModelState, StateScope } from "../lib/state.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
 import type { RetainedPiCheckpoint, Snapshot } from "../lib/snapshot.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
+import { awaitInFlightBackupPushes } from "../lib/git.ts";
+import "./git-environment.ts";
 
 const checkpointStores = new WeakMap<AgentSession, { root: string; sessionKey: string }>();
 import { SNAPSHOT_ENTRY_TYPE } from "../lib/session.ts";
@@ -62,9 +64,20 @@ export async function realPiFixture(t: TestContext, options: {
 	compaction?: { enabled: boolean; keepRecentTokens: number; reserveTokens?: number };
 } = {}): Promise<RealPiFixture> {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-real-pi-"));
-	// Settled-turn backup pushes are intentionally asynchronous and can briefly outlive session disposal.
-	t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 	const repositoryRoot = join(root, "knowledge");
+	const sessions = new Set<AgentSession>();
+	const runtimes = new Set<AgentSessionRuntime>();
+	// node:test runs after hooks in registration order, not reverse order. This hook
+	// precedes callers' disposal hooks, so settle all owners before removing files.
+	t.after(async () => {
+		try {
+			for (const runtime of runtimes) await runtime.dispose();
+			for (const session of sessions) session.dispose();
+			await awaitInFlightBackupPushes(repositoryRoot);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 	const remote = join(root, "remote.git");
 	const cwd = join(root, "project");
 	const agentDir = join(root, "agent");
@@ -174,14 +187,18 @@ export async function realPiFixture(t: TestContext, options: {
 		reason: "startup" | "new" | "resume" = "startup",
 		manager = SessionManager.create(sessionCwd, sessionDir),
 	): Promise<AgentSession> {
-		return (await createSessionResult(sessionCwd, manager, { type: "session_start", reason })).session;
+		const session = (await createSessionResult(sessionCwd, manager, { type: "session_start", reason })).session;
+		sessions.add(session);
+		return session;
 	}
 
-	function createRuntime(reason: "startup" | "new" | "resume" = "startup", manager = SessionManager.create(cwd, sessionDir)): Promise<AgentSessionRuntime> {
-		return createAgentSessionRuntime(
+	async function createRuntime(reason: "startup" | "new" | "resume" = "startup", manager = SessionManager.create(cwd, sessionDir)): Promise<AgentSessionRuntime> {
+		const runtime = await createAgentSessionRuntime(
 			({ cwd: sessionCwd, sessionManager, sessionStartEvent }) => createSessionResult(sessionCwd, sessionManager, sessionStartEvent ?? { type: "session_start", reason }),
 			{ cwd, agentDir, sessionManager: manager, sessionStartEvent: { type: "session_start", reason } },
 		);
+		runtimes.add(runtime);
+		return runtime;
 	}
 
 	function createSession(reason: "startup" | "new" | "resume" = "startup", manager?: SessionManager): Promise<AgentSession> {

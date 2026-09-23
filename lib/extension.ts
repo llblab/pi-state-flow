@@ -25,7 +25,7 @@ import {
   type SessionAddress,
 } from "./durable.ts";
 import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
-import { backupCurrentStateFlowFiles, pushCurrentStateFlowBackup } from "./git.ts";
+import { awaitInFlightBackupPushes, backupCurrentStateFlowFiles, startStateFlowBackupPush } from "./git.ts";
 import { projectRecentTransitionsWithLimit } from "./history.ts";
 import { isObject, presentationJson, sameJson, type JsonObject } from "./json.ts";
 import { StateFlowDiagnosticWriter, stateFlowLogPath, type DiagnosticExtras, type StateFlowDiagnosticCategory } from "./logging.ts";
@@ -88,6 +88,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	const repositoryRoot = resolve(options.repositoryRoot ?? config.directory);
 	const diagnosticWriter = new StateFlowDiagnosticWriter(config.logging, stateFlowLogPath(agentDir), repositoryRoot, (message) => notifyActiveContext(message));
 	let backupPending = false;
+	let shuttingDown = false;
+	let pushFailureNotified = false;
 	const skillReads = new SkillReadTracker(hashSkillSource, (path) => activeContext
 		? registeredSkillResolver(activeContext.cwd, pi.getCommands())(path)
 		: undefined);
@@ -935,11 +937,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				backupCurrentStateFlowFiles(repositoryRoot);
 				const pushSessionId = sessionAddress(ctx).id;
 				const pushCwd = ctx.cwd;
-				void pushCurrentStateFlowBackup(repositoryRoot).catch((error) => {
+				startStateFlowBackupPush(repositoryRoot, (error) => {
+					if (shuttingDown) return;
 					const message = error instanceof Error ? error.message : String(error);
-					diagnosticWriter.record(pushSessionId, pushCwd, message, "publication-conflict");
-					notifyActiveContext(`State Flow accepted canonical state; Git backup push failed: ${message}`);
-				});
+					const recorded = diagnosticWriter.recordBackupPushFailure(pushSessionId, pushCwd, message);
+					if (pushFailureNotified) return;
+					pushFailureNotified = true;
+					notifyActiveContext(recorded
+						? `State Flow Git backup push failed; state is saved locally. Details: ${stateFlowLogPath(agentDir)}. A later accepted turn retries.`
+						: `State Flow Git backup push failed; local diagnostics unavailable: ${message}`);
+				}, () => { pushFailureNotified = false; });
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -981,11 +988,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		runAnchorTimestamp = undefined;
 		restoreActiveBranch(ctx);
 	});
-	pi.on("session_shutdown", (_event, _ctx) => {
+	pi.on("session_shutdown", async (_event, _ctx) => {
+		shuttingDown = true;
 		telegramStartPending = false;
 		compactionStopped = true;
 		completedRunAccepted = false;
 		activeContext = undefined;
 		telegram.dispose();
+		await awaitInFlightBackupPushes(repositoryRoot);
 	});
 }

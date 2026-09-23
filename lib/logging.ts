@@ -1,5 +1,5 @@
 // Domain: opt-in diagnostic capture for rejected State Flow resolutions.
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isObject } from "./json.ts";
 
@@ -39,9 +39,22 @@ export function stateFlowLogPath(agentDir: string): string {
 	return join(agentDir, "tmp", "state-flow", "logs.jsonl");
 }
 
+function ensureDiagnosticDirectory(path: string): void {
+	if (dirname(path) !== path) ensureDiagnosticDirectory(dirname(path));
+	if (!lstatSync(path, { throwIfNoEntry: false })) mkdirSync(path);
+	const stat = lstatSync(path);
+	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`State Flow diagnostic directory is not a regular directory: ${path}`);
+}
+
 export function appendStateFlowDiagnostic(path: string, record: StateFlowDiagnosticRecord): void {
-	mkdirSync(dirname(path), { recursive: true });
-	appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+	ensureDiagnosticDirectory(dirname(path));
+	const descriptor = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+	try {
+		if (!fstatSync(descriptor).isFile()) throw new Error(`State Flow diagnostic destination is not a regular file: ${path}`);
+		appendFileSync(descriptor, `${JSON.stringify(record)}\n`, { encoding: "utf8" });
+	} finally {
+		closeSync(descriptor);
+	}
 }
 
 export interface DiagnosticExtras {
@@ -68,6 +81,15 @@ export class StateFlowDiagnosticWriter {
 
 	record(sessionId: string, cwd: string, error: string, category: StateFlowDiagnosticCategory, extras: DiagnosticExtras = {}): void {
 		if (!this.enabled) return;
+		this.write(sessionId, cwd, error, category, extras);
+	}
+
+	/** Push warnings stay short; retain the available Git failure detail locally even without opt-in logging. */
+	recordBackupPushFailure(sessionId: string, cwd: string, error: string): boolean {
+		return this.write(sessionId, cwd, error, "publication-conflict", {}, false);
+	}
+
+	private write(sessionId: string, cwd: string, error: string, category: StateFlowDiagnosticCategory, extras: DiagnosticExtras, reportFailure = true): boolean {
 		try {
 			const fromRepository = relative(this.repositoryRoot, this.path);
 			if (fromRepository === "" || (!isAbsolute(fromRepository) && fromRepository !== ".." && !fromRepository.startsWith(`..${sep}`))) {
@@ -84,10 +106,13 @@ export class StateFlowDiagnosticWriter {
 				...(extras.tool === undefined ? {} : { tool: extras.tool }),
 				...(extras.toolCallId === undefined ? {} : { toolCallId: extras.toolCallId }),
 			});
+			return true;
 		} catch (failure) {
-			if (this.warningReported) return;
-			this.warningReported = true;
-			this.notify(`State Flow could not write diagnostics: ${failure instanceof Error ? failure.message : String(failure)}`);
+			if (reportFailure && !this.warningReported) {
+				this.warningReported = true;
+				this.notify(`State Flow could not write diagnostics: ${failure instanceof Error ? failure.message : String(failure)}`);
+			}
+			return false;
 		}
 	}
 }

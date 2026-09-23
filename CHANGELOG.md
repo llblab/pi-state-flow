@@ -2,6 +2,12 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.18.1: Backup Reliability
+
+- `Push lifecycle`: Bounds backup replication to one in-flight push per repository, skips overlap until a later accepted turn, and awaits process closure at session shutdown under the existing push timeout. Suppresses failure reporting after shutdown starts; test fixtures settle pushes before cleanup. Canonical acceptance stays independent of Git replication.
+- `Push diagnostics`: Repeated asynchronous push failures produce one concise warning per failure streak until a successful push. Available redacted Git errors are recorded locally even without general logging; an unavailable diagnostic log falls back to one warning with the failure detail. Canonical acceptance and later-turn retry are unchanged.
+- `Prompt-prefix evidence`: Version 3 synthetic benchmark reports each inference's serialized context size and within-run shared byte prefix, accepted patch barriers, and matching native user/specification value sizes for State Flow and native Pi, including isolated resume probes. A source-bound local sample and regression coverage inform a later projection decision without changing 0.18.1 model behavior.
+
 ## 0.18.0: Independent Revisions and Replicated Backups
 
 - `Independent scope revisions`: Persists independent Global, CWD and Session semantic counters. Each materially changed scope advances once per atomic cohort; no-ops advance none, Session owns response changes, folding preserves counts, and pre-revision 0.17 stores start from retained-tail evidence. Effective uses the truthful `G#/C#/S#` vector rather than a scalar observer count. Metadata v2 keeps v1 readable and fences older writers after a revision-aware scope write.

@@ -15,6 +15,7 @@ import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } fro
 import { emptyState, projectStateForModel, type MaterializedState } from "../lib/state.ts";
 import type { JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
+import { awaitInFlightBackupPushes } from "../lib/git.ts";
 import { hashSkillSource, SKILL_ARTIFACT_COMPILER } from "../lib/skills.ts";
 import {
 	cwdScopePaths,
@@ -2712,15 +2713,18 @@ test("real Pi activation stays local without a remote attempt", async (t) => {
 	assert.equal(childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteBefore);
 });
 
-test("real Pi canonical acceptance stays local without a remote attempt", async (t) => {
+test("real Pi canonical acceptance persists locally while replication settles asynchronously", async (t) => {
 	const fixture = await realPiFixture(t, { autoStart: true });
 	const session = await fixture.createSession("new");
 	t.after(() => session.dispose());
 	const remoteBefore = childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
-	fixture.faux.setResponses(unchangedResponses("Local-only by policy."));
-	await session.prompt("Accept without remote replication");
-	assert.equal(childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteBefore);
-	assert.equal(fixture.readState(session).response, "Local-only by policy.");
+	fixture.faux.setResponses(unchangedResponses("Accepted locally."));
+	await session.prompt("Accept and replicate asynchronously");
+	assert.equal(fixture.readState(session).response, "Accepted locally.");
+	const committed = childProcess.execFileSync("git", ["-C", fixture.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+	assert.notEqual(committed, remoteBefore);
+	await awaitInFlightBackupPushes(fixture.repositoryRoot);
+	assert.equal(childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), committed);
 });
 
 test("real Pi projects resume bootstrap once and then uses step rehydration", async (t) => {

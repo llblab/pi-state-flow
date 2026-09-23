@@ -22,16 +22,24 @@ BENCH_PATCHES=2 BENCH_SAMPLES=1 BENCH_ROUNDS=2 BENCH_STATE_BYTES=1024 npm run be
 
 Treat timings as observations from the named host and source identity, not universal thresholds. Compare runs only when workload fingerprints, dependencies, payloads, and validation outcomes match. A failed correctness probe invalidates its timing sample.
 
+### Within-run prompt-prefix probe (0.18.1)
+
+The v3 report records `promptPrefixRuns` for each State Flow and native Pi user run, with no duplication across lifecycle checkpoints. Per inference, `contextBytes` is the UTF-8 byte length of `JSON.stringify(context.messages)` as seen by the installed faux provider; `sharedPrefixBytes` is the longest common byte prefix of that serialization with the previous inference **in the same run**, or `null` on the first inference. Per run, `patchStateBarriers` counts successful tool completions, and `nativeUserBytes` / `specificationBytes` count JSON-serialized *string values*, excluding their containing message/field frames (`specificationBytes` is `null` for native Pi). Isolated post-resume probes expose the same per-run metrics.
+
+A bounded local sample used `BENCH_PATCHES=2 BENCH_SAMPLES=1 BENCH_ROUNDS=2 BENCH_STATE_BYTES=1024 BENCH_POST_RESUME=1 npm run benchmark` on Node 26.8.1 Linux/x64 and Pi/AI 0.87.0. The runtime-source SHA-256 was `0f4eea2394c52c6ac545260cae967a16581b8768a24a8c611c13a389e6df01a9`, workload-source SHA-256 `e9b8158d953d8622776aa075835c4aa95c98855ed5c90e85de05dccae1087e91`, base commit `5f0f688650738d4d0e9850b2529b0273c47121a8` (the measured tree had uncommitted 0.18.1 changes). Both source hashes stayed unchanged during the run and all correctness phases passed. At user run 1, native Pi's second inference shared 2,776 of 2,777 prior serialized bytes; State Flow shared 9,365 of 9,467 at inference 2 and 9,173 with inference 2 at inference 3 (one accepted barrier). In both State Flow runs, the 21-byte serialized `specification` value duplicated the 21-byte current native user string value; native Pi had no projection field. These are synthetic short-run observations, not representative cache-hit rates or timing predictions.
+
+A later 0.19 decision about freezing the projected head must compare compatible workloads and include correctness of fresh state visibility after barriers. Byte-prefix measurements omit provider framing, tool schemas, tokenization, cache policies and quality; this probe does **not** justify changing context projection in 0.18.1.
+
 ## Current cost model
 
 - Current semantic projection is proportional to projected state size.
 - Retained temporal reads are bounded by configured `historyLimit` (`0..100`, default `7`).
 - Canonical publication writes the affected scope/runtime cohort under file CAS and cooperating-writer exclusion; it executes no Git command.
 - Registered-artifact maintenance is proportional to already-registered paths and uses metadata-only `size + mtimeNs` inspection. It performs no directory discovery or generic body hashing.
-- Optional Git backup runs only after accepted work reaches `agent_before_settle`. Its canonical-lock capture costs are proportional to owned file count and bytes; all Git commands and filters run after that lock is released. Git remains synchronous within the calling settled-turn callback: independent canonical processes can publish during slow Git, but this is not a host-event-loop latency bound. Backup is not an acceptance or recovery authority.
+- Optional Git backup runs only after accepted work reaches `agent_before_settle`. Its canonical-lock capture costs are proportional to owned file count and bytes; all Git commands and filters run after that lock is released. The commit remains synchronous within the calling settled-turn callback: independent canonical processes can publish during slow Git, but this is not a host-event-loop latency bound. Remote push runs asynchronously, skips overlapping attempts per repository within one Pi process, and is awaited at session shutdown within its existing timeout and process-group termination behavior. Backup is not an acceptance or recovery authority.
 - Native transcript opening, Pi context construction, and foreign custom-context preservation remain Pi/history costs rather than canonical-state storage costs.
 
-Discarded semantic history is unavailable. Benchmarks must not count Git cold reads, revision restoration, queue workers, remote pushes, migration, terminal repair, or fallback inference; those mechanisms do not exist in the 0.17 architecture.
+Discarded semantic history is unavailable. Git cold reads, revision restoration, queue workers, migration, terminal repair and fallback inference are absent from the current architecture. Remote pushes do exist but are asynchronous and outside these local benchmark workloads; do not count them as measured costs.
 
 ## Tool-preflight parent traversal
 

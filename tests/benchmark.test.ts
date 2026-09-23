@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
+import "./git-environment.ts";
 
 function sourceFixture(t: TestContext): string {
 	const source = fileURLToPath(new URL("../", import.meta.url));
@@ -59,7 +60,7 @@ process.stdout.write = function (chunk, ...args) {
 		const match = child.stdout.match(/BENCH_RESULT (\{[^\n]+\})/);
 		assert.ok(match, child.stdout + child.stderr);
 		const report = JSON.parse(match[1]!);
-		assert.equal(report.version, 2);
+		assert.equal(report.version, 3);
 		assert.equal(report.syntheticPadding, "x".repeat(1024 * 1024));
 		assert.equal(report.exitCode, mutate ? 1 : 0);
 		assert.equal(report.runtimeSourceUnchanged, true);
@@ -76,6 +77,21 @@ process.stdout.write = function (chunk, ...args) {
 		assert.equal(report.publishers.length, 0);
 		for (const entry of report.lifecycle) {
 			assert.equal(entry.acceptedTransitions, entry.stateFlow ? 2 : 0);
+			assert.equal(entry.promptPrefixRuns.length, 1);
+			const run = entry.promptPrefixRuns[0];
+			assert.equal(run.userRun, 1);
+			assert.equal(run.patchStateBarriers, entry.stateFlow ? 1 : 0);
+			assert.equal(run.nativeUserBytes, Buffer.byteLength(JSON.stringify("Synthetic request 1")));
+			assert.equal(run.specificationBytes, entry.stateFlow ? run.nativeUserBytes : null);
+			assert.equal(run.inferences.length, entry.stateFlow ? 3 : 2);
+			assert.ok(run.inferences[0].contextBytes > 0);
+			assert.equal(run.inferences[0].sharedPrefixBytes, null);
+			for (const [index, inference] of run.inferences.entries()) {
+				if (index === 0) continue;
+				assert.ok(inference.contextBytes > 0);
+				assert.ok(inference.sharedPrefixBytes > 0);
+				assert.ok(inference.sharedPrefixBytes <= Math.min(inference.contextBytes, run.inferences[index - 1].contextBytes));
+			}
 			const phases = [entry.recentRuns, entry.openSession, entry.resumeRuntime];
 			const reads = [entry.nativeRead];
 			if (mutate) assert.equal(entry.postResume, undefined);
@@ -87,6 +103,10 @@ process.stdout.write = function (chunk, ...args) {
 				assert.equal(probe.acceptedTransitionsPerProbe, entry.stateFlow ? 2 : 0);
 				assert.ok(probe.selectedLeafId);
 				assert.ok(probe.firstContextBytes.p50 > 0);
+				assert.equal(probe.promptPrefixRuns.length, 1);
+				assert.equal(probe.promptPrefixRuns[0].inferences.length, entry.stateFlow ? 3 : 2);
+				assert.equal(probe.promptPrefixRuns[0].patchStateBarriers, entry.stateFlow ? 1 : 0);
+				assert.equal(probe.promptPrefixRuns[0].specificationBytes, entry.stateFlow ? probe.promptPrefixRuns[0].nativeUserBytes : null);
 				assert.ok(probe.firstInference.wallMs.p50 <= probe.wholeRun.wallMs.p50);
 				assert.ok(probe.firstInference.gitCalls.p50 <= probe.wholeRun.gitCalls.p50);
 				if (entry.stateFlow && probe.selectedRevision) assert.equal(probe.firstInference.commands["commit-tree"], 1);

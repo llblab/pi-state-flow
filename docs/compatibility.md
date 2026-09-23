@@ -10,7 +10,7 @@ The current repository-local stack uses Linux/x64, Node 26.8.1, Git 2.55.0, and 
 
 | Pi SDK stack | Validation | Evidence status |
 | --- | --- | --- |
-| 0.87.0 | Build, typecheck, import, package dry-run, 438/438 tests | Current full-suite baseline |
+| 0.87.0 | Build, typecheck, import, package dry-run; 472/472 tests in each of five ordinary and five `push.negotiate=true` isolated-Git runs | 0.18.1 candidate source-bound acceptance (2026-09-23); not a live-provider or cross-platform claim |
 | 0.84.4 | Historical full-suite baseline | Unsupported by State Flow 0.17.0 |
 | 0.85.1 | Historical full-suite baseline | Unsupported by State Flow 0.17.0 |
 

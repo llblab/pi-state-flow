@@ -35,6 +35,37 @@ test("benchmark checkpoints retain prefix costs and release measurement ownershi
 });
 
 for (const stateFlow of [false, true]) {
+	test(`benchmark prefix report matches every serialized inference (${stateFlow ? "enabled" : "native"})`, { timeout: 30_000 }, async (t) => {
+		const fixture = await realPiFixture(t, { stateFlow });
+		const session = await fixture.createSession();
+		t.after(() => session.dispose());
+		if (stateFlow) await session.prompt("/state-flow-start");
+		const source = join(fixture.cwd, "evidence.txt");
+		writeFileSync(source, "BENCH_EVIDENCE\né");
+		const captured: Buffer[] = [];
+		const setResponses = fixture.faux.setResponses.bind(fixture.faux);
+		t.mock.method(fixture.faux, "setResponses", (responses: Parameters<typeof setResponses>[0]) => setResponses(responses.map((response) => {
+			if (typeof response !== "function") return response;
+			const record: FauxResponseFactory = (context, ...rest) => {
+				captured.push(Buffer.from(JSON.stringify(context.messages)));
+				return response(context, ...rest);
+			};
+			return record;
+		})));
+		const result = await prompt(fixture, session, { stateFlow, counter: 1, size: 1024, source, sourceFileBytes: statSync(source).size });
+		const observed = result.promptPrefix;
+		assert.equal(captured.length, stateFlow ? 3 : 2);
+		assert.equal(observed.patchStateBarriers, stateFlow ? 1 : 0);
+		assert.equal(observed.nativeUserBytes, Buffer.byteLength(JSON.stringify("Synthetic request 1")));
+		assert.equal(observed.specificationBytes, stateFlow ? observed.nativeUserBytes : null);
+		assert.equal(observed.inferences.length, captured.length);
+		for (const [index, bytes] of captured.entries()) {
+			const previous = captured[index - 1];
+			const difference = previous ? bytes.subarray(0, Math.min(bytes.length, previous.length)).findIndex((byte, position) => byte !== previous[position]) : -1;
+			const sharedPrefixBytes = previous ? difference === -1 ? Math.min(bytes.length, previous.length) : difference : null;
+			assert.deepEqual(observed.inferences[index], { contextBytes: bytes.length, sharedPrefixBytes });
+		}
+	});
 	test(`benchmark native read bytes distinguish complete, byte-truncated and line-truncated output (${stateFlow ? "enabled" : "native"})`, { timeout: 30_000 }, async (t) => {
 		const fixture = await realPiFixture(t, { stateFlow });
 		const session = await fixture.createSession();

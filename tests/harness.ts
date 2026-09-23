@@ -8,6 +8,7 @@ import { loadStateFlowConfig } from "../lib/config.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 import type { ModelState, StateScope } from "../lib/state.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
+import "./git-environment.ts";
 
 export type Handler = (...args: any[]) => any;
 

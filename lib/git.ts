@@ -8,6 +8,7 @@ import { acquirePublicationLock, withStoragePublicationLock } from "./storage.ts
 
 const GIT_TIMEOUT_MS = 15_000;
 const STATE_FLOW_COMMIT_TRAILER = "State-Flow-Durable: v1";
+const activePushes = new Map<string, Promise<void>>();
 
 function redactGitDiagnostic(value: string): string {
 	return value
@@ -206,6 +207,28 @@ export function backupCurrentStateFlowFiles(repositoryRoot: string): string | un
 	return withBackupLock(repositoryRoot, (root) => commitCurrentOwnedFiles(root, currentHead(root)));
 }
 
+/** Skip overlapping pushes; the next accepted turn can push the latest HEAD. */
+export function startStateFlowBackupPush(repositoryRoot: string, onFailure: (error: unknown) => void, onSuccess?: () => void): boolean {
+	const root = resolve(repositoryRoot);
+	if (activePushes.has(root)) return false;
+	const push = pushCurrentStateFlowBackup(root).then(
+		(result) => {
+			if (result) { try { onSuccess?.(); } catch { /* Reporting cannot change push acceptance. */ } }
+		},
+		(error) => {
+			try { onFailure(error); } catch { /* Reporting cannot revive a failed push. */ }
+		},
+	).finally(() => { activePushes.delete(root); });
+	activePushes.set(root, push);
+	return true;
+}
+
+/** Resolve only after the push process has closed (including timeout termination). */
+export async function awaitInFlightBackupPushes(repositoryRoot: string): Promise<void> {
+	const push = activePushes.get(resolve(repositoryRoot));
+	if (push) await push;
+}
+
 /** Push the current backup commit to its explicitly configured branch remote without blocking settlement. */
 export function pushCurrentStateFlowBackup(repositoryRoot: string): Promise<{ commit: string; remote: string; ref: string } | undefined> {
 	return new Promise((resolvePush, rejectPush) => {
@@ -217,7 +240,7 @@ export function pushCurrentStateFlowBackup(repositoryRoot: string): Promise<{ co
 			commit = currentHead(root);
 			destination = configuredPushDestination(root);
 		} catch (error) {
-			rejectPush(error);
+			rejectPush(new Error(redactGitDiagnostic(error instanceof Error ? error.message : String(error))));
 			return;
 		}
 		if (commit === undefined || destination === undefined) {

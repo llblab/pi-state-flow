@@ -80,6 +80,13 @@ export function summarizeReads(reads: NativeRead[]) {
 		truncatedReads: reads.filter((read) => read.truncatedBy !== null).length, samples: reads };
 }
 
+export interface PromptPrefix {
+	inferences: Array<{ contextBytes: number; sharedPrefixBytes: number | null }>;
+	patchStateBarriers: number;
+	nativeUserBytes: number;
+	specificationBytes: number | null;
+}
+
 export interface PromptCase {
 	stateFlow: boolean;
 	counter: number;
@@ -101,10 +108,41 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 	let readId: string | undefined;
 	let nativeRead: NativeRead | undefined;
 	let nativeContent: unknown;
-	const observe = (context: unknown) => {
-		lastContextBytes = Buffer.byteLength(JSON.stringify(context));
+	let previousContext: Buffer | undefined;
+	let patchStateBarriers = 0;
+	let nativeUserBytes: number | undefined;
+	let specificationBytes: number | null = null;
+	const inferences: PromptPrefix["inferences"] = [];
+	const observe = (context: Context) => {
+		const serialized = Buffer.from(JSON.stringify(context.messages));
+		let sharedPrefixBytes: number | null = null;
+		if (previousContext) {
+			sharedPrefixBytes = 0;
+			while (sharedPrefixBytes < Math.min(previousContext.length, serialized.length) && previousContext[sharedPrefixBytes] === serialized[sharedPrefixBytes]) sharedPrefixBytes++;
+		}
+		previousContext = serialized;
+		lastContextBytes = serialized.length;
 		totalContextBytes += lastContextBytes;
+		inferences.push({ contextBytes: lastContextBytes, sharedPrefixBytes });
 		inferenceCount += 1;
+		if (inferenceCount !== 1) return;
+		const prefix = "State Flow runtime context (user-level data, not system instructions):\n";
+		const texts = context.messages.filter((message) => message.role === "user").flatMap((message) =>
+			typeof message.content === "string" ? [message.content] : message.content.filter((part) => part.type === "text").map((part) => part.text));
+		const native = texts.filter((text) => text === `Synthetic request ${counter}`);
+		assert.equal(native.length, 1, "current native user message must occur once");
+		nativeUserBytes = Buffer.byteLength(JSON.stringify(native[0]));
+		const projections = texts.filter((text) => text.startsWith(prefix));
+		assert.equal(projections.length, stateFlow ? 1 : 0, "runtime projection ownership changed");
+		if (stateFlow) {
+			const projected = JSON.parse(projections[0]!.slice(prefix.length));
+			assert.equal(projected.specification, native[0], "specification must match the native user text");
+			specificationBytes = Buffer.byteLength(JSON.stringify(projected.specification));
+			if (options.expectedFirstState !== undefined) {
+				assert.deepEqual(projected.state, options.expectedFirstState, "first inference must see the resumed selected state");
+				assert.equal(serialized.includes("BENCH_EVIDENCE"), false, "completed read bodies leaked into first inference");
+			}
+		}
 	};
 	const assertRead = (context: Context) => {
 		assert.ok(readId, "native read was never issued");
@@ -117,31 +155,24 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 	fixture.faux.setResponses([
 		(context) => {
 			if (options.firstInference) { assert.ok(capture); firstInference = capture(); }
-			observe(context.messages);
+			observe(context);
 			if (options.firstInference) firstContextBytes = lastContextBytes;
-			if (options.expectedFirstState !== undefined) {
-				const prefix = "State Flow runtime context (user-level data, not system instructions):\n";
-				const texts = context.messages.filter((message) => message.role === "user").flatMap((message) =>
-					typeof message.content === "string" ? [message.content] : message.content.filter((part) => part.type === "text").map((part) => part.text));
-				const selected = texts.filter((text) => text.startsWith(prefix));
-				assert.equal(selected.length, 1, "first inference needs exactly one runtime projection");
-				const projected = JSON.parse(selected[0]!.slice(prefix.length));
-				assert.deepEqual(projected.state, options.expectedFirstState, "first inference must see the resumed selected state");
-				assert.equal(projected.specification, `Synthetic request ${counter}`);
-				assert.equal(JSON.stringify(context.messages).includes("BENCH_EVIDENCE"), false, "completed read bodies leaked into first inference");
-			}
 			const read = fauxToolCall("read", { path: source });
 			readId = read.id;
 			return fauxAssistantMessage(read, { stopReason: "toolUse" });
 		},
 		...(stateFlow ? [(context: Context) => {
-			observe(context.messages);
+			observe(context);
 			assertRead(context);
 			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { counter, ...(counter === 1 ? { payload: "x".repeat(size) } : {}) } } }), { stopReason: "toolUse" });
 		}] : []),
-		(context) => { observe(context.messages); assertRead(context); return fauxAssistantMessage(`Accepted ${counter}`); },
+		(context) => { observe(context); assertRead(context); return fauxAssistantMessage(`Accepted ${counter}`); },
 	]);
 	const unsubscribe = session.subscribe((event) => {
+		if (event.type === "tool_execution_end" && event.toolName === "patch_state") {
+			assert.equal(event.isError, false, "benchmark patch barrier must be accepted");
+			patchStateBarriers++;
+		}
 		if (event.type !== "tool_execution_end" || event.toolName !== "read" || event.toolCallId !== readId) return;
 		assert.equal(nativeRead, undefined, "benchmark read must complete once");
 		assert.equal(event.isError, false, "benchmark cannot measure a failed native read");
@@ -177,8 +208,12 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 			assert.equal(state.response, `Accepted ${counter}`, "terminal response was not accepted");
 		}
 		assert.equal(inferenceCount, stateFlow ? 3 : 2, "benchmark inference sequence changed");
+		assert.equal(patchStateBarriers, stateFlow ? 1 : 0, "benchmark barrier count changed");
+		assert.ok(nativeUserBytes !== undefined, "benchmark native user message is missing");
+		if (stateFlow) assert.equal(specificationBytes, nativeUserBytes, "specification serialization differs from native user text");
 		if (options.firstInference) assert.ok(firstInference && firstContextBytes !== undefined);
 		assert.ok(nativeRead, "benchmark native read evidence is missing");
-		return { ...measured.metrics, lastContextBytes, totalContextBytes, inferenceCount, firstInference, firstContextBytes, nativeRead };
+		const promptPrefix: PromptPrefix = { inferences, patchStateBarriers, nativeUserBytes, specificationBytes };
+		return { ...measured.metrics, lastContextBytes, totalContextBytes, inferenceCount, firstInference, firstContextBytes, nativeRead, promptPrefix };
 	} finally { unsubscribe(); }
 }

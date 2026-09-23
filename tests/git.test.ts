@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { delimiter, join, relative, sep } from "node:path";
 import test from "node:test";
-import { backupCurrentStateFlowFiles, pushCurrentStateFlowBackup } from "../lib/git.ts";
+import { awaitInFlightBackupPushes, backupCurrentStateFlowFiles, pushCurrentStateFlowBackup, startStateFlowBackupPush } from "../lib/git.ts";
 import { captureTemporalFileBases, isStateFlowOwnedPath } from "../lib/durable.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
+import "./git-environment.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
 
 function git(root: string, ...args: string[]): string {
@@ -61,6 +62,64 @@ test("backup replication pushes the exact current commit only to the configured 
 	git(root, "config", "branch.main.merge", "refs/heads/main");
 	assert.deepEqual(await pushCurrentStateFlowBackup(root), { commit, remote: "origin", ref: "refs/heads/main" });
 	assert.equal(git(remote, "rev-parse", "refs/heads/main"), commit);
+});
+
+test("in-flight backup push settlement closes the process and prevents overlapping pushes", { timeout: 30_000 }, async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-push-lifecycle-"));
+	const remote = join(root, "remote.git");
+	const repository = join(root, "store");
+	const bin = join(root, "bin");
+	mkdirSync(bin);
+	git(root, "init", "--bare", "-b", "main", remote);
+	git(root, "init", "-b", "main", repository);
+	git(repository, "config", "user.name", "State Flow Test");
+	git(repository, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(repository, "checkpoint.json"), "{}\n");
+	const first = backupCurrentStateFlowFiles(repository)!;
+	git(repository, "remote", "add", "origin", remote);
+	git(repository, "config", "branch.main.remote", "origin");
+	git(repository, "config", "branch.main.merge", "refs/heads/main");
+	const actualGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+	const script = join(bin, "git");
+	const entered = join(root, "entered");
+	const release = join(root, "release");
+	writeFileSync(script, `#!${process.execPath}\nconst fs = require('node:fs');\nconst { spawnSync } = require('node:child_process');\nconst args = process.argv.slice(2);\nif (args.includes('--porcelain') && args.includes('push')) {\n  fs.appendFileSync(${JSON.stringify(entered)}, 'push\\n');\n  while (!fs.existsSync(${JSON.stringify(release)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);\n}\nconst result = spawnSync(${JSON.stringify(actualGit)}, args, { stdio: 'inherit', env: process.env });\nprocess.exit(result.status ?? 1);\n`);
+	chmodSync(script, 0o755);
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${bin}${delimiter}${originalPath}`;
+	t.after(async () => {
+		writeFileSync(release, "go");
+		await awaitInFlightBackupPushes(repository);
+		process.env.PATH = originalPath;
+		rmSync(root, { recursive: true, force: true });
+	});
+	const failures: unknown[] = [];
+	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error)), true);
+	const deadline = Date.now() + 5_000;
+	while (!existsSync(entered)) {
+		if (Date.now() > deadline) throw new Error("Timed out waiting for the slow push");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	writeFileSync(join(repository, "checkpoint.json"), "{\"next\":true}\n");
+	const second = backupCurrentStateFlowFiles(repository)!;
+	assert.notEqual(second, first);
+	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error)), false);
+	assert.equal(readFileSync(entered, "utf8"), "push\n");
+	let settled = false;
+	const shutdown = awaitInFlightBackupPushes(repository).then(() => { settled = true; });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(settled, false, "shutdown must wait for the active push process");
+	writeFileSync(release, "go");
+	await shutdown;
+	assert.equal(failures.length, 0);
+	assert.equal(git(remote, "rev-parse", "refs/heads/main"), first);
+	const remoteBefore = readFileSync(join(remote, "refs", "heads", "main"));
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	assert.deepEqual(readFileSync(join(remote, "refs", "heads", "main")), remoteBefore, "no remote writes after shutdown resolves");
+	assert.equal(readFileSync(entered, "utf8"), "push\n");
+	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error)), true);
+	await awaitInFlightBackupPushes(repository);
+	assert.equal(git(remote, "rev-parse", "refs/heads/main"), second, "a later turn retries the latest HEAD");
 });
 
 test("backup replication skips repositories without an explicitly configured branch remote", async (t) => {

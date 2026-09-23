@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { temporalScopePaths, serializeScopeMetadata, serializeScopeStream } from "../lib/durable.ts";
 import { emptyState, type MaterializedState, type StateScope } from "../lib/state.ts";
 import { createTemporalState } from "../lib/temporal.ts";
+import "./git-environment.ts";
 
 function writeScope(cwd: string, sessionId: string, scope: StateScope, state: MaterializedState, root: string): string {
 	const states = { global: emptyState(), cwd: emptyState(), session: emptyState(), [scope]: state };

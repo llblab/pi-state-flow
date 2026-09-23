@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,6 +18,22 @@ test("diagnostics append local JSONL records", () => {
 	const path = stateFlowLogPath(agentDir);
 	appendStateFlowDiagnostic(path, { at: "2026-01-01T00:00:00.000Z", sessionId: "s", cwd: "/cwd", category: "invalid-patch", error: "invalid" });
 	assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { at: "2026-01-01T00:00:00.000Z", sessionId: "s", cwd: "/cwd", category: "invalid-patch", error: "invalid" });
+});
+
+test("diagnostics refuse symlinked paths without writing through them", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-log-symlink-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const target = join(root, "target");
+	writeFileSync(target, "unchanged\n");
+	const record = { at: "2026-01-01T00:00:00.000Z", sessionId: "s", cwd: "/cwd", category: "publication-conflict" as const, error: "failed" };
+	const directory = join(root, "agent", "tmp", "state-flow");
+	mkdirSync(directory, { recursive: true });
+	symlinkSync(target, join(directory, "logs.jsonl"));
+	assert.throws(() => appendStateFlowDiagnostic(join(directory, "logs.jsonl"), record));
+	symlinkSync(directory, join(root, "alias"));
+	assert.throws(() => appendStateFlowDiagnostic(join(root, "alias", "new.jsonl"), record), /not a regular directory/);
+	assert.equal(readFileSync(target, "utf8"), "unchanged\n");
+	assert.equal(existsSync(join(directory, "new.jsonl")), false);
 });
 
 test("rejected patch_state diagnostics retain the exact attempted arguments", async () => {

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { realPiFixture, resolvedSnapshot, runGit, type RealPiFixture } from "../tests/pi-harness.ts";
+import { awaitInFlightBackupPushes } from "../lib/git.ts";
 import { loadGlobalState, loadSessionState } from "../tests/temporal-fixture.ts";
 import { distribution, measure, prompt, resourcesEnabled as resources, summarize, summarizeReads, type Metrics } from "./benchmark-session.ts";
 import type { ResumeProbeResult } from "./benchmark-resume.ts";
@@ -53,7 +54,7 @@ function packageVersion(name: string): string {
 const sourceHash = runtimeSourceHash();
 const workloadHash = workloadSourceHash();
 const report: Record<string, unknown> = {
-	version: 2,
+	version: 3,
 	node: process.version,
 	platform: `${process.platform}/${process.arch}`,
 	piVersion: packageVersion("@earendil-works/pi-coding-agent"),
@@ -129,7 +130,8 @@ function probeAfterResume(fixture: RealPiFixture, session: AgentSession, stateFl
 		baselineUnchanged: true, acceptedTransitionsPerProbe: stateFlow ? 2 : 0,
 		openSession: summarize(probes.map((probe) => probe.openSession)), resumeRuntime: summarize(probes.map((probe) => probe.resumeRuntime)),
 		firstInference: summarize(probes.map((probe) => probe.firstInference)), wholeRun: summarize(probes.map((probe) => probe.wholeRun)),
-		firstContextBytes: distribution(probes.map((probe) => probe.firstContextBytes)), nativeRead: summarizeReads(probes.map((probe) => probe.wholeRun.nativeRead)) };
+		firstContextBytes: distribution(probes.map((probe) => probe.firstContextBytes)), nativeRead: summarizeReads(probes.map((probe) => probe.wholeRun.nativeRead)),
+		promptPrefixRuns: probes.map((probe) => probe.wholeRun.promptPrefix) };
 }
 
 test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_000 }, async (t) => {
@@ -164,8 +166,13 @@ test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_0
 					assert.equal(fixture.readState(session).working.counter, counter);
 				}
 			}
-			const entry = { stateFlow, stateBytes: size, modelPatches: stateFlow ? counter : 0, userRuns: counter, acceptedTransitions, nativeEntries: entries, nativeFileBytes: statSync(sessionFile).size, recentRuns: summarize(recent), openSession: summarize(opens), resumeRuntime: summarize(resumes), lastContextBytes: recent.at(-1)!.lastContextBytes, contextBytesPerRun: recent.at(-1)!.totalContextBytes, inferencesPerRun: recent.at(-1)!.inferenceCount, nativeRead: summarizeReads(recent.map((run) => run.nativeRead)) };
-			if (postResume) Object.assign(entry, { postResume: probeAfterResume(fixture, session, stateFlow, counter, size, source) });
+			const previousCheckpoint = checkpoints[checkpoints.indexOf(counter) - 1] ?? 0;
+			const promptPrefixRuns = timings.slice(previousCheckpoint).map((run, index) => ({ userRun: previousCheckpoint + index + 1, ...run.promptPrefix }));
+			const entry = { stateFlow, stateBytes: size, modelPatches: stateFlow ? counter : 0, userRuns: counter, acceptedTransitions, nativeEntries: entries, nativeFileBytes: statSync(sessionFile).size, recentRuns: summarize(recent), openSession: summarize(opens), resumeRuntime: summarize(resumes), lastContextBytes: recent.at(-1)!.lastContextBytes, contextBytesPerRun: recent.at(-1)!.totalContextBytes, inferencesPerRun: recent.at(-1)!.inferenceCount, nativeRead: summarizeReads(recent.map((run) => run.nativeRead)), promptPrefixRuns };
+			if (postResume) {
+				await awaitInFlightBackupPushes(fixture.repositoryRoot);
+				Object.assign(entry, { postResume: probeAfterResume(fixture, session, stateFlow, counter, size, source) });
+			}
 			(report.lifecycle as unknown[]).push(entry);
 			console.log(`BENCH_PHASE ${JSON.stringify(entry)}`);
 		}
