@@ -1455,7 +1455,7 @@ test("real Pi preserves branch-local state through compaction and rejects an exp
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
 
-	assert.equal(fixture.statuses.at(-1), "state-flow #0");
+	assert.equal(fixture.statuses.at(-1), undefined);
 	assert.equal(snapshots(session).length, 0);
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
 	await session.prompt("/state-flow-start");

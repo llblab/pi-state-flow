@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
 	captureTemporalFileBases, classifyScopeStream, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath,
-	loadScopeStream, parseScopeStream, resolveSessionAddress, serializeScopeMetadata, serializeScopeStream, sessionScopeKey, sessionStorageKey,
+	loadScopeStream, parseScopeProvenance, parseScopeStream, resolveSessionAddress, serializeScopeMetadata, serializeScopeProvenance, serializeScopeStream, sessionScopeKey, sessionStorageKey,
 	temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
 } from "../lib/durable.ts";
 import { emptyState, type StateScope } from "../lib/state.ts";
@@ -183,6 +183,13 @@ test("scope codecs preserve tails above the default while runtime configuration 
 	assert.deepEqual(restored, view.scopes.session);
 });
 
+test("scope metadata revisions preserve legacy reads and reject unknown future writers", () => {
+	assert.deepEqual(parseScopeProvenance(JSON.stringify({ version: 1, artifacts: {} }), "/legacy/meta.json"), {});
+	assert.deepEqual(parseScopeProvenance(serializeScopeProvenance({}), "/current/meta.json"), {});
+	assert.equal(JSON.parse(serializeScopeProvenance({})).version, 2);
+	assert.throws(() => parseScopeProvenance(JSON.stringify({ version: 3, artifacts: {} }), "/future/meta.json"), /Invalid State Flow provenance document/);
+});
+
 test("checkpoint codec uses deterministic bytes, anchored state, and no redundant current snapshot", () => {
 	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { working: { z: 1, a: 2 }, response: "Done" } }], "T1");
 	const first = serializeScopeStream(view.scopes.session, "session");
@@ -193,6 +200,7 @@ test("checkpoint codec uses deterministic bytes, anchored state, and no redundan
 	assert.equal(JSON.parse(first.checkpoint).response, "");
 	assert.equal(JSON.parse(first.patches).response, "Done");
 	assert.equal(Object.hasOwn(JSON.parse(first.patches), "transition"), false);
+	assert.equal(first.temporal.revision, 1);
 	assert.deepEqual(first.temporal.checkpoint, view.scopes.session.checkpoint.through);
 });
 
@@ -212,6 +220,11 @@ test("temporal codec rejects incomplete, legacy, malformed, oversized, and causa
 	assert.deepEqual(classifyScopeStream(undefined, undefined, "session"), { kind: "absent" });
 	const meta = serializeScopeMetadata({}, view.scopes.session, "session");
 	assert.deepEqual(classifyScopeStream(source.checkpoint, source.patches, "session", undefined, meta), { kind: "present", stream: view.scopes.session });
+	const legacyMeta = JSON.stringify({ version: 1, artifacts: {}, temporal: {
+		checkpoint: view.scopes.session.checkpoint.through,
+		patches: view.scopes.session.patches.map((record) => record.transition),
+	} });
+	assert.equal(parseScopeStream(source.checkpoint, source.patches, "session", undefined, legacyMeta)!.revision, 1);
 	assert.equal(parseScopeStream(undefined, undefined, "session"), undefined);
 	assert.throws(() => parseScopeStream(source.checkpoint, undefined, "session"), /incomplete checkpoint\/tail/);
 	assert.throws(() => parseScopeStream(undefined, source.patches, "session"), /incomplete checkpoint\/tail/);
@@ -221,6 +234,9 @@ test("temporal codec rejects incomplete, legacy, malformed, oversized, and causa
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(8), "session", undefined, meta), /does not match/);
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(2), "session", undefined, meta), /does not match/);
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "global", undefined, meta), /session response/);
+	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "session", undefined, JSON.stringify({
+		version: 1, artifacts: {}, temporal: { revision: "1", checkpoint: view.scopes.session.checkpoint.through, patches: view.scopes.session.patches.map((record) => record.transition) },
+	})), /Invalid temporal checkpoint/);
 	const broken = structuredClone(view.scopes.session);
 	broken.patches[0]!.transition.parent = "other-branch";
 	const brokenMeta = JSON.stringify({ version: 1, artifacts: {}, temporal: {

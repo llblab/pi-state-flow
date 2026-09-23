@@ -25,7 +25,7 @@ import {
   type SessionAddress,
 } from "./durable.ts";
 import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.ts";
-import { backupCurrentStateFlowFiles } from "./git.ts";
+import { backupCurrentStateFlowFiles, pushCurrentStateFlowBackup } from "./git.ts";
 import { projectRecentTransitionsWithLimit } from "./history.ts";
 import { isObject, presentationJson, sameJson, type JsonObject } from "./json.ts";
 import { StateFlowDiagnosticWriter, stateFlowLogPath, type DiagnosticExtras, type StateFlowDiagnosticCategory } from "./logging.ts";
@@ -40,6 +40,7 @@ import { emptySnapshot, migrationFailure, type Snapshot } from "./snapshot.ts";
 import { emptyState, overlayStates, projectStateForModel, type AtomicScopePatches, type MaterializedState, type ModelState, type ScopedStates, type StateScope } from "./state.ts";
 import { compactStatus, detailedStatus, STATUS_KEY, type StatusDiagnostics } from "./status.ts";
 import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramLoader, type StateFlowTelegramScope } from "./telegram.ts";
+import { temporalScopeRevisions, type ScopeRevisions } from "./temporal.ts";
 import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, type StagedScopedTransition } from "./transition.ts";
 
 export interface StateFlowExtensionOptions {
@@ -85,7 +86,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	let activeContext: ExtensionContext | undefined;
 	let rehydrationPhase: RehydrationPhase | undefined;
 	const repositoryRoot = resolve(options.repositoryRoot ?? config.directory);
-	const diagnosticWriter = new StateFlowDiagnosticWriter(config.logging, stateFlowLogPath(agentDir), repositoryRoot, (message) => activeContext?.ui.notify(message, "warning"));
+	const diagnosticWriter = new StateFlowDiagnosticWriter(config.logging, stateFlowLogPath(agentDir), repositoryRoot, (message) => notifyActiveContext(message));
 	let backupPending = false;
 	const skillReads = new SkillReadTracker(hashSkillSource, (path) => activeContext
 		? registeredSkillResolver(activeContext.cwd, pi.getCommands())(path)
@@ -98,6 +99,14 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	function sessionAddress(ctx: ExtensionContext): SessionAddress {
 		return resolveSessionAddress(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getSessionId(), ctx.sessionManager.getHeader()?.timestamp);
+	}
+
+	function notifyActiveContext(message: string): void {
+		try {
+			activeContext?.ui.notify(message, "warning");
+		} catch {
+			// An asynchronous push attempt can outlive the Pi context that launched it.
+		}
 	}
 
 	function createRuntime(ctx: ExtensionContext): TemporalRuntime {
@@ -134,8 +143,14 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		if ("boundary" in checkpoint) branchStartsWithoutRuntime = false;
 	}
 
+	function scopeRevisions(): ScopeRevisions {
+		return runtime?.view
+			? temporalScopeRevisions(runtime.view)
+			: { global: 0, cwd: 0, session: 0 };
+	}
+
 	function updateUi(ctx: ExtensionContext): void {
-		ctx.ui.setStatus(STATUS_KEY, compactStatus(snapshot, (color, text) => ctx.ui.theme.fg(color, text)));
+		ctx.ui.setStatus(STATUS_KEY, compactStatus(snapshot, scopeRevisions(), (color, text) => ctx.ui.theme.fg(color, text)));
 	}
 
 	function clearRunTransient(): void {
@@ -202,6 +217,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		if (Object.keys(removals).length > 0) {
 			const stage = stageAtomicScopePatches(scopeStates, removals, [], runtime.causalBasis());
 			commitStage(stage, ctx, false);
+			updateUi(ctx);
 		}
 		refreshArtifactHints();
 	}
@@ -217,10 +233,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	function refreshTelegramStateView(scope: StateFlowTelegramScope): void {
 		if (scope === "session" || scope === "effective") assertSelectedBranchAvailable();
-		if (runtime?.view) return;
-		if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
-		runtime ??= createRuntime(activeContext);
-		runtime.loadPassive();
+		if (!runtime?.view) {
+			if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
+			runtime ??= createRuntime(activeContext);
+			runtime.loadPassive();
+		} else if (scope !== "session") {
+			runtime.refreshShared();
+		}
 		installScopeStates();
 	}
 
@@ -319,6 +338,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				head: structuredClone(view.lineage.at(-1)!),
 				historyDepth: view.lineage.length - 1,
 				tailCounts: { global: view.scopes.global.patches.length, cwd: view.scopes.cwd.patches.length, session: view.scopes.session.patches.length },
+				revisions: temporalScopeRevisions(view),
 			} }),
 			staleArtifacts,
 			...(durableStateError === undefined ? {} : { durableStateError }),
@@ -699,6 +719,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			snapshot: () => ({
 				enabled: snapshot.config.enabled,
 				step: snapshot.meta.step,
+				revisions: scopeRevisions(),
 				bootstrap: snapshot.meta.bootstrap === true,
 				startPending: telegramStartPending,
 			}),
@@ -709,6 +730,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					: scopeStates[scope];
 				return { ...projectModelState(selected), lazy: structuredClone(selected.lazy) };
 			},
+			revisions: () => scopeRevisions(),
 			canStartNow: () => activeContext === undefined || activeContext.isIdle(),
 			start: () => {
 				if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
@@ -909,7 +931,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		if (!backupPending) return;
 		backupPending = false;
 		try {
-			if (existsSync(join(repositoryRoot, ".git"))) backupCurrentStateFlowFiles(repositoryRoot);
+			if (existsSync(join(repositoryRoot, ".git"))) {
+				backupCurrentStateFlowFiles(repositoryRoot);
+				const pushSessionId = sessionAddress(ctx).id;
+				const pushCwd = ctx.cwd;
+				void pushCurrentStateFlowBackup(repositoryRoot).catch((error) => {
+					const message = error instanceof Error ? error.message : String(error);
+					diagnosticWriter.record(pushSessionId, pushCwd, message, "publication-conflict");
+					notifyActiveContext(`State Flow accepted canonical state; Git backup push failed: ${message}`);
+				});
+			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			recordDiagnostic(message, "publication-conflict", ctx);
@@ -950,10 +981,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		runAnchorTimestamp = undefined;
 		restoreActiveBranch(ctx);
 	});
-	pi.on("session_shutdown", (_event, ctx) => {
+	pi.on("session_shutdown", (_event, _ctx) => {
 		telegramStartPending = false;
 		compactionStopped = true;
 		completedRunAccepted = false;
+		activeContext = undefined;
 		telegram.dispose();
 	});
 }

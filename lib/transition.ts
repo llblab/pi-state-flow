@@ -257,8 +257,8 @@ export function stageScopedTransition(
 	causalBasis: string,
 	successfulArtifactReads: Iterable<SuccessfulArtifactRead> = [],
 ): StagedScopedTransition {
-	if (typeof transition.response !== "string" || transition.response.trim().length === 0) {
-		throw new Error("Accepted State Flow response body must be non-empty");
+	if (typeof transition.response !== "string") {
+		throw new Error("Accepted State Flow response body must be a string");
 	}
 	return stageScopedSemanticTransition(
 		currentStates,

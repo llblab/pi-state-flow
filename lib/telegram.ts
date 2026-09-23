@@ -3,6 +3,9 @@
 // This is a leaf adapter. Core semantics, storage, and inference never depend on it; when
 // pi-telegram is absent or its registry is not ready, registration fails open and retries.
 
+import { formatScopeRevisionVector } from "./status.ts";
+import type { ScopeRevisions } from "./temporal.ts";
+
 export const STATE_FLOW_TELEGRAM_ID = "@llblab/pi-state-flow";
 
 /** Resolve the package export or the compiled sibling-extension layout used in local development. */
@@ -15,7 +18,9 @@ export function stateFlowTelegramSectionSpecifiers(moduleUrl = import.meta.url):
 
 export interface StateFlowTelegramSnapshot {
 	enabled: boolean;
+	/** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
 	step: number;
+	revisions?: ScopeRevisions;
 	bootstrap: boolean;
 	startPending: boolean;
 }
@@ -93,6 +98,8 @@ export interface StateFlowTelegramControlResult {
 export interface StateFlowTelegramPort {
 	snapshot(): StateFlowTelegramSnapshot;
 	state(scope: StateFlowTelegramScope): StateFlowTelegramState;
+	/** Optional additive capability; absent legacy ports retain their branch-step presentation. */
+	revisions?(): ScopeRevisions;
 	canStartNow(): boolean;
 	start(): StateFlowTelegramControlResult;
 	stop(): StateFlowTelegramControlResult;
@@ -107,12 +114,14 @@ export interface StateFlowTelegramAdapter {
 
 /** Main-menu section label doubles as the live status value: the spiral identity is constant, the value is not. */
 export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string {
-	return `🌀 State Flow: ${stateFlowLabelValue(snapshot)}`;
+	if (!snapshot.enabled) return "🌀 State Flow: off";
+	return `🌀 State Flow: ${snapshot.revisions ? formatScopeRevisionVector(snapshot.revisions) : `#${snapshot.step}`}`;
 }
 
 /** Shared live value: plain in the button label, monospaced in the submenu state line. */
 function stateFlowLabelValue(snapshot: StateFlowTelegramSnapshot): string {
-	return `#${snapshot.step}`;
+	if (!snapshot.enabled) return "off";
+	return snapshot.revisions ? formatScopeRevisionVector(snapshot.revisions) : `#${snapshot.step}`;
 }
 
 /** Submenu state line: the same identity as the button label, with the live value in monospace. */
@@ -191,13 +200,18 @@ function renderStateFlowTelegramField(value: unknown): string {
 	return rendered;
 }
 
-export function renderStateFlowRichState(scope: StateFlowTelegramScope, step: number, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
-	const fields = ["intents", "contract", "working", "artifacts", "response", "lazy"] as const;
+export function renderStateFlowRichState(scope: StateFlowTelegramScope, revisions: ScopeRevisions, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
+	const fields: Array<keyof StateFlowTelegramState> = scope === "global" || scope === "cwd"
+		? ["intents", "contract", "working", "artifacts", "lazy"]
+		: ["intents", "contract", "working", "artifacts", "response", "lazy"];
+	const revision = scope === "effective"
+		? formatScopeRevisionVector(revisions)
+		: `#${revisions[scope]}`;
 	return {
 		blocks: [
 			{
 				type: "heading",
-				text: [`${STATE_FLOW_SCOPE_LABELS[scope]}: `, { type: "code", text: `#${step}` }],
+				text: [`${STATE_FLOW_SCOPE_LABELS[scope]}: `, { type: "code", text: revision }],
 				size: 3,
 			},
 			...fields.map((field) => ({
@@ -233,7 +247,10 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
 				}
 				if (ctx.action === "inspect") {
 					if (!isStateFlowTelegramScope(ctx.payload)) throw new Error("Unknown State Flow scope");
-					await ctx.openRich(renderStateFlowRichState(ctx.payload, port.snapshot().step, port.state(ctx.payload)));
+					const state = port.state(ctx.payload);
+					const live = port.snapshot();
+					const revisions = port.revisions?.() ?? live.revisions ?? { global: live.step, cwd: live.step, session: live.step };
+					await ctx.openRich(renderStateFlowRichState(ctx.payload, revisions, state));
 					await ctx.answerCallback();
 					return "handled" as const;
 				}

@@ -415,6 +415,17 @@ export class TemporalRuntime {
 		return { view: reconciledView(), base: captured, provenance };
 	}
 
+	/** Refresh live shared scopes in memory without publishing or advancing private semantic history. */
+	refreshShared(): boolean {
+		if (!this.view || !this.base) throw new Error("State Flow shared refresh requires a selected temporal runtime");
+		const before = this.view;
+		const reconciled = this.reconcileSharedDrift(new Set());
+		this.view = reconciled.view;
+		this.base = reconciled.base;
+		this.provenanceByScope = reconciled.provenance;
+		return before !== this.view;
+	}
+
 	/** Canonically accept a prepared retained-boundary origin before lifecycle-only persistence. */
 	acceptRestoredOrigin(snapshot: Snapshot): RuntimePublication {
 		if (!this.restoredOriginPending) throw new Error("State Flow has no prepared restored origin to accept");

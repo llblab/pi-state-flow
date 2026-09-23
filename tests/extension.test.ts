@@ -335,6 +335,24 @@ test("removes proven-missing registered artifacts from every owning scope withou
 	}
 });
 
+test("automatic artifact cleanup updates revision status before a later scoped patch", async () => {
+	const h = harness();
+	await start(h);
+	const source = join(h.repositoryRoot, "cwd-source.txt");
+	writeFileSync(source, "registered source");
+	await h.tools.get("patch_state")!.execute("register", {
+		cwd: { artifacts: { [source]: { description: "CWD source" } } },
+	}, undefined, undefined, h.ctx);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>G0/C1/S0</dim>");
+	rmSync(source);
+	h.beforeAgentStart("Observe removal");
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>G0/C2/S0</dim>");
+	await h.tools.get("patch_state")!.execute("session-only", {
+		session: { working: { retained: true } },
+	}, undefined, undefined, h.ctx);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>G0/C2/S1</dim>");
+});
+
 test("State Flow tools follow branch enablement and history reads cannot run while disabled", async () => {
 	const h = harness();
 	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
@@ -729,6 +747,25 @@ test("length and provider-error endings never become accepted responses", async 
 		assert.equal(h.readState().response, "");
 		assert.equal(h.sentMessages.length, 0);
 	}
+});
+
+test("an empty accepted answer finalizes the run and stores an empty response", async () => {
+	const h = harness();
+	await start(h, "First run");
+	const first = finalMessage("Previous answer");
+	h.handlers.get("message_end")!({ message: first }, h.ctx);
+	h.handlers.get("turn_end")!({ message: first }, h.ctx);
+	h.beforeAgentStart("Update state without prose");
+	await h.tools.get("patch_state")!.execute("update", {
+		session: { working: { updated: true } },
+	}, undefined, undefined, h.ctx);
+	const empty = { ...finalMessage(""), content: [] };
+	h.handlers.get("message_end")!({ message: empty }, h.ctx);
+	h.handlers.get("turn_end")!({ message: empty }, h.ctx);
+	assert.equal(h.readState().working.updated, true);
+	assert.equal(h.readState().response, "");
+	assert.equal(h.resolveSnapshot().meta.specification, undefined);
+	assert.equal(h.notifications.some((notice) => /could not reconcile the final response/i.test(notice)), false);
 });
 
 test("accepts only canonical materially changing atomic scope patches", async () => {

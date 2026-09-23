@@ -10,6 +10,7 @@ import {
 	readTemporalState,
 	selectScopeStreamAtBoundary,
 	selectTemporalStateBoundary,
+	temporalScopeRevisions,
 	validateTemporalState,
 	validateScopeLineage,
 	type TemporalState,
@@ -68,8 +69,10 @@ test("selects only retained causal boundaries without external history", () => {
 	assert.equal(readTemporalState(selected, 0, "session", 3).working.value, 1);
 	assert.equal(readTemporalState(selected, 0, "cwd", 3).working.value, undefined);
 	assert.equal(readTemporalState(selected, 0, "global", 3).working.value, undefined);
+	assert.deepEqual(temporalScopeRevisions(selected), { global: 0, cwd: 0, session: 1 });
 	const selectedSession = selectScopeStreamAtBoundary(view.scopes.session, "session", view.lineage[1]!, 3);
 	assert.deepEqual(selectedSession.patches.map(({ transition }) => transition.id), ["T1"]);
+	assert.equal(selectedSession.revision, 1);
 	assert.throws(() => selectScopeStreamAtBoundary(view.scopes.session, "session", { id: "expired", position: -1, parent: null }, 3), /temporal boundary|predates/);
 	assert.throws(() => selectTemporalStateBoundary(view, "expired", 3), /outside the retained temporal window/);
 	assert.throws(() => selectTemporalStateBoundary(view, "", 3), /identity must be non-empty/);
@@ -101,6 +104,7 @@ test("zero history folds every accepted transition directly into the checkpoint"
 	assert.equal(view.lineage[0]!.id, "T2");
 	assert.deepEqual(view.scopes.session.patches, []);
 	assert.deepEqual(view.scopes.cwd.patches, []);
+	assert.deepEqual(temporalScopeRevisions(view), { global: 0, cwd: 1, session: 1 });
 	assert.equal(readTemporalState(view, 0, "session", 0).working.value, 1);
 	assert.equal(readTemporalState(view, 0, "cwd", 0).working.value, 2);
 	assert.throws(() => readTemporalState(view, 1, undefined, 0), /integer from 0 to 0/);
@@ -117,6 +121,7 @@ test("seven patches and repeated eighth-patch folding preserve every hot state e
 		snapshots.push(states);
 		expectHistory(view, snapshots);
 		const stream = view.scopes.session;
+		assert.equal(stream.revision, index);
 		assert.equal(stream.patches.length, Math.min(index, 7));
 		assert.equal(stream.checkpoint.through.position, Math.max(0, index - 7));
 		if (index === 7) assert.deepEqual(stream.checkpoint.state, initial().session);
@@ -152,6 +157,7 @@ test("sparse scope patches use effective boundaries, not each scope's mutation c
 	assert.deepEqual(readTemporalState(view, 2, "cwd").working, { cwd: "C'" });
 	assert.deepEqual(view.scopes.cwd.patches.at(-1)!.transition, view.scopes.session.patches.at(-1)!.transition);
 	assert.equal(view.scopes.global.patches.at(-1)!.transition.id, "T183");
+	assert.deepEqual(temporalScopeRevisions(view), { global: 1, cwd: 2, session: 3 });
 });
 
 test("mixed sparse changes and deletion overlays match an independent snapshot oracle through compaction", () => {
@@ -183,15 +189,18 @@ test("mixed sparse changes and deletion overlays match an independent snapshot o
 
 test("true no-ops do not enter history while response-only changes do", () => {
 	const view = createTemporalState(initial(), "base");
+	assert.deepEqual(temporalScopeRevisions(view), { global: 0, cwd: 0, session: 0 });
 	assert.equal(advanceTemporalState(view, [], "unused"), view);
 	assert.equal(advanceTemporalState(view, [{ scope: "cwd", patch: {} }], "unused"), view);
 	const next = advanceTemporalState(view, [{ scope: "session", patch: { response: "Done" } }], "answer");
 	assert.equal(readTemporalState(next).response, "Done");
 	assert.equal(readTemporalState(next, 1).response, "");
+	assert.deepEqual(temporalScopeRevisions(next), { global: 0, cwd: 0, session: 1 });
 	assert.equal(advanceTemporalState(next, [{ scope: "session", patch: { response: "Done" } }], "unused"), next);
 	const changed = advanceTemporalState(next, [patch("cwd", 1), { scope: "session", patch: { response: "Done" } }], "cwd-only");
 	assert.equal(changed.scopes.session.patches.length, 1);
 	assert.equal(changed.lineage.length, 3);
+	assert.deepEqual(temporalScopeRevisions(changed), { global: 0, cwd: 1, session: 1 });
 });
 
 test("hot range and unproven pre-migration history are explicit read boundaries", () => {

@@ -50,6 +50,7 @@ export function hasCwdMaterialization(cwd: string, repositoryRoot: string): bool
 }
 
 export interface ScopeTemporalMetadata {
+	revision: number;
 	checkpoint: ScopeStream["checkpoint"]["through"];
 	patches: ScopeStream["patches"][number]["transition"][];
 }
@@ -68,6 +69,7 @@ export function serializeScopeStream(stream: ScopeStream, scope: StateScope, cwd
 		checkpoint: `${canonicalJson(stream.checkpoint.state)}\n`,
 		patches: stream.patches.map((record) => `${canonicalJson(record.patch)}\n`).join(""),
 		temporal: {
+			revision: stream.revision,
 			checkpoint: structuredClone(stream.checkpoint.through),
 			patches: stream.patches.map((record) => structuredClone(record.transition)),
 		},
@@ -124,6 +126,9 @@ export function classifyScopeStream(
 	const boundaries = temporal.patches;
 	if (boundaries.length !== patches.length) throw new Error(`State Flow ${scope} temporal metadata does not match its semantic tail`);
 	const stream = {
+		// 0.17.4 and earlier did not persist scope revisions. Credit only their still-retained
+		// semantic tail; discarded ancestry cannot be reconstructed without inventing history.
+		revision: temporal.revision === undefined ? patches.length : temporal.revision,
 		checkpoint: { through: temporal.checkpoint, state: checkpoint },
 		patches: patches.map((patch, index) => ({ transition: boundaries[index], patch })),
 	};
@@ -219,7 +224,7 @@ export function serializeScopeMetadata(
 	const sources = serializeScopeStream(stream, scope, cwdIdentity);
 	const value = {
 		...existing,
-		version: 1,
+		version: 2,
 		...(registry === undefined ? {} : { artifacts: serializeArtifactProvenanceRegistry(registry) }),
 		temporal: sources.temporal,
 		...(scope === "cwd" ? { owner: { cwd: resolve(cwdIdentity!) } } : {}),
@@ -229,7 +234,7 @@ export function serializeScopeMetadata(
 
 /** Compatibility serializer retained for metadata-only callers. */
 export function serializeScopeProvenance(registry: Readonly<ArtifactProvenanceRegistry>): string {
-	return `${canonicalJson({ version: 1, artifacts: serializeArtifactProvenanceRegistry(registry) })}\n`;
+	return `${canonicalJson({ version: 2, artifacts: serializeArtifactProvenanceRegistry(registry) })}\n`;
 }
 
 function parseMetadataDocument(source: string | undefined, label: string): Record<string, unknown> {
@@ -245,7 +250,7 @@ function parseMetadataDocument(source: string | undefined, label: string): Recor
 export function parseScopeProvenance(source: string | undefined, path: string): ArtifactProvenanceRegistry {
 	const value = parseMetadataDocument(source, `State Flow provenance file: ${path}`);
 	if (Object.keys(value).length === 0) return {};
-	if (value.version !== 1) throw new Error(`Invalid State Flow provenance document: ${path}`);
+	if (value.version !== 1 && value.version !== 2) throw new Error(`Invalid State Flow provenance document: ${path}`);
 	if (!Object.hasOwn(value, "artifacts")) return {};
 	return parseArtifactProvenanceRegistry(value.artifacts, `State Flow provenance at ${path}`);
 }

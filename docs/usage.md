@@ -64,14 +64,14 @@ Logs remain local unless you move them; rotation/deletion is operator-owned. Tre
 
 `/state-flow-status` separates runtime configuration/metadata from semantic state. It reports:
 
-- Selected CWD/session keys, step, temporal head, recovery failures, and available hot history.
+- Selected CWD/session keys, internal step, independent scope revisions, temporal head, recovery failures, and available hot history.
 - Per-scope retained patch tails and artifact counts, plus one JSON representation of effective global → CWD → session memory. Individual scope JSON is available through `read_state`, not duplicated in status.
 - Already-known runtime hints or pending artifact invalidations; status does not discover or validate sources.
 - Memory-bearing scopes. Promotion-shaped values receive no special interpretation.
 
 Tail counts are not history depth: inherited records may predate the active origin. Failed inspection reports unavailable evidence, not invented empty state. Status is observational: it does not read source files, calculate fingerprints, create invalidations, or mutate semantic state.
 
-The terminal indicator is `state-flow #N` in active and passive modes; accepted passive patches advance the same counter. When `pi-telegram` is available, one main-menu section mirrors `#N`, opens Start/Stop controls, and can inspect global, CWD, session or effective state in either mode. Telegram may lazily read existing shared state even when passive model tools are disabled; this observation does not initialize or mutate storage. Start requested during a run waits for settlement; Stop currently applies immediately. The adapter is optional and the Pi commands remain available without it. Open implementation work is tracked in [BACKLOG.md](../BACKLOG.md).
+The terminal indicator is `state-flow G15/C8/S31` only in active mode. Global, CWD and Session own independent semantic revisions; one atomic transition advances each materially changed scope once, including session-only response reconciliation. Effective has no scalar counter and uses the `G#/C#/S#` revision vector. When `pi-telegram` is available, its main-menu section shows that vector only while active and `State Flow: off` while passive. Requested owner-scope Rich snapshots show `#revision`; Effective shows the vector. Telegram inspection may lazily load or refresh live shared state from other instances even when passive model tools are disabled, but it does not initialize, publish, or advance storage. Start requested during a run waits for settlement; Stop currently applies immediately. The adapter is optional and the Pi commands remain available without it. Open implementation work is tracked in [BACKLOG.md](../BACKLOG.md).
 
 ## Storage and recovery
 
@@ -92,19 +92,19 @@ Exactly one surviving pair member is corruption and fails closed. Present malfor
 
 After a selected-boundary failure, configured passive access may still expose current global/CWD memory, but it never grants access to the unavailable session layer or permission to publish an empty replacement. Session reads, every `patch_state`, and Stop refuse without changing canonical files or appending substitute checkpoints. Status retains the restoration error even when shared reads work. Start retries the original selection; repair its missing or invalid evidence, select a still-retained boundary, or use a genuinely new Pi session instead of forcing a reset.
 
-Missing artifact provenance inside an otherwise complete scope `meta.json` means compilation evidence is unavailable while semantic state remains usable; removing the whole metadata file also removes temporal authority and fails closed. An unavailable registered source path does not prove that durable artifact routing was deleted, and external files are never created. State Flow has no durable push queue or publication-worker lease. See the complete [filesystem recovery contract](filesystem-recovery.md).
+Missing artifact provenance inside an otherwise complete scope `meta.json` means compilation evidence is unavailable while semantic state remains usable; removing the whole metadata file also removes temporal authority and fails closed. An unavailable registered source path does not prove that durable artifact routing was deleted, and external files are never created. State Flow has no durable push queue or publication-worker lease; failed replication is attempted again only after a later accepted turn. See the complete [filesystem recovery contract](filesystem-recovery.md).
 
 ### Canonical files and optional Git backup
 
 Canonical scope/runtime files own current materialization and retained hot history regardless of Git availability. Pi checkpoints identify a retained semantic boundary, not a Git commit or arbitrary historical snapshot. Restart and branch restoration fail closed when the selected boundary has expired rather than substituting newer files as the selected past.
 
-After an accepted turn has reconciled its response, Pi 0.87's final actionable `agent_before_settle` boundary may create one best-effort backup commit when Git is available. Backup failure is diagnostic-only. Git availability never changes semantic authority, step, or retained lineage.
+After an accepted turn has reconciled its response, Pi 0.87's final actionable `agent_before_settle` boundary may create one best-effort backup commit when Git is available. If the attached branch has an explicitly configured remote/ref, State Flow starts a non-interactive asynchronous push of the exact current commit without force. Settlement does not wait for the network. Commit or push failure is diagnostic-only, and the next accepted turn retries the latest backup without a durable queue. Git availability never changes semantic authority, step, or retained lineage.
 
 ### Moving a store and the 0.17 format boundary
 
 An SDK `repositoryRoot` override or a different `PI_CODING_AGENT_DIR` selects a location; it does not relocate existing state or retained history. Copy the complete canonical store while all writers are quiescent, or use a genuinely new Pi session for an independent store. Copying only current checkpoints without their tails and metadata cannot preserve retained boundaries.
 
-State Flow 0.17 accepts only its canonical checkpoint/tail, temporal metadata, and separate session config/runtime contract. Predecessor checkpoint envelopes, combined session metadata, pre-intents checkpoints, `state.json`, hashed layouts, and semantic Pi checkpoint envelopes fail as unsupported without rewriting existing bytes. State Flow does not provide an in-place converter; external conversion or a fresh store is operator-owned.
+State Flow 0.17 accepts only its canonical checkpoint/tail, temporal metadata, and separate session config/runtime contract. A canonical 0.17 scope written before independent revisions remains readable: its initial counter uses only the retained semantic tail and is persisted in metadata version 2 on the next owned write, without inventing folded ancestry. Version 1 remains readable; older writers refuse version 2 through the existing provenance-version fence, so cooperating instances should upgrade together. Predecessor checkpoint envelopes, combined session metadata, pre-intents checkpoints, `state.json`, hashed layouts, and semantic Pi checkpoint envelopes fail as unsupported without rewriting existing bytes. State Flow does not provide an in-place converter; external conversion or a fresh store is operator-owned.
 
 ### Conflicts and interrupted publication
 

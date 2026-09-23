@@ -77,7 +77,8 @@ test("final response concatenates ordinary post-handler assistant text blocks", 
 	assert.equal(response, "Answer continued.");
 });
 
-test("final response requires non-empty text and no late tool call", () => {
-	assert.throws(() => finalizedAssistantResponse({ role: "assistant", content: [] } as any), /non-empty/);
+test("final response preserves empty text and rejects a late tool call", () => {
+	assert.equal(finalizedAssistantResponse({ role: "assistant", content: [] } as any), "");
+	assert.equal(finalizedAssistantResponse({ role: "assistant", content: [{ type: "text", text: "  " }] } as any), "  ");
 	assert.throws(() => finalizedAssistantResponse({ role: "assistant", content: [{ type: "toolCall" }] } as any), /tool call/);
 });

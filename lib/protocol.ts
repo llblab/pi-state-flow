@@ -56,7 +56,7 @@ READ: Use read_state for concrete scope/history gaps. lazy_navigation lists boun
 
 WRITE: patch_state is the sole model-authored semantic mutation mechanism. Supply global/cwd/session patches in any combination; all supplied scopes are validated and durably accepted as one atomic transition. Call it alone in an assistant response, then continue only after its acknowledgement.
 
-RESPONSE: Ordinary assistant completion needs no finalization patch. Runtime reconciles the accepted non-empty answer into response at turn_end without another inference.
+RESPONSE: Ordinary assistant completion needs no finalization patch. At turn_end, runtime stores the exact accepted answer; empty becomes response "".
 
 INTENTS: Keep chosen actions; detail may stay lazy. State refs use {"$ref":"cwd.lazy.plan"} or \`$cwd.lazy.plan\` in text. Resolve only when needed; infer no authority, hydration, execution, or completion. If that resolution proves a dangling state ref, fix/drop it in owning text; never scan for broken refs.
 
@@ -88,10 +88,8 @@ export function finalizedAssistantResponse(message: AgentMessage): string {
 	if (message.content.some((block) => block.type === "toolCall")) {
 		throw new Error("Accepted State Flow response cannot contain a tool call");
 	}
-	const response = message.content
+	return message.content
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
 		.join("");
-	if (response.trim().length === 0) throw new Error("Finalized State Flow response must contain non-empty text");
-	return response;
 }

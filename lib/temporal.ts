@@ -21,6 +21,8 @@ export interface TemporalPatch {
 }
 
 export interface ScopeStream {
+	/** Monotonic semantic revision owned by this scope; independent of branch-local boundary positions. */
+	revision: number;
 	checkpoint: ScopeCheckpoint;
 	patches: TemporalPatch[];
 }
@@ -32,6 +34,7 @@ export interface TemporalState {
 }
 
 const SCOPES: StateScope[] = ["global", "cwd", "session"];
+export type ScopeRevisions = Record<StateScope, number>;
 
 function validateHistoryLimit(limit: number): void {
 	if (!Number.isSafeInteger(limit) || limit < 0 || limit > MAX_HISTORY_LIMIT) {
@@ -69,7 +72,8 @@ function sameBoundary(left: TransitionBoundary, right: TransitionBoundary): bool
 export function validateScopeStream(value: unknown, scope: StateScope, historyLimit = DEFAULT_HISTORY_LIMIT): asserts value is ScopeStream {
 	validateHistoryLimit(historyLimit);
 	if (!SCOPES.includes(scope)) throw new Error("Unknown temporal scope");
-	if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "checkpoint,patches"
+	if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "checkpoint,patches,revision"
+		|| !Number.isSafeInteger(value.revision) || (value.revision as number) < 0
 		|| !isObject(value.checkpoint) || Object.keys(value.checkpoint).sort().join(",") !== "state,through"
 		|| !Array.isArray(value.patches)) {
 		throw new Error("Invalid temporal checkpoint/tail envelope");
@@ -78,6 +82,7 @@ export function validateScopeStream(value: unknown, scope: StateScope, historyLi
 	validateBoundary(stream.checkpoint.through);
 	validateState(stream.checkpoint.state);
 	if (stream.patches.length > historyLimit) throw new Error(`Temporal scope tail exceeds configured history limit ${historyLimit}`);
+	if (stream.revision < stream.patches.length) throw new Error("Temporal scope revision predates its retained patch tail");
 	let previous = stream.checkpoint.through;
 	let state = stream.checkpoint.state;
 	const identities = new Set([previous.id]);
@@ -191,6 +196,7 @@ export function adoptTemporalStreams(scopes: Record<StateScope, ScopeStream>, id
 export function createTemporalState(states: ScopedStates, id: string, historyLimit = DEFAULT_HISTORY_LIMIT): TemporalState {
 	const through: TransitionBoundary = { id, position: 0, parent: null };
 	const stream = (scope: StateScope): ScopeStream => ({
+		revision: 0,
 		checkpoint: { through: structuredClone(through), state: structuredClone(states[scope]) },
 		patches: [],
 	});
@@ -234,7 +240,9 @@ export function selectScopeStreamAtBoundary(stream: ScopeStream, scope: StateSco
 		throw new Error("Selected State Flow history boundary predates the retained scope checkpoint");
 	}
 	const selected = structuredClone(stream);
-	selected.patches = selected.patches.filter(({ transition }) => transition.position <= boundary.position);
+	const retained = selected.patches.filter(({ transition }) => transition.position <= boundary.position);
+	selected.revision -= selected.patches.length - retained.length;
+	selected.patches = retained;
 	validateScopeStream(selected, scope, historyLimit);
 	return selected;
 }
@@ -250,10 +258,26 @@ export function selectTemporalStateBoundary(view: TemporalState, boundaryId: str
 	const selected = structuredClone(view);
 	selected.lineage = selected.lineage.slice(0, index + 1);
 	for (const scope of SCOPES) {
-		selected.scopes[scope].patches = selected.scopes[scope].patches.filter(({ transition }) => transition.position <= target.position);
+		const stream = selected.scopes[scope];
+		const retained = stream.patches.filter(({ transition }) => transition.position <= target.position);
+		stream.revision -= stream.patches.length - retained.length;
+		stream.patches = retained;
 	}
 	validateTemporalState(selected, historyLimit);
 	return selected;
+}
+
+/** Current independent scope revisions; Effective uses this vector rather than inventing a scalar owner. */
+export function temporalScopeRevisions(view: TemporalState): ScopeRevisions {
+	const revisions = {
+		global: view.scopes.global.revision,
+		cwd: view.scopes.cwd.revision,
+		session: view.scopes.session.revision,
+	};
+	if (Object.values(revisions).some((revision) => !Number.isSafeInteger(revision) || revision < 0)) {
+		throw new Error("Invalid State Flow scope revision vector");
+	}
+	return revisions;
 }
 
 /** Lazy scope/effective read at one shared transition boundary, never by local patch count. */
@@ -298,6 +322,8 @@ export function advanceTemporalState(
 	const next = structuredClone(view);
 	for (const { scope, patch } of changes) {
 		const stream = next.scopes[scope];
+		if (stream.revision >= Number.MAX_SAFE_INTEGER) throw new Error(`State Flow ${scope} scope revision is exhausted`);
+		stream.revision += 1;
 		if (historyLimit === 0) {
 			stream.checkpoint = { through: structuredClone(boundary), state: apply(scopeAt(stream, head), patch) };
 			stream.patches = [];

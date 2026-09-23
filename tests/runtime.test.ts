@@ -12,7 +12,7 @@ import { emptySnapshot, type Snapshot } from "../lib/snapshot.ts";
 import { emptyState, type StateScope } from "../lib/state.ts";
 import type { JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
-import { validateTemporalState } from "../lib/temporal.ts";
+import { temporalScopeRevisions, validateTemporalState } from "../lib/temporal.ts";
 import { commitScopedTransition, stageAtomicScopePatches } from "../lib/transition.ts";
 import { harness } from "./harness.ts";
 import { loadScopeProvenance } from "./temporal-fixture.ts";
@@ -322,6 +322,7 @@ for (const scope of ["global", "cwd"] as const) for (const write of ["session", 
 		if (write === "session") {
 			assert.equal(b.read(0, "session").working.mine, "accepted");
 			assert.equal(snapshot.meta.step, 1);
+			assert.deepEqual(temporalScopeRevisions(b.view!), { global: 1, cwd: 1, session: 1 });
 		} else {
 			assert.deepEqual(b.artifactProvenance(otherScope)[source], evidence);
 			assert.equal(snapshot.meta.step, 0);
@@ -484,12 +485,17 @@ test("file-backed publication reconciles an untouched shared scope advanced by a
 	b.prepare();
 	b.initialize(emptySnapshot(true), true);
 	publishScopedPatch(b, emptySnapshot(true), "global", { globalAdvanced: "file" }, "b-file-advance");
+	const beforeRefresh = captureTemporalFileBases(cwd, a.sessionId, root);
+	assert.equal(a.refreshShared(), true);
+	assert.deepEqual(captureTemporalFileBases(cwd, a.sessionId, root), beforeRefresh);
+	assert.deepEqual(temporalScopeRevisions(a.view!), { global: 1, cwd: 0, session: 1 });
 	const publication = publishScopedPatch(a, snapshot, "session", { sessionPatch: "applied" }, "a-file-drift")!;
 	assert.ok(publication.revision);
 	validateTemporalState(a.view!);
 	assert.equal(a.read().working.globalAdvanced, "file");
 	assert.equal(a.read().working.sessionA, "retained");
 	assert.equal(a.read().working.sessionPatch, "applied");
+	assert.deepEqual(temporalScopeRevisions(a.view!), { global: 1, cwd: 0, session: 2 });
 });
 
 test("file-backed publication repairs a wholly absent untouched CWD pair without resurrecting it", (t) => {

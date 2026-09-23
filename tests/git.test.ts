@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import test from "node:test";
-import { backupCurrentStateFlowFiles } from "../lib/git.ts";
+import { backupCurrentStateFlowFiles, pushCurrentStateFlowBackup } from "../lib/git.ts";
 import { captureTemporalFileBases, isStateFlowOwnedPath } from "../lib/durable.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
@@ -41,6 +41,102 @@ test("settled backup commits only State Flow-owned current files", (t) => {
 	assert.equal(git(root, "show", "HEAD:unrelated.txt"), "baseline");
 	assert.equal(readFileSync(join(root, "unrelated.txt"), "utf8"), "caller edit\n");
 	assert.equal(backupCurrentStateFlowFiles(root), undefined);
+});
+
+test("backup replication pushes the exact current commit only to the configured branch remote", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-push-"));
+	const remote = mkdtempSync(join(tmpdir(), "state-flow-backup-remote-"));
+	t.after(() => {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(remote, { recursive: true, force: true });
+	});
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "checkpoint.json"), "{\"accepted\":true}\n");
+	const commit = backupCurrentStateFlowFiles(root)!;
+	git(remote, "init", "--bare", "-b", "main");
+	git(root, "remote", "add", "origin", remote);
+	git(root, "config", "branch.main.remote", "origin");
+	git(root, "config", "branch.main.merge", "refs/heads/main");
+	assert.deepEqual(await pushCurrentStateFlowBackup(root), { commit, remote: "origin", ref: "refs/heads/main" });
+	assert.equal(git(remote, "rev-parse", "refs/heads/main"), commit);
+});
+
+test("backup replication skips repositories without an explicitly configured branch remote", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-local-"));
+	const remote = mkdtempSync(join(tmpdir(), "state-flow-backup-unused-remote-"));
+	t.after(() => {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(remote, { recursive: true, force: true });
+	});
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "checkpoint.json"), "{}\n");
+	backupCurrentStateFlowFiles(root);
+	git(remote, "init", "--bare", "-b", "main");
+	git(root, "remote", "add", "origin", remote);
+	assert.equal(await pushCurrentStateFlowBackup(root), undefined);
+	assert.throws(() => git(remote, "rev-parse", "refs/heads/main"));
+});
+
+test("failed backup replication remains retryable on the next attempt", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-push-retry-"));
+	const remoteParent = mkdtempSync(join(tmpdir(), "state-flow-backup-push-retry-remote-"));
+	const remote = join(remoteParent, "remote.git");
+	t.after(() => {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(remoteParent, { recursive: true, force: true });
+	});
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "checkpoint.json"), "{}\n");
+	const commit = backupCurrentStateFlowFiles(root)!;
+	git(root, "remote", "add", "origin", remote);
+	git(root, "config", "branch.main.remote", "origin");
+	git(root, "config", "branch.main.merge", "refs/heads/main");
+	await assert.rejects(pushCurrentStateFlowBackup(root), /Git backup push failed/);
+	mkdirSync(remote);
+	git(remote, "init", "--bare", "-b", "main");
+	assert.deepEqual(await pushCurrentStateFlowBackup(root), { commit, remote: "origin", ref: "refs/heads/main" });
+	assert.equal(git(remote, "rev-parse", "refs/heads/main"), commit);
+});
+
+test("backup replication does not force a divergent configured remote", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-no-force-"));
+	const remote = mkdtempSync(join(tmpdir(), "state-flow-backup-no-force-remote-"));
+	const writer = mkdtempSync(join(tmpdir(), "state-flow-backup-no-force-writer-"));
+	t.after(() => {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(remote, { recursive: true, force: true });
+		rmSync(writer, { recursive: true, force: true });
+	});
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "checkpoint.json"), "{\"generation\":1}\n");
+	const baseline = backupCurrentStateFlowFiles(root)!;
+	git(remote, "init", "--bare", "-b", "main");
+	git(root, "remote", "add", "origin", remote);
+	git(root, "config", "branch.main.remote", "origin");
+	git(root, "config", "branch.main.merge", "refs/heads/main");
+	await pushCurrentStateFlowBackup(root);
+	git(writer, "clone", remote, ".");
+	git(writer, "config", "user.name", "Remote Writer");
+	git(writer, "config", "user.email", "remote@example.invalid");
+	writeFileSync(join(writer, "remote.txt"), "divergent remote commit\n");
+	git(writer, "add", "remote.txt");
+	git(writer, "commit", "-m", "remote advance");
+	git(writer, "push", "origin", "main");
+	const remoteHead = git(remote, "rev-parse", "refs/heads/main");
+	assert.notEqual(remoteHead, baseline);
+	writeFileSync(join(root, "checkpoint.json"), "{\"generation\":2}\n");
+	const localHead = backupCurrentStateFlowFiles(root)!;
+	await assert.rejects(pushCurrentStateFlowBackup(root), /Git backup push failed/);
+	assert.equal(git(root, "rev-parse", "HEAD"), localHead);
+	assert.equal(git(remote, "rev-parse", "refs/heads/main"), remoteHead);
 });
 
 for (const outcome of ["success", "unchanged", "index-lock"] as const) test(`backup preserves unrelated staged data on ${outcome}`, (t) => {

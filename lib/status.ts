@@ -3,7 +3,7 @@ import { projectRecentTransitionsWithLimit, type RecentTransitionWindow } from "
 import { retainedMemoryScopes } from "./memory.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { overlayStates, type ScopedStates, type StateScope } from "./state.ts";
-import type { TransitionBoundary } from "./temporal.ts";
+import type { ScopeRevisions, TransitionBoundary } from "./temporal.ts";
 
 export const STATUS_KEY = "state-flow";
 
@@ -24,13 +24,18 @@ export interface StatusDiagnostics {
 	scopeStates: ScopedStates;
 	recent: RecentTransitionWindow;
 	historyLimit: number;
-	temporal?: { head: TransitionBoundary; historyDepth: number; tailCounts: Record<StateScope, number> };
+	temporal?: { head: TransitionBoundary; historyDepth: number; tailCounts: Record<StateScope, number>; revisions: ScopeRevisions };
 	staleArtifacts: readonly StaleArtifactDiagnostic[];
 	durableStateError?: string;
 }
 
-export function compactStatus(snapshot: Snapshot, colorize: Colorize): string {
-	return `${colorize("accent", "state-flow")} ${colorize("dim", `#${snapshot.meta.step}`)}`;
+export function formatScopeRevisionVector(revisions: ScopeRevisions): string {
+	return `G${revisions.global}/C${revisions.cwd}/S${revisions.session}`;
+}
+
+export function compactStatus(snapshot: Snapshot, revisions: ScopeRevisions, colorize: Colorize): string | undefined {
+	if (!snapshot.config.enabled) return undefined;
+	return `${colorize("accent", "state-flow")} ${colorize("dim", formatScopeRevisionVector(revisions))}`;
 }
 
 function countArtifacts(states: ScopedStates, scope: StateScope): number {
@@ -62,6 +67,7 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 			`Hot history: unavailable; configured maximum depth ${diagnostics.historyLimit}`,
 			"Retained patch tails: unavailable"]
 		: [`Temporal head: ${JSON.stringify(temporal.head.id)}; branch-local position ${temporal.head.position}`,
+			`Scope revisions: global #${temporal.revisions.global}; CWD #${temporal.revisions.cwd}; session #${temporal.revisions.session}; effective ${formatScopeRevisionVector(temporal.revisions)}`,
 			`Hot history: offsets 0..${temporal.historyDepth}; maximum depth ${diagnostics.historyLimit}`,
 			`Retained patch tails: global ${temporal.tailCounts.global}; CWD ${temporal.tailCounts.cwd}; session ${temporal.tailCounts.session}`];
 	const artifacts = (scope: StateScope) => available ? countArtifacts(diagnostics.scopeStates, scope) : "unknown";

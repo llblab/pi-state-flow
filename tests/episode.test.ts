@@ -8,7 +8,15 @@ import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } fro
 import { loadCwdState, loadSessionState } from "./temporal-fixture.ts";
 import { commitTerminal, harness, start } from "./harness.ts";
 
-test("accepted turns defer canonical-file backup until agent_before_settle", async () => {
+async function waitFor(check: () => boolean, timeoutMs = 3_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!check()) {
+		if (Date.now() >= deadline) throw new Error("Timed out waiting for asynchronous backup replication");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
+test("accepted turns defer canonical-file backup and replication until agent_before_settle", async () => {
 	const h = harness();
 	await start(h);
 	const head = () => execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -18,6 +26,8 @@ test("accepted turns defer canonical-file backup until agent_before_settle", asy
 	h.handlers.get("agent_before_settle")!({}, h.ctx);
 	const backedUp = head();
 	assert.notEqual(backedUp, before);
+	const remote = execFileSync("git", ["-C", h.repositoryRoot, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+	await waitFor(() => execFileSync("git", ["-C", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim() === backedUp);
 	h.handlers.get("agent_settled")!({}, h.ctx);
 	assert.equal(head(), backedUp, "notification-only settlement does not repeat backup work");
 });
@@ -38,6 +48,23 @@ test("settled backup failure is diagnostic-only and is not retried without anoth
 	assert.equal(h.readState().response, "Accepted answer");
 	assert.equal(h.sentMessages.length, messages);
 	assert.equal(readFileSync(lock, "utf8"), "caller-owned interrupted backup\n");
+});
+
+test("settled push failure warns without changing accepted state and a later turn retries", async () => {
+	const h = harness();
+	await start(h);
+	const remote = execFileSync("git", ["-C", h.repositoryRoot, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+	execFileSync("git", ["-C", h.repositoryRoot, "remote", "set-url", "origin", join(h.repositoryRoot, "missing-remote.git")]);
+	await commitTerminal(h, {}, { accepted: 1 }, "First accepted answer");
+	h.handlers.get("agent_before_settle")!({}, h.ctx);
+	await waitFor(() => h.notifications.some((message) => message.includes("Git backup push failed")));
+	assert.equal(h.readState().response, "First accepted answer");
+	execFileSync("git", ["-C", h.repositoryRoot, "remote", "set-url", "origin", remote]);
+	await commitTerminal(h, {}, { accepted: 2 }, "Second accepted answer");
+	h.handlers.get("agent_before_settle")!({}, h.ctx);
+	const head = execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+	await waitFor(() => execFileSync("git", ["-C", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim() === head);
+	assert.equal(h.readState().response, "Second accepted answer");
 });
 
 test("starts, resumes, and stops branch-local episodes without discarding state", () => {
@@ -109,6 +136,6 @@ test("start creates the CWD activation marker and stop preserves branch state", 
 	const checkpoint = h.entries.at(-1)!.data;
 	assert.equal(Object.hasOwn(checkpoint, "revision") || Object.hasOwn(checkpoint, "boundary"), true);
 	assert.equal(h.activeTools.includes("patch_state"), false);
-	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#2</dim>");
+	assert.equal(h.statuses.at(-1), undefined);
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), semantic);
 });

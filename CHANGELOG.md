@@ -2,6 +2,15 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.18.0: Independent Revisions and Replicated Backups
+
+- `Independent scope revisions`: Persists independent Global, CWD and Session semantic counters. Each materially changed scope advances once per atomic cohort; no-ops advance none, Session owns response changes, folding preserves counts, and pre-revision 0.17 stores start from retained-tail evidence. Effective uses the truthful `G#/C#/S#` vector rather than a scalar observer count. Metadata v2 keeps v1 readable and fences older writers after a revision-aware scope write.
+- `Passive status semantics`: Active terminal status renders `state-flow G#/C#/S#`, while Telegram retains its `State Flow: G#/C#/S#` label format; passive terminal status is absent and Telegram shows `State Flow: off`. Owner Rich snapshots show `#revision`, Effective shows the vector, and read-only inspection may refresh foreign Global/CWD revisions in memory without publication.
+- `Response ownership`: Documents response as runtime-owned Session state. Global/CWD retain only the empty structural slot required by the uniform canonical shape and omit it from Telegram Rich views; Effective inherits the Session response.
+- `Revision status freshness`: Refreshes terminal status immediately after automatic missing-artifact reconciliation, so an independently advanced Global/CWD revision is visible before any later `patch_state` call rather than appearing to have been caused by that call.
+- `Progressive backup replication`: After each successful settled-turn backup attempt, asynchronously pushes the exact current commit without force to the attached branch's explicitly configured remote/ref. Push failure remains visible but cannot affect canonical acceptance or the answer; a later accepted turn retries the latest backup. No durable queue, worker, lease, retry generation, remote policy metadata or semantic Git authority returns.
+- `Empty response finalization`: Accepts an ordinary completion with no text as a valid lifecycle boundary, stores the Session response as `""`, and preserves any preceding `patch_state` transition instead of emitting a blocking recovery error.
+
 ## 0.17.4: scoped Skill acquisition and passive observability hotfix
 
 - `Passive observability`: Keeps the `state-flow #N` counter visible in terminal and Telegram surfaces while active mode is off, with accepted passive patches advancing the same counter. Telegram scope controls now explicitly retain global/CWD/session/effective inspection in either mode and can lazily read existing shared canonical state when passive model tools are disabled, without initializing or mutating storage.

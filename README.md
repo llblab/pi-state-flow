@@ -56,7 +56,7 @@ Starting in an existing conversation retains its context for one complete bootst
 - `/state-flow-status`: Inspect effective state, retained history and known recovery issues without scanning sources or changing state.
 - `/state-flow-stop`: End active episode semantics without deleting memory; an interrupted run retains its frozen handoff and available trajectory.
 
-Active mode is **opt-in**. Passive memory projection and the memory tools are enabled by default: existing state can be read or explicitly patched without an active episode or State Flow compaction. Passive patches advance the same `#N` transition counter. When `pi-telegram` is present, global, CWD, session and effective state remain inspectable from its State Flow section in either mode. Stop returns to the configured passive behavior. `autoStart` can enable active mode for genuinely new sessions; resumed branches restore their own enablement. See [configuration](docs/usage.md#configuration).
+Active mode is **opt-in**. Passive memory projection and the memory tools are enabled by default: existing state can be read or explicitly patched without an active episode or State Flow compaction. Every materially changed owner advances its independent scope revision even in passive mode, without displaying an active-mode status. When active, terminal and Telegram status render the Effective revision vector as `G15/C8/S31`; passive Telegram shows `State Flow: off`. Requested Global, CWD and Session snapshots show their own `#revision`, while Effective shows the vector. Inspection can refresh live shared revisions from other instances without publishing state or advancing a counter. Stop returns to the configured passive behavior. `autoStart` can enable active mode for genuinely new sessions; resumed branches restore their own enablement. See [configuration](docs/usage.md#configuration).
 
 ## State model
 
@@ -80,10 +80,10 @@ Every scope uses the same shape:
 - `contract`: Requirements, decisions, constraints and interface commitments.
 - `working`: Observations, results, uncertainties and current continuation.
 - `artifacts`: Source-addressed descriptions and compiled knowledge.
-- `response`: The latest complete answer, captured by the runtime.
+- `response`: The exact latest accepted answer, including an empty string, captured by the runtime only in Session. Global and CWD retain an empty structural slot; Effective inherits the Session value.
 - `lazy`: Supporting memory available through explicit reads, with its body omitted from baseline model context.
 
-These planes organize ordinary JSON rather than imposing a project-specific schema. The model updates the semantic planes except `response`, which is runtime-owned. Memory remains fallible: storing an observation does not make it current or correct.
+These planes organize ordinary JSON rather than imposing a project-specific schema. The model updates the semantic planes except `response`, which is runtime-owned. Global and CWD revisions are shared by their canonical stores, Session has its own revision, and Effective has no scalar owner: its identity is the `G#/C#/S#` vector. One atomic patch advances each materially changed scope once. Memory remains fallible: storing an observation does not make it current or correct.
 
 Registered Pi Skills may be compiled into source-addressed artifacts when durable guidance is useful. Pi's resource provenance determines ownership: user Skills map to global, project Skills to CWD and temporary Skills to session. A matching source hash needs no update; an uncompiled read remains ordinary volatile context and does not block unrelated patches.
 
@@ -124,7 +124,7 @@ Array ranges, structural `keys` reads and path-intersected `patch` projections s
 
 The default store is `~/.pi/agent/state-flow/`, independent of registered source files. Canonical `checkpoint.json`, `patches.jsonl` and `meta.json` files hold each scope's state, retained changes and metadata; session configuration and runtime identity are stored separately.
 
-**Git backups are optional.** When the store is a configured Git repository, accepted active turns may create versioned backups of State Flow-owned files. Backup needs a Git commit identity; accepting and persisting state does not. A backup failure produces a warning without rejecting or rolling back accepted memory. Git history can be inspected separately, but it is not the authority for `read_state` or automatic restoration of expired semantic boundaries.
+**Git backups are optional.** When the store is a configured Git repository, accepted active turns may create versioned backups of State Flow-owned files. If the attached branch has an explicitly configured remote, State Flow then pushes the exact current backup commit there asynchronously and without force. Commit or push failure produces a warning without rejecting or rolling back accepted memory; a later accepted turn tries the latest backup again. Backup needs a Git commit identity, but accepting and persisting state does not. Git history can be inspected separately, but it is not the authority for `read_state` or automatic restoration of expired semantic boundaries.
 
 Resume and tree navigation restore the selected retained session boundary over current shared global/CWD memory. A new session gets its own session layer. Supported native forks copy selected session state into a new owner without changing the parent's private data. Expired, incomplete or contradictory boundaries fail closed rather than silently substituting newer state. See [fork support](docs/usage.md#fork-support-and-limits) and [storage recovery](docs/usage.md#storage-and-recovery).
 

@@ -2,12 +2,18 @@
 import { closeSync, constants, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { captureOwnedFileBases, isStateFlowOwnedPath } from "./durable.ts";
 import { acquirePublicationLock, withStoragePublicationLock } from "./storage.ts";
 
 const GIT_TIMEOUT_MS = 15_000;
 const STATE_FLOW_COMMIT_TRAILER = "State-Flow-Durable: v1";
+
+function redactGitDiagnostic(value: string): string {
+	return value
+		.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1***@")
+		.replace(/([?&](?:access_token|auth|password|token)=)[^&\s]+/gi, "$1***");
+}
 
 interface GitResult {
 	status: number;
@@ -134,6 +140,22 @@ function currentBranchRef(repositoryRoot: string): string {
 	return result.stdout.trim();
 }
 
+function configuredPushDestination(repositoryRoot: string): { remote: string; ref: string } | undefined {
+	const branchRef = currentBranchRef(repositoryRoot);
+	const branch = branchRef.slice("refs/heads/".length);
+	const configuredRemote = git(repositoryRoot, ["config", "--get", `branch.${branch}.remote`], { allowFailure: true });
+	if (configuredRemote.status > 1) throw new Error(configuredRemote.stderr || "Cannot inspect State Flow backup remote configuration");
+	if (configuredRemote.status !== 0 || configuredRemote.stdout.trim().length === 0) return undefined;
+	const remote = configuredRemote.stdout.trim();
+	if (remote === ".") throw new Error("State Flow backup replication requires a non-local Git remote");
+	const configuredMerge = git(repositoryRoot, ["config", "--get", `branch.${branch}.merge`], { allowFailure: true });
+	if (configuredMerge.status > 1) throw new Error(configuredMerge.stderr || "Cannot inspect State Flow backup branch configuration");
+	const ref = configuredMerge.status === 0 && configuredMerge.stdout.trim().length > 0
+		? configuredMerge.stdout.trim()
+		: branchRef;
+	return { remote, ref };
+}
+
 function commitCurrentOwnedFiles(repositoryRoot: string, expectedHead: string | undefined): string | undefined {
 	const branchRef = currentBranchRef(repositoryRoot);
 	if (currentHead(repositoryRoot) !== expectedHead) throw new Error("State Flow backup Git base changed concurrently");
@@ -182,4 +204,64 @@ function commitCurrentOwnedFiles(repositoryRoot: string, expectedHead: string | 
 /** Commit only current State Flow-owned files; never changes canonical acceptance. */
 export function backupCurrentStateFlowFiles(repositoryRoot: string): string | undefined {
 	return withBackupLock(repositoryRoot, (root) => commitCurrentOwnedFiles(root, currentHead(root)));
+}
+
+/** Push the current backup commit to its explicitly configured branch remote without blocking settlement. */
+export function pushCurrentStateFlowBackup(repositoryRoot: string): Promise<{ commit: string; remote: string; ref: string } | undefined> {
+	return new Promise((resolvePush, rejectPush) => {
+		let root: string;
+		let commit: string | undefined;
+		let destination: { remote: string; ref: string } | undefined;
+		try {
+			root = assertRepositoryRoot(repositoryRoot);
+			commit = currentHead(root);
+			destination = configuredPushDestination(root);
+		} catch (error) {
+			rejectPush(error);
+			return;
+		}
+		if (commit === undefined || destination === undefined) {
+			resolvePush(undefined);
+			return;
+		}
+		const child = spawn("git", ["-C", root, "push", "--porcelain", "--", destination.remote, `${commit}:${destination.ref}`], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "ignore", "pipe"],
+			windowsHide: true,
+			env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
+		});
+		let stderr = "";
+		let failure: Error | undefined;
+		let settled = false;
+		function terminate(error: Error): void {
+			failure ??= error;
+			if (child.exitCode !== null || child.signalCode !== null) {
+				child.stderr?.destroy();
+				return;
+			}
+			if (!child.pid) return;
+			try {
+				if (process.platform === "win32") child.kill("SIGKILL");
+				else process.kill(-child.pid, "SIGKILL");
+			} catch {
+				// Keep waiting for close: signalling failure is not proof that the process ended.
+			}
+		}
+		const timeout = setTimeout(() => terminate(new Error(`Git backup push timed out after ${GIT_TIMEOUT_MS}ms`)), GIT_TIMEOUT_MS);
+		function finish(error?: Error): void {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			if (error) rejectPush(error);
+			else resolvePush({ commit: commit!, ...destination! });
+		}
+		child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-1000); });
+		child.on("error", (error) => {
+			failure ??= error;
+			if (!child.pid) finish(error);
+		});
+		child.once("exit", () => { if (failure) child.stderr?.destroy(); });
+		child.once("close", (code, endedBy) => finish(failure ?? (code === 0 ? undefined
+			: new Error(`Git backup push failed (${endedBy ?? code}): ${redactGitDiagnostic(stderr.trim()) || "no diagnostic output"}`))));
+	});
 }

@@ -19,7 +19,7 @@ import { harness } from "./harness.ts";
 import { writeGlobalState } from "./storage-fixture.ts";
 
 function snapshot(overrides: Partial<StateFlowTelegramSnapshot> = {}): StateFlowTelegramSnapshot {
-	return { enabled: false, step: 0, bootstrap: false, startPending: false, ...overrides };
+	return { enabled: false, step: 0, revisions: { global: 0, cwd: 0, session: 0 }, bootstrap: false, startPending: false, ...overrides };
 }
 
 function fakePort(initial: StateFlowTelegramSnapshot, options: { canStartNow?: boolean; startResult?: { ok: boolean; message: string } } = {}) {
@@ -28,11 +28,12 @@ function fakePort(initial: StateFlowTelegramSnapshot, options: { canStartNow?: b
 	const port: StateFlowTelegramPort = {
 		snapshot: () => current,
 		state: () => ({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "" }),
+		revisions: () => current.revisions!,
 		canStartNow: () => options.canStartNow ?? true,
 		start: () => {
 			calls.push("start");
 			const result = options.startResult ?? { ok: true, message: "State Flow enabled" };
-			if (result.ok) current = { ...current, enabled: true, step: 1, startPending: false };
+			if (result.ok) current = { ...current, enabled: true, startPending: false };
 			return result;
 		},
 		stop: () => {
@@ -99,31 +100,43 @@ test("Telegram section discovery covers the package and compiled sibling layouts
 	]);
 });
 
-test("section label always carries the spiral identity and patch counter", () => {
-	assert.equal(formatStateFlowSectionLabel(snapshot()), "🌀 State Flow: #0");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, step: 7 })), "🌀 State Flow: #7");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, step: 7, bootstrap: true })), "🌀 State Flow: #7");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ step: 4, startPending: true })), "🌀 State Flow: #4");
+test("section label exposes the effective revision vector only while active mode is enabled", () => {
+	assert.equal(formatStateFlowSectionLabel(snapshot()), "🌀 State Flow: off");
+	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, revisions: { global: 15, cwd: 8, session: 31 } })), "🌀 State Flow: G15/C8/S31");
+	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, step: 7, revisions: undefined })), "🌀 State Flow: #7");
+	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, revisions: { global: 15, cwd: 8, session: 31 }, bootstrap: true })), "🌀 State Flow: G15/C8/S31");
+	assert.equal(formatStateFlowSectionLabel(snapshot({ revisions: { global: 4, cwd: 3, session: 2 }, startPending: true })), "🌀 State Flow: off");
+});
+
+test("Rich headings distinguish owner revisions from the Effective vector", () => {
+	const state = { artifacts: {}, contract: {}, working: {}, intents: {}, response: "" };
+	const revisions = { global: 15, cwd: 8, session: 31 };
+	const heading = (scope: "global" | "cwd" | "session" | "effective") => renderStateFlowRichState(scope, revisions, state).blocks[0];
+	assert.deepEqual(heading("global"), { type: "heading", text: ["🌐 Global: ", { type: "code", text: "#15" }], size: 3 });
+	assert.doesNotMatch(JSON.stringify(renderStateFlowRichState("global", revisions, state)), /response/);
+	assert.deepEqual(heading("cwd"), { type: "heading", text: ["📂 CWD: ", { type: "code", text: "#8" }], size: 3 });
+	assert.deepEqual(heading("session"), { type: "heading", text: ["💬 Session: ", { type: "code", text: "#31" }], size: 3 });
+	assert.deepEqual(heading("effective"), { type: "heading", text: ["🧬 Effective: ", { type: "code", text: "G15/C8/S31" }], size: 3 });
 });
 
 test("section view repeats the state line with one lifecycle button and no refresh or cancel", () => {
 	const off = buildStateFlowSectionView(snapshot(), (action) => `cb:${action}`);
 	assert.equal(
 		off.text,
-		"<b>🌀 State Flow: <code>#0</code></b>\n\nAccepted memory remains visible in active and passive modes. Start or Stop changes episode behavior, not state access.",
+		"<b>🌀 State Flow: <code>off</code></b>\n\nAccepted memory remains visible in active and passive modes. Start or Stop changes episode behavior, not state access.",
 	);
 	assert.deepEqual(off.replyMarkup?.inline_keyboard, [
 		[{ text: "▶️ Start", callback_data: "cb:start" }],
 		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
 	]);
-	const on = buildStateFlowSectionView(snapshot({ enabled: true, step: 3 }), (action) => `cb:${action}`);
-	assert.match(on.text, /^<b>🌀 State Flow: <code>#3<\/code><\/b>/);
+	const on = buildStateFlowSectionView(snapshot({ enabled: true, revisions: { global: 15, cwd: 8, session: 31 } }), (action) => `cb:${action}`);
+	assert.match(on.text, /^<b>🌀 State Flow: <code>G15\/C8\/S31<\/code><\/b>/);
 	assert.deepEqual(on.replyMarkup?.inline_keyboard, [
 		[{ text: "⏹ Stop", callback_data: "cb:stop" }],
 		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
 	]);
 	const pending = buildStateFlowSectionView(snapshot({ startPending: true }), (action) => `cb:${action}`);
-	assert.match(pending.text, /^<b>🌀 State Flow: <code>#0<\/code><\/b>/);
+	assert.match(pending.text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
 	assert.deepEqual(pending.replyMarkup?.inline_keyboard, [
 		[{ text: "▶️ Start", callback_data: "cb:start" }],
 		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
@@ -135,6 +148,7 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 	const { modules, sections } = fakeModules();
 	const { port } = fakePort(snapshot({ enabled: true }));
 	port.state = (scope) => ({ ...state, working: { scope } });
+	port.revisions = () => ({ global: 15, cwd: 8, session: 31 });
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	await adapter.ensure();
 	const chooser = sectionContext("show-state");
@@ -148,11 +162,11 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 	]);
 	const inspect = sectionContext("inspect", "effective");
 	assert.equal(await sections[0].handleCallback!(inspect.context), "handled");
-	assert.deepEqual(inspect.richMessages, [renderStateFlowRichState("effective", 0, { ...state, working: { scope: "effective" } })]);
+	assert.deepEqual(inspect.richMessages, [renderStateFlowRichState("effective", { global: 15, cwd: 8, session: 31 }, { ...state, working: { scope: "effective" } })]);
 	assert.deepEqual(inspect.richMessages[0]?.blocks.map((block) => block.type), ["heading", "details", "details", "details", "details", "details", "details"]);
 	assert.deepEqual(inspect.richMessages[0]?.blocks[0], {
 		type: "heading",
-		text: ["🧬 Effective: ", { type: "code", text: "#0" }],
+		text: ["🧬 Effective: ", { type: "code", text: "G15/C8/S31" }],
 		size: 3,
 	});
 	assert.deepEqual(inspect.richMessages[0]?.blocks.slice(1).map((block) => "summary" in block ? block.summary : undefined), [
@@ -200,7 +214,7 @@ test("Telegram can load shared state for inspection when passive model tools are
 });
 
 test("Rich state rendering bounds unbounded semantic fields with explicit truncation", () => {
-	const message = renderStateFlowRichState("global", 12, {
+	const message = renderStateFlowRichState("global", { global: 12, cwd: 7, session: 9 }, {
 		artifacts: { huge: "x".repeat(40_000) },
 		contract: { huge: "y".repeat(40_000) },
 		working: { huge: "z".repeat(40_000) },
@@ -210,13 +224,13 @@ test("Rich state rendering bounds unbounded semantic fields with explicit trunca
 	});
 	const serialized = JSON.stringify(message);
 	assert.ok(serialized.length < 32_768);
-	assert.equal((serialized.match(/\\"truncated\\": true/g) ?? []).length, 6);
-	assert.equal((serialized.match(/omittedChars/g) ?? []).length, 6);
+	assert.equal((serialized.match(/\\"truncated\\": true/g) ?? []).length, 5);
+	assert.equal((serialized.match(/omittedChars/g) ?? []).length, 5);
 	for (const key of ["rules", "memory", "projects", "soul", "vision"]) {
 		assert.match(serialized, new RegExp(`\\\\"${key}\\\\"`));
 	}
 	for (const hostile of ['"', "\\", "\n", "🌀"]) {
-		const hostileMessage = renderStateFlowRichState("effective", 12, {
+		const hostileMessage = renderStateFlowRichState("effective", { global: 12, cwd: 7, session: 9 }, {
 			artifacts: { huge: hostile.repeat(40_000) },
 			contract: { huge: hostile.repeat(40_000) },
 			working: { huge: hostile.repeat(40_000) },
@@ -229,7 +243,7 @@ test("Rich state rendering bounds unbounded semantic fields with explicit trunca
 
 test("adapter registers the section once and disposes idempotently", async () => {
 	const { modules, sections, disposed } = fakeModules();
-	const { port } = fakePort(snapshot({ enabled: true, step: 2 }));
+	const { port } = fakePort(snapshot({ enabled: true, revisions: { global: 2, cwd: 3, session: 4 } }));
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	assert.equal(await adapter.ensure(), true);
 	assert.equal(sections.length, 1);
@@ -272,7 +286,7 @@ test("start applies immediately when idle and edits the refreshed view", async (
 	assert.deepEqual(calls, ["start"]);
 	assert.deepEqual(notices, ["State Flow enabled"]);
 	assert.equal(edits.length, 1);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>#1<\/code><\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>G0\/C0\/S0<\/code><\/b>/);
 });
 
 test("start defers while a run is active and reports a pending intent", async () => {
@@ -284,7 +298,7 @@ test("start defers while a run is active and reports a pending intent", async ()
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(calls, ["deferStart"]);
 	assert.deepEqual(notices, ["State Flow will start after the current turn"]);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>#0<\/code><\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
 	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard, [
 		[{ text: "▶️ Start", callback_data: "section:0:start" }],
 		[{ text: "👁 Show state", callback_data: "section:0:show-state" }],
@@ -293,7 +307,7 @@ test("start defers while a run is active and reports a pending intent", async ()
 
 test("stop routes while legacy cancel/refresh actions stay harmless", async () => {
 	const { modules, sections } = fakeModules();
-	const { port, calls, read } = fakePort(snapshot({ enabled: true, step: 5 }));
+	const { port, calls, read } = fakePort(snapshot({ enabled: true, revisions: { global: 5, cwd: 4, session: 3 } }));
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	await adapter.ensure();
 
@@ -327,7 +341,7 @@ test("start failure surfaces the control message without corrupting the menu", a
 	const { context, edits, notices } = sectionContext("start");
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(notices, ["Selected branch revision is unavailable"]);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>#0<\/code><\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
 });
 
 test("render and dynamic label always read the live snapshot", async () => {
@@ -337,10 +351,10 @@ test("render and dynamic label always read the live snapshot", async () => {
 	await adapter.ensure();
 	const section = sections[0];
 	const renderContext = { callbackData: (action: string) => `cb:${action}` } as StateFlowTelegramSectionContext;
-	assert.equal(section.getLabel!(), "🌀 State Flow: #0");
+	assert.equal(section.getLabel!(), "🌀 State Flow: off");
 	assert.match((await section.render(renderContext)).text, /Accepted memory remains visible in active and passive modes/);
 	await port.deferStart();
-	assert.equal(section.getLabel!(), "🌀 State Flow: #0");
+	assert.equal(section.getLabel!(), "🌀 State Flow: off");
 });
 
 test("section controls drive the same branch lifecycle as the commands", async () => {
@@ -379,11 +393,13 @@ test("section controls drive the same branch lifecycle as the commands", async (
 	await h.tools.get("patch_state")!.execute("passive-telegram", { global: { working: { visibleWhilePassive: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.resolveSnapshot().config.enabled, false);
 	assert.equal(h.resolveSnapshot().meta.step, 1);
-	assert.equal(sections[0].getLabel!(), "🌀 State Flow: #1");
+	assert.equal(sections[0].getLabel!(), "🌀 State Flow: off");
 	assert.equal(await sections[0].handleCallback!(control("inspect", "global")), "handled");
 	assert.equal(await sections[0].handleCallback!(control("inspect", "effective")), "handled");
 	assert.equal(rich.length, 2);
 	assert.match(JSON.stringify(rich), /visibleWhilePassive/);
+	assert.match(JSON.stringify(rich), /#1/);
+	assert.match(JSON.stringify(rich), /G1\/C0\/S0/);
 	await h.handlers.get("session_shutdown")!({ reason: "quit" }, h.ctx);
 	assert.deepEqual(disposed, ["@llblab/pi-state-flow"]);
 });

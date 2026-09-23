@@ -42,11 +42,11 @@ global | CWD | session
 ├── contract
 ├── working
 ├── artifacts
-├── response (session-owned where applicable)
+├── response (session-owned; empty structural slot in Global/CWD)
 └── lazy
 ```
 
-`intents`, `contract`, `working`, `artifacts`, and `response` remain hot. `intents` may keep compact active direction while referring to large supporting detail in `lazy`. `lazy` differs only in projection policy:
+`intents`, `contract`, `working`, and `artifacts` remain hot in every scope. Session-owned `response` is also hot; Global and CWD keep only its required empty structural slot, and Effective inherits the Session value. `intents` may keep compact active direction while referring to large supporting detail in `lazy`. `lazy` differs only in projection policy:
 
 - It is canonical semantic JSON, validated and versioned with its owning scope.
 - It is excluded from the ordinary baseline effective-state body.

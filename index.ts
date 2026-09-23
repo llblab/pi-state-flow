@@ -71,7 +71,7 @@ export {
   temporalStateFileUpdates, type ScopeStreamSources, type TemporalScopePaths
 } from "./lib/durable.ts";
 export { default, PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME, type StateFlowExtensionOptions } from "./lib/extension.ts";
-export { backupCurrentStateFlowFiles } from "./lib/git.ts";
+export { backupCurrentStateFlowFiles, pushCurrentStateFlowBackup } from "./lib/git.ts";
 export {
   createAcceptedTransition,
   DEFAULT_HISTORY_LIMIT,
@@ -139,5 +139,5 @@ export {
   type StateFlowTelegramSnapshot,
   type StateFlowTelegramView
 } from "./lib/telegram.ts";
-export { advanceTemporalState, readTemporalState, type TemporalState } from "./lib/temporal.ts";
+export { advanceTemporalState, readTemporalState, temporalScopeRevisions, type ScopeRevisions, type TemporalState } from "./lib/temporal.ts";
 export { parseStateReadPath, readStatePath, type StateReadQuery, type StateReadResult } from "./lib/query.ts";

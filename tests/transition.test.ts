@@ -276,6 +276,19 @@ test("finalized response controls no-op identity and step independently of lifec
 	assert.equal(current.meta.step, 1);
 });
 
+test("an empty accepted response remains a session-owned semantic transition", () => {
+	const current = snapshot();
+	const state = states();
+	state.session.response = "Previous answer";
+	const stage = stageScopedTransition(state, { transitions: [], response: "" }, [], "origin");
+	commitScopedTransition(current, state, stage, (accepted) => assert.deepEqual(accepted!.transitions, [
+		{ scope: "session", patch: { response: "" } },
+	]), "origin");
+	assert.equal(state.session.response, "");
+	assert.equal(current.meta.step, 1);
+	assert.equal(current.meta.bootstrap, false);
+});
+
 test("intermediate barriers preserve response/bootstrap and failed publication leaves staging retryable", () => {
 	const current = snapshot();
 	const state = states();
@@ -475,7 +488,7 @@ test("commits and hides one useful terminal patch after the tool loop", async ()
 	assert.equal(h.resolveSnapshot().meta.step, 2);
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "Inspection complete.");
-	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#2</dim>");
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>G0/C0/S2</dim>");
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /"goal": "Inspect project"/);
 	assert.match(h.notifications.at(-1)!, /"next": "run tests"/);

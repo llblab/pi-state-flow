@@ -25,7 +25,7 @@ function diagnostics(overrides: Partial<StatusDiagnostics> = {}): StatusDiagnost
 		},
 		recent: [],
 		historyLimit: 7,
-		temporal: { head: { id: "origin", position: 7, parent: null }, historyDepth: 0, tailCounts: { global: 1, cwd: 2, session: 0 } },
+		temporal: { head: { id: "origin", position: 7, parent: null }, historyDepth: 0, tailCounts: { global: 1, cwd: 2, session: 0 }, revisions: { global: 15, cwd: 8, session: 31 } },
 		staleArtifacts: [],
 		...overrides,
 	};
@@ -35,18 +35,19 @@ test("uses one stable status ownership key", () => {
 	assert.equal(STATUS_KEY, "state-flow");
 });
 
-test("renders the compact patch counter in active and passive modes", () => {
+test("renders the effective revision vector only while active mode is enabled", () => {
 	const colorize = (color: "accent" | "dim", text: string) => `<${color}>${text}</${color}>`;
-	assert.equal(compactStatus(snapshot, colorize), "<accent>state-flow</accent> <dim>#7</dim>");
-	assert.equal(compactStatus({ ...snapshot, config: { enabled: false } }, colorize), "<accent>state-flow</accent> <dim>#7</dim>");
+	const revisions = { global: 15, cwd: 8, session: 31 };
+	assert.equal(compactStatus(snapshot, revisions, colorize), "<accent>state-flow</accent> <dim>G15/C8/S31</dim>");
+	assert.equal(compactStatus({ ...snapshot, config: { enabled: false } }, revisions, colorize), undefined);
 });
 
-test("a passive patch advances and renders the shared patch counter", async () => {
+test("a passive patch advances semantic history without rendering active status", async () => {
 	const h = harness({ passiveTools: true });
 	await h.tools.get("patch_state")!.execute("passive", { global: { working: { passiveCounter: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.resolveSnapshot().config.enabled, false);
 	assert.equal(h.resolveSnapshot().meta.step, 1);
-	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#1</dim>");
+	assert.equal(h.statuses.at(-1), undefined);
 });
 
 test("distinguishes branch diagnostics and renders only effective memory as JSON", () => {
@@ -58,6 +59,7 @@ test("distinguishes branch diagnostics and renders only effective memory as JSON
 	assert.match(output, /Runtime metadata: step #7; bootstrap false/);
 	assert.doesNotMatch(output, /Remote publication|Remote queue/);
 	assert.match(output, /Temporal head: "origin"; branch-local position 7/);
+	assert.match(output, /Scope revisions: global #15; CWD #8; session #31; effective G15\/C8\/S31/);
 	assert.match(output, /Hot history: offsets 0\.\.0; maximum depth 7/);
 	assert.match(output, /Retained patch tails: global 1; CWD 2; session 0/);
 	assert.match(output, /Artifacts: global 0; CWD 0; session 0; pending invalidations 0/);
