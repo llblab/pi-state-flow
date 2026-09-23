@@ -1455,7 +1455,7 @@ test("real Pi preserves branch-local state through compaction and rejects an exp
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
 
-	assert.equal(fixture.statuses.at(-1), undefined);
+	assert.equal(fixture.statuses.at(-1), "state-flow #0");
 	assert.equal(snapshots(session).length, 0);
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
 	await session.prompt("/state-flow-start");
@@ -2376,11 +2376,56 @@ test("real Pi rejects no-read provenance forgery atomically and accepts a correc
 	assert.equal(loadGlobalProvenance(fixture.repositoryRoot)[source], undefined);
 });
 
+test("real Pi maps registered Skill source scope and leaves independent patches unblocked", { timeout: 30_000 }, async (t) => {
+	const fixture = await realPiFixture(t);
+	const registered = {
+		global: fixture.registerSkill("user", "user-ax", "# User AX\n\nGlobal guidance."),
+		cwd: fixture.registerSkill("project", "project-ax", "# Project AX\n\nProject guidance."),
+		session: fixture.registerSkill("temporary", "temporary-ax", "# Temporary AX\n\nSession guidance."),
+	};
+	const session = await fixture.createSession();
+	t.after(() => session.dispose());
+	await session.prompt("/state-flow-start");
+	const toolResultText = (context: Context, id: string) => JSON.stringify(context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === id)?.content);
+	fixture.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("read", { path: registered.global }, { id: "read-user-skill" }), { stopReason: "toolUse" }),
+		(context) => {
+			assert.match(toolResultText(context, "read-user-skill"), /belongs at global\.artifacts/);
+			return fauxAssistantMessage(fauxToolCall("read", { path: registered.cwd }, { id: "read-project-skill" }), { stopReason: "toolUse" });
+		},
+		(context) => {
+			assert.match(toolResultText(context, "read-project-skill"), /belongs at cwd\.artifacts/);
+			return fauxAssistantMessage(fauxToolCall("read", { path: registered.session }, { id: "read-temporary-skill" }), { stopReason: "toolUse" });
+		},
+		(context) => {
+			assert.match(toolResultText(context, "read-temporary-skill"), /belongs at session\.artifacts/);
+			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { independent: "accepted" } } }, { id: "independent-patch" }), { stopReason: "toolUse" });
+		},
+		fauxAssistantMessage(fauxToolCall("patch_state", {
+			global: { artifacts: { [registered.global]: { description: "User guidance", kind: "skill", compilation: { scope: "global" } } } },
+			cwd: { artifacts: { [registered.cwd]: { description: "Project guidance", kind: "skill", compilation: { scope: "cwd" } } } },
+			session: { artifacts: { [registered.session]: { description: "Temporary guidance", kind: "skill", compilation: { scope: "session" } } } },
+		}, { id: "compile-scoped-skills" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("read", { path: registered.global }, { id: "reread-current-skill" }), { stopReason: "toolUse" }),
+		(context) => {
+			assert.doesNotMatch(toolResultText(context, "reread-current-skill"), /State Flow acquisition/);
+			return fauxAssistantMessage("Scope-aware Skill acquisition accepted.");
+		},
+	]);
+	await session.prompt("Exercise registered Skill acquisition");
+	assert.equal(fixture.readState(session, 0, "session").working.independent, "accepted");
+	for (const scope of ["global", "cwd", "session"] as const) {
+		assert.equal(fixture.readState(session, 0, scope).artifacts[registered[scope]]!.compilation!.scope, scope);
+		const paths = temporalScopePaths(fixture.cwd, session.sessionId, scope, fixture.repositoryRoot, nativeSessionKey(session));
+		const provenance = JSON.parse(readFileSync(paths.meta, "utf8")).artifacts[registered[scope]];
+		assert.equal(provenance.sourceHash, hashSkillSource(registered[scope]));
+		assert.equal(provenance.compilerRevision, SKILL_ARTIFACT_COMPILER);
+	}
+});
+
 test("a fresh real Pi agent continues from compact state and a runtime-compiled Skill artifact", async (t) => {
 	const fixture = await realPiFixture(t);
-	const skill = join(fixture.cwd, "skills", "continuation", "SKILL.md");
-	mkdirSync(join(fixture.cwd, "skills", "continuation"), { recursive: true });
-	writeFileSync(skill, "# Continuation\n\nPreserve the next discriminating check.\n\nSOURCE-BODY-ONLY-MARKER\n", { flag: "wx" });
+	const skill = fixture.registerSkill("project", "continuation", "# Continuation\n\nPreserve the next discriminating check.\n\nSOURCE-BODY-ONLY-MARKER");
 	const session = await fixture.createSession();
 	await session.prompt("/state-flow-start");
 	fixture.faux.setResponses([

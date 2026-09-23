@@ -112,7 +112,7 @@ export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot)
 
 /** Shared live value: plain in the button label, monospaced in the submenu state line. */
 function stateFlowLabelValue(snapshot: StateFlowTelegramSnapshot): string {
-	return snapshot.enabled ? `#${snapshot.step}` : "off";
+	return `#${snapshot.step}`;
 }
 
 /** Submenu state line: the same identity as the button label, with the live value in monospace. */
@@ -122,7 +122,7 @@ function formatStateFlowSectionHeader(snapshot: StateFlowTelegramSnapshot): stri
 
 /** Short help under the state line: what State Flow is and why its action button exists. */
 const STATE_FLOW_SECTION_HELP =
-	"Records the latest accepted state after every turn, so a new session resumes from the last committed point.";
+	"Accepted memory remains visible in active and passive modes. Start or Stop changes episode behavior, not state access.";
 
 /** The submenu header repeats the button's state line; the single action matches the current state. */
 export function buildStateFlowSectionView(

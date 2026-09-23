@@ -9,7 +9,7 @@ import {
 } from "./artifact.ts";
 import type { SuccessfulArtifactRead } from "./acquisition.ts";
 import { createAcceptedTransition, type AcceptedTransition } from "./history.ts";
-import { applyPatch, containsNull, hashJson, isObject, validatePatch } from "./json.ts";
+import { applyPatch, containsNull, hashJson, isObject, validatePatch, type JsonObject } from "./json.ts";
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER, type SuccessfulSkillRead } from "./skills.ts";
 import type { Snapshot } from "./snapshot.ts";
 import type {
@@ -64,29 +64,48 @@ function compileReadArtifacts(
 	}
 }
 
+function validateSkillCompilerOutput(scope: StateScope, path: string, output: unknown): asserts output is JsonObject {
+	const problems: string[] = [];
+	if (!isObject(output)) problems.push("artifact entry is missing");
+	else {
+		if (typeof output.description !== "string" || output.description.trim().length === 0) problems.push("description must be a non-empty string");
+		if (output.kind !== "skill") problems.push('kind must be "skill"');
+		if (!isObject(output.compilation) || Object.keys(output.compilation).length === 0) problems.push("compilation must be a non-empty object");
+	}
+	if (problems.length === 0) return;
+	const target = `${scope}.artifacts[${JSON.stringify(path)}]`;
+	throw new Error(`Skill compiler output at ${target} is invalid: ${problems.join("; ")}. Example: {${JSON.stringify(scope)}:{"artifacts":{${JSON.stringify(path)}:{"description":"What this Skill provides","kind":"skill","compilation":{"rules":["Operational rule retained from the Skill"]}}}}}`);
+}
+
+function validateSkillCompilerTargets(
+	patches: ReadonlyMap<StateScope, ScopePatch>,
+	successfulSkillReads: Iterable<SuccessfulSkillRead>,
+): void {
+	for (const read of successfulSkillReads) {
+		for (const scope of SCOPES) {
+			if (scope === read.scope) continue;
+			const artifacts = patches.get(scope)?.artifacts;
+			if (artifacts && Object.hasOwn(artifacts, read.path) && artifacts[read.path] !== null) {
+				throw new Error(`Registered Skill compiler output for ${read.path} belongs at ${read.scope}.artifacts[${JSON.stringify(read.path)}], not ${scope}.artifacts`);
+			}
+		}
+	}
+}
+
 function compileReadSkills(
+	scope: StateScope,
 	nextState: StateDocument,
 	patch: Pick<StatePatch, "artifacts">,
 	successfulSkillReads: Iterable<SuccessfulSkillRead>,
 	provenance: Record<string, ArtifactProvenance>,
 ): void {
 	for (const read of successfulSkillReads) {
+		if (!Object.hasOwn(patch.artifacts, read.path)) continue;
 		if (read.hash === undefined) {
 			throw new Error(`Could not capture the source hash for successfully read Skill ${read.path}: ${read.error ?? "unknown error"}`);
 		}
 		const output = patch.artifacts[read.path];
-		if (!isObject(output)) {
-			throw new Error(`Every successfully read Skill must have a CWD artifact compiler output at artifacts[exactReadPath]; missing: ${read.path}`);
-		}
-		if (typeof output.description !== "string" || output.description.trim().length === 0) {
-			throw new Error(`Skill artifact compiler output at ${read.path} must have a non-empty description`);
-		}
-		if (Object.hasOwn(output, "kind") && output.kind !== "skill") {
-			throw new Error(`Skill artifact compiler output at ${read.path} kind must be "skill"`);
-		}
-		if (!isObject(output.compilation) || Object.keys(output.compilation).length === 0) {
-			throw new Error(`Skill artifact compiler output at ${read.path} must have a non-empty compilation object`);
-		}
+		validateSkillCompilerOutput(scope, read.path, output);
 		const compiled = compileArtifact({
 			source: { path: read.path, hash: read.hash },
 			compiler: SKILL_ARTIFACT_COMPILER,
@@ -171,8 +190,9 @@ function stageScopedSemanticTransition(
 		patches.set(scope, item.patch);
 	}
 
-	const cwdPatch = patches.get("cwd") ?? {};
 	const artifactReads = [...successfulArtifactReads];
+	const skillReads = [...successfulSkillReads];
+	validateSkillCompilerTargets(patches, skillReads);
 	const nextStates = { ...currentStates };
 	const provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>> = { global: {}, cwd: {}, session: {} };
 	for (const scope of SCOPES) {
@@ -188,7 +208,7 @@ function stageScopedSemanticTransition(
 			artifactReads.filter((read) => (read.scope ?? "global") === scope),
 			provenanceUpdates[scope],
 		);
-		compileReadSkills(nextState, { artifacts: scope === "cwd" ? cwdPatch.artifacts ?? {} : {} }, scope === "cwd" ? successfulSkillReads : [], provenanceUpdates.cwd);
+		compileReadSkills(scope, nextState, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
 		validateMaterializedTransition(nextState);
 		nextStates[scope] = nextState;
 	}

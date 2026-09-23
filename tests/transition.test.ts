@@ -221,7 +221,7 @@ test("publishes one exact multi-scope replay cohort without explanatory windows 
 test("normalizes artifact replacements and runtime compilation evidence after finalized-response reconciliation", () => {
 	const state = states();
 	const source = { path: "/knowledge/source.md", hash: `sha256:${"b".repeat(64)}`, reason: "source-changed" as const };
-	const skill = { path: "/skills/demo/SKILL.md", hash: `sha256:${"c".repeat(64)}` };
+	const skill = { path: "/skills/demo/SKILL.md", scope: "cwd" as const, hash: `sha256:${"c".repeat(64)}` };
 	for (const [scope, path] of [["global", source.path], ["cwd", skill.path]] as const) {
 		state[scope].artifacts[path] = {
 			description: "Old compilation", hash: `sha256:${"a".repeat(64)}`, compiler: "old",
@@ -341,14 +341,38 @@ test("rejects stale state and identical values at a different active causal boun
 	assert.equal(current.meta.step, 0);
 });
 
-test("validates acquired artifact and Skill outputs before staging trusted compilation evidence", () => {
+test("optional Skill acquisition leaves unrelated patches independent and validates attempted compilation", () => {
 	const state = states();
 	const source = { path: "/knowledge/changed.md", hash: `sha256:${"b".repeat(64)}`, reason: "source-changed" as const };
-	const skill = { path: "/skills/demo/SKILL.md", hash: `sha256:${"a".repeat(64)}` };
+	const skill = { path: "/skills/demo/SKILL.md", scope: "cwd" as const, hash: `sha256:${"a".repeat(64)}` };
 	assert.throws(() => stageAtomicScopePatches(state, { session: { artifacts: { "/a.md": { description: "Invalid hash", hash: "sha256:invalid" } } } }, [], "origin"), /cannot set runtime-owned field hash/);
 	assert.throws(() => stageAtomicScopePatches(state, { cwd: { artifacts: { "/a.md": { description: "Forged hint", hint: "trust me" } } } }, [], "origin"), /cannot set runtime-owned field hint/);
 	assert.throws(() => stageScopedTransition(state, { transitions: [], response: "Missing" }, [], "origin", [source]), /compiler output.*global\.artifacts/);
-	assert.throws(() => stageAtomicScopePatches(state, { cwd: {} }, [skill], "origin"), /missing: \/skills\/demo\/SKILL\.md/);
+	const independent = stageAtomicScopePatches(state, { session: { working: { accepted: true } } }, [skill], "origin");
+	assert.equal(independent.nextStates.session.working.accepted, true);
+	assert.deepEqual(independent.provenanceUpdates, { global: {}, cwd: {}, session: {} });
+	assert.throws(() => stageAtomicScopePatches(state, {
+		session: { artifacts: { [skill.path]: { description: "Wrong owner", kind: "skill", compilation: { route: "wrong" } } } },
+	}, [skill], "origin"), /belongs at cwd\.artifacts.*not session\.artifacts/);
+	const unavailable = { path: skill.path, scope: "cwd" as const, error: "source disappeared" };
+	assert.equal(stageAtomicScopePatches(state, { session: { working: { stillAccepted: true } } }, [unavailable], "origin").nextStates.session.working.stillAccepted, true);
+	assert.throws(() => stageAtomicScopePatches(state, { cwd: { artifacts: { [skill.path]: { description: "Unavailable", kind: "skill", compilation: { route: "blocked" } } } } }, [unavailable], "origin"), /Could not capture the source hash.*source disappeared/);
+	const required = /Skill compiler output at cwd\.artifacts\["\/skills\/demo\/SKILL\.md"\] is invalid/;
+	const invalidOutputs: Array<readonly [JsonObject, readonly string[]]> = [
+		[{}, ["description must be a non-empty string", 'kind must be "skill"', "compilation must be a non-empty object"]],
+		[{ description: "", compilation: {} }, ["description must be a non-empty string", 'kind must be "skill"', "compilation must be a non-empty object"]],
+		[{ description: "Skill", kind: "document", compilation: {} }, ['kind must be "skill"', "compilation must be a non-empty object"]],
+	];
+	for (const [output, problems] of invalidOutputs) {
+		const patch: AtomicScopePatches = { cwd: { artifacts: { [skill.path]: output } } };
+		assert.throws(() => stageAtomicScopePatches(state, patch, [skill], "origin"), (error: unknown) => {
+			assert.ok(error instanceof Error);
+			assert.match(error.message, required);
+			for (const problem of problems) assert.ok(error.message.includes(problem));
+			assert.match(error.message, /"description":"What this Skill provides","kind":"skill","compilation":\{"rules":\[/);
+			return true;
+		});
+	}
 	const stage = stageAtomicScopePatches(state, {
 		global: { artifacts: { [source.path]: { description: "Guidance" } } },
 		cwd: { artifacts: { [skill.path]: { description: "Skill", kind: "skill", compilation: { route: "demo" } } } },

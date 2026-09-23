@@ -51,6 +51,7 @@ export function harness(options: HarnessOptions = {}) {
 	const sentMessages: Array<{ message: unknown; options: unknown }> = [];
 	const compactRequests: any[] = [];
 	const tools = new Map<string, any>();
+	const skillCommands: any[] = [];
 	let activeTools = ["read", "bash"];
 	const pi = {
 		registerTool(definition: any) {
@@ -63,6 +64,7 @@ export function harness(options: HarnessOptions = {}) {
 		sendMessage(message: unknown, options: unknown) { sentMessages.push({ message, options }); },
 		getActiveTools() { return [...activeTools]; },
 		setActiveTools(names: string[]) { activeTools = [...names]; },
+		getCommands() { return [...skillCommands]; },
 	};
 	const notifications: string[] = [];
 	const statuses: Array<string | undefined> = [];
@@ -145,6 +147,11 @@ export function harness(options: HarnessOptions = {}) {
 		resolveSnapshot: (data: unknown = entries.at(-1)?.data) => resolveCheckpoint(data, ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot,
 			resolveSessionAddress(options.sessionFile, ctx.sessionManager.getSessionId(), options.sessionTimestamp).key),
 		readState: (offset?: number, scope?: StateScope) => accessor.read(offset, scope),
+		registerSkill(path: string, scope: "user" | "project" | "temporary" = "project") {
+			const previous = skillCommands.findIndex((command) => command.sourceInfo.path === path);
+			if (previous >= 0) skillCommands.splice(previous, 1);
+			skillCommands.push({ name: `skill:${skillCommands.length}`, source: "skill", sourceInfo: { path, source: "test", scope, origin: "top-level" } });
+		},
 		get registeredTools() { return tools.size; },
 		get activeTools() { return [...activeTools]; },
 	};

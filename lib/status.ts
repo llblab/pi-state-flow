@@ -29,8 +29,7 @@ export interface StatusDiagnostics {
 	durableStateError?: string;
 }
 
-export function compactStatus(snapshot: Snapshot, colorize: Colorize): string | undefined {
-	if (!snapshot.config.enabled) return undefined;
+export function compactStatus(snapshot: Snapshot, colorize: Colorize): string {
 	return `${colorize("accent", "state-flow")} ${colorize("dim", `#${snapshot.meta.step}`)}`;
 }
 

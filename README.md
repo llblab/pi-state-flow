@@ -56,7 +56,7 @@ Starting in an existing conversation retains its context for one complete bootst
 - `/state-flow-status`: Inspect effective state, retained history and known recovery issues without scanning sources or changing state.
 - `/state-flow-stop`: End active episode semantics without deleting memory; an interrupted run retains its frozen handoff and available trajectory.
 
-Active mode is **opt-in**. Passive memory projection and the memory tools are enabled by default: existing state can be read or explicitly patched without an active episode or State Flow compaction. Stop returns to the configured passive behavior. `autoStart` can enable active mode for genuinely new sessions; resumed branches restore their own enablement. See [configuration](docs/usage.md#configuration).
+Active mode is **opt-in**. Passive memory projection and the memory tools are enabled by default: existing state can be read or explicitly patched without an active episode or State Flow compaction. Passive patches advance the same `#N` transition counter. When `pi-telegram` is present, global, CWD, session and effective state remain inspectable from its State Flow section in either mode. Stop returns to the configured passive behavior. `autoStart` can enable active mode for genuinely new sessions; resumed branches restore their own enablement. See [configuration](docs/usage.md#configuration).
 
 ## State model
 
@@ -84,6 +84,8 @@ Every scope uses the same shape:
 - `lazy`: Supporting memory available through explicit reads, with its body omitted from baseline model context.
 
 These planes organize ordinary JSON rather than imposing a project-specific schema. The model updates the semantic planes except `response`, which is runtime-owned. Memory remains fallible: storing an observation does not make it current or correct.
+
+Registered Pi Skills may be compiled into source-addressed artifacts when durable guidance is useful. Pi's resource provenance determines ownership: user Skills map to global, project Skills to CWD and temporary Skills to session. A matching source hash needs no update; an uncompiled read remains ordinary volatile context and does not block unrelated patches.
 
 ## Incremental updates and history
 

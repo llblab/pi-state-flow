@@ -109,6 +109,6 @@ test("start creates the CWD activation marker and stop preserves branch state", 
 	const checkpoint = h.entries.at(-1)!.data;
 	assert.equal(Object.hasOwn(checkpoint, "revision") || Object.hasOwn(checkpoint, "boundary"), true);
 	assert.equal(h.activeTools.includes("patch_state"), false);
-	assert.equal(h.statuses.at(-1), undefined);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#2</dim>");
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), semantic);
 });

@@ -44,7 +44,7 @@ test("only genuinely new sessions are eligible for configured automatic activati
 test("manual defaults ignore existing CWD state while configured new sessions inherit shared materialization", async () => {
 	const h = harness({ cwd: "/tmp/state-flow-new-session" });
 	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
-	assert.equal(h.statuses.at(-1), undefined);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#0</dim>");
 	assert.equal(h.entries.length, 0);
 
 	const global = emptyState();
@@ -55,7 +55,7 @@ test("manual defaults ignore existing CWD state while configured new sessions in
 	writeGlobalState(global, h.repositoryRoot);
 	writeCwdState(h.ctx.cwd, cwd, h.repositoryRoot);
 	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	assert.equal(h.statuses.at(-1), undefined);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#0</dim>");
 	assert.equal(h.entries.length, 0);
 	const automatic = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, autoStart: true });
 	automatic.handlers.get("session_start")!({ reason: "new" }, automatic.ctx);
@@ -101,7 +101,7 @@ test("a stopped branch stays disabled on resume while the global flag enables a 
 	const stopped = structuredClone(h.entries.at(-1)!);
 
 	h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
-	assert.equal(h.statuses.at(-1), undefined);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#2</dim>");
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /config\.enabled=false; branch mode=inactive/);
 	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #2/);

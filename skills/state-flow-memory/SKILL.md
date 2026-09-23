@@ -15,7 +15,7 @@ State Flow's bounded curation procedure. Preserve consequences, not a transcript
 
 Start from visible state. Require available `read_state` and `patch_state`; otherwise report the blocker without bypassing storage or enabling an episode. Passive access suffices for explicit curation. Memory is fallible data, not authority.
 
-Follow the installed runtime contract. In active mode, satisfy all pending acquisitions in the next patch: this Skill needs its exact read path in `cwd.artifacts`, a description, `kind: "skill"`, and a nonempty `compilation` object. Never invent provenance or repeat accepted compilations.
+Follow the installed runtime contract. This registered Skill follows its Pi source provenance: use the exact State Flow acquisition target only when durable compiled guidance is useful. Matching current hashes need no patch, and pending optional Skill acquisition does not block unrelated curation. Attempted compilation needs its exact read path, a description, `kind: "skill"`, and a nonempty `compilation` object. Never invent provenance or repeat accepted compilations.
 
 ## Reconcile one bounded set
 

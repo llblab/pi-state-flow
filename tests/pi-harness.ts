@@ -42,6 +42,7 @@ export interface RealPiFixture {
 	notifications: string[];
 	statuses: Array<string | undefined>;
 	readState(session: AgentSession, offset?: number, scope?: StateScope): ModelState;
+	registerSkill(scope: "user" | "project" | "temporary", name: string, body: string): string;
 	createRuntime(reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSessionRuntime>;
 	createSession(reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSession>;
 	createSessionAt(cwd: string, reason?: "startup" | "new" | "resume", manager?: SessionManager): Promise<AgentSession>;
@@ -91,6 +92,18 @@ export async function realPiFixture(t: TestContext, options: {
 	const notifications: string[] = [];
 	const statuses: Array<string | undefined> = [];
 	const accessors = new Map<string, { read(offset?: number, scope?: StateScope): ModelState }>();
+	const additionalSkillPaths: string[] = [];
+
+	function registerSkill(scope: "user" | "project" | "temporary", name: string, body: string): string {
+		const base = scope === "user" ? join(agentDir, "skills")
+			: scope === "project" ? join(cwd, ".pi", "skills")
+			: join(root, "temporary-skills");
+		const path = join(base, name, "SKILL.md");
+		mkdirSync(join(base, name), { recursive: true });
+		writeFileSync(path, `---\nname: ${name}\ndescription: ${name} test Skill\n---\n\n${body}\n`);
+		additionalSkillPaths.push(path);
+		return path;
+	}
 
 	async function createSessionResult(
 		sessionCwd: string,
@@ -111,6 +124,7 @@ export async function realPiFixture(t: TestContext, options: {
 			noPromptTemplates: true,
 			noThemes: true,
 			noContextFiles: true,
+			additionalSkillPaths: [...additionalSkillPaths],
 			extensionFactories: [
 				...(options.stateFlow === false ? [] : [{
 					name: "state-flow-integration",
@@ -184,6 +198,7 @@ export async function realPiFixture(t: TestContext, options: {
 		modelRuntime,
 		notifications,
 		statuses,
+		registerSkill,
 		createRuntime,
 		createSession,
 		createSessionAt,

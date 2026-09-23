@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.17.4: scoped Skill acquisition and passive observability hotfix
+
+- `Passive observability`: Keeps the `state-flow #N` counter visible in terminal and Telegram surfaces while active mode is off, with accepted passive patches advancing the same counter. Telegram scope controls now explicitly retain global/CWD/session/effective inspection in either mode and can lazily read existing shared canonical state when passive model tools are disabled, without initializing or mutating storage.
+- `Skill Acquisition AX`: Recognizes only exact registered Pi Skills through public command source metadata and maps user/project/temporary ownership to global/CWD/session artifacts. Matching source hashes need no update; other reads receive one precise optional target hint. Uncompiled reads remain volatile and never block unrelated patches, while attempted compilation retains strict shape, hashing, provenance and CAS validation.
+
 ## 0.17.3: passive shared-memory concurrency
 
 - `Passive concurrency`: First passive semantic or compilation-evidence writes now adopt untouched global/CWD updates made by another session after memory was loaded. Targeted shared-scope changes still reject stale writes with scope-specific diagnostics, and competing private-session writes remain fenced. No automatic patch replay, episode activation, storage-format change or weaker publication CAS is introduced.

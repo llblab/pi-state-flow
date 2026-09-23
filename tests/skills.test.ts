@@ -9,9 +9,9 @@ import { loadCwdProvenance, loadCwdState } from "./temporal-fixture.ts";
 import {
 	hasCompiledSkillArtifact,
 	hashSkillSource,
+	registeredSkillResolver,
 	SKILL_ARTIFACT_COMPILER,
 	SkillReadTracker,
-	skillPathFromRead,
 } from "../lib/skills.ts";
 import { commitTerminal, harness, start } from "./harness.ts";
 
@@ -36,7 +36,8 @@ function compilerOutput(rule = "Use the compiled route for current episode opera
 	};
 }
 
-function recordRead(h: ReturnType<typeof harness>, source: string, id = "skill-1"): void {
+function recordRead(h: ReturnType<typeof harness>, source: string, id = "skill-1", scope: "user" | "project" | "temporary" = "project"): void {
+	h.registerSkill(source, scope);
 	const input = { path: source };
 	h.handlers.get("tool_call")!({ toolCallId: id, toolName: "read", input }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: id, toolName: "read", result: {}, isError: false }, h.ctx);
@@ -92,13 +93,10 @@ test("requested curation compiles an acquired Skill with one atomic scope move",
 	}, undefined, undefined, h.ctx);
 	const source = skillFile("curation-sequence");
 	recordRead(h, source);
-	await assert.rejects(
-		patchState.execute("premature", {
-			session: { working: { unrelated: true } },
-		}, undefined, undefined, h.ctx),
-		/newly read Skill must be compiled|successfully read Skill must have a CWD artifact compiler output/,
-	);
-	assert.equal(h.readState().working.unrelated, undefined);
+	await patchState.execute("independent", {
+		session: { working: { unrelated: true } },
+	}, undefined, undefined, h.ctx);
+	assert.equal(h.readState().working.unrelated, true);
 	await patchState.execute("compile-and-move", {
 		global: { contract: { projectRule: null } },
 		cwd: { contract: { projectRule: "project-only" }, artifacts: { [source]: compilerOutput("Curate one requested cohort") } },
@@ -134,12 +132,6 @@ test("memory curation can narrow an established value without retaining two auth
 	assert.equal(h.readState().contract.projectRule, "project-only");
 });
 
-test("recognizes only exact Skill reads", () => {
-	assert.equal(skillPathFromRead("read", { path: "/skills/demo/SKILL.md" }), "/skills/demo/SKILL.md");
-	assert.equal(skillPathFromRead("bash", { path: "/skills/demo/SKILL.md" }), undefined);
-	assert.equal(skillPathFromRead("read", { path: "/skills/demo/README.md" }), undefined);
-});
-
 test("requires source-identified non-empty Skill artifact compilations", () => {
 	const source = "/skills/demo/SKILL.md";
 	const hash = hashArtifactSource("demo");
@@ -155,30 +147,49 @@ test("requires source-identified non-empty Skill artifact compilations", () => {
 	}, undefined, source, hash), false);
 });
 
-test("tracks the mutable executed Skill path and trusted hash across Pi lifecycle order", () => {
-	const tracker = new SkillReadTracker((source) => hashArtifactSource(`body:${source}`));
+test("maps only registered Pi Skills from public command source metadata", () => {
+	const resolve = registeredSkillResolver("/project", [
+		{ source: "skill", sourceInfo: { path: "/user/global/SKILL.md", scope: "user" } },
+		{ source: "skill", sourceInfo: { path: ".pi/skills/project/SKILL.md", scope: "project" } },
+		{ source: "skill", sourceInfo: { path: "/tmp/one-shot/registered-source.md", scope: "temporary" } },
+		{ source: "prompt", sourceInfo: { path: "/not-a-skill/SKILL.md", scope: "user" } },
+		{ source: "skill", sourceInfo: { path: "/ambiguous/SKILL.md", scope: "user" } },
+		{ source: "skill", sourceInfo: { path: "/ambiguous/SKILL.md", scope: "project" } },
+	]);
+	assert.deepEqual(resolve("/user/global/SKILL.md"), { path: "/user/global/SKILL.md", scope: "global" });
+	assert.deepEqual(resolve(".pi/skills/project/SKILL.md"), { path: "/project/.pi/skills/project/SKILL.md", scope: "cwd" });
+	assert.deepEqual(resolve("/tmp/one-shot/registered-source.md"), { path: "/tmp/one-shot/registered-source.md", scope: "session" });
+	assert.equal(resolve("/not-a-skill/SKILL.md"), undefined);
+	assert.equal(resolve("/unregistered/SKILL.md"), undefined);
+	assert.equal(resolve("/ambiguous/SKILL.md"), undefined);
+});
+
+test("tracks the mutable executed registered Skill path, scope, and trusted hash", () => {
+	const resolve = registeredSkillResolver("/", [{ source: "skill", sourceInfo: { path: "/skills/executed/registered-source.md", scope: "user" } }]);
+	const tracker = new SkillReadTracker((source) => hashArtifactSource(`body:${source}`), resolve);
 	const input = { path: "/skills/requested/SKILL.md" };
 	tracker.recordStart("call-1", "read", { ...input });
 	tracker.recordCall("call-1", "read", input);
-	input.path = "/skills/executed/SKILL.md";
+	input.path = "/skills/executed/registered-source.md";
 	tracker.recordEnd("call-1", "read", false);
 	assert.deepEqual([...tracker.successful.values()], [{
-		path: "/skills/executed/SKILL.md",
-		hash: hashArtifactSource("body:/skills/executed/SKILL.md"),
+		path: "/skills/executed/registered-source.md",
+		scope: "global",
+		hash: hashArtifactSource("body:/skills/executed/registered-source.md"),
 	}]);
 });
 
-test("retains a successful read as a validation failure when source hashing fails", () => {
-	const tracker = new SkillReadTracker(() => { throw new Error("source disappeared"); });
+test("retains a registered successful read as a validation failure when source hashing fails", () => {
+	const tracker = new SkillReadTracker(() => { throw new Error("source disappeared"); }, () => ({ path: "/skills/vanished/SKILL.md", scope: "session" }));
 	tracker.recordCall("failed-hash", "read", { path: "/skills/vanished/SKILL.md" });
 	tracker.recordEnd("failed-hash", "read", false);
 	assert.deepEqual([...tracker.successful.values()], [{
-		path: "/skills/vanished/SKILL.md", error: "source disappeared",
+		path: "/skills/vanished/SKILL.md", scope: "session", error: "source disappeared",
 	}]);
 });
 
-test("discards stale, failed, and mismatched lifecycle records", () => {
-	const tracker = new SkillReadTracker(() => hashArtifactSource("body"));
+test("discards unregistered, stale, failed, and mismatched lifecycle records", () => {
+	const tracker = new SkillReadTracker(() => hashArtifactSource("body"), () => undefined);
 	tracker.recordStart("reused", "read", { path: "/skills/stale/SKILL.md" });
 	tracker.recordCall("reused", "bash", { command: "true" });
 	tracker.recordEnd("reused", "read", false);
@@ -187,14 +198,21 @@ test("discards stale, failed, and mismatched lifecycle records", () => {
 	assert.deepEqual([...tracker.successful.values()], []);
 });
 
-test("requires every successful Skill read to compile a local source-addressed artifact", async () => {
+test("registered Skill acquisition does not block an independent patch and validates attempted compilation", async () => {
 	const h = harness();
 	await start(h);
 	const source = skillFile("required");
 	recordRead(h, source);
 
-	await assert.rejects(patchCwdArtifacts(h, {}), (error: unknown) => {
-		return error instanceof Error && /CWD artifact compiler output/.test(error.message) && error.message.includes(source);
+	await h.tools.get("patch_state")!.execute("independent", { session: { working: { accepted: true } } }, undefined, undefined, h.ctx);
+	assert.equal(h.readState(0, "session").working.accepted, true);
+	await assert.rejects(patchCwdArtifacts(h, { [source]: {} }), (error: unknown) => {
+		return error instanceof Error
+			&& error.message.includes(`cwd.artifacts[${JSON.stringify(source)}]`)
+			&& error.message.includes("description must be a non-empty string")
+			&& error.message.includes('kind must be "skill"')
+			&& error.message.includes("compilation must be a non-empty object")
+			&& error.message.includes('"kind":"skill"');
 	});
 	await patchCwdArtifacts(h, { [source]: compilerOutput() });
 	const artifact = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source];
@@ -211,32 +229,87 @@ test("attributes Skill acquisition to mutable tool input in Pi event order", asy
 	await start(h);
 	const requested = skillFile("requested");
 	const executed = skillFile("executed");
+	h.registerSkill(executed);
 	const input = { path: requested };
 	h.handlers.get("tool_execution_start")!({ toolCallId: "skill-1", toolName: "read", args: { path: requested } }, h.ctx);
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
 	input.path = executed;
 	h.handlers.get("tool_execution_end")!({ toolCallId: "skill-1", toolName: "read", result: {}, isError: false }, h.ctx);
-	await assert.rejects(patchCwdArtifacts(h, { [requested]: compilerOutput("wrong") }), (error: unknown) => {
-		return error instanceof Error && error.message.includes(executed) && !error.message.includes(requested);
-	});
+	await patchCwdArtifacts(h, { [requested]: compilerOutput("wrong") });
+	assert.equal(loadCwdProvenance(h.ctx.cwd, h.repositoryRoot)[requested], undefined);
+	await patchCwdArtifacts(h, { [executed]: compilerOutput("executed") });
+	assert.equal(loadCwdProvenance(h.ctx.cwd, h.repositoryRoot)[executed]!.sourceHash, hashSkillSource(executed));
 });
 
-test("ordinary answers cannot bypass missing Skill artifacts", async () => {
+for (const [sourceScope, stateScope] of [["user", "global"], ["project", "cwd"], ["temporary", "session"]] as const) {
+	test(`registered ${sourceScope} Skill acquisition targets ${stateScope} and matching hash is current`, async () => {
+		const h = harness();
+		await start(h);
+		const source = skillFile(`scope-${sourceScope}`);
+		h.registerSkill(source, sourceScope);
+		const event = { toolCallId: `read-${sourceScope}`, toolName: "read", input: { path: source }, content: [{ type: "text", text: "Skill body" }], isError: false };
+		const first = h.handlers.get("tool_result")!(event, h.ctx);
+		assert.match(first.content.at(-1).text, new RegExp(`belongs at ${stateScope}\\.artifacts`));
+		assert.match(first.content.at(-1).text, /Unrelated semantic patches do not need to include it/);
+		await h.tools.get("patch_state")!.execute(`compile-${sourceScope}`, {
+			[stateScope]: { artifacts: { [source]: compilerOutput(`${sourceScope} guidance`) } },
+		}, undefined, undefined, h.ctx);
+		assert.deepEqual(h.readState(0, stateScope).artifacts[source], compilerOutput(`${sourceScope} guidance`));
+		assert.equal(h.handlers.get("tool_result")!(event, h.ctx), undefined, "matching source hash needs no new compilation hint");
+		await h.tools.get("patch_state")!.execute(`independent-${sourceScope}`, { session: { working: { [sourceScope]: true } } }, undefined, undefined, h.ctx);
+	});
+}
+
+test("a changed registered owner is reported without silently promoting the old compilation", async () => {
+	const h = harness();
+	await start(h);
+	const source = skillFile("owner-change");
+	h.registerSkill(source, "project");
+	const event = { toolCallId: "owner-change", toolName: "read", input: { path: source }, content: [{ type: "text", text: "Skill body" }], isError: false };
+	h.handlers.get("tool_result")!(event, h.ctx);
+	await patchCwdArtifacts(h, { [source]: compilerOutput("project version") });
+	h.registerSkill(source, "user");
+	const moved = h.handlers.get("tool_result")!(event, h.ctx);
+	assert.match(moved.content.at(-1).text, /belongs at global\.artifacts/);
+	assert.deepEqual(h.readState(0, "cwd").artifacts[source], compilerOutput("project version"));
+	assert.equal(h.readState(0, "global").artifacts[source], undefined);
+	await h.tools.get("patch_state")!.execute("move-owner", {
+		global: { artifacts: { [source]: compilerOutput("portable version") } },
+		cwd: { artifacts: { [source]: null } },
+	}, undefined, undefined, h.ctx);
+	assert.deepEqual(h.readState(0, "global").artifacts[source], compilerOutput("portable version"));
+	assert.equal(h.readState(0, "cwd").artifacts[source], undefined);
+});
+
+test("an unregistered SKILL.md read has no acquisition semantics", async () => {
+	const h = harness();
+	await start(h);
+	const source = skillFile("unregistered");
+	const result = h.handlers.get("tool_result")!({ toolCallId: "plain", toolName: "read", input: { path: source }, content: [{ type: "text", text: "Ordinary source" }], isError: false }, h.ctx);
+	assert.equal(result, undefined);
+	await h.tools.get("patch_state")!.execute("unrelated", { session: { working: { accepted: true } } }, undefined, undefined, h.ctx);
+	assert.equal(h.readState(0, "session").working.accepted, true);
+});
+
+test("ordinary answers may retain a registered Skill read as volatile context", async () => {
 	const h = harness();
 	await start(h);
 	const source = skillFile("plain");
+	h.registerSkill(source);
 	h.handlers.get("tool_execution_start")!({ toolCallId: "plain", toolName: "read", args: { path: source } }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "plain", toolName: "read", isError: false }, h.ctx);
-	await assert.rejects(patchCwdArtifacts(h, {}), (error: unknown) => error instanceof Error && error.message.includes(source));
-	assert.equal(h.resolveSnapshot().meta.step, 0);
-	await patchCwdArtifacts(h, { [source]: compilerOutput() });
-	assert.equal(h.resolveSnapshot().meta.step, 1);
+	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Used the Skill without durable compilation." }] };
+	h.handlers.get("message_end")!({ message }, h.ctx);
+	h.handlers.get("turn_end")!({ message }, h.ctx);
+	assert.equal(h.readState().response, "Used the Skill without durable compilation.");
+	assert.equal(loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source], undefined);
 });
 
-test("a pending Skill compilation reports reconciliation failure without a repair inference", async () => {
+test("a pending optional Skill compilation schedules no repair inference", async () => {
 	const h = harness();
 	await start(h);
 	const source = skillFile("pending-answer");
+	h.registerSkill(source);
 	h.handlers.get("tool_execution_start")!({ toolCallId: "pending", toolName: "read", args: { path: source } }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "pending", toolName: "read", isError: false }, h.ctx);
 	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Answer with pending compilation." }] };
@@ -252,13 +325,14 @@ test("retains compatibility with execution-start updates after interception", as
 	await start(h);
 	const requested = skillFile("compat-requested");
 	const executed = skillFile("compat-executed");
+	h.registerSkill(executed);
 	const input = { path: requested };
 	h.handlers.get("tool_call")!({ toolCallId: "skill-1", toolName: "read", input }, h.ctx);
 	h.handlers.get("tool_execution_start")!({ toolCallId: "skill-1", toolName: "read", args: { path: executed } }, h.ctx);
 	h.handlers.get("tool_execution_end")!({ toolCallId: "skill-1", toolName: "read", result: {}, isError: false }, h.ctx);
-	await assert.rejects(patchCwdArtifacts(h, { [requested]: compilerOutput("wrong") }), (error: unknown) => {
-		return error instanceof Error && error.message.includes(executed) && !error.message.includes(requested);
-	});
+	await patchCwdArtifacts(h, { [requested]: compilerOutput("wrong") });
+	await patchCwdArtifacts(h, { [executed]: compilerOutput("executed") });
+	assert.equal(loadCwdProvenance(h.ctx.cwd, h.repositoryRoot)[executed]!.sourceHash, hashSkillSource(executed));
 });
 
 test("does not attribute stale reads when lifecycle ids are reused for other tools", async () => {

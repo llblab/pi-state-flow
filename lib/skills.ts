@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
 	hashArtifactSource,
 	isArtifactHash,
@@ -6,6 +7,7 @@ import {
 	type ArtifactRegistry,
 } from "./artifact.ts";
 import { isObject } from "./json.ts";
+import type { StateScope } from "./state.ts";
 
 export const SKILL_ARTIFACT_COMPILER = "skill-artifact-v1";
 
@@ -44,15 +46,50 @@ export function hashSkillSource(source: string): string {
 	return hashArtifactSource(readFileSync(source));
 }
 
-export function skillPathFromRead(toolName: unknown, args: unknown): string | undefined {
+function readPath(toolName: unknown, args: unknown): string | undefined {
 	if (toolName !== "read" || !isObject(args) || typeof args.path !== "string") return undefined;
-	return /(^|[\\/])SKILL\.md$/.test(args.path) ? args.path : undefined;
+	return args.path;
 }
 
 export interface SuccessfulSkillRead {
 	path: string;
+	scope: StateScope;
 	hash?: string;
 	error?: string;
+}
+
+export interface SkillCommandInfo {
+	source: string;
+	sourceInfo: { path: string; scope: string };
+}
+
+export interface RegisteredSkillSource {
+	path: string;
+	scope: StateScope;
+}
+
+export type RegisteredSkillResolver = (path: string) => RegisteredSkillSource | undefined;
+
+export function registeredSkillResolver(cwd: string, commands: readonly SkillCommandInfo[]): RegisteredSkillResolver {
+	const skills = new Map<string, RegisteredSkillSource>();
+	const conflicts = new Set<string>();
+	for (const command of commands) {
+		if (command.source !== "skill") continue;
+		const scope = command.sourceInfo.scope === "user" ? "global"
+			: command.sourceInfo.scope === "project" ? "cwd"
+			: command.sourceInfo.scope === "temporary" ? "session"
+			: undefined;
+		if (!scope) continue;
+		const path = resolve(cwd, command.sourceInfo.path);
+		const existing = skills.get(path);
+		if (existing && existing.scope !== scope) {
+			skills.delete(path);
+			conflicts.add(path);
+		} else if (!conflicts.has(path)) {
+			skills.set(path, { path, scope });
+		}
+	}
+	return (path) => skills.get(resolve(cwd, path));
 }
 
 interface PendingRead {
@@ -65,9 +102,11 @@ export class SkillReadTracker {
 	readonly successful = new Map<string, SuccessfulSkillRead>();
 	readonly #pending = new Map<string, PendingRead>();
 	readonly hashSource: SkillSourceHasher;
+	readonly resolveRegistered: RegisteredSkillResolver;
 
-	constructor(hashSource: SkillSourceHasher = hashSkillSource) {
+	constructor(hashSource: SkillSourceHasher = hashSkillSource, resolveRegistered: RegisteredSkillResolver = () => undefined) {
 		this.hashSource = hashSource;
+		this.resolveRegistered = resolveRegistered;
 	}
 
 	clear(): void {
@@ -87,18 +126,33 @@ export class SkillReadTracker {
 		const pending = this.#pending.get(toolCallId);
 		this.#pending.delete(toolCallId);
 		if (isError || !pending || toolName !== pending.toolName) return;
-		const source = skillPathFromRead(pending.toolName, pending.args);
-		if (!source) return;
+		this.#recordSuccessful(pending.toolName, pending.args);
+	}
+
+	recordResult(toolName: string, input: unknown, isError: boolean): SuccessfulSkillRead | undefined {
+		if (isError) return undefined;
+		return this.#recordSuccessful(toolName, input);
+	}
+
+	delete(path: string): void {
+		this.successful.delete(path);
+	}
+
+	#recordSuccessful(toolName: string, args: unknown): SuccessfulSkillRead | undefined {
+		const source = readPath(toolName, args);
+		if (!source) return undefined;
+		const registered = this.resolveRegistered(source);
+		if (!registered) return undefined;
+		let read: SuccessfulSkillRead;
 		try {
-			const hash = this.hashSource(source);
+			const hash = this.hashSource(registered.path);
 			if (!isArtifactHash(hash)) throw new Error("hasher returned a non-canonical SHA-256 identity");
-			this.successful.set(source, { path: source, hash });
+			read = { ...registered, hash };
 		} catch (error) {
-			this.successful.set(source, {
-				path: source,
-				error: error instanceof Error ? error.message : String(error),
-			});
+			read = { ...registered, error: error instanceof Error ? error.message : String(error) };
 		}
+		this.successful.set(registered.path, read);
+		return read;
 	}
 
 	#record(toolCallId: string, toolName: string, args: unknown): void {

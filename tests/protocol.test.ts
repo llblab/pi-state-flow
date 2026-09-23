@@ -21,10 +21,13 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.match(protocol, /State refs use .*\$ref.* or `\$cwd\.lazy\.plan` in text/);
 	assert.match(protocol, /Resolve only when needed/);
 	assert.match(protocol, /If that resolution proves a dangling state ref, fix\/drop it in owning text; never scan for broken refs/);
-	assert.ok(protocol.length <= 4_000, `model protocol grew to ${protocol.length} characters`);
+	for (const bootstrap of [false, true]) {
+		const candidate = stateFlowProtocol(bootstrap);
+		assert.ok(candidate.length <= 4_000, `${bootstrap ? "bootstrap" : "ordinary"} model protocol grew to ${candidate.length} characters`);
+	}
 });
 
-test("runtime and Skill guidance compile ordinary artifacts into their reported owner", () => {
+test("runtime and Skill guidance preserve reported ordinary and provenance-derived Skill owners", () => {
 	for (const bootstrap of [false, true]) {
 		const protocol = stateFlowProtocol(bootstrap);
 		const artifacts = protocol.split("\n").find((line) => line.startsWith("ARTIFACTS:"))!;
@@ -32,16 +35,21 @@ test("runtime and Skill guidance compile ordinary artifacts into their reported 
 		assert.match(artifacts, /exact path/);
 		assert.doesNotMatch(artifacts, /patch global\.artifacts/);
 		assert.match(protocol, /source fingerprints/);
-		assert.match(protocol, /SKILLS:.*cwd\.artifacts/);
+		assert.match(protocol, /SKILLS: Registered Skill reads/);
+		assert.match(protocol, /user→global, project→cwd, temporary→session/);
+		assert.match(protocol, /never blocks patches/);
 	}
 	const guide = readFileSync(new URL("../skills/state-flow-guide/SKILL.md", import.meta.url), "utf8");
 	assert.match(guide, /reported scope/);
 	assert.doesNotMatch(guide, /Ordinary artifacts need exact-path descriptions in `global\.artifacts`/);
 	assert.match(guide, /one atomic multi-scope patch to relocate/);
+	assert.match(guide, /user Skills target global, project Skills target CWD and temporary Skills target session/);
+	assert.match(guide, /unrelated semantic patch may proceed/);
 	const memory = readFileSync(new URL("../skills/state-flow-memory/SKILL.md", import.meta.url), "utf8");
 	assert.match(memory, /only on explicit user request/);
 	assert.doesNotMatch(memory, /or once at an active State Flow|phase-boundary curation/);
 	assert.match(memory, /one atomic multi-scope `patch_state`/);
+	assert.match(memory, /pending optional Skill acquisition does not block unrelated curation/);
 	assert.match(memory, /External transfers require confirmed destination and write authority/);
 });
 

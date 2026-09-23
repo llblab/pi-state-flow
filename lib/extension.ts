@@ -35,11 +35,11 @@ import { recoverSnapshot } from "./recovery.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
 import { SharedScopeRemovalConflictError, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
 import { discoverSnapshotData, findAssistantToolBatch, findPassiveStopBoundary, hasPriorConversation, isNewSession, retainsPhysicalSessionProjection, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
-import { SkillReadTracker } from "./skills.ts";
+import { hasCompiledSkillArtifact, hashSkillSource, registeredSkillResolver, SkillReadTracker, type SuccessfulSkillRead } from "./skills.ts";
 import { emptySnapshot, migrationFailure, type Snapshot } from "./snapshot.ts";
 import { emptyState, overlayStates, projectStateForModel, type AtomicScopePatches, type MaterializedState, type ModelState, type ScopedStates, type StateScope } from "./state.ts";
 import { compactStatus, detailedStatus, STATUS_KEY, type StatusDiagnostics } from "./status.ts";
-import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramLoader } from "./telegram.ts";
+import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramLoader, type StateFlowTelegramScope } from "./telegram.ts";
 import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, type StagedScopedTransition } from "./transition.ts";
 
 export interface StateFlowExtensionOptions {
@@ -87,7 +87,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	const repositoryRoot = resolve(options.repositoryRoot ?? config.directory);
 	const diagnosticWriter = new StateFlowDiagnosticWriter(config.logging, stateFlowLogPath(agentDir), repositoryRoot, (message) => activeContext?.ui.notify(message, "warning"));
 	let backupPending = false;
-	const skillReads = new SkillReadTracker();
+	const skillReads = new SkillReadTracker(hashSkillSource, (path) => activeContext
+		? registeredSkillResolver(activeContext.cwd, pi.getCommands())(path)
+		: undefined);
 	const artifactReads = new ArtifactReadTracker();
 	let artifactInvalidations: ArtifactInvalidationRequest[] = [];
 	let artifactHints: Record<string, string> = {};
@@ -213,6 +215,15 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return snapshot.config.enabled || config.passiveTools;
 	}
 
+	function refreshTelegramStateView(scope: StateFlowTelegramScope): void {
+		if (scope === "session" || scope === "effective") assertSelectedBranchAvailable();
+		if (runtime?.view) return;
+		if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
+		runtime ??= createRuntime(activeContext);
+		runtime.loadPassive();
+		installScopeStates();
+	}
+
 	function syncStateFlowTools(): void {
 		const active = pi.getActiveTools();
 		const owned = [PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME];
@@ -234,6 +245,27 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		if (publication) recordPublication(publication, ctx);
 	}
 
+	function skillReadIsCurrent(read: SuccessfulSkillRead): boolean {
+		return read.hash !== undefined && runtime?.view !== undefined && hasCompiledSkillArtifact(
+			scopeStates[read.scope].artifacts,
+			runtime.artifactProvenance(read.scope)[read.path],
+			read.path,
+			read.hash,
+		);
+	}
+
+	function dropCurrentSkillReads(): void {
+		for (const read of skillReads.successful.values()) {
+			if (skillReadIsCurrent(read)) skillReads.delete(read.path);
+		}
+	}
+
+	function skillAcquisitionHint(read: SuccessfulSkillRead): string | undefined {
+		if (read.hash === undefined || skillReadIsCurrent(read)) return undefined;
+		const target = `${read.scope}.artifacts[${JSON.stringify(read.path)}]`;
+		return `State Flow acquisition: this registered Skill belongs at ${target}. If durable compiled guidance is useful, include a non-empty description, kind:"skill", and compilation object there. Unrelated semantic patches do not need to include it.`;
+	}
+
 	function commitStage(stage: StagedScopedTransition, ctx: ExtensionContext, finalizeRun: boolean): boolean {
 		const acquiredArtifactPaths = new Set(artifactReads.successful.keys());
 		let committed: boolean;
@@ -253,7 +285,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		installScopeStates();
 		artifactInvalidations = artifactInvalidations.filter(({ path }) => !acquiredArtifactPaths.has(path));
 		artifactReads.setCandidates(artifactInvalidations);
-		skillReads.clear();
+		dropCurrentSkillReads();
 		artifactReads.clear();
 		persist();
 		return true;
@@ -671,7 +703,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				startPending: telegramStartPending,
 			}),
 			state: (scope) => {
-				if (scope === "session") assertSelectedBranchAvailable();
+				refreshTelegramStateView(scope);
 				const selected = scope === "effective"
 					? overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)
 					: scopeStates[scope];
@@ -801,7 +833,18 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	pi.on("tool_execution_end", (event) => {
 		if (!snapshot.config.enabled) return;
 		skillReads.recordEnd(event.toolCallId, event.toolName, event.isError);
+		dropCurrentSkillReads();
 		artifactReads.recordEnd(event.toolCallId, event.toolName, event.isError);
+	});
+
+	pi.on("tool_result", (event) => {
+		if (!snapshot.config.enabled) return;
+		const read = skillReads.recordResult(event.toolName, event.input, event.isError);
+		if (!read) return;
+		dropCurrentSkillReads();
+		const hint = skillAcquisitionHint(read);
+		if (!hint) return;
+		return { content: [...event.content, { type: "text", text: `\n${hint}` }] };
 	});
 
 	pi.on("message_end", (event, ctx): any => {

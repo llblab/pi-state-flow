@@ -35,10 +35,18 @@ test("uses one stable status ownership key", () => {
 	assert.equal(STATUS_KEY, "state-flow");
 });
 
-test("renders compact status only while enabled", () => {
+test("renders the compact patch counter in active and passive modes", () => {
 	const colorize = (color: "accent" | "dim", text: string) => `<${color}>${text}</${color}>`;
 	assert.equal(compactStatus(snapshot, colorize), "<accent>state-flow</accent> <dim>#7</dim>");
-	assert.equal(compactStatus({ ...snapshot, config: { enabled: false } }, colorize), undefined);
+	assert.equal(compactStatus({ ...snapshot, config: { enabled: false } }, colorize), "<accent>state-flow</accent> <dim>#7</dim>");
+});
+
+test("a passive patch advances and renders the shared patch counter", async () => {
+	const h = harness({ passiveTools: true });
+	await h.tools.get("patch_state")!.execute("passive", { global: { working: { passiveCounter: true } } }, undefined, undefined, h.ctx);
+	assert.equal(h.resolveSnapshot().config.enabled, false);
+	assert.equal(h.resolveSnapshot().meta.step, 1);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>#1</dim>");
 });
 
 test("distinguishes branch diagnostics and renders only effective memory as JSON", () => {
