@@ -60,9 +60,9 @@ Active mode is **opt-in**. Passive memory projection and the memory tools are en
 
 ### Active, passive, off
 
-- **Active:** Memory tools are available; the agent consolidates necessary final state changes before completing an iteration. Subsequent iterations use accepted state and new input rather than completed prior reasoning.
-- **Passive:** Memory tools and existing-state projection remain available by default. Patching is on demand, and ordinary conversation context continues without State Flow's active iteration reset.
-- **Configured off:** With the branch inactive and both `passiveTools` and `passiveBootstrap` false, neither memory tool nor bootstrap/state projection is exposed to the model. `autoStart: false` alone does not turn memory off.
+- `Active`: Memory tools are available; the agent consolidates necessary final state changes before completing an iteration. Subsequent iterations use accepted state and new input rather than completed prior reasoning.
+- `Passive`: Memory tools and existing-state projection remain available by default. Patching is on demand, and ordinary conversation context continues without State Flow's active iteration reset.
+- `Configured off`: With the branch inactive and both `passiveTools` and `passiveBootstrap` false, neither memory tool nor bootstrap/state projection is exposed to the model. `autoStart: false` alone does not turn memory off.
 
 Modes select agent behavior, not a different disk persistence or fork-copy mechanism. Final consolidation does not require an empty ceremonial patch, and context projection does not delete native history. See [mode semantics and bootstrap terminology](docs/usage.md#active-passive-and-configured-off).
 
