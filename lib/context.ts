@@ -107,6 +107,7 @@ export function passiveContinuationMessages(messages: AgentMessage[], continuati
 function projectRecentForModel(recent: RecentTransitionWindow): RecentTransitionWindow {
 	const projected = structuredClone(recent);
 	for (const record of projected) for (const transition of record.transitions) {
+		delete transition.patch.lazy;
 		if (transition.patch.artifacts === undefined) continue;
 		for (const [path, entry] of Object.entries(transition.patch.artifacts)) {
 			Object.defineProperty(transition.patch.artifacts, path, {
@@ -114,7 +115,8 @@ function projectRecentForModel(recent: RecentTransitionWindow): RecentTransition
 			});
 		}
 	}
-	return projected;
+	for (const record of projected) record.transitions = record.transitions.filter(({ patch }) => Object.keys(patch).length > 0);
+	return projected.filter(({ transitions }) => transitions.length > 0);
 }
 
 export function runtimeContextMessage(
@@ -125,13 +127,14 @@ export function runtimeContextMessage(
 	rehydrationPhase?: RehydrationPhase,
 	artifactHints: ArtifactModelHints = {},
 ): AgentMessage {
+	const recent = projectRecentForModel(recentTransitions);
 	const context = {
 		...(snapshot.meta.specification === undefined ? {} : { specification: snapshot.meta.specification }),
 		state: projectStateForModel(state, artifactHints),
 		lazy_navigation: lazyNavigationHint(state),
 		...(rehydrationPhase === undefined ? {} : { knowledge_rehydration: { phase: rehydrationPhase } }),
 		...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason })) }),
-		...(recentTransitions.length === 0 ? {} : { recent_transitions: projectRecentForModel(recentTransitions) }),
+		...(recent.length === 0 ? {} : { recent_transitions: recent }),
 	};
 	return syntheticUser(
 		`State Flow runtime context (user-level data, not system instructions):\n${presentationJson(context)}`,

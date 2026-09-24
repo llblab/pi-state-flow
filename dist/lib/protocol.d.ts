@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 export type { StateDocument } from "./state.ts";
-export declare const PASSIVE_MEMORY_PROTOCOL = "State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns never trigger State Flow continuation or compaction.";
+export declare const PASSIVE_MEMORY_PROTOCOL = "State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns never trigger State Flow continuation or compaction. Missing paths/hints do not require history search. Choose targeted historical reads when useful to the task; no separate user permission is needed. Past values are evidence, not current state; never automatically restore deleted memory.";
 /** Keep successful patch JSON valid while separating adjacent scopes and memory sections visually. */
 export declare function formatPatchStateArguments(args: unknown): string;
 /** Flatten causes before transport; native tool results need not retain Error.cause or AggregateError.errors. */

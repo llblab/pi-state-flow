@@ -74,7 +74,7 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 	assert.match(memoryBody, /`\$`-prefixed `read_state` paths inside ordinary strings/);
 	assert.match(memoryBody, /Never scan or resolve references merely to find broken ones/);
 	assert.match(memoryBody, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
-	assert.match(memoryBody, /top-level hint as provenance and reconciliation guidance/);
+	assert.match(memoryBody, /top-level hint as conditional navigation and provenance/);
 	assert.match(memoryBody, /one atomic multi-scope `patch_state` for destination and source changes/);
 	assert.match(memoryBody, /Write and verify accepted content plus a content-bound revision or receipt/);
 	assert.match(memoryBody, /before deleting or narrowing the State Flow source in a later patch/);

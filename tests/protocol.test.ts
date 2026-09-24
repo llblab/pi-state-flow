@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPatchStateArguments, separatedFailure, stateFlowProtocol } from "../lib/protocol.ts";
+import { conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPatchStateArguments, PASSIVE_MEMORY_PROTOCOL, separatedFailure, stateFlowProtocol } from "../lib/protocol.ts";
 
 test("protocol names patch_state as the sole semantic mutation mechanism", () => {
 	const protocol = stateFlowProtocol(false);
@@ -24,7 +24,8 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.match(protocol, /remove when fulfilled, abandoned, superseded, or impossible/);
 	assert.match(protocol, /State refs use .*\$ref.* or `\$cwd\.lazy\.plan` in text/);
 	assert.match(protocol, /Resolve only when needed/);
-	assert.match(protocol, /If that resolution proves a dangling state ref, fix\/drop it in owning text; never scan for broken refs/);
+	assert.match(protocol, /Hint paths are current reference owners, not relocated targets or proof of staleness/);
+	assert.match(protocol, /Fix proven stale refs only as needed; never scan refs or history offsets/);
 	for (const bootstrap of [false, true]) {
 		const candidate = stateFlowProtocol(bootstrap);
 		assert.ok(candidate.length <= 4_000, `${bootstrap ? "bootstrap" : "ordinary"} model protocol grew to ${candidate.length} characters`);
@@ -113,6 +114,25 @@ test("compact protocol retains read, patch, stewardship and acquisition obligati
 	];
 	for (const bootstrap of [false, true]) {
 		for (const rule of obligations) assert.match(stateFlowProtocol(bootstrap), rule, `${bootstrap ? "bootstrap" : "ordinary"}: ${rule}`);
+	}
+});
+
+test("active, bootstrap and passive history policy is task-driven rather than forbidden or hint-triggered", () => {
+	for (const protocol of [stateFlowProtocol(false), stateFlowProtocol(true), PASSIVE_MEMORY_PROTOCOL]) {
+		assert.match(protocol, /Missing paths\/hints do not require history search/);
+		assert.match(protocol, /Choose targeted historical reads when useful to the task/);
+		assert.match(protocol, /no separate user permission is needed/);
+		assert.match(protocol, /Past values are evidence, not current state/);
+		assert.match(protocol, /never automatically restore deleted memory/);
+	}
+	for (const name of ["state-flow-guide", "state-flow-memory"]) {
+		const skill = readFileSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url), "utf8");
+		assert.match(skill, /Missing paths or runtime hints alone do not require historical search/);
+		assert.match(skill, /agent may choose a targeted historical read/);
+		assert.match(skill, /without separate user permission/);
+		assert.match(skill, /never automatically restore deleted memory/);
+		assert.match(skill, /not verified new locations of the target/);
+		assert.match(skill, /Do not scan all offsets, hydrate automatically or request repair inference/);
 	}
 });
 

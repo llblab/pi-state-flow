@@ -132,7 +132,7 @@ test("missing reads reactively identify exact durable reference sources without 
 		value: null,
 		hint: [{
 			type: "dangling-reference",
-			message: "Reconcile the verified current values that reference this path.",
+			message: "The requested value is unavailable in the selected state. These current values reference that path, not a verified new location. Use this evidence if relevant to the task.",
 			paths: ["cwd.intents.release.plan", "cwd.working.note"],
 		}],
 	});
@@ -157,10 +157,33 @@ test("implicit missing paths match explicit effective references", () => {
 		value: null,
 		hint: [{
 			type: "dangling-reference",
-			message: "Reconcile the verified current values that reference this path.",
+			message: "The requested value is unavailable in the selected state. These current values reference that path, not a verified new location. Use this evidence if relevant to the task.",
 			paths: ["session.working.note"],
 		}],
 	});
+});
+
+test("missing hints expose current reference owners without lazy bodies or historical recovery", () => {
+	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "T0");
+	view = advanceTemporalState(view, [{ scope: "session", patch: { lazy: {
+		target: "HISTORICAL-BODY", owner: { ref: { $ref: "session.lazy.target" }, body: "OWNER-BODY".repeat(4096) },
+	} } }], "T1");
+	view = advanceTemporalState(view, [{ scope: "session", patch: { lazy: { target: null } } }], "T2");
+	const before = structuredClone(view);
+	const result = readProjectedState(view, ["session.lazy.target"]);
+	assert.ok("value" in result);
+	assert.equal(result.value, null);
+	assert.deepEqual(result.hint?.[0]?.paths, ["session.lazy.owner.ref"]);
+	assert.match(result.hint![0]!.message, /if relevant to the task/);
+	assert.doesNotMatch(JSON.stringify(result), /HISTORICAL-BODY|OWNER-BODY|Reconcile|restore|search history/);
+	assert.deepEqual(readProjectedState(view, ["session[1].lazy.target"]), { value: "HISTORICAL-BODY" });
+	assert.deepEqual(readProjectedState(view, ["session.lazy.target"], "patch"), { patch: null });
+	assert.throws(() => readProjectedState(view, ["session.lazy.target"], "keys"), /does not exist/);
+	assert.throws(() => readProjectedState(view, ["session.lazy.owner", "session.lazy.target"]), /does not exist/);
+	assert.throws(() => readProjectedState(view, ["session[3].lazy.target"]), /predates/);
+	assert.deepEqual(view, before);
+	view = advanceTemporalState(view, [{ scope: "session", patch: { lazy: { owner: null } } }], "T3");
+	assert.throws(() => readProjectedState(view, ["session.lazy.target"]), /does not exist/, "historical owners cannot produce a current hint");
 });
 
 test("lazy values remain absent from hot projection and readable through scoped and effective paths", () => {

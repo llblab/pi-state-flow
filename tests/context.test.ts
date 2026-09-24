@@ -226,6 +226,46 @@ test("builds runtime context as synthetic user data without system-prompt interp
 	assert.doesNotMatch(text, /validation_feedback/);
 });
 
+for (const scope of ["global", "cwd", "session"] as const) test(`automatic history hides ${scope} lazy writes, replacements and deletions without renumbering visible history`, () => {
+	const body = "LAZY-BODY-ONLY".repeat(4096);
+	const state = { ...emptyState(), lazy: { releasePlan: body } };
+	const recent = [
+		{ id: "mixed", at: 11, transitions: [{ scope, patch: { lazy: { releasePlan: body }, working: { keep: "HOT" }, artifacts: { "/source": { description: "Keep card", hash: "hidden-evidence", compiler: "hidden-compiler" } } } }] },
+		{ id: "replacement", at: 9, transitions: [{ scope, patch: { lazy: { releasePlan: [body] } } }] },
+		{ id: "deletion", at: 7, transitions: [{ scope, patch: { lazy: { releasePlan: null } } }, { scope: "session" as const, patch: { contract: { keep: true } } }] },
+		{ id: "lazy-only-deletion", at: 5, transitions: [{ scope, patch: { lazy: { releasePlan: null } } }] },
+	];
+	const before = structuredClone({ state, recent });
+	const context = runtimeContextMessage(startEpisode(false), state, recent);
+	assert.equal(context.role, "user");
+	const text = (context.content as any[])[0].text;
+	const projected = JSON.parse(text.slice(text.indexOf("\n") + 1));
+	assert.deepEqual(projected.recent_transitions, [
+		{ id: "mixed", at: 11, transitions: [{ scope, patch: { working: { keep: "HOT" }, artifacts: { "/source": { description: "Keep card" } } } }] },
+		{ id: "deletion", at: 7, transitions: [{ scope: "session", patch: { contract: { keep: true } } }] },
+	]);
+	assert.deepEqual(projected.lazy_navigation, { available: true, path: "effective.lazy", keys: { releasePlan: "string" } });
+	assert.doesNotMatch(text, /LAZY-BODY-ONLY|hidden-evidence|hidden-compiler/);
+	assert.deepEqual({ state, recent }, before, "visibility filtering cannot mutate the supplied history or current state");
+	const onlyLazy = runtimeContextMessage(startEpisode(false), state, [recent[1]!, recent[3]!]);
+	assert.equal(onlyLazy.role, "user");
+	assert.doesNotMatch((onlyLazy.content as any[])[0].text, /recent_transitions|LAZY-BODY-ONLY/);
+});
+
+test("automatic history filtering does not redact previously seen lazy text from specification or response", () => {
+	const snapshot = startEpisode(true);
+	snapshot.meta.specification = "Already communicated LAZY-BODY";
+	const state = { ...emptyState(), response: "Accepted LAZY-BODY", lazy: { body: "LAZY-BODY" } };
+	const recent = [{ id: "answer", at: 3, transitions: [{ scope: "session" as const, patch: { response: "Historical LAZY-BODY", lazy: { body: "LAZY-BODY" } } }] }];
+	const message = runtimeContextMessage(snapshot, state, recent);
+	assert.equal(message.role, "user");
+	const text = (message.content as any[])[0].text;
+	const projected = JSON.parse(text.slice(text.indexOf("\n") + 1));
+	assert.equal(projected.specification, snapshot.meta.specification);
+	assert.equal(projected.state.response, state.response);
+	assert.deepEqual(projected.recent_transitions[0].transitions[0].patch, { response: "Historical LAZY-BODY" });
+});
+
 test("projects accepted memory without resurrecting a completed specification for boundary continuation", () => {
 	const snapshot = startEpisode(false);
 	snapshot.meta.specification = "Completed original task";

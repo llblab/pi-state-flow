@@ -588,7 +588,7 @@ test("read_state returns dangling-reference hints as top-level metadata beside a
 		value: null,
 		hint: [{
 			type: "dangling-reference",
-			message: "Reconcile the verified current values that reference this path.",
+			message: "The requested value is unavailable in the selected state. These current values reference that path, not a verified new location. Use this evidence if relevant to the task.",
 			paths: ["cwd.working.continuation"],
 		}],
 	});

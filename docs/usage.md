@@ -141,6 +141,16 @@ Fatal process termination can leave an incomplete canonical file cohort. Before 
 
 Independently valid shared streams may require a fresh composed origin without inventing cross-writer history. Authored patches use that current basis; raw precomputed replay still refuses an advanced target instead of applying stale normalized changes. Rollback restores only bytes still matching that publisher's output and preserves detected external changes. See [performance evidence](performance.md) for measured contention and the [acceptance map](temporal-acceptance.md) for the tested boundaries; the [backlog](../BACKLOG.md) owns open implementation work.
 
+## Lazy navigation and historical reading
+
+Lazy bodies require explicit reads. Automatic state and recent-transition projections omit them, including lazy deletions; bounded `lazy_navigation` can still show the current layer's presence, path and key types. Explicit `session.lazy.releasePlan` reads the current value, while `session[3].lazy.releasePlan` reads the exact older value only if that causal boundary remains available. Filtering automatic visibility does not renumber history or erase already communicated native/user/tool/response text.
+
+A missing path or runtime hint does not by itself require historical search. If the old value is unnecessary, continue without searching. If it can help the current task, the agent may choose a targeted historical read without separate user permission. Treat any found value as historical evidence, not automatically as current memory; do not restore deleted data without an independent reason. Do not scan all offsets or use repair inference or automatic hydration.
+
+A dangling-reference hint accompanies only an unresolved single value read with verified current reference sources. Its `paths` are the owners of those references, not verified new locations of the requested data. It does not prove that the target existed, remains retained or was moved. The bounded lookup searches current state only and emits no lazy bodies. A proven stale reference may be repaired within touched work without resurrecting its target. Without a match, ordinary missing-path errors remain; keys, patch and batch projections retain their existing contracts.
+
+Artifact freshness/invalidations and optional Skill acquisition hints keep their exact source/scope targets. Hints expose possibilities and diagnostic evidence; the current task determines whether action is necessary.
+
 ## Memory and source acquisition
 
 The agent should use sufficient materialized knowledge before rereading files. Read for a concrete gap, exact-source/edit operation, evidenced invalidation, contradiction/failure, explicit request, or bounded maintenance—not simply because a new session began.

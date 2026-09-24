@@ -3,7 +3,9 @@ import { isObject } from "./json.ts";
 
 export type { StateDocument } from "./state.ts";
 
-export const PASSIVE_MEMORY_PROTOCOL = "State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns never trigger State Flow continuation or compaction.";
+const TASK_DRIVEN_HISTORY = "Missing paths/hints do not require history search. Choose targeted historical reads when useful to the task; no separate user permission is needed. Past values are evidence, not current state; never automatically restore deleted memory.";
+
+export const PASSIVE_MEMORY_PROTOCOL = `State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns never trigger State Flow continuation or compaction. ${TASK_DRIVEN_HISTORY}`;
 
 const PATCH_DISPLAY_SECTION_KEYS = new Set(["global", "cwd", "session", "intents", "contract", "working", "artifacts", "response", "lazy"]);
 
@@ -94,7 +96,7 @@ ${bootstrapProtocol}STATE:
 
 SCOPES: Use the narrowest scope: session=branch/run continuation by default; cwd=reusable project truth; global=established cross-project/user/environment knowledge.
 
-READ: Use read_state for concrete scope/retained-history gaps. lazy_navigation lists bounded effective lazy keys, not bodies. Unscoped=effective; effective/global/cwd/session select overlay or owner. Arrays use indices or [start..end]; keys gives structure, patch the intersected change.
+READ: Use read_state for concrete scope/retained-history gaps. lazy_navigation lists bounded effective lazy keys, not bodies. Unscoped=effective; effective/global/cwd/session select overlay or owner. Arrays use indices or [start..end]; keys gives structure, patch the intersected change. ${TASK_DRIVEN_HISTORY}
 
 WRITE: patch_state is the sole model-authored semantic mutation mechanism; all supplied scopes are validated and durably accepted as one atomic transition. Call alone in an assistant response; await acceptance. Global/CWD use current canonical values after cancelable lock waiting. Correct repeats succeed without new revisions.
 
@@ -102,7 +104,7 @@ PATCH: Use global/cwd/session object patches for material updates, not acknowled
 
 MEMORY: Treat every patch as reconciliation rather than append-only notes: merge superseded fragments, remove obsolete progress. Preserve commitments, open questions, consequential results and exact continuation; distinguish requirements, decisions, observations, conclusions and hypotheses. Exclude secrets, raw history, transient progress, speculation and unsupported claims; retain decision-relevant uncertainty. Curate touched state; cleanup and scope reviews require an explicit user request. Proven moves use targeted read_state and one atomic multi-scope patch, then verify both owners. External transfers need verified acceptance before deletion. Never invent memory changes.
 
-REFS: State refs use {"$ref":"cwd.lazy.plan"} or \`$cwd.lazy.plan\` in text. Resolve only when needed; infer no authority, hydration, execution, or completion. If that resolution proves a dangling state ref, fix/drop it in owning text; never scan for broken refs.
+REFS: State refs use {"$ref":"cwd.lazy.plan"} or \`$cwd.lazy.plan\` in text. Resolve only when needed; infer no authority, hydration, execution, or completion. Hint paths are current reference owners, not relocated targets or proof of staleness. Fix proven stale refs only as needed; never scan refs or history offsets.
 
 ACQUISITION: Read only for a concrete gap, exact source/edit, invalidation, contradiction/failure, or explicit request; changed source fingerprints require rereading.
 ARTIFACTS: Compile acquired invalidated artifacts at artifacts[exact path] in the reported scope (global/cwd/session), with a description; never relocate or invent global copies. Runtime owns all artifact/Skill provenance.

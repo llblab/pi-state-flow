@@ -187,7 +187,7 @@ function missingReferenceHint(view: TemporalState, path: string, historyLimit: n
 	if (sources.length === 0) return undefined;
 	return [{
 		type: "dangling-reference",
-		message: `Reconcile the verified current values that reference this path${truncated ? "; additional sources may exist beyond the bounded scan" : ""}.`,
+		message: `The requested value is unavailable in the selected state. These current values reference that path, not a verified new location. Use this evidence if relevant to the task${truncated ? "; additional reference owners may exist beyond the bounded scan" : ""}.`,
 		paths: sources.map(({ path: sourcePath }) => sourcePath),
 	}];
 }

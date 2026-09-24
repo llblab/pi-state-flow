@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.19.1: Lazy Isolation and Task-Driven History
+
+- `Lazy projection isolation`: Automatic recent transitions omit entire lazy patches, including deletions, and discard empty visible records without renumbering history. Hot changes, artifact metadata filtering and bounded lazy navigation remain available. Canonical state/history, explicit reads and already communicated user/tool/response text are unchanged.
+- `Task-driven history`: Missing paths and runtime hints do not require historical search. Active/passive guidance and both Skills permit targeted historical reads when useful to the task, without separate user permission, while forbidding automatic resurrection of deleted memory. Dangling-reference hints describe current reference owners, not relocated targets or recovery duties; existing lookup bounds and projection rules remain intact.
+
 ## 0.19.0: Awaited Memory and Lossless Mode Changes
 
 - `Lossless context toggles`: Stop retains uncompiled conversation through Start/Stop, reload and restart without resurrecting compiled history. Interrupted runs keep their native anchor or conservatively retain available context. Uncheckpointed requests and interrupted boundary continuations survive idle Stop/reload even without a specification; successful bootstrap releases the extra context. Completed idle Stop stays bounded.

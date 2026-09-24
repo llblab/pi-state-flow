@@ -44,6 +44,141 @@ import {
 	type RealPiFixture,
 } from "./pi-harness.ts";
 
+for (const mode of ["active", "bootstrap", "reload", "stop-start"] as const) test(`real Pi automatic lazy history stays hidden across ${mode} without redacting native evidence`, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, autoStart: mode !== "bootstrap", passiveTools: true, passiveBootstrap: true });
+	const session = await f.createSession("new");
+	const scopes = ["global", "cwd", "session"] as const;
+	const body = "LAZY-HISTORY-BODY-".repeat(1024);
+	const blocks = (context: Context) => context.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+		.filter((part: any) => part.type === "text" && /^State Flow (runtime context|exit handoff|passive)/.test(part.text));
+	const checkProjection = (context: Context) => {
+		for (const block of blocks(context)) assert.doesNotMatch(block.text, /LAZY-HISTORY-BODY-/);
+	};
+	for (const phase of ["write", "replace", "delete"] as const) {
+		let inspected = false;
+		const patch = Object.fromEntries(scopes.map((scope) => [scope, {
+			lazy: { releasePlan: phase === "delete" ? null : phase === "replace" ? [body, scope] : { body, scope } },
+			...(phase === "write" ? { working: { visible: `HOT-${scope}` } } : {}),
+		}]));
+		f.faux.setResponses([(context) => {
+			checkProjection(context);
+			return fauxAssistantMessage(fauxToolCall("patch_state", patch), { stopReason: "toolUse" });
+		}, (context) => {
+			checkProjection(context);
+			if (phase !== "delete") assert.match(JSON.stringify(context.messages), /LAZY-HISTORY-BODY-/, "the current native tool trajectory is not redacted");
+			inspected = true;
+			return fauxAssistantMessage("Saved");
+		}]);
+		await session.prompt(`Perform the ${phase} operation`);
+		assert.equal(inspected, true, `${phase} provider assertions completed`);
+	}
+	const semantic = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session))
+		.filter(({ path }) => !/(?:^|\/)(?:config|runtime)\.json$/.test(path));
+	const before = semantic();
+	assert.match(before.map((file) => file.bytes ? Buffer.from(file.bytes).toString("utf8") : "").join("\n"), /LAZY-HISTORY-BODY-/, "canonical retained patches still contain the body");
+	if (mode === "reload") await session.reload();
+	if (mode === "stop-start") await session.prompt("/state-flow-stop");
+	if (mode === "bootstrap" || mode === "stop-start") await session.prompt("/state-flow-start");
+	const calls = f.faux.state.callCount;
+	let inspected = false;
+	f.faux.setResponses([(context) => {
+		assert.ok(blocks(context).length > 0);
+		checkProjection(context);
+		const text = JSON.stringify(blocks(context));
+		assert.match(text, /HOT-session/);
+		if (mode === "bootstrap") {
+			assert.equal(latestSnapshot(session).meta.bootstrap, true);
+			assert.match(JSON.stringify(context.messages), /LAZY-HISTORY-BODY-/, "unfinished bootstrap keeps the actual prior conversation");
+		}
+		assert.deepEqual(semantic(), before, "projection and preparation do not rewrite retained semantic history");
+		inspected = true;
+		return fauxAssistantMessage("Saved");
+	}]);
+	await session.prompt("Continue without reading or restoring removed detail");
+	assert.equal(inspected, true, "provider assertions completed rather than becoming a scripted provider error");
+	assert.equal(f.faux.state.callCount, calls + 1, "projection cannot add a hydration or repair inference");
+	const current = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	await current.refreshCurrentMemory();
+	for (const scope of scopes) assert.equal(current.read(0, scope).lazy.releasePlan, undefined);
+});
+
+for (const active of [false, true]) for (const needHistory of [false, true]) test(`real Pi missing hint leaves historical reading to the task (active=${active}, history=${needHistory})`, async (t) => {
+	const tools: Array<{ name: string; input: unknown }> = [];
+	const f = await realPiFixture(t, {
+		initializeRepository: false, autoStart: active, passiveTools: true, passiveBootstrap: true,
+		extensions: [{ name: "observe-memory-tools", factory: (pi) => {
+			pi.on("tool_call", (event) => { tools.push({ name: event.toolName, input: structuredClone(event.input) }); });
+		} }],
+	});
+	const session = await f.createSession("new");
+	const scopes = ["global", "cwd", "session"] as const;
+	const values = scopes.map((scope) => `${scope}-EXPLICIT-LAZY-BODY-`.repeat(256));
+	let currentChecked = false, hintChecked = false, historyChecked = false;
+	const result = (context: Context, id: string) => {
+		const message = context.messages.find((entry: any) => entry.role === "toolResult" && entry.toolCallId === id) as any;
+		assert.ok(message && !message.isError);
+		return JSON.parse(message.content[0].text);
+	};
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", Object.fromEntries(scopes.map((scope, index) => [scope, {
+			lazy: { releasePlan: values[index] },
+			...(scope === "session" ? { working: { reference: { $ref: "session.lazy.releasePlan" } } } : {}),
+		}]))), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("read_state", { paths: scopes.map((scope) => `${scope}.lazy.releasePlan`) }, { id: "current-lazy" }), { stopReason: "toolUse" }),
+		(context) => {
+			assert.deepEqual(result(context, "current-lazy"), { value: values });
+			currentChecked = true;
+			return fauxAssistantMessage(fauxToolCall("patch_state", Object.fromEntries(scopes.map((scope) => [scope, { lazy: { releasePlan: null } }]))), { stopReason: "toolUse" });
+		},
+		fauxAssistantMessage("Ready"),
+	]);
+	await session.prompt("Store, explicitly read and remove the detail");
+	const offset = latestSnapshot(session).meta.step - 1;
+	const historicalPaths = scopes.map((scope) => `${scope}[${offset}].lazy.releasePlan`);
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	let before: ReturnType<typeof files> = [], checkpoints = 0;
+	const calls = f.faux.state.callCount;
+	tools.length = 0;
+	f.faux.setResponses([
+		() => {
+			before = files();
+			checkpoints = snapshots(session).length;
+			return fauxAssistantMessage(fauxToolCall("read_state", { path: "session.lazy.releasePlan" }, { id: "missing-lazy" }), { stopReason: "toolUse" });
+		},
+		(context) => {
+			const hint = result(context, "missing-lazy");
+			assert.equal(hint.value, null);
+			assert.deepEqual(hint.hint[0].paths, ["session.working.reference"]);
+			assert.match(hint.hint[0].message, /if relevant to the task/);
+			assert.doesNotMatch(JSON.stringify(hint), /EXPLICIT-LAZY-BODY|Reconcile|restore|search history/);
+			assert.deepEqual(files(), before, "the hint itself never publishes memory");
+			assert.equal(snapshots(session).length, checkpoints);
+			hintChecked = true;
+			return needHistory
+				? fauxAssistantMessage(fauxToolCall("read_state", { paths: historicalPaths }, { id: "historical-lazy" }), { stopReason: "toolUse" })
+				: fauxAssistantMessage("Continue without the old detail");
+		},
+		...(needHistory ? [(context: Context) => {
+			assert.deepEqual(result(context, "historical-lazy"), { value: values }, "explicit offsets retain exact data despite automatic visibility filtering");
+			assert.deepEqual(files(), before);
+			assert.equal(snapshots(session).length, checkpoints);
+			historyChecked = true;
+			return fauxAssistantMessage("Use historical evidence without restoring it");
+		}] : []),
+	]);
+	await session.prompt(needHistory ? "The earlier detail is useful; inspect the selected historical boundary" : "The earlier detail is unnecessary; continue if absent");
+	assert.equal(f.faux.state.callCount, calls + (needHistory ? 3 : 2));
+	assert.deepEqual(tools, [
+		{ name: "read_state", input: { path: "session.lazy.releasePlan" } },
+		...(needHistory ? [{ name: "read_state", input: { paths: historicalPaths } }] : []),
+	]);
+	assert.deepEqual([currentChecked, hintChecked, historyChecked], [true, true, needHistory]);
+	const current = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	await current.refreshCurrentMemory();
+	for (const scope of scopes) assert.equal(current.read(0, scope).lazy.releasePlan, undefined);
+	if (!active) assert.deepEqual(files(), before, "passive hints and reads do not add a response publication either");
+});
+
 for (const control of ["stop", "start"] as const) test(`real Pi ${control} keeps local mode off while awaiting a partial foreign publication without private leakage`, { timeout: 20_000 }, async (t) => {
 	let child: ReturnType<typeof childProcess.spawn> | undefined;
 	let closed: ReturnType<typeof once> | undefined;
