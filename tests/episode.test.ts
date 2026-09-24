@@ -163,7 +163,8 @@ test("missing Git commit identity cannot reject or roll back accepted canonical 
 		const warnings = h.notifications.filter((message) => message.includes("state saved; Git backup failed"));
 		assert.equal(warnings.length, 1);
 		assert.match(warnings[0], /Git command failed \(commit-tree /);
-		assert.match(warnings[0], /unable to auto-detect email address/);
+		// Git's first identity failure depends on the host's inferred name/email.
+		assert.match(warnings[0], /unable to auto-detect email address|empty ident name/);
 		assert.ok(warnings[0].length <= 220);
 		assert.throws(() => execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "--verify", "HEAD"], { stdio: "ignore" }));
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), files);
