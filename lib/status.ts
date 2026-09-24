@@ -1,6 +1,7 @@
 import type { ArtifactInvalidationReason } from "./artifact.ts";
 import { projectRecentTransitionsWithLimit, type RecentTransitionWindow } from "./history.ts";
 import { retainedMemoryScopes } from "./memory.ts";
+import { conciseDiagnostic } from "./protocol.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { overlayStates, type ScopedStates, type StateScope } from "./state.ts";
 import type { ScopeRevisions, TransitionBoundary } from "./temporal.ts";
@@ -27,6 +28,7 @@ export interface StatusDiagnostics {
 	temporal?: { head: TransitionBoundary; historyDepth: number; tailCounts: Record<StateScope, number>; revisions: ScopeRevisions };
 	staleArtifacts: readonly StaleArtifactDiagnostic[];
 	durableStateError?: string;
+	publicationError?: string;
 }
 
 export function formatScopeRevisionVector(revisions: ScopeRevisions): string {
@@ -63,7 +65,7 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 		];
 	const temporal = available ? diagnostics.temporal : undefined;
 	const temporalLines = temporal === undefined
-		? [`Temporal materialization unavailable: ${diagnostics.durableStateError ?? "no selected branch runtime"}`,
+		? [`Temporal materialization unavailable: ${conciseDiagnostic(diagnostics.durableStateError ?? "no selected branch runtime")}`,
 			`Hot history: unavailable; configured maximum depth ${diagnostics.historyLimit}`,
 			"Retained patch tails: unavailable"]
 		: [`Temporal head: ${JSON.stringify(temporal.head.id)}; branch-local position ${temporal.head.position}`,
@@ -82,6 +84,7 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 		"Memory: owner state-flow; global retention enabled; global fallback active",
 		`Memory-bearing scopes: global ${memoryScopes?.global ?? "unknown"}; CWD ${memoryScopes?.cwd ?? "unknown"}; session ${memoryScopes?.session ?? "unknown"}`,
 		...temporalLines,
+		...(diagnostics.publicationError === undefined ? [] : [`Memory writes paused after Stop: ${conciseDiagnostic(diagnostics.publicationError)}`]),
 		`Artifacts: global ${artifacts("global")}; CWD ${artifacts("cwd")}; session ${artifacts("session")}; pending invalidations ${invalidated}`,
 		available ? `Recent transitions: global ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "global")).length}; CWD ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "cwd")).length}; session ${diagnostics.recent.filter(({ transitions }) => transitions.some(({ scope }) => scope === "session")).length}; active ${projectedRecent.length}` : "Recent transitions: unavailable",
 		...invalidationLines,

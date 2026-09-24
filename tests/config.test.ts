@@ -70,28 +70,28 @@ test("load-time auto-start controls new sessions, not resumed branch mode", asyn
 	const options = { agentDir: f.agentDir, repositoryRoot: f.repositoryRoot, useConfiguredDirectory: true,
 		initializeRepository: false, cwd: join(f.root, "project"), sessionId: "first" };
 	const h = harness(options);
-	h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
+	await h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	assert.equal(h.repositoryRoot, f.repositoryRoot);
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	assert.equal(existsSync(join(h.repositoryRoot, "checkpoint.json")), true);
-	h.beforeAgentStart("Automatic");
+	await h.beginRun("Automatic");
 	await commitTerminal(h, {}, { retained: true });
 	await h.commands.get("state-flow-stop").handler("", h.ctx);
 	const stopped = structuredClone(h.entries);
 	assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), { autoStart: true });
 	const resumed = harness(options);
 	resumed.entries.push(...stopped);
-	resumed.handlers.get("session_start")!({ reason: "resume" }, resumed.ctx);
+	await resumed.handlers.get("session_start")!({ reason: "resume" }, resumed.ctx);
 	assert.equal(resumed.activeTools.includes("patch_state"), false);
 	assert.equal(resumed.readState().working.retained, true);
 	f.write({ autoStart: false });
 	// An existing registration retains its settings until reload, even for another new session.
 	h.entries.splice(0);
 	h.ctx.sessionManager.getSessionId = () => "before-reload";
-	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	const reloaded = harness({ ...options, sessionId: "after-reload" });
-	reloaded.handlers.get("session_start")!({ reason: "new" }, reloaded.ctx);
+	await reloaded.handlers.get("session_start")!({ reason: "new" }, reloaded.ctx);
 	assert.equal(reloaded.activeTools.includes("patch_state"), false);
 	assert.equal(reloaded.entries.length, 0);
 });
@@ -104,9 +104,9 @@ test("configured historyLimit controls runtime folding and historical reads", as
 	t.after(() => { process.env.PATH = path; });
 	const h = harness({ agentDir: f.agentDir, repositoryRoot: f.repositoryRoot, useConfiguredDirectory: true,
 		initializeRepository: false, cwd: join(f.root, "project"), sessionId: "limited" });
-	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	for (let index = 1; index <= 5; index++) {
-		h.beforeAgentStart(`Iteration ${index}`);
+		await h.beginRun(`Iteration ${index}`);
 		await commitTerminal(h, {}, { index }, `Answer ${index}`);
 	}
 	assert.equal(h.readState(3).working.index, 4);
@@ -118,8 +118,8 @@ for (const historyLimit of [0, 1, 7, 12]) test(`scope patch-history reads honor 
 	f.write({ autoStart: true, historyLimit });
 	const h = harness({ agentDir: f.agentDir, repositoryRoot: f.repositoryRoot, useConfiguredDirectory: true,
 		initializeRepository: false, cwd: join(f.root, "project"), sessionId: "patch-history" });
-	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	h.beforeAgentStart("Build retained history");
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.beginRun("Build retained history");
 	for (let index = 1; index <= historyLimit + 1; index++) {
 		await h.tools.get("patch_state")!.execute(`patch-${index}`, {
 			global: { working: { index } }, cwd: { working: { index } }, session: { working: { index } },
@@ -153,9 +153,9 @@ test("historyLimit zero retains only current state through runtime publication",
 	t.after(() => { process.env.PATH = path; });
 	const h = harness({ agentDir: f.agentDir, repositoryRoot: f.repositoryRoot, useConfiguredDirectory: true,
 		initializeRepository: false, cwd: join(f.root, "project"), sessionId: "current-only" });
-	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	for (let index = 1; index <= 2; index++) {
-		h.beforeAgentStart(`Iteration ${index}`);
+		await h.beginRun(`Iteration ${index}`);
 		await commitTerminal(h, {}, { index }, `Answer ${index}`);
 	}
 	assert.equal(h.readState(0).working.index, 2);
@@ -163,7 +163,7 @@ test("historyLimit zero retains only current state through runtime publication",
 	assert.throws(() => h.readState(1), /integer from 0 to 0/);
 });
 
-test("SDK storage override selects its own repository-global configuration without scanning adjacent sources", (t) => {
+test("SDK storage override selects its own repository-global configuration without scanning adjacent sources", async (t) => {
 	const f = fixture(t);
 	const override = join(f.root, "override");
 	mkdirSync(override);
@@ -174,7 +174,7 @@ test("SDK storage override selects its own repository-global configuration witho
 	const adjacentSource = join(f.agentDir, "unregistered-source.md");
 	writeFileSync(adjacentSource, "source bytes");
 	const h = harness({ agentDir: f.agentDir, repositoryRoot: override, initializeRepository: false });
-	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	assert.equal(existsSync(join(h.repositoryRoot, "checkpoint.json")), true);
 	h.beforeAgentStart("Sources");

@@ -45,7 +45,7 @@ export function hasCwdMaterialization(cwd: string, repositoryRoot: string): bool
 		join(directory, CHECKPOINT_FILE), join(directory, PATCHES_FILE), join(directory, META_FILE),
 	], root);
 	if (checkpoint!.content !== undefined) return parseScopeStream(checkpoint!.content, patches!.content, "cwd", cwd, meta!.content) !== undefined;
-	if (patches!.content !== undefined) throw new Error(`State Flow tail has no provable checkpoint: ${directory}`);
+	if (patches!.content !== undefined) throw new Error(`State Flow tail has no provable checkpoint: ${JSON.stringify(directory)}`);
 	return false;
 }
 
@@ -174,7 +174,7 @@ export function sessionRuntimePaths(cwd: string, sessionId: string, repositoryRo
 export function loadScopeStream(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string, sessionKey = sessionId): ScopeStream | undefined {
 	const paths = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
 	if (readRegularBytes(join(paths.directory, STATE_FILE), repositoryRoot) !== undefined) {
-		throw new Error(`Unsupported State Flow storage format: ${paths.directory}`);
+		throw new Error(`Unsupported State Flow storage format: ${JSON.stringify(paths.directory)}`);
 	}
 	return parseScopeStream(readRegularFile(paths.checkpoint, repositoryRoot), readRegularFile(paths.patches, repositoryRoot), scope, scope === "cwd" ? cwd : undefined, readRegularFile(paths.meta, repositoryRoot));
 }
@@ -205,7 +205,7 @@ export function temporalStateFileUpdates(
 		seen.add(scope);
 		const paths = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
 		if (readRegularBytes(join(paths.directory, STATE_FILE), repositoryRoot) !== undefined) {
-			throw new Error(`Unsupported State Flow storage format: ${paths.directory}`);
+			throw new Error(`Unsupported State Flow storage format: ${JSON.stringify(paths.directory)}`);
 		}
 		const sources = serializeScopeStream(view.scopes[scope], scope, scope === "cwd" ? cwd : undefined);
 		return [{ path: paths.checkpoint, content: sources.checkpoint }, { path: paths.patches, content: sources.patches }];
@@ -248,11 +248,11 @@ function parseMetadataDocument(source: string | undefined, label: string): Recor
 
 /** Missing provenance is unavailable evidence, never corrupt state. Unknown metadata is preserved by writers. */
 export function parseScopeProvenance(source: string | undefined, path: string): ArtifactProvenanceRegistry {
-	const value = parseMetadataDocument(source, `State Flow provenance file: ${path}`);
+	const value = parseMetadataDocument(source, `State Flow provenance file: ${JSON.stringify(path)}`);
 	if (Object.keys(value).length === 0) return {};
-	if (value.version !== 1 && value.version !== 2) throw new Error(`Invalid State Flow provenance document: ${path}`);
+	if (value.version !== 1 && value.version !== 2) throw new Error(`Invalid State Flow provenance document: ${JSON.stringify(path)}`);
 	if (!Object.hasOwn(value, "artifacts")) return {};
-	return parseArtifactProvenanceRegistry(value.artifacts, `State Flow provenance at ${path}`);
+	return parseArtifactProvenanceRegistry(value.artifacts, `State Flow provenance at ${JSON.stringify(path)}`);
 }
 
 export interface ScopePaths {
@@ -345,7 +345,7 @@ function missing(error: unknown): boolean {
 function assertWithinRepository(path: string, repositoryRoot: string): void {
 	const child = relative(repositoryRoot, path);
 	if (child === "" || child === ".." || child.startsWith(`..${sep}`)) {
-		throw new Error(`Durable State Flow path escapes its repository: ${path}`);
+		throw new Error(`Durable State Flow path escapes its repository: ${JSON.stringify(path)}`);
 	}
 }
 
@@ -367,7 +367,7 @@ function assertDirectoryChain(repositoryRoot: string, directory: string, create:
 		try {
 			const metadata = lstatSync(current);
 			if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-				throw new Error(`Durable State Flow directory is not a regular directory: ${current}`);
+				throw new Error(`Durable State Flow directory is not a regular directory: ${JSON.stringify(current)}`);
 			}
 		} catch (error) {
 			if (!missing(error)) throw error;
@@ -384,7 +384,7 @@ function readRegularBytes(path: string, repositoryRoot: string): Buffer | undefi
 	try {
 		descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
 		if (!fstatSync(descriptor).isFile()) {
-			throw new Error(`Durable State Flow path is not a regular file: ${path}`);
+			throw new Error(`Durable State Flow path is not a regular file: ${JSON.stringify(path)}`);
 		}
 		return readFileSync(descriptor);
 	} catch (error) {
@@ -392,7 +392,7 @@ function readRegularBytes(path: string, repositoryRoot: string): Buffer | undefi
 		if (error instanceof Error
 			&& "code" in error
 			&& (error as NodeJS.ErrnoException).code === "ELOOP") {
-			throw new Error(`Durable State Flow path is not a regular file: ${path}`);
+			throw new Error(`Durable State Flow path is not a regular file: ${JSON.stringify(path)}`);
 		}
 		throw error;
 	} finally {
@@ -416,7 +416,7 @@ function fileBase(path: string, repositoryRoot: string): DurableFileBase {
 
 function assertCurrentBytes(path: string, root: string, expected: Uint8Array | undefined): void {
 	if (byteIdentity(readRegularBytes(path, root)) !== byteIdentity(expected)) {
-		throw new Error(`State Flow file conflict at ${path}; preserve concurrent bytes and reconcile before retrying`);
+		throw new Error(`State Flow file conflict at ${JSON.stringify(path)}; concurrent bytes preserved`);
 	}
 }
 
@@ -424,7 +424,7 @@ function assertCurrentBytes(path: string, root: string, expected: Uint8Array | u
 export function captureOwnedFileBases(paths: readonly string[], repositoryRoot: string): DurableFileBase[] {
 	const root = resolve(repositoryRoot);
 	return paths.map((path) => {
-		if (!isStateFlowOwnedPath(path, root)) throw new Error(`Cannot capture a non-State Flow path: ${path}`);
+		if (!isStateFlowOwnedPath(path, root)) throw new Error(`Cannot capture a non-State Flow path: ${JSON.stringify(path)}`);
 		return fileBase(resolve(path), root);
 	});
 }
@@ -442,7 +442,7 @@ function prepareFile(path: string, repositoryRoot: string, content: string | und
 	assertDirectoryChain(repositoryRoot, dirname(path), true);
 	const original = readRegularBytes(path, repositoryRoot);
 	if (expected !== undefined && byteIdentity(original) !== expected.identity) {
-		throw new Error(`State Flow file conflict during preparation: ${path}`);
+		throw new Error(`State Flow file conflict during preparation: ${JSON.stringify(path)}`);
 	}
 	const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
 	const next = content === undefined ? undefined : Buffer.from(content);
@@ -502,7 +502,7 @@ export interface OwnedFileUpdate {
 export function assertOwnedFileUpdates(updates: readonly OwnedFileUpdate[], repositoryRoot: string): void {
 	const root = resolve(repositoryRoot);
 	for (const update of updates) {
-		if (!isStateFlowOwnedPath(update.path, root)) throw new Error(`Cannot inspect a non-State Flow path: ${update.path}`);
+		if (!isStateFlowOwnedPath(update.path, root)) throw new Error(`Cannot inspect a non-State Flow path: ${JSON.stringify(update.path)}`);
 		assertCurrentBytes(update.path, root, update.content === undefined ? undefined : Buffer.from(update.content));
 	}
 }
@@ -520,11 +520,11 @@ export function writeOwnedFileUpdates(
 	try {
 		for (const update of updates) {
 			const path = resolve(update.path);
-			if (!isStateFlowOwnedPath(path, root)) throw new Error(`Cannot update a non-State Flow path: ${path}`);
-			if (seen.has(path)) throw new Error(`Duplicate State Flow file update: ${path}`);
+			if (!isStateFlowOwnedPath(path, root)) throw new Error(`Cannot update a non-State Flow path: ${JSON.stringify(path)}`);
+			if (seen.has(path)) throw new Error(`Duplicate State Flow file update: ${JSON.stringify(path)}`);
 			seen.add(path);
 			const base = byPath.get(path);
-			if (base === undefined) throw new Error(`State Flow file update has no captured base: ${path}`);
+			if (base === undefined) throw new Error(`State Flow file update has no captured base: ${JSON.stringify(path)}`);
 			prepared.push(prepareFile(path, root, update.content, base));
 		}
 	} catch (error) {
@@ -546,19 +546,19 @@ export function restoreDurableFileBases(
 	for (const base of bases) {
 		assertWithinRepository(base.path, root);
 		if (!isStateFlowOwnedPath(base.path, root)) {
-			throw new Error(`Cannot restore a non-State Flow path: ${base.path}`);
+			throw new Error(`Cannot restore a non-State Flow path: ${JSON.stringify(base.path)}`);
 		}
 	}
 	for (const base of bases) {
 		const update = expected.get(resolve(base.path));
-		if (update === undefined) throw new Error(`Rollback has no published basis: ${base.path}`);
+		if (update === undefined) throw new Error(`Rollback has no published basis: ${JSON.stringify(base.path)}`);
 		assertCurrentBytes(base.path, root, update.content === undefined ? undefined : Buffer.from(update.content));
 		if (base.identity === "missing") {
 			rmSync(base.path, { force: true });
 			continue;
 		}
 		const original = base.bytes ?? (base.content === undefined ? undefined : Buffer.from(base.content));
-		if (original === undefined) throw new Error(`Durable State Flow base content is missing: ${base.path}`);
+		if (original === undefined) throw new Error(`Durable State Flow base content is missing: ${JSON.stringify(base.path)}`);
 		assertDirectoryChain(root, dirname(base.path), true);
 		const temporary = join(dirname(base.path), `.${basename(base.path)}.${process.pid}.${randomUUID()}.restore`);
 		try {

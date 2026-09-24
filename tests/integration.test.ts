@@ -1,21 +1,26 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import childProcess from "node:child_process";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { basename, join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage, getCurrentTools, getSystemMessageText, Type, type Context, type ImageContent } from "@earendil-works/pi-ai";
-import { SessionManager, type AgentBeforeSettleEvent, type ExtensionContext, type TurnEndEvent } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type AgentSession, type AgentBeforeSettleEvent, type ExtensionContext, type TurnEndEvent } from "@earendil-works/pi-coding-agent";
 import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER, type ArtifactProvenanceRegistry } from "../lib/artifact.ts";
 import { STATE_FLOW_COMPACTION_SUMMARY } from "../lib/compaction.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
+import { temporalScopeRevisions } from "../lib/temporal.ts";
 import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { emptyState, projectStateForModel, type MaterializedState } from "../lib/state.ts";
 import type { JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
+import { withStorageTransaction } from "../lib/storage.ts";
+import { stateFlowLogPath } from "../lib/logging.ts";
 import { hashSkillSource, SKILL_ARTIFACT_COMPILER } from "../lib/skills.ts";
 import {
 	cwdScopePaths,
@@ -39,7 +44,988 @@ import {
 	type RealPiFixture,
 } from "./pi-harness.ts";
 
-test("real Pi self-heals a wholly absent CWD pair during response reconciliation without resurrecting it", { timeout: 30_000 }, async (t) => {
+for (const control of ["stop", "start"] as const) test(`real Pi ${control} keeps local mode off while awaiting a partial foreign publication without private leakage`, { timeout: 20_000 }, async (t) => {
+	let child: ReturnType<typeof childProcess.spawn> | undefined;
+	let closed: ReturnType<typeof once> | undefined;
+	let stopping: Promise<void> | undefined;
+	t.after(async () => {
+		if (child?.exitCode === null) child.kill("SIGKILL");
+		await closed;
+		await stopping?.catch(() => undefined);
+	});
+	const f = await realPiFixture(t, { initializeRepository: false, autoStart: true });
+	const session = await f.createSession("new");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { private: "LOCAL-PRIVATE" } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Previous answer"),
+	]);
+	await session.prompt("Retain this private memory");
+	if (control === "start") await session.prompt("/state-flow-stop");
+	const cached = f.readState(session);
+	const previous = latestSnapshot(session);
+	const count = snapshots(session).length;
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	const lifecycle = sessionRuntimePaths(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	const semantic = () => files().filter(({ path }) => path !== lifecycle.config && path !== lifecycle.runtime);
+	const ready = join(f.root, "stop-writer-ready");
+	const release = join(f.root, "stop-writer-release");
+	child = childProcess.spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+		import fs from "node:fs";
+		import { syncBuiltinESMExports } from "node:module";
+		import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
+		import { temporalScopePaths } from ${JSON.stringify(new URL("../lib/durable.ts", import.meta.url).href)};
+		import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
+		import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+		const { root, cwd, ready, release } = JSON.parse(process.argv[1]);
+		const pauseAt = temporalScopePaths(cwd, "peer", "global", root).patches;
+		const rename = fs.renameSync;
+		fs.renameSync = (from, to) => {
+			rename(from, to);
+			if (to !== pauseAt) return;
+			fs.writeFileSync(ready, "partial");
+			const deadline = Date.now() + 15_000;
+			while (!fs.existsSync(release)) {
+				if (Date.now() > deadline) throw new Error("Stop fixture gate expired");
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+			}
+		};
+		syncBuiltinESMExports();
+		await new TemporalRuntime(cwd, "peer", root).withPatchTransaction((tx) => {
+			const stage = stageAtomicScopePatches(tx.states, {
+				global: { working: { globalPeer: "FOREIGN-G" } },
+				cwd: { working: { cwdPeer: "FOREIGN-C" } },
+				session: { working: { private: "FOREIGN-PRIVATE-SECRET" } },
+			}, [], tx.causalBasis);
+			commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+		});
+	`, JSON.stringify({ root: f.repositoryRoot, cwd: f.cwd, ready, release })], { stdio: ["ignore", "ignore", "inherit"] });
+	closed = once(child, "close");
+	// Process/SDK startup competes with the full suite; the separate 2.2-second held-owner witness is unchanged.
+	const deadline = Date.now() + 10_000;
+	while (!existsSync(ready)) {
+		if (Date.now() > deadline || child.exitCode !== null) assert.fail(`foreign ${control} fixture writer did not reach its gate (exit ${child.exitCode})`);
+		await delay(10);
+	}
+	const partial = files();
+	let ended = false;
+	stopping = session.prompt(`/state-flow-${control}`).then(() => { ended = true; });
+	await delay(2_200);
+	assert.equal(ended, false);
+	assert.equal(f.statuses.at(-1), undefined);
+	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
+	assert.deepEqual(files(), partial);
+	assert.deepEqual(f.readState(session), cached);
+	assert.equal(snapshots(session).length, count);
+	assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8").trim(), String(child.pid));
+	writeFileSync(release, "continue");
+	assert.equal((await closed)[0], 0);
+	const foreign = semantic();
+	await stopping;
+	assert.deepEqual(semantic(), foreign, "this mode change preserves accepted semantic and provenance bytes");
+	assert.equal(latestSnapshot(session).config.enabled, control === "start");
+	assert.equal(latestSnapshot(session).meta.step, previous.meta.step);
+	assert.equal(snapshots(session).length, count + 1);
+	assert.deepEqual(f.readState(session).working, { globalPeer: "FOREIGN-G", cwdPeer: "FOREIGN-C", private: "LOCAL-PRIVATE" });
+	assert.deepEqual(f.readState(session, 0, "session").working, { private: "LOCAL-PRIVATE" });
+	assert.equal(f.notifications.some((notice) => /paused|(?:Start|Stop).*failed/.test(notice)), false);
+	f.faux.setResponses([(context) => {
+		const text = JSON.stringify(context.messages);
+		for (const value of ["FOREIGN-G", "FOREIGN-C", "LOCAL-PRIVATE"]) assert.ok(text.includes(value), value);
+		assert.equal(text.includes("FOREIGN-PRIVATE-SECRET"), false);
+		return fauxAssistantMessage("Accepted mode change is visible");
+	}]);
+	await session.prompt("Continue with the accepted memory");
+});
+
+test("real Pi Abort cancels an in-run Start without waiting for the canonical owner or another provider call", { timeout: 15_000 }, async (t) => {
+	let entered!: () => void;
+	const reached = new Promise<void>((resolve) => { entered = resolve; });
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	let holder: Promise<unknown> | undefined;
+	let prompt: Promise<void> | undefined;
+	let starting: Promise<void> | undefined;
+	let abortNative: (() => Promise<void>) | undefined;
+	t.after(async () => { release(); await abortNative?.(); await holder; await Promise.allSettled([prompt, starting]); });
+	let nativeSignal: AbortSignal | undefined;
+	const f = await realPiFixture(t, {
+		initializeRepository: false, autoStart: true, tools: ["read", "patch_state", "read_state", "await_native_abort"],
+		extensions: [{ name: "native-start-boundary", factory: (pi) => {
+			pi.registerTool({
+				name: "await_native_abort", label: "Await native Abort", description: "Isolated lifecycle witness", parameters: Type.Object({}),
+				async execute(_id, _params, signal) {
+					nativeSignal = signal;
+					entered();
+					await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+					return { content: [{ type: "text", text: "Native wait cancelled" }], details: {} };
+				},
+			});
+		} }],
+	});
+	const session = await f.createSession("new");
+	abortNative = () => session.abort();
+	assert.ok(session.getActiveToolNames().includes("await_native_abort"));
+	f.faux.setResponses([fauxAssistantMessage("Previous accepted answer")]);
+	await session.prompt("Keep this answer");
+	await session.prompt("/state-flow-stop");
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	const before = files();
+	const entries = snapshots(session).length;
+	holder = withStorageTransaction(f.repositoryRoot, () => gate);
+	let calls = 0;
+	f.faux.setResponses([() => { calls += 1; return fauxAssistantMessage(fauxToolCall("await_native_abort", {}), { stopReason: "toolUse" }); }]);
+	prompt = session.prompt("Retain this uncompiled request after Abort");
+	await reached;
+	assert.ok(nativeSignal && !nativeSignal.aborted);
+	starting = session.prompt("/state-flow-start");
+	await delay(40);
+	await Promise.race([session.abort(), delay(1_000).then(() => assert.fail("native Abort waited for Start's file owner"))]);
+	await Promise.all([prompt, starting]);
+	assert.equal(nativeSignal.aborted, true);
+	assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8"), `${process.pid}\n`);
+	assert.deepEqual(files(), before);
+	assert.equal(snapshots(session).length, entries);
+	assert.match(JSON.stringify(session.sessionManager.getBranch()), /Retain this uncompiled request after Abort/);
+	assert.equal(calls, 1);
+	assert.equal(f.statuses.at(-1), undefined);
+	assert.match(f.notifications.at(-1)!, /Start failed/);
+	release(); await holder;
+	await delay(40);
+	assert.deepEqual(files(), before, "an aborted activation never revives when the lock becomes free");
+	assert.equal(calls, 1);
+});
+
+for (const outcome of ["accept", "cancel"] as const) test(`real Pi production preparation ${outcome}s beside a partial foreign publication before inference`, { timeout: 30_000 }, async (t) => {
+	let child: ReturnType<typeof childProcess.spawn> | undefined;
+	let closed: ReturnType<typeof once> | undefined;
+	let prompt: Promise<void> | undefined;
+	t.after(async () => {
+		if (child?.exitCode === null) child.kill("SIGKILL");
+		await closed;
+		await prompt?.catch(() => undefined);
+	});
+	let beforeSeen = false;
+	let beforeSignal: AbortSignal | undefined;
+	const f = await realPiFixture(t, {
+		initializeRepository: false, autoStart: true,
+		extensions: [{ name: "observe-native-preparation", factory: (pi) => {
+			pi.on("before_agent_start", (_event, ctx) => { beforeSeen = true; beforeSignal = ctx.signal; });
+		} }],
+	});
+	const session = await f.createSession("new");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { private: "LOCAL-PRIVATE" } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Previous answer"),
+	]);
+	await session.prompt("Establish accepted memory");
+	beforeSeen = false;
+	const cached = f.readState(session);
+	const previous = latestSnapshot(session);
+	const checkpointCount = snapshots(session).length;
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	const privateDirectory = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session)).directory;
+	const privateFiles = files().filter(({ path }) => path.startsWith(privateDirectory));
+	assert.equal(privateFiles.length, 5);
+	const ready = join(f.root, "preparation-writer-ready");
+	const release = join(f.root, "preparation-writer-release");
+	const missing = join(f.cwd, "shared-missing.txt");
+	const returned = join(f.cwd, "returned-during-wait.txt");
+	child = childProcess.spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+		import fs from "node:fs";
+		import { syncBuiltinESMExports } from "node:module";
+		import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
+		import { temporalScopePaths } from ${JSON.stringify(new URL("../lib/durable.ts", import.meta.url).href)};
+		import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
+		import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+		const { root, cwd, ready, release, missing, returned } = JSON.parse(process.argv[1]);
+		const pauseAt = temporalScopePaths(cwd, "peer", "global", root).patches;
+		const rename = fs.renameSync;
+		fs.renameSync = (from, to) => {
+			rename(from, to);
+			if (to !== pauseAt) return;
+			fs.writeFileSync(ready, "partial");
+			const deadline = Date.now() + 20_000;
+			while (!fs.existsSync(release)) {
+				if (Date.now() > deadline) throw new Error("preparation fixture gate expired");
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+			}
+		};
+		syncBuiltinESMExports();
+		await new TemporalRuntime(cwd, "peer", root).withPatchTransaction((tx) => {
+			const stage = stageAtomicScopePatches(tx.states, {
+				global: { working: { globalPeer: "FOREIGN-G" }, artifacts: { [missing]: { description: "Missing global registration" } } },
+				cwd: { working: { cwdPeer: "FOREIGN-C" }, artifacts: {
+					[missing]: { description: "Missing CWD registration" }, [returned]: { description: "Keep the returned source" },
+				} },
+				session: { working: { secret: "FOREIGN-PRIVATE-SECRET" } },
+			}, [], tx.causalBasis);
+			const evidence = { sourceFingerprint: { size: 1, mtimeNs: "1" }, compilerRevision: "artifact-v1" };
+			commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted, {
+				global: { [missing]: evidence }, cwd: { [missing]: evidence },
+			}), tx.causalBasis);
+		});
+	`, JSON.stringify({ root: f.repositoryRoot, cwd: f.cwd, ready, release, missing, returned })], { stdio: ["ignore", "ignore", "inherit"] });
+	closed = once(child, "close");
+	const deadline = Date.now() + 5_000;
+	while (!existsSync(ready)) {
+		if (Date.now() > deadline || child.exitCode !== null) assert.fail("foreign writer did not pause mid-cohort");
+		await delay(10);
+	}
+	const partial = files();
+	const inputs: Context[] = [];
+	f.faux.setResponses([async (context) => {
+		inputs.push(context);
+		assert.equal(latestSnapshot(session).meta.specification, "Prepare against current memory");
+		assert.equal(latestSnapshot(session).meta.step, previous.meta.step + 1);
+		assert.equal(snapshots(session).length, checkpointCount + 1, "lifecycle and maintenance share one checkpoint");
+		const current = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+		await current.refreshCurrentMemory();
+		assert.deepEqual(temporalScopeRevisions(current.view!), { global: 2, cwd: 2, session: 2 });
+		return fauxAssistantMessage("Prepared answer");
+	}]);
+	prompt = session.prompt("Prepare against current memory");
+	await delay(2_200);
+	assert.equal(beforeSeen, true);
+	assert.equal(beforeSignal, undefined);
+	assert.equal(inputs.length, 0, "no provider may read the partial cohort or the older cache");
+	assert.deepEqual(files(), partial);
+	assert.deepEqual(f.readState(session), cached);
+	assert.equal(snapshots(session).length, checkpointCount);
+	assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8").trim(), String(child.pid));
+	if (outcome === "cancel") {
+		await session.abort();
+		await prompt;
+		assert.deepEqual(files(), partial, "native Abort returns while the independent owner still holds exclusion");
+		assert.equal(inputs.length, 0);
+	}
+	writeFileSync(returned, "Source returned before locked validation");
+	writeFileSync(release, "continue");
+	assert.equal((await closed)[0], 0);
+	await prompt;
+	assert.equal(f.notifications.some((notice) => /preparation failed|lock is unavailable/.test(notice)), false);
+	if (outcome === "cancel") {
+		assert.deepEqual(files().filter(({ path }) => path.startsWith(privateDirectory)), privateFiles);
+		assert.deepEqual(f.readState(session), cached);
+		assert.equal(snapshots(session).length, checkpointCount);
+		assert.equal(inputs.length, 0, "releasing the owner cannot revive canceled inference");
+		await session.reload();
+		assert.equal(latestSnapshot(session).meta.bootstrap, true, "native input survives even though canceled preparation wrote no checkpoint");
+		assert.equal(latestSnapshot(session).meta.specification, undefined);
+		await session.prompt("/state-flow-stop");
+		const file = session.sessionFile!;
+		session.dispose();
+		const resumed = await f.createSession("resume", SessionManager.open(file, f.sessionDir));
+		f.faux.setResponses([(context) => {
+			assert.match(JSON.stringify(context.messages), /State Flow exit handoff/);
+			assert.match(JSON.stringify(context.messages), /Prepare against current memory/);
+			return fauxAssistantMessage("Uncompiled input retained");
+		}]);
+		await resumed.prompt("Continue after canceled preparation, reload and Stop");
+		return;
+	}
+	assert.equal(inputs.length, 1);
+	const input = inputs[0];
+	assert.ok(input);
+	const projected = JSON.stringify(input.messages);
+	for (const value of ["FOREIGN-G", "FOREIGN-C", "LOCAL-PRIVATE"]) assert.ok(projected.includes(value), value);
+	assert.equal(projected.includes("FOREIGN-PRIVATE-SECRET"), false);
+	for (const scope of ["global", "cwd"] as const) assert.equal(f.readState(session, 0, scope).artifacts[missing], undefined);
+	assert.equal(f.readState(session, 0, "cwd").artifacts[returned]?.description, "Keep the returned source");
+	assert.equal(loadGlobalProvenance(f.repositoryRoot)[missing], undefined);
+	assert.equal(loadCwdProvenance(f.cwd, f.repositoryRoot)[missing], undefined);
+	assert.equal(f.readState(session).response, "Prepared answer");
+});
+
+test("real Pi aborts before the provider when atomic inference preparation fails, without losing accepted memory", { timeout: 20_000 }, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, autoStart: true });
+	const session = await f.createSession("new");
+	f.faux.setResponses([fauxAssistantMessage("Previous answer")]);
+	await session.prompt("Previously accepted request");
+	const previous = latestSnapshot(session);
+	const cached = f.readState(session);
+	const checkpointCount = snapshots(session).length;
+	const missing = join(f.cwd, "missing-before-failed-preparation.txt");
+	writeGlobalState({ ...emptyState(), working: { foreign: true }, artifacts: { [missing]: { description: "Retain on failure" } } }, f.repositoryRoot);
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	const before = files();
+	const path = sessionRuntimePaths(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)).runtime;
+	let providerCalls = 0;
+	f.faux.setResponses([() => { providerCalls++; return fauxAssistantMessage("Must not be requested"); }]);
+	const rename = fs.renameSync;
+	fs.renameSync = (from, to) => {
+		if (to === path) throw new Error("injected native preparation failure");
+		rename(from, to);
+	};
+	syncBuiltinESMExports();
+	try { await session.prompt("Abort rather than infer from rejected preparation"); }
+	finally { fs.renameSync = rename; syncBuiltinESMExports(); }
+	assert.equal(providerCalls, 0, "throwing from context alone would not prevent Pi from calling the provider");
+	assert.deepEqual(files(), before);
+	assert.deepEqual(f.readState(session), cached);
+	assert.deepEqual(latestSnapshot(session), previous);
+	assert.equal(snapshots(session).length, checkpointCount);
+	assert.match(f.notifications.at(-1)!, /inference preparation failed:.*injected native preparation failure/);
+	await session.abort();
+	f.faux.setResponses([fauxAssistantMessage("Recovered")]);
+	await session.prompt("Retry with valid publication");
+	assert.equal(f.readState(session).working.foreign, true);
+	assert.equal(f.readState(session).artifacts[missing], undefined);
+	assert.equal(f.readState(session).response, "Recovered");
+});
+
+for (const reload of [false, true]) test(`real Pi retains interrupted boundary-continuation evidence at idle Stop${reload ? " after reload" : ""}`, async (t) => {
+	let continued = false;
+	const f = await realPiFixture(t, {
+		initializeRepository: false, autoStart: true,
+		extensions: [{ name: "interruptible-boundary-continuation", factory: (pi) => {
+			pi.on("turn_end", (event) => {
+				if (continued || event.outcome !== "completed") return;
+				continued = true;
+				return { entries: [...event.entries, { type: "custom_message" as const, customType: "continued-work", content: "CONTINUED-WORK", display: false }], continue: true };
+			});
+		} }],
+	});
+	const session = await f.createSession("new");
+	writeFileSync(join(f.cwd, "continued.txt"), "UNCOMPILED-TOOL-EVIDENCE");
+	f.faux.setResponses([
+		fauxAssistantMessage("Accepted before continuing"),
+		fauxAssistantMessage(fauxToolCall("read", { path: "continued.txt" }, { id: "continued-read" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage([], { stopReason: "aborted" }),
+	]);
+	await session.prompt("Original request");
+	assert.equal(latestSnapshot(session).meta.specification, undefined, "boundary continuation does not invent a run specification");
+	if (reload) await session.reload();
+	await session.prompt("/state-flow-stop");
+	f.faux.setResponses([(context) => {
+		const text = JSON.stringify(context.messages);
+		assert.match(text, /State Flow exit handoff/);
+		assert.match(text, /CONTINUED-WORK/);
+		assert.match(text, /UNCOMPILED-TOOL-EVIDENCE/);
+		assert.match(text, /continued-read/);
+		return fauxAssistantMessage("No repeated read needed");
+	}]);
+	await session.prompt("Continue after the interrupted boundary");
+	assert.equal(f.readState(session).response, "Accepted before continuing");
+});
+
+for (const outcome of ["accept", "cancel"] as const) test(`real Pi context provides a cancellable lifecycle boundary: ${outcome}`, { timeout: 20_000 }, async (t) => {
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	let holder: Promise<void> | undefined;
+	let prompt: Promise<void> | undefined;
+	t.after(async () => { release(); await holder; await prompt?.catch(() => undefined); });
+	let runtime!: TemporalRuntime;
+	let beforeSeen = false;
+	let beforeSignal: AbortSignal | undefined;
+	let contextSignal: AbortSignal | undefined;
+	let waiting = false;
+	let failure: unknown;
+	let providerCalls = 0;
+	const snapshot = emptySnapshot(true);
+	const specification = "Prepare lifecycle before inference";
+	// A host-capability probe, not State Flow's production caller cutover.
+	const f = await realPiFixture(t, {
+		initializeRepository: false, stateFlow: false,
+		extensions: [{ name: "lifecycle-boundary-probe", factory: (pi) => {
+			pi.on("before_agent_start", (_event, ctx) => { beforeSeen = true; beforeSignal = ctx.signal; });
+			pi.on("context", async (event, ctx) => {
+				contextSignal = ctx.signal;
+				waiting = true;
+				try {
+					await runtime.withLifecycleTransaction((publish) => publish({ ...snapshot, meta: { ...snapshot.meta, specification } }), contextSignal);
+				} catch (error) {
+					failure = error;
+					if (!contextSignal?.aborted) throw error;
+				}
+				return { messages: event.messages };
+			});
+		} }],
+	});
+	const session = await f.createSession("new");
+	runtime = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	runtime.initialize(snapshot, true);
+	const cached = structuredClone(runtime.view);
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	const before = files();
+	const paths = sessionRuntimePaths(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	f.faux.setResponses([(input) => {
+		providerCalls++;
+		assert.equal(JSON.parse(readFileSync(paths.runtime, "utf8")).specification, specification);
+		assert.equal(JSON.stringify(input.messages).includes(specification), true);
+		return fauxAssistantMessage("Lifecycle was accepted before inference");
+	}]);
+	holder = withStorageTransaction(f.repositoryRoot, () => gate);
+	let ended = false;
+	prompt = session.prompt(specification).then(() => { ended = true; });
+	const deadline = Date.now() + 6_000;
+	while (!waiting) {
+		if (Date.now() > deadline) assert.fail("native context did not reach the lifecycle transaction");
+		await delay(10);
+	}
+	assert.equal(beforeSeen, true);
+	assert.equal(beforeSignal, undefined, "SDK 0.87 has no agent abort signal before_agent_start");
+	assert.ok(contextSignal, "context runs inside the active native abort lifetime");
+	await delay(outcome === "accept" ? 2_200 : 60);
+	assert.equal(ended, false);
+	assert.equal(providerCalls, 0);
+	assert.deepEqual(files(), before);
+	assert.deepEqual(runtime.view, cached);
+	if (outcome === "cancel") {
+		await session.abort();
+		await prompt;
+		assert.equal(contextSignal.aborted, true);
+		assert.equal((failure as Error)?.name, "AbortError");
+		assert.deepEqual(files(), before);
+		assert.deepEqual(runtime.view, cached);
+		assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8"), `${process.pid}\n`);
+	}
+	release();
+	await holder;
+	await prompt;
+	assert.equal(providerCalls, outcome === "accept" ? 1 : 0);
+	if (outcome === "accept") {
+		assert.equal(failure, undefined);
+		assert.deepEqual(files().filter(({ path }) => path !== paths.config && path !== paths.runtime), before.filter(({ path }) => path !== paths.config && path !== paths.runtime));
+		assert.deepEqual(runtime.view, cached);
+	} else assert.deepEqual(files(), before, "releasing the owner cannot revive the canceled publication");
+});
+
+for (const outcome of ["accept", "cancel"] as const) test(`real Pi awaits foreign publication and ${outcome === "accept" ? "exposes the accepted current head to its next provider" : "cancels waiting without changing canonical memory"}`, { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, autoStart: true });
+	const session = await f.createSession("new");
+	const ready = join(f.root, "foreign-ready");
+	const release = join(f.root, "foreign-release");
+	let child: ReturnType<typeof childProcess.spawn> | undefined;
+	let closed: ReturnType<typeof once> | undefined;
+	t.after(() => { if (child?.exitCode === null) child.kill("SIGKILL"); });
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	let before: ReturnType<typeof files> | undefined;
+	let input: Context | undefined;
+	let started = false;
+	let ended = false;
+	t.after(session.subscribe((event) => {
+		if (event.type === "tool_execution_start" && event.toolName === "patch_state") started = true;
+		if (event.type === "tool_execution_end" && event.toolName === "patch_state") ended = true;
+	}));
+	f.faux.setResponses([
+		async () => {
+			before = files();
+			child = childProcess.spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+				import fs from "node:fs";
+				import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
+				import { withStorageTransaction } from ${JSON.stringify(new URL("../lib/storage.ts", import.meta.url).href)};
+				import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
+				import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+				const { root, cwd, ready, release, outcome } = JSON.parse(process.argv[1]);
+				function wait() {
+					fs.writeFileSync(ready, "locked");
+					const until = Date.now() + 20_000;
+					while (!fs.existsSync(release)) {
+						if (Date.now() > until) throw new Error("foreign fixture gate expired");
+						Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+					}
+				}
+				if (outcome === "cancel") await withStorageTransaction(root, wait);
+				else await new TemporalRuntime(cwd, "foreign", root).withPatchTransaction((tx) => {
+					wait();
+					const stage = stageAtomicScopePatches(tx.states, {
+						global: { working: { globalPeer: "FOREIGN-G" } }, cwd: { working: { cwdPeer: "FOREIGN-C" } },
+						session: { working: { peer: "FOREIGN-PRIVATE-SECRET" } },
+					}, [], tx.causalBasis);
+					commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted, stage.provenanceUpdates), tx.causalBasis);
+				});
+			`, JSON.stringify({ root: f.repositoryRoot, cwd: f.cwd, ready, release, outcome })], { stdio: ["ignore", "ignore", "inherit"] });
+			closed = once(child, "close");
+			const deadline = Date.now() + 5_000;
+			while (!existsSync(ready)) {
+				if (Date.now() > deadline || child.exitCode !== null) throw new Error("foreign writer did not acquire storage");
+				await delay(10);
+			}
+			return fauxAssistantMessage(fauxToolCall("patch_state", {
+				global: { working: { globalLocal: "LOCAL-G" } }, cwd: { working: { cwdLocal: "LOCAL-C" } }, session: { working: { private: "LOCAL-PRIVATE" } },
+			}), { stopReason: "toolUse" });
+		},
+		async (context) => {
+			input = context;
+			const current = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+			await current.refreshCurrentMemory();
+			assert.deepEqual(temporalScopeRevisions(current.view!), { global: 2, cwd: 2, session: 1 });
+			return fauxAssistantMessage("Accepted memory is available.");
+		},
+	]);
+	const prompt = session.prompt("Preserve current shared memory and my private update");
+	const deadline = Date.now() + 8_000;
+	while (!started) {
+		if (Date.now() > deadline) assert.fail("native patch did not start");
+		await delay(10);
+	}
+	await delay(outcome === "accept" ? 2_200 : 80);
+	assert.equal(ended, false, "native patch is still waiting, not an ordinary contention failure");
+	assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8").trim(), String(child!.pid));
+	if (outcome === "cancel") {
+		await session.abort();
+		await prompt;
+		assert.deepEqual(files(), before);
+		assert.equal(f.readState(session, 0, "session").working.private, undefined);
+		assert.equal(input, undefined);
+	}
+	writeFileSync(release, "continue");
+	assert.equal((await closed!)[0], 0);
+	if (outcome === "cancel") return;
+	await prompt;
+	assert.ok(input);
+	const projected = JSON.stringify(input.messages);
+	for (const value of ["FOREIGN-G", "FOREIGN-C", "LOCAL-G", "LOCAL-C", "LOCAL-PRIVATE"]) assert.ok(projected.includes(value), value);
+	assert.equal(projected.includes("FOREIGN-PRIVATE-SECRET"), false);
+	assert.deepEqual(f.readState(session, 0, "global").working, { globalPeer: "FOREIGN-G", globalLocal: "LOCAL-G" });
+	assert.deepEqual(f.readState(session, 0, "cwd").working, { cwdPeer: "FOREIGN-C", cwdLocal: "LOCAL-C" });
+	assert.deepEqual(f.readState(session, 0, "session").working, { private: "LOCAL-PRIVATE" });
+	const results = session.sessionManager.getEntries().filter((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "patch_state");
+	assert.equal(results.length, 1);
+	assert.ok(results[0]?.type === "message" && results[0].message.role === "toolResult" && !results[0].message.isError);
+});
+
+for (const outcome of ["accept", "cancel"] as const) test(`real Pi awaits response publication and ${outcome === "accept" ? "continues with accepted current memory" : "honors native abort without losing the unfinished run"}`, { timeout: 30_000 }, async (t) => {
+	const answer = "Answer waiting for canonical acceptance";
+	let continued = false;
+	const f = await realPiFixture(t, {
+		initializeRepository: false, autoStart: true,
+		extensions: [{ name: "after-response-acceptance", factory: (pi) => {
+			pi.on("turn_end", (event) => {
+				if (outcome !== "accept" || continued || event.outcome !== "completed" || event.message.role !== "assistant"
+					|| !event.message.content.some((part) => part.type === "text" && part.text === answer)) return;
+				assert.equal(f.readState(session).response, answer, "later boundary handlers run only after canonical acceptance");
+				continued = true;
+				return { entries: [...event.entries, { type: "custom_message" as const, customType: "after-response", content: "Observe accepted response memory", display: false }], continue: true };
+			});
+		} }],
+	});
+	const session = await f.createSession("new");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { private: "LOCAL-PRIVATE" } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Previously accepted answer"),
+	]);
+	await session.prompt("Establish private memory");
+	const ready = join(f.root, "response-writer-ready");
+	const release = join(f.root, "response-writer-release");
+	let child: ReturnType<typeof childProcess.spawn> | undefined;
+	let closed: ReturnType<typeof once> | undefined;
+	t.after(() => { if (child?.exitCode === null) child.kill("SIGKILL"); });
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	let before: ReturnType<typeof files> | undefined;
+	let input: Context | undefined;
+	let started = false;
+	let ended = false;
+	t.after(session.subscribe((event) => {
+		if (event.type === "message_end" && event.message.role === "assistant"
+			&& event.message.content.some((part) => part.type === "text" && part.text === answer)) started = true;
+	}));
+	f.faux.setResponses([
+		async () => {
+			before = files();
+			child = childProcess.spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+				import fs from "node:fs";
+				import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
+				import { withStorageTransaction } from ${JSON.stringify(new URL("../lib/storage.ts", import.meta.url).href)};
+				import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
+				import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+				const { root, cwd, ready, release, outcome } = JSON.parse(process.argv[1]);
+				function wait() {
+					fs.writeFileSync(ready, "locked");
+					const deadline = Date.now() + 20_000;
+					while (!fs.existsSync(release)) {
+						if (Date.now() > deadline) throw new Error("response writer fixture expired");
+						Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+					}
+				}
+				if (outcome === "cancel") await withStorageTransaction(root, wait);
+				else await new TemporalRuntime(cwd, "foreign", root).withPatchTransaction((tx) => {
+					wait();
+					const stage = stageAtomicScopePatches(tx.states, {
+						global: { working: { globalPeer: "FOREIGN-G" } }, cwd: { working: { cwdPeer: "FOREIGN-C" } },
+						session: { working: { secret: "FOREIGN-PRIVATE-SECRET" } },
+					}, [], tx.causalBasis);
+					commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+				});
+			`, JSON.stringify({ root: f.repositoryRoot, cwd: f.cwd, ready, release, outcome })], { stdio: ["ignore", "ignore", "inherit"] });
+			closed = once(child, "close");
+			const deadline = Date.now() + 5_000;
+			while (!existsSync(ready)) {
+				if (Date.now() > deadline || child.exitCode !== null) throw new Error("foreign response writer did not acquire storage");
+				await delay(10);
+			}
+			return fauxAssistantMessage(answer);
+		},
+		async (context) => {
+			input = context;
+			const current = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+			await current.refreshCurrentMemory();
+			assert.deepEqual(temporalScopeRevisions(current.view!), { global: 1, cwd: 1, session: 3 });
+			assert.equal(latestSnapshot(session).meta.specification, undefined);
+			return fauxAssistantMessage("Continued after accepted response");
+		},
+	]);
+	const prompt = session.prompt("Reconcile this accepted response").then(() => { ended = true; });
+	const deadline = Date.now() + 8_000;
+	while (!started) {
+		if (Date.now() > deadline) assert.fail("native final answer did not reach reconciliation");
+		await delay(10);
+	}
+	await delay(outcome === "accept" ? 2_200 : 80);
+	assert.equal(ended, false, "Pi awaits acceptance rather than surfacing ordinary contention");
+	assert.deepEqual(files(), before, "waiting does not complete lifecycle or alter accepted state");
+	assert.equal(f.readState(session).response, "Previously accepted answer");
+	assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8").trim(), String(child!.pid));
+	if (outcome === "cancel") {
+		await session.abort();
+		await prompt;
+		assert.deepEqual(files(), before);
+		assert.equal(f.readState(session).response, "Previously accepted answer");
+		assert.equal(input, undefined);
+		assert.equal(continued, false);
+	}
+	writeFileSync(release, "continue");
+	assert.equal((await closed!)[0], 0);
+	if (outcome === "cancel") {
+		assert.equal(latestSnapshot(session).meta.specification, "Reconcile this accepted response");
+	} else {
+		await prompt;
+		assert.equal(continued, true, JSON.stringify(f.notifications));
+		assert.ok(input);
+		const projected = JSON.stringify(input.messages);
+		for (const value of [answer, "FOREIGN-G", "FOREIGN-C", "LOCAL-PRIVATE"]) assert.ok(projected.includes(value), value);
+		assert.equal(projected.includes("FOREIGN-PRIVATE-SECRET"), false);
+		assert.equal(f.readState(session).response, "Continued after accepted response");
+		assert.equal(continued, true);
+	}
+	assert.equal(f.notifications.some((notice) => /reconciliation failed|lock is unavailable/.test(notice)), false);
+});
+
+for (const outcome of ["accept", "busy"] as const) test(`real Pi ${outcome === "accept" ? "settles only after the local backup commit" : "defers unabortable backup contention without undoing its accepted answer"}`, { timeout: 20_000 }, async (t) => {
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	let owner: Promise<void> | undefined;
+	let prompt: Promise<void> | undefined;
+	t.after(async () => { release(); await owner; await prompt?.catch(() => undefined); });
+	let locked = false;
+	let laterBoundary = false;
+	let repairRequested = false;
+	let acceptedFiles: ReturnType<typeof captureTemporalFileBases> | undefined;
+	const answer = "Answer accepted before optional backup";
+	const f = await realPiFixture(t, {
+		autoStart: true,
+		extensions: [{ name: "awaited-backup-boundary", factory: (pi) => {
+			pi.on("turn_end", (event) => {
+				if (locked || event.outcome !== "completed" || event.message.role !== "assistant") return;
+				assert.equal(f.readState(session).response, answer);
+				assert.equal(latestSnapshot(session).meta.specification, undefined);
+				acceptedFiles = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+				locked = true;
+				if (outcome === "busy") owner = withStorageTransaction(f.repositoryRoot, () => gate);
+			});
+			pi.on("agent_before_settle", (_event, ctx) => {
+				laterBoundary = true;
+				if (outcome === "busy") assert.equal(ctx.signal, undefined, "SDK 0.87 has no native abort signal at settlement");
+				if (outcome === "accept") assert.notEqual(runGit(f.repositoryRoot, "rev-parse", "HEAD"), head, "later handlers observe the completed local backup");
+			});
+		} }],
+	});
+	const session = await f.createSession("new");
+	const head = runGit(f.repositoryRoot, "rev-parse", "HEAD");
+	f.faux.setResponses([fauxAssistantMessage(answer), () => { repairRequested = true; return fauxAssistantMessage("No repair should be requested"); }]);
+	let settled = false;
+	prompt = session.prompt("Accept the answer, then back it up").then(() => { settled = true; });
+	const deadline = Date.now() + 6_000;
+	while (!locked) {
+		if (Date.now() > deadline) assert.fail("accepted turn did not reach the backup gate");
+		await delay(10);
+	}
+	await prompt;
+	assert.equal(settled, true);
+	assert.equal(laterBoundary, true, "later settlement handlers observe a finished commit or explicit deferral");
+	assert.equal(f.readState(session).response, answer);
+	if (outcome === "busy") {
+		await session.abort();
+		await prompt;
+		assert.equal(runGit(f.repositoryRoot, "rev-parse", "HEAD"), head);
+		assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8"), `${process.pid}\n`);
+	}
+	release();
+	await owner;
+	await prompt;
+	assert.equal(f.readState(session).response, answer);
+	assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), acceptedFiles);
+	assert.equal(latestSnapshot(session).meta.specification, undefined);
+	assert.equal(repairRequested, false);
+	assert.equal(existsSync(join(f.repositoryRoot, ".git", "state-flow-backup.lock")), false);
+	assert.equal(f.notifications.some((notice) => /Git backup failed|lock is unavailable/.test(notice)), false);
+	assert.equal(f.notifications.filter((notice) => /Git backup deferred.*no cancellable settlement wait/.test(notice)).length, outcome === "busy" ? 1 : 0);
+});
+
+for (const scope of ["global", "cwd", "session"] as const) test(`real Pi transports actionable long-path diagnostics and accepts an exact-target correction (${scope})`, { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false });
+	writeFileSync(join(f.repositoryRoot, "config.json"), JSON.stringify({ autoStart: true, logging: true }));
+	const session = await f.createSession("new");
+	const path = join(f.cwd, "long directory/".repeat(60), "knowledge.json");
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	let before: ReturnType<typeof files> | undefined;
+	let afterRejection: ReturnType<typeof files> | undefined;
+	let nextInput: Context | undefined;
+	const attempted = { [scope]: { working: { diagnosticProbe: true }, artifacts: { [path]: {} } } };
+	f.faux.setResponses([
+		() => {
+			before = files();
+			return fauxAssistantMessage(fauxToolCall("patch_state", attempted), { stopReason: "toolUse" });
+		},
+		(context) => {
+			nextInput = context;
+			afterRejection = files();
+			return fauxAssistantMessage(fauxToolCall("patch_state", { [scope]: { working: { diagnosticProbe: true }, artifacts: { [path]: { description: "Corrected artifact" } } } }), { stopReason: "toolUse" });
+		},
+		fauxAssistantMessage("Corrected without changing the target."),
+	]);
+	await session.prompt("Remember the artifact, correcting any validation error");
+	assert.ok(before && afterRejection);
+	assert.deepEqual(afterRejection, before, "diagnostic rendering cannot accept any part of the rejected patch");
+	const rejected = session.sessionManager.getEntries().find((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "patch_state" && entry.message.isError);
+	assert.ok(rejected?.type === "message" && rejected.message.role === "toolResult");
+	const text = rejected.message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+	assert.match(text, /^\nArtifact metadata at /);
+	assert.equal(text.slice(1).includes("\n"), false);
+	assert.ok(text.length <= 221);
+	assert.ok(text.includes(`${scope}.artifacts[`));
+	assert.match(text, /knowledge\.json/);
+	assert.match(text, /must have a non-empty description$/);
+	assert.deepEqual(rejected.message.details, {}, "Pi does not carry the original Error.cause in tool details");
+	assert.deepEqual(nextInput!.messages.findLast((message) => message.role === "toolResult" && message.toolName === "patch_state")?.content, rejected.message.content);
+	assert.equal(f.readState(session, 0, scope).artifacts[path]?.description, "Corrected artifact");
+	assert.equal(f.readState(session, 0, scope).working.diagnosticProbe, true);
+	const record = JSON.parse(readFileSync(stateFlowLogPath(f.agentDir), "utf8").trim());
+	assert.equal(record.toolCallId, rejected.message.toolCallId);
+	assert.deepEqual(record.input, attempted);
+	assert.ok(record.error.includes(JSON.stringify(path)), "opt-in diagnostics keep the complete target, not its display abbreviation");
+});
+
+test("real Pi transports nested publication causes as text without requiring Error.cause", { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false });
+	writeFileSync(join(f.repositoryRoot, "config.json"), JSON.stringify({ autoStart: true, logging: true }));
+	const session = await f.createSession("new");
+	const path = join(f.repositoryRoot, "long directory/".repeat(40), "runtime.json");
+	const cause = new Error(`EACCES: permission denied, open '${path}'`);
+	const failure = new Error("Canonical memory publication failed", { cause });
+	let armed = false;
+	const publish = TemporalRuntime.prototype.publish;
+	t.mock.method(TemporalRuntime.prototype, "publish", function (this: TemporalRuntime, ...args: Parameters<typeof publish>) {
+		if (armed && args[2] !== undefined) { armed = false; throw failure; }
+		return publish.apply(this, args);
+	});
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	let before: ReturnType<typeof files> | undefined;
+	let after: ReturnType<typeof files> | undefined;
+	let nextInput: Context | undefined;
+	f.faux.setResponses([
+		() => { armed = true; before = files(); return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { diagnosticFault: true } } }), { stopReason: "toolUse" }); },
+		(context) => { nextInput = context; after = files(); return fauxAssistantMessage("The memory write failed; ordinary conversation continues."); },
+	]);
+	await session.prompt("Attempt a memory update");
+	assert.ok(before && after);
+	assert.deepEqual(after, before);
+	assert.equal(f.readState(session).working.diagnosticFault, undefined);
+	const rejected = session.sessionManager.getEntries().find((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "patch_state" && entry.message.isError);
+	assert.ok(rejected?.type === "message" && rejected.message.role === "toolResult");
+	const text = rejected.message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
+	assert.match(text, /^\nCanonical memory publication failed: EACCES: permission denied/);
+	assert.match(text, /runtime\.json/);
+	assert.ok(text.length <= 221);
+	assert.deepEqual(rejected.message.details, {});
+	assert.deepEqual(nextInput!.messages.findLast((message) => message.role === "toolResult" && message.toolName === "patch_state")?.content, rejected.message.content);
+	const record = JSON.parse(readFileSync(stateFlowLogPath(f.agentDir), "utf8").trim());
+	assert.ok(record.error.includes(cause.message));
+});
+
+test("real Pi starts State Flow in an ordinary conversation after reload", { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { autoStart: false, passiveBootstrap: true, passiveTools: true, initializeRepository: false });
+	const session = await f.createSession("new");
+	t.after(() => session.dispose());
+	for (let index = 1; index <= 4; index++) {
+		f.faux.setResponses([fauxAssistantMessage(`Ordinary answer ${index}`)]);
+		await session.prompt(`Ordinary question ${index}`);
+	}
+	assert.equal(snapshots(session).length, 0);
+	await session.reload();
+	await session.prompt("/state-flow-start");
+	assert.equal(latestSnapshot(session).config.enabled, true);
+	assert.equal(latestSnapshot(session).meta.bootstrap, true);
+	let bootstrapInput: Context | undefined;
+	f.faux.setResponses([(context) => {
+		bootstrapInput = context;
+		return fauxAssistantMessage("Bootstrap completed.");
+	}]);
+	await session.prompt("Compile the prior conversation");
+	assert.match(JSON.stringify(bootstrapInput!.messages), /Ordinary question 1/);
+	assert.match(JSON.stringify(bootstrapInput!.messages), /Ordinary answer 4/);
+	assert.equal(f.readState(session).response, "Bootstrap completed.");
+});
+
+for (const fault of ["concurrent", "locked"] as const) test(`real Pi failed Stop stays passive through late tools, tree, reload and resume (${fault})`, { timeout: 30_000 }, async (t) => {
+	let session: Awaited<ReturnType<RealPiFixture["createSession"]>>;
+	let armed = false;
+	let stopped = false;
+	let canonical: ReturnType<typeof captureTemporalFileBases>;
+	const inputs: Context[] = [];
+	const f = await realPiFixture(t, {
+		initializeRepository: false, autoStart: true, passiveBootstrap: true, passiveTools: true,
+		extensions: [{ name: "stop-failure", factory: (pi) => {
+			pi.on("tool_result", async (event) => {
+				if (!armed || event.toolName !== "read") return;
+				armed = false;
+				if (fault === "concurrent") {
+					const peer = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+					const snapshot = (await peer.refreshCurrentMemory())!;
+					const before = peer.states();
+					const next = structuredClone(before);
+					next.session.working.peer = "accepted";
+					snapshot.config.enabled = true;
+					snapshot.meta.step++;
+					peer.publish(snapshot, true, createAcceptedTransition(before, next));
+				}
+				canonical = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+				const lock = join(f.repositoryRoot, ".state-flow-publication.lock");
+				if (fault === "locked") mkdirSync(lock);
+				try {
+					await session.prompt("/state-flow-stop");
+					stopped = true;
+				} finally {
+					if (fault === "locked") rmSync(lock, { recursive: true });
+				}
+			});
+		} }],
+	});
+	session = await f.createSession("new");
+	f.faux.setResponses(sessionResponses({ working: { private: "retained" } }, "Compiled memory"));
+	await session.prompt("Establish private memory");
+	const trace = readFileSync(session.sessionFile!);
+	const source = join(f.cwd, "trajectory.txt");
+	writeFileSync(source, "READ_RESULT_TO_RETAIN");
+	armed = true;
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("read", { path: source }), { stopReason: "toolUse" }),
+		(context) => { inputs.push(context); return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { unsafe: true } } }), { stopReason: "toolUse" }); },
+		(context) => { inputs.push(context); return fauxAssistantMessage("Ordinary answer after Stop"); },
+	]);
+	await session.prompt("UNCOMPILED_REQUEST: retain the complete read trajectory");
+	assert.equal(stopped, true);
+	assert.equal(inputs.length, 2);
+	assert.match(JSON.stringify(inputs[0]!.messages), /UNCOMPILED_REQUEST/);
+	assert.match(JSON.stringify(inputs[0]!.messages), /READ_RESULT_TO_RETAIN/);
+	const handoff = inputs[0]!.messages.find((message) => message.role === "user" && JSON.stringify(message.content).includes("State Flow exit handoff"));
+	assert.match(JSON.stringify(handoff), /private.*retained/);
+	assert.doesNotMatch(JSON.stringify(inputs[0]!.messages), /State Flow is enabled/);
+	const rejected = session.sessionManager.getEntries().findLast((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "patch_state");
+	assert.ok(rejected?.type === "message" && rejected.message.role === "toolResult" && rejected.message.isError);
+	assert.match(JSON.stringify(rejected.message.content), /paused after Stop/);
+	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+	assert.deepEqual(files(), canonical!);
+	assert.deepEqual(readFileSync(session.sessionFile!).subarray(0, trace.length), trace);
+	const stoppedLeaf = session.sessionManager.getLeafId()!;
+	f.faux.setResponses([fauxAssistantMessage("Later passive answer")]);
+	await session.prompt("Another ordinary request");
+	await session.navigateTree(stoppedLeaf, { summarize: false });
+	assert.deepEqual(files(), canonical!, "tree restoration must not publish an older private selection");
+	await session.reload();
+	assert.deepEqual(files(), canonical!);
+	const file = session.sessionFile!;
+	session.dispose();
+	session = await f.createSession("resume", SessionManager.open(file));
+	assert.deepEqual(files(), canonical!, "cold resume remains read-only despite canonical enabled=true");
+	assert.equal(f.readState(session, 0, "session").working.private, "retained");
+	if (fault === "concurrent") assert.equal(f.readState(session, 0, "session").working.peer, "accepted");
+	let continued: Context | undefined;
+	f.faux.setResponses([(context) => { continued = context; return fauxAssistantMessage("Still ordinary"); }]);
+	await session.prompt("Continue without active State Flow");
+	assert.match(JSON.stringify(continued!.messages), /UNCOMPILED_REQUEST/);
+	assert.match(JSON.stringify(continued!.messages), /READ_RESULT_TO_RETAIN/);
+	assert.doesNotMatch(JSON.stringify(continued!.messages), /State Flow is enabled/);
+	assert.deepEqual(files(), canonical!);
+	await session.prompt("/state-flow-status");
+	assert.match(f.notifications.at(-1)!, /branch mode=inactive/);
+	assert.match(f.notifications.at(-1)!, /Memory writes paused after Stop/);
+	await session.prompt("/state-flow-start");
+	f.faux.setResponses(sessionResponses({ working: { restarted: true } }, "Accepted after explicit Start"));
+	await session.prompt("Compile retained context and continue");
+	assert.equal(f.readState(session, 0, "session").working.restarted, true);
+	assert.equal(f.readState(session, 0, "session").working.private, "retained");
+	if (fault === "concurrent") assert.equal(f.readState(session, 0, "session").working.peer, "accepted");
+});
+
+test("real Pi forks a failed-Stop source as disabled without inheriting its write fence", { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, autoStart: true, passiveBootstrap: true, passiveTools: true });
+	const runtime = await f.createRuntime("new");
+	const parent = runtime.session;
+	f.faux.setResponses(sessionResponses({ working: { inherited: "retained" } }, "Parent answer"));
+	await parent.prompt("Remember parent memory");
+	const files = () => captureTemporalFileBases(f.cwd, parent.sessionId, f.repositoryRoot, nativeSessionKey(parent));
+	const before = files();
+	const lock = join(f.repositoryRoot, ".state-flow-publication.lock");
+	mkdirSync(lock);
+	try { await parent.prompt("/state-flow-stop"); } finally { rmSync(lock, { recursive: true }); }
+	assert.deepEqual(files(), before);
+	assert.equal((await runtime.fork(parent.sessionManager.getLeafId()!, { position: "at" })).cancelled, false);
+	const child = runtime.session;
+	assert.equal(latestSnapshot(child).config.enabled, false);
+	assert.equal(f.readState(child, 0, "session").working.inherited, "retained");
+	await child.reload();
+	f.faux.setResponses(sessionResponses({ working: { child: true } }, "Passive child answer"));
+	await child.prompt("Patch child memory while passive");
+	assert.equal(f.readState(child, 0, "session").working.child, true);
+	assert.equal(latestSnapshot(child).config.enabled, false);
+	assert.deepEqual(files(), before, "child activation policy cannot repair or overwrite its parent's canonical files");
+});
+
+for (const priorActive of [false, true]) test(`real Pi repeated Start/Stop preserves uncompiled conversation and its prior boundary (${priorActive ? "restart" : "first activation"})`, { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const session = await f.createSession("new");
+	if (priorActive) {
+		await session.prompt("/state-flow-start");
+		f.faux.setResponses(sessionResponses({ working: { established: true } }, "Established memory."));
+		await session.prompt("ALREADY_COMPILED_CONVERSATION");
+		await session.prompt("/state-flow-stop");
+	}
+	f.faux.setResponses([fauxAssistantMessage("Ordinary requirement acknowledged.")]);
+	await session.prompt("UNCOMPILED_REQUIREMENT: use a violet interface.");
+	const before = structuredClone(session.sessionManager.getEntries());
+	for (let cycle = 0; cycle < 2; cycle++) {
+		await session.prompt("/state-flow-start");
+		assert.equal(latestSnapshot(session).meta.bootstrap, true);
+		await session.prompt("/state-flow-stop");
+		await session.reload();
+	}
+	assert.deepEqual(session.sessionManager.getEntries().slice(0, before.length), before, "mode changes preserve the native trace");
+	let passiveInput: Context | undefined;
+	f.faux.setResponses([(context) => { passiveInput = context; return fauxAssistantMessage("Continuing normally."); }]);
+	await session.prompt("Continue without losing the earlier requirement");
+	assert.match(JSON.stringify(passiveInput!.messages), /UNCOMPILED_REQUIREMENT/);
+	assert.doesNotMatch(JSON.stringify(passiveInput!.messages), /ALREADY_COMPILED_CONVERSATION/);
+	await session.prompt("/state-flow-start");
+	let bootstrapInput: Context | undefined;
+	f.faux.setResponses([
+		(context) => {
+			bootstrapInput = context;
+			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { interface: "violet" } } }), { stopReason: "toolUse" });
+		},
+		fauxAssistantMessage("Requirement compiled."),
+	]);
+	await session.prompt("Compile and continue");
+	assert.match(JSON.stringify(bootstrapInput!.messages), /UNCOMPILED_REQUIREMENT/);
+	assert.notEqual(latestSnapshot(session).meta.bootstrap, true);
+	let laterInput: Context | undefined;
+	f.faux.setResponses([(context) => { laterInput = context; return fauxAssistantMessage("Continued from memory."); }]);
+	await session.prompt("Use the saved interface");
+	assert.doesNotMatch(JSON.stringify(laterInput!.messages), /UNCOMPILED_REQUIREMENT|ALREADY_COMPILED_CONVERSATION/);
+	assert.equal(f.readState(session).working.interface, "violet");
+});
+
+test("real Pi initializes wholly absent CWD files before inference without resurrecting them", { timeout: 30_000 }, async (t) => {
 	const fixture = await realPiFixture(t, { autoStart: true });
 	let session = await fixture.createSession("new");
 	t.after(() => session.dispose());
@@ -48,10 +1034,16 @@ test("real Pi self-heals a wholly absent CWD pair during response reconciliation
 	const paths = temporalScopePaths(fixture.cwd, session.sessionId, "cwd", fixture.repositoryRoot, nativeSessionKey(session));
 	rmSync(paths.checkpoint);
 	rmSync(paths.patches);
-	fixture.faux.setResponses(unchangedResponses("Recovered ordinary answer."));
+	fixture.faux.setResponses([(context) => {
+		assert.equal(fixture.readState(session, 0, "cwd").working.must_not_resurrect, undefined);
+		assert.equal(existsSync(paths.checkpoint), true);
+		assert.equal(existsSync(paths.patches), true);
+		assert.doesNotMatch(JSON.stringify(context.messages), /old-cwd-value/);
+		return fauxAssistantMessage("Recovered ordinary answer.");
+	}]);
 	await session.prompt("Answer after the complete live CWD pair disappeared");
 	assert.equal(fixture.notifications.some((message) => /Live State Flow cwd scope storage is incomplete/.test(message)), false);
-	assert.equal(fixture.readState(session).response, "Recovered ordinary answer.");
+	assert.equal(fixture.readState(session).response, "Recovered ordinary answer.", fixture.notifications.join("\n"));
 	assert.equal(fixture.readState(session, 0, "cwd").working.must_not_resurrect, undefined);
 	assert.equal(existsSync(paths.checkpoint), true);
 	assert.equal(existsSync(paths.patches), true);
@@ -268,6 +1260,152 @@ test("real Pi forks selected private memory over current shared scopes and reloa
 	assert.deepEqual(bytes(), protectedBytes);
 });
 
+for (const operation of ["tree", "fork"] as const) test(`real Pi ${operation} selection awaits a held publisher and the next provider sees only the selected private memory`, { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const runtime = await f.createRuntime();
+	t.after(() => runtime.dispose());
+	const parent = runtime.session;
+	f.faux.setResponses(sessionResponses({ working: { private: "SELECTED-PRIVATE" } }, "Selected answer"));
+	await parent.prompt("Selected request");
+	const point = parent.sessionManager.getLeafId()!;
+	f.faux.setResponses(sessionResponses({ working: { private: "LATER-PRIVATE" } }, "Later answer"));
+	await parent.prompt("Later request");
+	const parentFiles = captureTemporalFileBases(f.cwd, parent.sessionId, f.repositoryRoot, nativeSessionKey(parent));
+	let entered!: () => void;
+	let release!: () => void;
+	const holding = new Promise<void>((resolve) => { entered = resolve; });
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const holder = withStorageTransaction(f.repositoryRoot, async () => { entered(); await gate; });
+	t.after(async () => { release(); await holder; });
+	await holding;
+	let ended = false;
+	const selecting = (operation === "tree"
+		? parent.navigateTree(point, { summarize: false })
+		: runtime.fork(point, { position: "at" })).then(() => { ended = true; });
+	await delay(200);
+	assert.equal(ended, false, "the native lifecycle awaits owned restoration under exclusion");
+	if (operation === "tree") {
+		assert.throws(() => f.readState(parent, 0, "session"), /restoration is pending/);
+		assert.equal(parent.getActiveToolNames().includes("patch_state"), false);
+	}
+	release();
+	await holder;
+	await selecting;
+	const session = runtime.session;
+	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
+	assert.equal(f.readState(session, 0, "session").working.private, "SELECTED-PRIVATE");
+	if (operation === "fork") {
+		assert.notEqual(session.sessionId, parent.sessionId);
+		assert.equal(latestSnapshot(session).meta.step, 0);
+		assert.deepEqual(captureTemporalFileBases(f.cwd, parent.sessionId, f.repositoryRoot, nativeSessionKey(parent))
+			.filter(({ path }) => path.includes(nativeSessionKey(parent))), parentFiles.filter(({ path }) => path.includes(nativeSessionKey(parent))), "fork never rewrites parent-private files");
+	}
+	let input = "";
+	f.faux.setResponses([(context) => { input = JSON.stringify(context.messages); return fauxAssistantMessage("Next answer"); }]);
+	await session.prompt("Next request");
+	assert.match(input, /SELECTED-PRIVATE/);
+	assert.doesNotMatch(input, /LATER-PRIVATE/);
+	assert.equal(f.readState(session, 0, "session").working.private, "SELECTED-PRIVATE");
+});
+
+for (const restart of [false, true]) test(`public Pi child control during pending fork preserves independent memory (restart=${restart})`, { timeout: 30_000 }, async (t) => {
+	let capture!: (session: AgentSession) => void;
+	const created = new Promise<AgentSession>((resolve) => { capture = resolve; });
+	const f = await realPiFixture(t, {
+		autoStart: true, initializeRepository: false, passiveTools: true, passiveBootstrap: true,
+		onSessionCreated: (session, event) => { if (event.reason === "fork") capture(session); },
+	});
+	const runtime = await f.createRuntime();
+	const parent = runtime.session;
+	f.faux.setResponses(sessionResponses({ working: { private: "SELECTED-FORK-PRIVATE" } }, "Selected answer"));
+	await parent.prompt("Selected request");
+	const point = parent.sessionManager.getLeafId()!;
+	f.faux.setResponses(sessionResponses({ working: { private: "LATER-PARENT-PRIVATE" } }, "Later answer"));
+	await parent.prompt("Later request");
+	const parentPrefix = sessionRuntimePaths(f.cwd, parent.sessionId, f.repositoryRoot, nativeSessionKey(parent)).config.slice(0, -"config.json".length);
+	const parentFiles = () => captureTemporalFileBases(f.cwd, parent.sessionId, f.repositoryRoot, nativeSessionKey(parent)).filter(({ path }) => path.startsWith(parentPrefix));
+	const before = parentFiles();
+	let enter!: () => void, release!: () => void;
+	const entered = new Promise<void>((resolve) => { enter = resolve; });
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const holder = withStorageTransaction(f.repositoryRoot, async () => { enter(); await gate; });
+	await entered;
+	let forked = false;
+	const forking = runtime.fork(point, { position: "at" }).then((result) => { forked = true; return result; });
+	let starting: Promise<void> | undefined;
+	try {
+		const child = await Promise.race([created, delay(5_000).then(() => { throw new Error("native fork factory did not expose its child"); })]);
+		await delay(100);
+		assert.throws(() => f.readState(child, 0, "session"), /restoration is pending/);
+		await Promise.race([child.prompt("/state-flow-stop"), delay(1_000).then(() => assert.fail("Stop waited for child memory"))]);
+		if (restart) starting = child.prompt("/state-flow-start");
+		await delay(20);
+		assert.equal(forked, false);
+		assert.equal(f.statuses.at(-1), undefined);
+		assert.deepEqual(parentFiles(), before);
+	} finally { release(); await holder; }
+	assert.equal((await forking).cancelled, false);
+	await starting;
+	const child = runtime.session;
+	assert.notEqual(child.sessionId, parent.sessionId);
+	assert.equal(latestSnapshot(child).config.enabled, restart);
+	assert.equal(f.readState(child, 0, "session").working.private, "SELECTED-FORK-PRIVATE");
+	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
+	let input = "";
+	f.faux.setResponses([(context) => {
+		input = JSON.stringify(context.messages);
+		return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { childOnly: true } } }), { stopReason: "toolUse" });
+	}, fauxAssistantMessage("Independent child answer")]);
+	await child.prompt("Continue in the child");
+	assert.match(input, /SELECTED-FORK-PRIVATE/);
+	assert.doesNotMatch(input, /LATER-PARENT-PRIVATE/);
+	assert.equal(f.readState(child, 0, "session").working.childOnly, true);
+	assert.equal(latestSnapshot(child).config.enabled, restart);
+	assert.deepEqual(parentFiles(), before);
+});
+
+test("real Pi Stop during tree restoration preserves passive memory and next-provider context", { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false, passiveTools: true, passiveBootstrap: true });
+	const runtime = await f.createRuntime();
+	const session = runtime.session;
+	f.faux.setResponses(sessionResponses({ working: { private: "SELECTED-PASSIVE-PRIVATE" } }, "Selected answer"));
+	await session.prompt("Selected request");
+	const point = session.sessionManager.getLeafId()!;
+	f.faux.setResponses(sessionResponses({ working: { private: "LATER-PRIVATE" } }, "Later answer"));
+	await session.prompt("Later request");
+	let enter!: () => void, release!: () => void;
+	const entered = new Promise<void>((resolve) => { enter = resolve; });
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const holder = withStorageTransaction(f.repositoryRoot, async () => { enter(); await gate; });
+	await entered;
+	let selected = false;
+	const navigating = session.navigateTree(point, { summarize: false }).then(() => { selected = true; });
+	try {
+		await delay(100);
+		assert.throws(() => f.readState(session, 0, "session"), /restoration is pending/);
+		await Promise.race([session.prompt("/state-flow-stop"), delay(1_000).then(() => assert.fail("Stop blocked on tree restoration"))]);
+		await delay(20);
+		assert.equal(selected, false, "mode change must not cancel selected memory restoration");
+		assert.equal(f.statuses.at(-1), undefined);
+	} finally { release(); await holder; }
+	await navigating;
+	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.equal(f.readState(session, 0, "session").working.private, "SELECTED-PASSIVE-PRIVATE");
+	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
+	let input = "";
+	f.faux.setResponses([(context) => {
+		input = JSON.stringify(context.messages);
+		return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { passivePatch: true } } }), { stopReason: "toolUse" });
+	}, fauxAssistantMessage("Passive answer")]);
+	await session.prompt("Continue passively");
+	assert.match(input, /SELECTED-PASSIVE-PRIVATE/);
+	assert.match(input, /Selected request/);
+	assert.doesNotMatch(input, /LATER-PRIVATE/);
+	assert.equal(f.readState(session, 0, "session").working.passivePatch, true);
+	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.equal(f.notifications.some((notice) => /writes paused|cancelled by Stop/.test(notice)), false);
+});
+
 for (const operation of ["restore", "fork"] as const) test(`real Pi ${operation} reacquires evidence for an older private artifact without changing its semantics early`, { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
 	const runtime = await f.createRuntime();
@@ -330,7 +1468,7 @@ for (const operation of ["restore", "fork"] as const) test(`real Pi ${operation}
 	assert.deepEqual(provenance()[source], currentEvidence);
 });
 
-test("real Pi fork refuses inherited pre-origin pointers without resetting existing child storage", { timeout: 30_000 }, async (t) => {
+test("real Pi fork rejects inherited history but explicit Start preserves its current child-owned memory", { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { autoStart: false });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
@@ -342,6 +1480,8 @@ test("real Pi fork refuses inherited pre-origin pointers without resetting exist
 	const inheritedPoint = parent.sessionManager.getLeafId()!;
 	await runtime.fork(inheritedPoint, { position: "at" });
 	const child = runtime.session;
+	f.faux.setResponses(sessionResponses({ working: { childOwned: true } }, "Child answer"));
+	await child.prompt("Keep the child's own changes");
 	const ownedPoint = child.sessionManager.getLeafId()!;
 	const selected = f.readState(child);
 	const paths = temporalScopePaths(f.cwd, child.sessionId, "session", f.repositoryRoot, nativeSessionKey(child));
@@ -351,7 +1491,8 @@ test("real Pi fork refuses inherited pre-origin pointers without resetting exist
 	await child.navigateTree(inheritedPoint, { summarize: false });
 	assert.equal(child.getActiveToolNames().includes("patch_state"), false);
 	await child.prompt("/state-flow-start");
-	assert.equal(child.getActiveToolNames().includes("patch_state"), false, "inherited checkpoints must not fall through to a reset marker");
+	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
+	assert.deepEqual(f.readState(child), selected, "activation uses the existing child's current memory, not an empty reset or a new parent copy");
 	assert.equal(runGit(f.repositoryRoot, "rev-parse", "HEAD"), head);
 	assert.deepEqual(files.map((path) => readFileSync(path)), before);
 	await child.navigateTree(ownedPoint, { summarize: false });
@@ -534,7 +1675,8 @@ for (const bootstrap of [false, true]) test(`real Pi mid-tool Stop retains the a
 		assert.match(text, /EARLY-TOOL-EVIDENCE/);
 		assert.match(text, /LATE-TOOL-EVIDENCE/);
 		assert.match(text, /PERSISTENT-FOREIGN-POLICY/);
-		assert.doesNotMatch(text, /COMPLETED-RAW-REQUEST|ABANDONED-FUTURE/);
+		assert.equal(text.includes("COMPLETED-RAW-REQUEST"), bootstrap, "a bootstrap cannot discard conversation it has not compiled");
+		assert.doesNotMatch(text, /ABANDONED-FUTURE/);
 		const calls = context.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : []).filter((block: any) => block.type === "toolCall").map((block: any) => block.id);
 		const results = context.messages.filter((message: any) => message.role === "toolResult").map((message: any) => message.toolCallId);
 		assert.deepEqual(calls, ["early-read", "late-read"]);
@@ -633,8 +1775,10 @@ for (const stopDuringTool of [false, true]) test(`real Pi retains a native split
 	const compactions = all.filter((entry) => entry.type === "compaction");
 	assert.equal(compactions.length, 1);
 	assert.equal(compactions[0]!.fromHook, false);
-	const kept = all.find((entry) => entry.id === compactions[0]!.firstKeptEntryId);
-	assert.ok(kept?.type === "message" && kept.message.role === "assistant", "the native compaction must split the current turn");
+	assert.match(compactions[0]!.summary, /Turn Context \(split turn\)/, "the native compaction must split the current turn");
+	// Pi also retains invisible metadata immediately before the cut. Preparation now checkpoints after the native user.
+	const kept = all.slice(all.findIndex((entry) => entry.id === compactions[0]!.firstKeptEntryId)).find((entry) => entry.type === "message");
+	assert.ok(kept?.type === "message" && kept.message.role === "assistant", "the first retained conversation entry is still the tool-bearing assistant");
 	const original = all.find((entry) => entry.type === "message" && entry.message.role === "user" && JSON.stringify(entry.message.content).includes("ORIGINAL-SPLIT-REQUEST:"));
 	assert.ok(original);
 	assert.equal(session.sessionManager.buildContextEntries().some((entry) => entry.id === original.id), false);
@@ -875,7 +2019,7 @@ for (const mode of ["captured", "midrun", "repeated"] as const) for (const passi
 	for (let index = 2; index <= count; index += 2) {
 		const text = JSON.stringify(inputs[index]!.messages);
 		assert.match(text, /R15-CURRENT-REQUEST/);
-		assert.doesNotMatch(text, /R15-OLDER-REQUEST/, "disabled user runs must rotate the native anchor too");
+		assert.equal(text.includes("R15-OLDER-REQUEST"), mode !== "captured", "mid-run activation retains uncompiled pre-bootstrap context independently of the run anchor");
 		for (let read = 0; read < index; read++) assert.ok(text.includes(`R15-READ-${read}`));
 	}
 	const branch = session.sessionManager.getBranch();
@@ -886,6 +2030,7 @@ for (const mode of ["captured", "midrun", "repeated"] as const) for (const passi
 	for (const entry of stops) {
 		assert.ok(entry.type === "custom");
 		assert.equal((entry.data as { from: number }).from, original.message.timestamp, "persist the actual observed native anchor, not a guessed boundary");
+		assert.equal((entry.data as { preserveContext?: boolean }).preserveContext === true, mode !== "captured");
 	}
 	const frozenState = structuredClone(f.readState(session));
 	const trace = readFileSync(session.sessionFile!);
@@ -1543,7 +2688,56 @@ test("real Pi Stop preserves a global-only passive branch through reload, patch,
 	assert.equal(existsSync(join(f.repositoryRoot, ".git")), false);
 });
 
-test("real Pi expired selection cannot reset private state through passive Start, Stop, patch, or reload", { timeout: 30_000 }, async (t) => {
+for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi activates current ${mode} memory after expired tree selection and reload`, { timeout: 30_000 }, async (t) => {
+	let session: Awaited<ReturnType<RealPiFixture["createSession"]>>;
+	let interrupted = false;
+	const f = await realPiFixture(t, {
+		initializeRepository: false, passiveBootstrap: true, passiveTools: true,
+		extensions: [{ name: "interrupt-state-flow", factory: (pi) => {
+			pi.on("tool_result", async (event) => {
+				if (mode !== "interrupted" || interrupted || event.toolName !== "patch_state") return;
+				interrupted = true;
+				await session.prompt("/state-flow-stop");
+			});
+		} }],
+	});
+	session = await f.createSession("new");
+	if (mode !== "passive") await session.prompt("/state-flow-start");
+	let old: ReturnType<typeof snapshots>[number] | undefined;
+	for (let index = 1; index <= 9; index++) {
+		f.faux.setResponses(scopedResponses([{ scope: "session", patch: { working: { private: index } } }], `Answer ${index}`));
+		await session.prompt(`Request ${index}`);
+		if (index === 1) old = snapshots(session).at(-1)!;
+	}
+	const step = latestSnapshot(session).meta.step;
+	assert.equal(latestSnapshot(session).config.enabled, mode === "active");
+	assert.equal(latestSnapshot(session).meta.specification !== undefined, mode === "interrupted");
+	assert.equal(f.readState(session, 0, "session").working.private, 9);
+	await session.navigateTree(old!.id, { summarize: false });
+	assert.match(f.notifications.at(-1)!, /outside the retained temporal window/);
+	await session.reload();
+	const paths = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
+	const privateBefore = readFileSync(paths.checkpoint, "utf8");
+	await session.prompt("/state-flow-start");
+	assert.equal(latestSnapshot(session).config.enabled, true);
+	assert.equal(latestSnapshot(session).meta.step, step);
+	assert.equal(latestSnapshot(session).meta.specification, undefined);
+	assert.equal(f.readState(session, 0, "session").working.private, 9);
+	assert.equal(readFileSync(paths.checkpoint, "utf8"), privateBefore, "activation must not discard private state");
+	let nextInput: Context | undefined;
+	f.faux.setResponses([(context) => { nextInput = context; return fauxAssistantMessage("Reconciled after activation."); }]);
+	await session.prompt("Continue actively");
+	const runtimeUser = nextInput!.messages.find((message) => message.role === "user"
+		&& Array.isArray(message.content) && message.content.some((block) => block.type === "text" && block.text.startsWith("State Flow runtime context")));
+	assert.ok(runtimeUser?.role === "user" && Array.isArray(runtimeUser.content));
+	assert.match(runtimeUser.content.find((block) => block.type === "text")?.text ?? "", /"private":9/);
+	assert.equal(f.readState(session).response, "Reconciled after activation.");
+	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-start");
+	assert.equal(f.readState(session, 0, "session").working.private, 9);
+});
+
+test("real Pi expired selection fences passive publication until explicit current-memory activation", { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
@@ -1564,14 +2758,13 @@ test("real Pi expired selection cannot reset private state through passive Start
 	assert.match(f.notifications.at(-1)!, /outside the retained temporal window/);
 	assert.equal(f.readState(session, 0, "global").working.shared, "retained");
 	assert.throws(() => f.readState(session, 0, "session"), /selected branch is unavailable/);
-	await session.prompt("/state-flow-start");
-	assert.match(f.notifications.at(-1)!, /selected branch is unavailable/);
-	assert.deepEqual(snapshots(session).at(-1), expired);
 	await session.prompt("/state-flow-stop");
 	assert.deepEqual(files(), before);
 	assert.deepEqual(snapshots(session).at(-1), expired);
+	const notices = f.notifications.length;
 	await session.reload();
-	assert.match(f.notifications.at(-1)!, /outside the retained temporal window/);
+	assert.equal(f.notifications.length, notices, "degraded Stop does not repeat restoration warnings");
+	assert.equal(f.readState(session, 0, "session").working.private, 5);
 	assert.deepEqual(files(), before);
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", { global: { working: { unsafe: true } } }), { stopReason: "toolUse" }),
@@ -1580,9 +2773,13 @@ test("real Pi expired selection cannot reset private state through passive Start
 	await session.prompt("Try a passive patch after failed restoration");
 	const rejected = session.sessionManager.getEntries().findLast((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "patch_state");
 	assert.ok(rejected?.type === "message" && rejected.message.role === "toolResult" && rejected.message.isError);
-	assert.match(JSON.stringify(rejected.message.content), /selected branch is unavailable/);
+	assert.match(JSON.stringify(rejected.message.content), /paused after Stop/);
 	assert.deepEqual(snapshots(session).at(-1), expired);
 	assert.deepEqual(files(), before, "passive tools and ordinary answers cannot publish an empty substitute session");
+	await session.prompt("/state-flow-start");
+	assert.equal(latestSnapshot(session).config.enabled, true);
+	assert.equal(f.readState(session, 0, "session").working.private, 5);
+	assert.match(f.notifications.at(-1)!, /State Flow enabled/);
 	await session.navigateTree(retained.id, { summarize: false });
 	assert.equal(f.readState(session, 0, "session").working.private, 5);
 	f.faux.setResponses(sessionResponses({ working: { continued: true } }, "Restored safely."));
@@ -1616,7 +2813,12 @@ test("real Pi refuses contradictory session files without passive substitution a
 	assert.ok(f.notifications.some((message) => /Conflicting State Flow temporal lineage/.test(message)));
 	assert.equal(f.readState(session, 0, "global").working.shared, "retained");
 	assert.throws(() => f.readState(session, 0, "session"), /selected branch is unavailable/);
+	const notices = f.notifications.length;
 	await session.prompt("/state-flow-start");
+	assert.equal(f.notifications.length, notices + 1, "a refused activation emits only one final error");
+	assert.match(f.notifications.at(-1)!, /Start failed.*Conflicting State Flow temporal lineage/);
+	assert.doesNotMatch(f.notifications.at(-1)!, /\n/);
+	assert.ok(f.notifications.at(-1)!.length <= 220);
 	await session.prompt("/state-flow-stop");
 	assert.deepEqual(snapshots(session).at(-1), selected);
 	assert.deepEqual(files(), mixed, "failed selection cannot publish a passive replacement");
@@ -1626,7 +2828,7 @@ test("real Pi refuses contradictory session files without passive substitution a
 	assert.equal(latestSnapshot(session).config.enabled, true);
 });
 
-test("real Pi can restart an early disabled marker as a new origin while preserving shared streams without fallback", async (t) => {
+test("real Pi explicit Start on a pre-runtime selection retains current same-session memory and shared streams", async (t) => {
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
@@ -1637,10 +2839,13 @@ test("real Pi can restart an early disabled marker as a new origin while preserv
 	fixture.faux.setResponses(scopedResponses([
 		{ scope: "global", patch: { working: { sharedGlobal: "keep" } } },
 		{ scope: "cwd", patch: { working: { sharedCwd: "keep" } } },
-		{ scope: "session", patch: { working: { laterPrivate: "keep in cold history" } } },
+		{ scope: "session", patch: { working: { laterPrivate: "retained current memory" } } },
 	], "Later branch"));
 	await session.prompt("Save later branch");
 	const later = snapshots(session).at(-1)!;
+	const acceptedStep = latestSnapshot(session).meta.step;
+	const privateState = fixture.readState(session, 0, "session");
+	const priorState = fixture.readState(session, 1);
 	const shared = ["global", "cwd"].flatMap((scope) => {
 		const pair = temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), scope as "global" | "cwd", fixture.repositoryRoot);
 		return [pair.checkpoint, pair.patches].map((path) => ({ path, bytes: readFileSync(path) }));
@@ -1649,18 +2854,14 @@ test("real Pi can restart an early disabled marker as a new origin while preserv
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
 	await session.prompt("/state-flow-start");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
-	assert.equal(latestSnapshot(session).meta.step, 0);
-	assert.deepEqual(fixture.readState(session, 0, "session"), { artifacts: {}, contract: {}, working: {}, intents: {}, response: "" });
+	assert.equal(latestSnapshot(session).meta.step, acceptedStep);
+	assert.deepEqual(fixture.readState(session, 0, "session"), privateState);
 	assert.equal(fixture.readState(session).working.sharedGlobal, "keep");
 	assert.equal(fixture.readState(session).working.sharedCwd, "keep");
-	assert.throws(() => fixture.readState(session, 1), /predates the proven temporal origin/);
+	assert.deepEqual(fixture.readState(session, 1), priorState);
 	for (const { path, bytes } of shared) assert.deepEqual(readFileSync(path), bytes);
 	await session.navigateTree(later.id, { summarize: false });
-	try {
-		assert.equal(fixture.readState(session).working.laterPrivate, "keep in cold history");
-	} catch (error) {
-		assert.match(error instanceof Error ? error.message : String(error), /runtime is unavailable/);
-	}
+	assert.equal(fixture.readState(session).working.laterPrivate, "retained current memory");
 });
 
 test("real Pi isolates same-CWD sessions and retains seven patches per scope", async (t) => {
@@ -1972,7 +3173,7 @@ test("real Pi keeps a malformed patch_state failure separated from the invocatio
 	await session.prompt("Attempt a malformed patch");
 });
 
-test("real Pi reconciles unrelated Git history and refuses a shared write racing after inference", async (t) => {
+test("real Pi preserves unrelated Git history and accepts a shared write against a head advanced after inference", async (t) => {
 	const fixture = await realPiFixture(t);
 	const first = await fixture.createSession();
 	const second = await fixture.createSession();
@@ -2014,18 +3215,19 @@ test("real Pi reconciles unrelated Git history and refuses a shared write racing
 				cwd: { working: { writer: "second" } },
 			}, { id: "stale-cwd-write" }), { stopReason: "toolUse" });
 		},
-		...unchangedResponses("Second writer was rejected."),
+		...unchangedResponses("Second writer was accepted."),
 	]);
 	await second.prompt("Attempt a simultaneous durable transition");
 	assert.equal(observedWriter, "first");
-	assert.equal(latestSnapshot(second).meta.step, 1);
+	assert.equal(latestSnapshot(second).meta.step, 2);
 	assert.equal(latestSnapshot(second).config.enabled, true);
-	assert.equal(loadCwdState(fixture.cwd, fixture.repositoryRoot)!.working.writer, "racing");
-	assert.equal(loadCwdMaterialization(fixture.cwd, fixture.repositoryRoot)!.recentTransitions.length, 2);
-	const failed = second.sessionManager.getEntries().find((entry: any) => entry.type === "message"
-		&& entry.message?.role === "toolResult" && entry.message?.toolCallId === "stale-cwd-write" && entry.message?.isError) as any;
-	assert.ok(failed);
-	assert.match(failed.message.content[0].text, /live CWD state advanced/);
+	assert.equal(loadCwdState(fixture.cwd, fixture.repositoryRoot)!.working.writer, "second");
+	assert.equal(loadCwdMaterialization(fixture.cwd, fixture.repositoryRoot)!.recentTransitions.length, 3);
+	assert.equal(fixture.readState(second, 2, "cwd").working.writer, "racing", "the predecessor is the accepted current head, not model input");
+	const accepted = second.sessionManager.getEntries().find((entry: any) => entry.type === "message"
+		&& entry.message?.role === "toolResult" && entry.message?.toolCallId === "stale-cwd-write") as any;
+	assert.ok(accepted && !accepted.message.isError);
+	assert.match(accepted.message.content[0].text, /State materialized atomically/);
 });
 
 for (const owner of ["global", "cwd", "session"] as const) test(`real Pi compiles an invalidated artifact only into its reported ${owner} scope`, { timeout: 30_000 }, async (t) => {
@@ -2422,6 +3624,86 @@ test("real Pi maps registered Skill source scope and leaves independent patches 
 		assert.equal(provenance.sourceHash, hashSkillSource(registered[scope]));
 		assert.equal(provenance.compilerRevision, SKILL_ARTIFACT_COMPILER);
 	}
+});
+
+for (const scope of ["global", "cwd"] as const) for (const variant of ["duplicate", "competing", "invalid"] as const) test(`real Pi ${scope} Skill compilation respects an independent writer (${variant})`, { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const skill = f.registerSkill(scope === "global" ? "user" : "project", `race-${scope}`, "# Shared Skill\n\nRetain the exact source identity.");
+	const session = await f.createSession("new");
+	const card = { description: "Shared Skill", kind: "skill", compilation: { rule: "LOCAL-COMPILED" } };
+	const peerCard = variant === "duplicate" ? card : { description: "Earlier compilation", kind: "skill", compilation: { rule: "PEER-COMPILED", obsolete: true }, obsolete: true };
+	const paths = temporalScopePaths(f.cwd, session.sessionId, scope, f.repositoryRoot, nativeSessionKey(session));
+	const peerPrefix = sessionRuntimePaths(f.cwd, "skill-peer", f.repositoryRoot).config.slice(0, -"config.json".length);
+	const peerFiles = () => captureTemporalFileBases(f.cwd, "skill-peer", f.repositoryRoot).filter(({ path }) => path.startsWith(peerPrefix));
+	let peerBefore: ReturnType<typeof peerFiles> = [];
+	let localBefore: ReturnType<typeof captureTemporalFileBases> = [];
+	let sharedBefore: string[] = [];
+	let revision = 0, step = 0;
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { private: "LOCAL-PRIVATE" } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("read", { path: skill }, { id: "read-racing-skill" }), { stopReason: "toolUse" }),
+		(context) => {
+			const result = context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === "read-racing-skill");
+			assert.match(JSON.stringify(result), new RegExp(`belongs at ${scope}\\.artifacts`));
+			// An independent process accepts shared compilation after this agent acquired the source.
+			childProcess.execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+				import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
+				import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
+				import { hashSkillSource } from ${JSON.stringify(new URL("../lib/skills.ts", import.meta.url).href)};
+				import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+				const { cwd, root, scope, skill, card } = JSON.parse(process.argv[1]);
+				await new TemporalRuntime(cwd, "skill-peer", root).withPatchTransaction((tx) => {
+					const stage = stageAtomicScopePatches(tx.states, {
+						[scope]: { artifacts: { [skill]: card }, working: { independentPeer: "KEEP-PEER-FIELD" } },
+						session: { working: { private: "FOREIGN-PRIVATE-SECRET" } },
+					}, [{ path: skill, scope, hash: hashSkillSource(skill) }], tx.causalBasis);
+					commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted, stage.provenanceUpdates), tx.causalBasis, { finalizeRun: false });
+				});
+			`, JSON.stringify({ cwd: f.cwd, root: f.repositoryRoot, scope, skill, card: peerCard })], { timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
+			peerBefore = peerFiles();
+			localBefore = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+			assert.equal(peerBefore.length, 5);
+			sharedBefore = [paths.checkpoint, paths.patches, paths.meta].map((path) => readFileSync(path, "utf8"));
+			revision = JSON.parse(sharedBefore[2]!).temporal.revision;
+			step = latestSnapshot(session).meta.step;
+			return fauxAssistantMessage(fauxToolCall("patch_state", {
+				[scope]: { artifacts: { [skill]: variant === "invalid" ? { ...card, compilation: {} } : card } },
+				...(variant === "invalid" ? { session: { working: { mustNotAccept: true } } } : {}),
+			}, { id: "compile-racing-skill" }), { stopReason: "toolUse" });
+		},
+		(context) => {
+			const text = JSON.stringify(context.messages);
+			assert.match(text, /LOCAL-PRIVATE/);
+			assert.doesNotMatch(text, /FOREIGN-PRIVATE-SECRET/);
+			const result = context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === "compile-racing-skill");
+			if (variant === "invalid") {
+				assert.equal((result as any)?.isError, true);
+				assert.match(JSON.stringify(result), /compilation object must be non-empty/);
+				assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), localBefore);
+				assert.deepEqual(peerFiles(), peerBefore);
+				assert.equal(f.readState(session, 0, "session").working.mustNotAccept, undefined);
+				return fauxAssistantMessage("Rejected compilation left accepted memory intact.");
+			}
+			assert.match(text, /KEEP-PEER-FIELD/);
+			assert.ok(result && !(result as any).isError);
+			assert.deepEqual(f.readState(session, 0, scope).artifacts[skill], card, "a compilation replaces the complete artifact, not a stale merge");
+			assert.equal(f.readState(session, 0, scope).working.independentPeer, "KEEP-PEER-FIELD");
+			assert.equal(f.readState(session, 0, "session").working.private, "LOCAL-PRIVATE");
+			const meta = JSON.parse(readFileSync(paths.meta, "utf8"));
+			assert.equal(meta.temporal.revision, revision + (variant === "competing" ? 1 : 0));
+			assert.equal(latestSnapshot(session).meta.step, step + (variant === "competing" ? 1 : 0));
+			assert.equal(meta.artifacts[skill].sourceHash, hashSkillSource(skill));
+			assert.equal(meta.artifacts[skill].compilerRevision, SKILL_ARTIFACT_COMPILER);
+			assert.deepEqual(peerFiles(), peerBefore, "local compilation never rewrites the other session's five private files");
+			if (variant === "duplicate") {
+				assert.match(JSON.stringify(result), /State already current/);
+				assert.deepEqual([paths.checkpoint, paths.patches, paths.meta].map((path) => readFileSync(path, "utf8")), sharedBefore);
+			}
+			return fauxAssistantMessage("Shared Skill compilation verified.");
+		},
+	]);
+	await session.prompt("Compile the registered Skill while another session publishes shared state");
+	assert.deepEqual(peerFiles(), peerBefore);
 });
 
 test("a fresh real Pi agent continues from compact state and a runtime-compiled Skill artifact", async (t) => {

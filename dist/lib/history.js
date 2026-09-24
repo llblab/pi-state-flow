@@ -1,0 +1,84 @@
+import { randomUUID } from "node:crypto";
+import { isJsonValue, isObject, sameJson, validatePatch } from "./json.js";
+export const DEFAULT_HISTORY_LIMIT = 7;
+export const MAX_HISTORY_LIMIT = 100;
+const SCOPES = new Set(["global", "cwd", "session"]);
+const PATCH_KEYS = new Set(["artifacts", "contract", "working", "intents", "response", "lazy"]);
+/** Normalize accepted replacements into recursive-merge replay, including removals. */
+function replayPatch(before, after) {
+    const entries = [];
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+        if (!Object.hasOwn(after, key)) {
+            entries.push([key, null]);
+            continue;
+        }
+        if (Object.hasOwn(before, key) && sameJson(before[key], after[key]))
+            continue;
+        const previous = before[key];
+        const next = after[key];
+        entries.push([key, isObject(previous) && isObject(next) ? replayPatch(previous, next) : structuredClone(next)]);
+    }
+    return Object.fromEntries(entries);
+}
+function validateScopedPatch(value) {
+    if (!isObject(value) || Object.keys(value).sort().join(",") !== "patch,scope") {
+        throw new Error('Recent State Flow transition entries must contain exactly "scope" and "patch"');
+    }
+    if (typeof value.scope !== "string" || !SCOPES.has(value.scope)) {
+        throw new Error(`Recent State Flow transition has an unknown scope: ${String(value.scope)}`);
+    }
+    validatePatch(value.patch);
+    for (const [key, field] of Object.entries(value.patch)) {
+        const valid = key === "response"
+            ? value.scope === "session" && typeof field === "string"
+            : key === "lazy"
+                ? field !== null
+                : PATCH_KEYS.has(key) && isObject(field);
+        if (!PATCH_KEYS.has(key) || !valid) {
+            throw new Error("Recent State Flow patches may contain hot object planes, ordinary-JSON lazy state, and a session response string");
+        }
+    }
+}
+export function validateRecentTransition(value) {
+    if (!isObject(value) || Object.keys(value).sort().join(",") !== "at,id,transitions")
+        throw new Error("Recent State Flow transition has an invalid envelope");
+    if (typeof value.id !== "string" || value.id.length === 0)
+        throw new Error("Recent State Flow transition must have a non-empty id");
+    if (!Number.isSafeInteger(value.at) || value.at < 0)
+        throw new Error("Recent State Flow transition must have a safe non-negative position");
+    if (!Array.isArray(value.transitions) || value.transitions.length === 0 || !isJsonValue(value.transitions))
+        throw new Error("Recent State Flow transition must contain semantic patches");
+    const seen = new Set();
+    for (const transition of value.transitions) {
+        validateScopedPatch(transition);
+        if (seen.has(transition.scope))
+            throw new Error(`Duplicate recent State Flow transition scope: ${transition.scope}`);
+        seen.add(transition.scope);
+    }
+}
+export function createAcceptedTransition(currentStates, nextStates, id) {
+    const transitions = [];
+    for (const scope of SCOPES) {
+        const patch = replayPatch(currentStates[scope], nextStates[scope]);
+        if (Object.keys(patch).length > 0)
+            transitions.push({ scope, patch });
+    }
+    if (transitions.length === 0)
+        return undefined;
+    return { id: id ?? randomUUID(), transitions };
+}
+/** Preserve the configured per-scope budget, filtering in selected-lineage order. */
+export function projectRecentTransitionsWithLimit(limit, lineage) {
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > MAX_HISTORY_LIMIT) {
+        throw new Error(`Recent State Flow transition limit must be an integer from 0 to ${MAX_HISTORY_LIMIT}`);
+    }
+    const remaining = { global: limit, cwd: limit, session: limit };
+    const result = [];
+    for (let index = lineage.length - 1; index >= 0; index--) {
+        const record = lineage[index];
+        const transitions = record.transitions.filter(({ scope }) => remaining[scope]-- > 0);
+        if (transitions.length)
+            result.push({ ...record, transitions });
+    }
+    return structuredClone(result.reverse());
+}

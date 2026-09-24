@@ -5,9 +5,11 @@ import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, join, relative, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { awaitInFlightBackupPushes, backupCurrentStateFlowFiles, pushCurrentStateFlowBackup, startStateFlowBackupPush } from "../lib/git.ts";
-import { captureTemporalFileBases, isStateFlowOwnedPath } from "../lib/durable.ts";
+import { captureTemporalFileBases, isStateFlowOwnedPath, temporalScopePaths } from "../lib/durable.ts";
+import { withStorageTransaction } from "../lib/storage.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import "./git-environment.ts";
@@ -17,13 +19,13 @@ function git(root: string, ...args: string[]): string {
 	return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
 }
 
-test("backup requires the exact State Flow root to be a Git repository", (t) => {
+test("backup requires the exact State Flow root to be a Git repository", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-no-git-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	assert.throws(() => backupCurrentStateFlowFiles(root), /Git command failed|repository/);
+	await assert.rejects(backupCurrentStateFlowFiles(root), /Git command failed|repository/);
 });
 
-test("settled backup commits only State Flow-owned current files", (t) => {
+test("settled backup commits only State Flow-owned current files", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	git(root, "init");
@@ -35,13 +37,13 @@ test("settled backup commits only State Flow-owned current files", (t) => {
 	const before = git(root, "rev-parse", "HEAD");
 	writeFileSync(join(root, "checkpoint.json"), "{\"accepted\":true}\n");
 	writeFileSync(join(root, "unrelated.txt"), "caller edit\n");
-	const commit = backupCurrentStateFlowFiles(root);
+	const commit = await backupCurrentStateFlowFiles(root);
 	assert.match(commit ?? "", /^[0-9a-f]{40,64}$/);
 	assert.notEqual(commit, before);
 	assert.equal(git(root, "show", "HEAD:checkpoint.json"), '{"accepted":true}');
 	assert.equal(git(root, "show", "HEAD:unrelated.txt"), "baseline");
 	assert.equal(readFileSync(join(root, "unrelated.txt"), "utf8"), "caller edit\n");
-	assert.equal(backupCurrentStateFlowFiles(root), undefined);
+	assert.equal(await backupCurrentStateFlowFiles(root), undefined);
 });
 
 test("backup replication pushes the exact current commit only to the configured branch remote", async (t) => {
@@ -55,7 +57,7 @@ test("backup replication pushes the exact current commit only to the configured 
 	git(root, "config", "user.name", "State Flow Test");
 	git(root, "config", "user.email", "state-flow@example.invalid");
 	writeFileSync(join(root, "checkpoint.json"), "{\"accepted\":true}\n");
-	const commit = backupCurrentStateFlowFiles(root)!;
+	const commit = (await backupCurrentStateFlowFiles(root))!;
 	git(remote, "init", "--bare", "-b", "main");
 	git(root, "remote", "add", "origin", remote);
 	git(root, "config", "branch.main.remote", "origin");
@@ -75,7 +77,7 @@ test("in-flight backup push settlement closes the process and prevents overlappi
 	git(repository, "config", "user.name", "State Flow Test");
 	git(repository, "config", "user.email", "state-flow@example.invalid");
 	writeFileSync(join(repository, "checkpoint.json"), "{}\n");
-	const first = backupCurrentStateFlowFiles(repository)!;
+	const first = (await backupCurrentStateFlowFiles(repository))!;
 	git(repository, "remote", "add", "origin", remote);
 	git(repository, "config", "branch.main.remote", "origin");
 	git(repository, "config", "branch.main.merge", "refs/heads/main");
@@ -101,7 +103,7 @@ test("in-flight backup push settlement closes the process and prevents overlappi
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 	writeFileSync(join(repository, "checkpoint.json"), "{\"next\":true}\n");
-	const second = backupCurrentStateFlowFiles(repository)!;
+	const second = (await backupCurrentStateFlowFiles(repository))!;
 	assert.notEqual(second, first);
 	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error)), false);
 	assert.equal(readFileSync(entered, "utf8"), "push\n");
@@ -133,7 +135,7 @@ test("backup replication skips repositories without an explicitly configured bra
 	git(root, "config", "user.name", "State Flow Test");
 	git(root, "config", "user.email", "state-flow@example.invalid");
 	writeFileSync(join(root, "checkpoint.json"), "{}\n");
-	backupCurrentStateFlowFiles(root);
+	await backupCurrentStateFlowFiles(root);
 	git(remote, "init", "--bare", "-b", "main");
 	git(root, "remote", "add", "origin", remote);
 	assert.equal(await pushCurrentStateFlowBackup(root), undefined);
@@ -152,7 +154,7 @@ test("failed backup replication remains retryable on the next attempt", async (t
 	git(root, "config", "user.name", "State Flow Test");
 	git(root, "config", "user.email", "state-flow@example.invalid");
 	writeFileSync(join(root, "checkpoint.json"), "{}\n");
-	const commit = backupCurrentStateFlowFiles(root)!;
+	const commit = (await backupCurrentStateFlowFiles(root))!;
 	git(root, "remote", "add", "origin", remote);
 	git(root, "config", "branch.main.remote", "origin");
 	git(root, "config", "branch.main.merge", "refs/heads/main");
@@ -176,7 +178,7 @@ test("backup replication does not force a divergent configured remote", async (t
 	git(root, "config", "user.name", "State Flow Test");
 	git(root, "config", "user.email", "state-flow@example.invalid");
 	writeFileSync(join(root, "checkpoint.json"), "{\"generation\":1}\n");
-	const baseline = backupCurrentStateFlowFiles(root)!;
+	const baseline = (await backupCurrentStateFlowFiles(root))!;
 	git(remote, "init", "--bare", "-b", "main");
 	git(root, "remote", "add", "origin", remote);
 	git(root, "config", "branch.main.remote", "origin");
@@ -192,13 +194,13 @@ test("backup replication does not force a divergent configured remote", async (t
 	const remoteHead = git(remote, "rev-parse", "refs/heads/main");
 	assert.notEqual(remoteHead, baseline);
 	writeFileSync(join(root, "checkpoint.json"), "{\"generation\":2}\n");
-	const localHead = backupCurrentStateFlowFiles(root)!;
+	const localHead = (await backupCurrentStateFlowFiles(root))!;
 	await assert.rejects(pushCurrentStateFlowBackup(root), /Git backup push failed/);
 	assert.equal(git(root, "rev-parse", "HEAD"), localHead);
 	assert.equal(git(remote, "rev-parse", "refs/heads/main"), remoteHead);
 });
 
-for (const outcome of ["success", "unchanged", "index-lock"] as const) test(`backup preserves unrelated staged data on ${outcome}`, (t) => {
+for (const outcome of ["success", "unchanged", "index-lock"] as const) test(`backup preserves unrelated staged data on ${outcome}`, async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-index-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	git(root, "init");
@@ -227,12 +229,12 @@ for (const outcome of ["success", "unchanged", "index-lock"] as const) test(`bac
 	if (outcome === "index-lock") {
 		const lock = join(root, ".git", "index.lock");
 		writeFileSync(lock, "caller-owned lock\n");
-		assert.throws(() => backupCurrentStateFlowFiles(root), /index\.lock/);
+		await assert.rejects(backupCurrentStateFlowFiles(root), /index\.lock/);
 		assert.equal(readFileSync(lock, "utf8"), "caller-owned lock\n");
 		assert.equal(git(root, "rev-parse", "HEAD"), head);
 		assert.deepEqual(readFileSync(join(root, ".git", "index")), beforeIndex);
 	} else {
-		const commit = backupCurrentStateFlowFiles(root);
+		const commit = await backupCurrentStateFlowFiles(root);
 		if (outcome === "unchanged") {
 			assert.equal(commit, undefined);
 			assert.equal(git(root, "rev-parse", "HEAD"), head);
@@ -242,7 +244,7 @@ for (const outcome of ["success", "unchanged", "index-lock"] as const) test(`bac
 			assert.equal(git(root, "show", "HEAD:checkpoint.json"), "accepted canonical bytes");
 			assert.equal(git(root, "ls-tree", "--name-only", "HEAD", "--", "patches.jsonl"), "");
 			assert.equal(git(root, "diff", "--cached", "--", "checkpoint.json", "patches.jsonl"), "");
-			assert.equal(backupCurrentStateFlowFiles(root), undefined);
+			assert.equal(await backupCurrentStateFlowFiles(root), undefined);
 		}
 	}
 	assert.equal(stages(), beforeStages);
@@ -268,7 +270,7 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 	const a = new TemporalRuntime(cwd, "writer-a", root);
 	const snapshot = emptySnapshot(true);
 	a.initialize(snapshot, true);
-	const baseline = backupCurrentStateFlowFiles(root)!;
+	const baseline = (await backupCurrentStateFlowFiles(root))!;
 	const publish = (generation: number) => {
 		const before = a.states();
 		const next = structuredClone(before);
@@ -309,7 +311,7 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 		};
 		syncBuiltinESMExports();
 		let result;
-		try { result = { commit: backupCurrentStateFlowFiles(root) }; }
+		try { result = { commit: await backupCurrentStateFlowFiles(root) }; }
 		catch (error) { result = { error: error.message }; }
 		process.send({ phase: "complete", ...result, lockedCommands }, () => process.disconnect());
 	`, JSON.stringify({ root, release, phase, fail })], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
@@ -355,12 +357,179 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 	}
 	assert.equal(existsSync(join(root, ".state-flow-publication.lock")), false);
 	assert.equal(existsSync(join(root, ".git", "state-flow-backup.lock")), false);
-	const next = backupCurrentStateFlowFiles(root);
+	const next = await backupCurrentStateFlowFiles(root);
 	assert.equal(next === undefined, !fail && phase === "read-tree");
 	verify(next ?? result.commit, capturedAfter);
 });
 
-test("backup preserves Git ignore/filter policy, literal paths, and opaque snapshot bytes", (t) => {
+for (const outcome of ["accept", "cancel"] as const) test(`backup awaits a partial foreign cohort and ${outcome === "accept" ? "captures its complete inventory behind the backup mutex" : "cancels without changing files or Git"}`, { timeout: 25_000 }, async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-awaited-"));
+	const release = join(root, "writer-release");
+	const partial = join(root, "writer-partial");
+	const controller = new AbortController();
+	const operations: Promise<string | undefined>[] = [];
+	let child: ReturnType<typeof spawn> | undefined;
+	let closed: ReturnType<typeof once> | undefined;
+	t.after(async () => {
+		controller.abort();
+		writeFileSync(release, "finish");
+		if (child?.exitCode === null) child.kill("SIGKILL");
+		await closed;
+		await Promise.allSettled(operations);
+		rmSync(root, { recursive: true, force: true });
+	});
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	const local = new TemporalRuntime(join(root, "project"), "local", root);
+	local.initialize(emptySnapshot(true), true);
+	const baseline = (await backupCurrentStateFlowFiles(root))!;
+	const index = readFileSync(join(root, ".git", "index"));
+	const cwd = join(root, "new-project");
+	child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+		import fs from "node:fs";
+		import { syncBuiltinESMExports } from "node:module";
+		import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
+		import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
+		import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+		const { root, cwd, partial, release, pauseAt } = JSON.parse(process.argv[1]);
+		const rename = fs.renameSync;
+		let paused = false;
+		fs.renameSync = (from, to) => {
+			rename(from, to);
+			if (paused || to !== pauseAt) return;
+			paused = true;
+			fs.writeFileSync(partial, "partial");
+			const deadline = Date.now() + 20_000;
+			while (!fs.existsSync(release)) {
+				if (Date.now() > deadline) throw new Error("backup writer fixture expired");
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+			}
+		};
+		syncBuiltinESMExports();
+		await new TemporalRuntime(cwd, "foreign", root).withPatchTransaction((tx) => {
+			const stage = stageAtomicScopePatches(tx.states, {
+				global: { working: { cohort: "foreign" } }, cwd: { working: { cohort: "new-cwd" } },
+				session: { working: { cohort: "new-session" } },
+			}, [], tx.causalBasis);
+			commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+		});
+	`, JSON.stringify({ root, cwd, partial, release, pauseAt: temporalScopePaths(cwd, "foreign", "global", root).patches })], { stdio: ["ignore", "ignore", "inherit"] });
+	closed = once(child, "close");
+	const deadline = Date.now() + 8_000;
+	while (!existsSync(partial)) {
+		if (Date.now() > deadline || child.exitCode !== null) assert.fail("writer did not pause midway through publication");
+		await delay(10);
+	}
+	assert.equal(existsSync(temporalScopePaths(cwd, "foreign", "session", root).checkpoint), false, "the new namespace is not yet present");
+	const partialFiles = captureTemporalFileBases(local.cwd, local.sessionId, root);
+	const backup = backupCurrentStateFlowFiles(root, controller.signal);
+	operations.push(backup);
+	let settled = false;
+	backup.then(() => { settled = true; }, () => { settled = true; });
+	await delay(2_200);
+	assert.equal(settled, false, "live ownership outlasts the old two-second timeout without blocking this timer");
+	assert.equal(git(root, "rev-parse", "HEAD"), baseline);
+	assert.deepEqual(readFileSync(join(root, ".git", "index")), index);
+	const mutex = join(root, ".git", "state-flow-backup.lock");
+	assert.equal(readFileSync(mutex, "utf8"), `${process.pid}\n`, "backup mutex remains held across awaited capture");
+	if (outcome === "cancel") {
+		controller.abort();
+		await assert.rejects(backup, { name: "AbortError" });
+		assert.equal(existsSync(mutex), false);
+		assert.deepEqual(captureTemporalFileBases(local.cwd, local.sessionId, root), partialFiles);
+		assert.equal(git(root, "rev-parse", "HEAD"), baseline);
+		assert.deepEqual(readFileSync(join(root, ".git", "index")), index);
+	} else {
+		const waiting = new AbortController();
+		const cancelled = backupCurrentStateFlowFiles(root, waiting.signal);
+		operations.push(cancelled);
+		await delay(40);
+		waiting.abort();
+		await assert.rejects(cancelled, { name: "AbortError" });
+		assert.equal(readFileSync(mutex, "utf8"), `${process.pid}\n`, "canceling a backup waiter cannot release the first owner's mutex");
+	}
+	assert.equal(readFileSync(join(root, ".state-flow-publication.lock"), "utf8"), `${child.pid}\n`);
+	const following = outcome === "accept" ? backupCurrentStateFlowFiles(root, controller.signal) : undefined;
+	if (following) operations.push(following);
+	writeFileSync(release, "continue");
+	assert.equal((await closed)[0], 0);
+	const accepted = [...captureTemporalFileBases(local.cwd, local.sessionId, root), ...captureTemporalFileBases(cwd, "foreign", root)];
+	const commit = outcome === "accept" ? await backup : await backupCurrentStateFlowFiles(root);
+	assert.ok(commit, "a later accepted backup remains retryable after cancellation");
+	if (following) assert.equal(await following, undefined, "the next backup reads HEAD only after acquiring its mutex");
+	const expected = new Map(accepted.filter((file) => file.bytes !== undefined).map((file) => [relative(root, file.path).split(sep).join("/"), file.bytes]));
+	assert.deepEqual(git(root, "ls-tree", "-r", "--name-only", "-z", commit).split("\0").filter(Boolean).sort(), [...expected.keys()].sort());
+	for (const [path, bytes] of expected) assert.deepEqual(execFileSync("git", ["-C", root, "show", `${commit}:${path}`]), bytes, path);
+	assert.equal(existsSync(mutex), false);
+	assert.equal(existsSync(join(root, ".state-flow-publication.lock")), false);
+});
+
+for (const change of ["head", "branch"] as const) test(`backup rechecks the Git ${change} after awaiting capture`, async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-git-drift-"));
+	git(root, "init", "-b", "main");
+	git(root, "config", "user.name", "State Flow Test");
+	git(root, "config", "user.email", "state-flow@example.invalid");
+	writeFileSync(join(root, "checkpoint.json"), "baseline\n");
+	const before = await backupCurrentStateFlowFiles(root);
+	writeFileSync(join(root, "checkpoint.json"), "accepted current bytes\n");
+	const controller = new AbortController();
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const owner = withStorageTransaction(root, () => gate);
+	const backup = backupCurrentStateFlowFiles(root, controller.signal);
+	t.after(async () => {
+		controller.abort();
+		release();
+		await Promise.allSettled([owner, backup]);
+		rmSync(root, { recursive: true, force: true });
+	});
+	if (change === "head") git(root, "commit", "--allow-empty", "-m", "foreign history");
+	else git(root, "switch", "-c", "foreign-branch");
+	const head = git(root, "rev-parse", "HEAD");
+	const branch = git(root, "symbolic-ref", "HEAD");
+	const index = readFileSync(join(root, ".git", "index"));
+	release();
+	await owner;
+	await assert.rejects(backup, /Git base changed concurrently/);
+	assert.equal(git(root, "rev-parse", "HEAD"), head);
+	assert.equal(git(root, "symbolic-ref", "HEAD"), branch);
+	assert.equal(git(root, "rev-parse", "main"), change === "head" ? head : before);
+	assert.deepEqual(readFileSync(join(root, ".git", "index")), index);
+	assert.equal(readFileSync(join(root, "checkpoint.json"), "utf8"), "accepted current bytes\n");
+	assert.equal(existsSync(join(root, ".git", "state-flow-backup.lock")), false);
+});
+
+test("backup cancellation preserves replacement mutex ownership and both failure causes", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-replaced-"));
+	git(root, "init", "-b", "main");
+	const controller = new AbortController();
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const owner = withStorageTransaction(root, () => gate);
+	const backup = backupCurrentStateFlowFiles(root, controller.signal);
+	t.after(async () => {
+		controller.abort();
+		release();
+		await Promise.allSettled([owner, backup]);
+		rmSync(root, { recursive: true, force: true });
+	});
+	const mutex = join(root, ".git", "state-flow-backup.lock");
+	assert.equal(readFileSync(mutex, "utf8"), `${process.pid}\n`);
+	fs.renameSync(mutex, join(root, ".git", "displaced-backup-lock"));
+	writeFileSync(mutex, "replacement owner\n");
+	controller.abort();
+	await assert.rejects(backup, (error: unknown) => {
+		assert.ok(error instanceof AggregateError);
+		assert.equal(error.errors[0].name, "AbortError");
+		assert.match(error.errors[1].message, /lock changed.*current owner preserved/);
+		return true;
+	});
+	assert.equal(readFileSync(mutex, "utf8"), "replacement owner\n");
+	assert.equal(readFileSync(join(root, ".state-flow-publication.lock"), "utf8"), `${process.pid}\n`);
+});
+
+test("backup preserves Git ignore/filter policy, literal paths, and opaque snapshot bytes", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-policy-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	git(root, "init", "-b", "main");
@@ -383,7 +552,7 @@ test("backup preserves Git ignore/filter policy, literal paths, and opaque snaps
 	writeFileSync(join(cwd, "meta.json"), "ignored metadata\n");
 	const opaque = Buffer.from([0xff, 0xfe, 0, 10]);
 	writeFileSync(join(root, "patches.jsonl"), opaque);
-	const commit = backupCurrentStateFlowFiles(root)!;
+	const commit = (await backupCurrentStateFlowFiles(root))!;
 	assert.equal(git(root, "show", `${commit}:checkpoint.json`), "filtered:captured root");
 	assert.equal(git(root, "show", `${commit}:--project[1]--/checkpoint.json`), "literal child");
 	assert.equal(git(root, "show", `${commit}:meta.json`), "current tracked metadata");
@@ -391,10 +560,10 @@ test("backup preserves Git ignore/filter policy, literal paths, and opaque snaps
 	assert.equal(git(root, "ls-tree", "--name-only", "-r", commit).includes("--project[1]--/meta.json"), false);
 	assert.equal(git(root, "ls-tree", "--name-only", "-r", commit).includes(".gitattributes"), false);
 	assert.equal(readFileSync(join(root, "checkpoint.json"), "utf8"), "captured root\n");
-	assert.equal(backupCurrentStateFlowFiles(root), undefined);
+	assert.equal(await backupCurrentStateFlowFiles(root), undefined);
 });
 
-test("backup inventories only canonical namespace levels and records removed owned directories", (t) => {
+test("backup inventories only canonical namespace levels and records removed owned directories", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-inventory-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	git(root, "init", "-b", "main");
@@ -409,17 +578,17 @@ test("backup inventories only canonical namespace levels and records removed own
 	const original = fs.readdirSync;
 	fs.readdirSync = ((path: any, options: any) => { visited.push(String(path)); return original(path, options); }) as typeof original;
 	syncBuiltinESMExports();
-	try { assert.ok(backupCurrentStateFlowFiles(root)); }
+	try { assert.ok(await backupCurrentStateFlowFiles(root)); }
 	finally { fs.readdirSync = original; syncBuiltinESMExports(); }
 	assert.deepEqual(visited.sort(), [root, cwd, session].sort());
 	rmSync(session, { recursive: true });
-	const removed = backupCurrentStateFlowFiles(root)!;
+	const removed = (await backupCurrentStateFlowFiles(root))!;
 	assert.ok(removed);
 	assert.equal(git(root, "ls-tree", "--name-only", "-r", removed).includes("session/"), false);
 	assert.equal(readFileSync(join(cwd, "checkpoint.json"), "utf8"), "{}\n");
 });
 
-for (const kind of ["symlink", "directory"] as const) test(`backup refuses an owned ${kind} without altering Git or following source bodies`, (t) => {
+for (const kind of ["symlink", "directory"] as const) test(`backup refuses an owned ${kind} without altering Git or following source bodies`, async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-unsafe-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	git(root, "init", "-b", "main");
@@ -427,14 +596,14 @@ for (const kind of ["symlink", "directory"] as const) test(`backup refuses an ow
 	git(root, "config", "user.email", "state-flow@example.invalid");
 	const path = join(root, "checkpoint.json");
 	writeFileSync(path, "{}\n");
-	const head = backupCurrentStateFlowFiles(root)!;
+	const head = (await backupCurrentStateFlowFiles(root))!;
 	const index = readFileSync(join(root, ".git", "index"));
 	rmSync(path);
 	const outside = join(root, "unrelated-source.txt");
 	writeFileSync(outside, "Caller-owned source\n");
 	if (kind === "symlink") symlinkSync(outside, path, "file");
 	else { mkdirSync(path); writeFileSync(join(path, "unrelated-source.txt"), "Must not stage a directory"); }
-	assert.throws(() => backupCurrentStateFlowFiles(root), /not a regular file/);
+	await assert.rejects(backupCurrentStateFlowFiles(root), /not a regular file/);
 	assert.equal(git(root, "rev-parse", "HEAD"), head);
 	assert.deepEqual(readFileSync(join(root, ".git", "index")), index);
 	assert.equal(readFileSync(outside, "utf8"), "Caller-owned source\n");
@@ -442,7 +611,7 @@ for (const kind of ["symlink", "directory"] as const) test(`backup refuses an ow
 	assert.equal(existsSync(join(root, ".git", "state-flow-backup.lock")), false);
 });
 
-for (const owned of [false, true]) test(`unborn backup preserves caller-only index data (owned files=${owned})`, (t) => {
+for (const owned of [false, true]) test(`unborn backup preserves caller-only index data (owned files=${owned})`, async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-backup-unborn-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	git(root, "init");
@@ -453,7 +622,7 @@ for (const owned of [false, true]) test(`unborn backup preserves caller-only ind
 	rmSync(join(root, "notes.txt"));
 	const before = git(root, "ls-files", "--stage", "-z", "--", "notes.txt");
 	if (owned) writeFileSync(join(root, "checkpoint.json"), "{}\n");
-	const commit = backupCurrentStateFlowFiles(root);
+	const commit = await backupCurrentStateFlowFiles(root);
 	assert.equal(commit !== undefined, owned);
 	assert.equal(git(root, "ls-files", "--stage", "-z", "--", "notes.txt"), before);
 	assert.equal(git(root, "show", ":notes.txt"), "index-only content");

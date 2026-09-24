@@ -68,13 +68,13 @@ function validateSkillCompilerOutput(scope: StateScope, path: string, output: un
 	const problems: string[] = [];
 	if (!isObject(output)) problems.push("artifact entry is missing");
 	else {
-		if (typeof output.description !== "string" || output.description.trim().length === 0) problems.push("description must be a non-empty string");
+		if (typeof output.description !== "string" || output.description.trim().length === 0) problems.push("description must be non-empty");
 		if (output.kind !== "skill") problems.push('kind must be "skill"');
-		if (!isObject(output.compilation) || Object.keys(output.compilation).length === 0) problems.push("compilation must be a non-empty object");
+		if (!isObject(output.compilation) || Object.keys(output.compilation).length === 0) problems.push("compilation object must be non-empty");
 	}
 	if (problems.length === 0) return;
 	const target = `${scope}.artifacts[${JSON.stringify(path)}]`;
-	throw new Error(`Skill compiler output at ${target} is invalid: ${problems.join("; ")}. Example: {${JSON.stringify(scope)}:{"artifacts":{${JSON.stringify(path)}:{"description":"What this Skill provides","kind":"skill","compilation":{"rules":["Operational rule retained from the Skill"]}}}}}`);
+	throw new Error(`Invalid Skill at ${target}: ${problems.join("; ")}`);
 }
 
 function validateSkillCompilerTargets(
@@ -107,7 +107,7 @@ function compileReadSkills(
 		const output = patch.artifacts[read.path];
 		validateSkillCompilerOutput(scope, read.path, output);
 		const compiled = compileArtifact({
-			source: { path: read.path, hash: read.hash },
+			source: { path: read.path, scope, hash: read.hash },
 			compiler: SKILL_ARTIFACT_COMPILER,
 			output: { ...structuredClone(output), kind: "skill" } as ArtifactCompilerOutput,
 		});
@@ -125,11 +125,11 @@ function compileReadSkills(
 	}
 }
 
-function validateMaterializedTransition(nextState: StateDocument): void {
+function validateMaterializedTransition(nextState: StateDocument, scope: StateScope): void {
 	if (containsNull(nextState)) {
 		throw new Error("Materialized state cannot contain null; use null only as an object-key deletion marker");
 	}
-	validateArtifactRegistry(nextState.artifacts);
+	validateArtifactRegistry(nextState.artifacts, `${scope}.artifacts`);
 	if (Object.hasOwn(nextState.contract, "compiled_skills")) {
 		throw new Error("contract.compiled_skills is retired; Skill compilations belong only in source-addressed artifacts");
 	}
@@ -153,7 +153,7 @@ function validateScopePatch(scope: unknown, patch: unknown): asserts patch is Sc
 	if (Object.hasOwn(patch, "lazy") && !isObject(patch.lazy)) {
 		throw new Error("Scoped State Flow patch field lazy must be a JSON object");
 	}
-	if (isObject(patch.artifacts)) validateModelArtifactPatch(patch.artifacts);
+	if (isObject(patch.artifacts)) validateModelArtifactPatch(patch.artifacts, `${scope}.artifacts`);
 }
 
 function completePatch(patch: ScopePatch, response: string): StatePatch {
@@ -209,7 +209,7 @@ function stageScopedSemanticTransition(
 			provenanceUpdates[scope],
 		);
 		compileReadSkills(scope, nextState, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
-		validateMaterializedTransition(nextState);
+		validateMaterializedTransition(nextState, scope);
 		nextStates[scope] = nextState;
 	}
 	return {

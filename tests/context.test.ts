@@ -55,7 +55,7 @@ test("ordinary context derives compact lineage from cached runtime without Git q
 	const h = harness();
 	await start(h, "Continue");
 	await commitTerminal(h, {}, { verified: true }, "Accepted");
-	h.beforeAgentStart("Continue");
+	await h.beginRun("Continue");
 	const spawn = childProcess.spawnSync;
 	childProcess.spawnSync = (() => { throw new Error("Ordinary inference queried a process"); }) as typeof spawn;
 	syncBuiltinESMExports();
@@ -309,6 +309,24 @@ for (const boundary of ["missing", "ambiguous", "nonfinite"] as const) test(`pas
 	}
 });
 
+test("unfinished compilation preserves all available native context without mutating or reconstructing messages", () => {
+	const native: AgentMessage[] = [
+		message("custom", "Foreign policy", 1, "foreign-policy"),
+		{ role: "compactionSummary", summary: "Available native summary", tokensBefore: 5000, timestamp: 2 } as AgentMessage,
+		user("Uncompiled earlier request", 3),
+		message("assistant", "Uncompiled earlier result", 4),
+		user("Bootstrap request", 10),
+		toolAssistant("pending") as AgentMessage,
+	];
+	const before = structuredClone(native);
+	const continuation = createPassiveContinuation(emptyState(), 20, 10, true);
+	const projected = passiveContinuationMessages(native, continuation);
+	assert.deepEqual(projected, [continuation.handoff, ...native]);
+	assert.ok(projected.slice(1).every((entry, index) => entry === native[index]));
+	assert.deepEqual(native, before);
+	assert.deepEqual(passiveContinuationMessages([], continuation), [continuation.handoff]);
+});
+
 test("idle and legacy passive cutoffs retain only later conversation plus foreign custom context", () => {
 	const persistent = message("custom", "Persistent policy", 1, "foreign-policy");
 	const later = message("user", "Later request", 22);
@@ -345,7 +363,7 @@ test("rotates the user-authority turn specification while retaining committed st
 	const h = harness();
 	await start(h, "First request");
 	await commitTerminal(h, { mode: "stable" }, { phase: "one" });
-	const next = h.beforeAgentStart("Second request");
+	const next = await h.beginRun("Second request");
 	assert.doesNotMatch(next.systemPrompt, /First request|Second request/);
 	assert.equal(h.resolveSnapshot().meta.specification, "Second request");
 	const projected = h.handlers.get("context")!({
@@ -434,7 +452,7 @@ test("projects only the latest seven compact accepted transitions", async () => 
 	const h = harness();
 	await start(h, "Current task");
 	for (let index = 0; index < 10; index++) await commitTerminal(h, {}, { index });
-	h.beforeAgentStart("Current task");
+	await h.beginRun("Current task");
 	const projected = h.handlers.get("context")!({ messages: [user("Current task", 1)] });
 	const text = projected.messages[0].content[0].text as string;
 	const runtime = JSON.parse(text.slice(text.indexOf("\n") + 1));
@@ -455,8 +473,8 @@ test("new sessions project durable causality without old conversation trajectori
 	await commitScopedTerminal(first, [{ scope: "cwd", patch: { contract: { decision: "durable" } } }], "Saved.");
 
 	const second = harness({ cwd, repositoryRoot, sessionId: "second-session", autoStart: true });
-	second.handlers.get("session_start")!({ reason: "new" }, second.ctx);
-	second.beforeAgentStart("Continue");
+	await second.handlers.get("session_start")!({ reason: "new" }, second.ctx);
+	await second.beginRun("Continue");
 	const projected = second.handlers.get("context")!({ messages: [user("Continue", 2)] });
 	const text = projected.messages[0].content[0].text as string;
 	assert.match(text, /"decision":"durable"/);
@@ -477,8 +495,8 @@ test("tree restoration selects private state while shared scopes remain proven o
 	const base = structuredClone(h.entries);
 	await commitAll("abandoned-future");
 	h.entries.splice(0, h.entries.length, ...base);
-	h.handlers.get("session_tree")!({}, h.ctx);
-	h.beforeAgentStart("Branch task");
+	await h.handlers.get("session_tree")!({}, h.ctx);
+	await h.beginRun("Branch task");
 	const projected = h.handlers.get("context")!({ messages: [user("Branch task", 1)] });
 	const text = projected.messages[0].content[0].text as string;
 	const sharedSelected = text.includes('"globalBranch":"base"') && text.includes('"cwdBranch":"base"');
@@ -491,7 +509,7 @@ test("tree restoration selects private state while shared scopes remain proven o
 	assert.equal(h.resolveSnapshot().meta.validation, undefined);
 	assert.doesNotMatch(JSON.stringify(h.sentMessages), /cannot publish/);
 	// Untouched shared scopes are adopted from the live basis while the restored session continues.
-	h.beforeAgentStart("Branch task");
+	await h.beginRun("Branch task");
 	const adopted = h.handlers.get("context")!({ messages: [user("Branch task", 2)] });
 	const adoptedText = adopted.messages[0].content[0].text as string;
 	assert.match(adoptedText, /"globalBranch":"abandoned-future"/);

@@ -1,3 +1,5 @@
+import { parseRetainedPiCheckpoint } from "./snapshot.ts";
+
 export const SNAPSHOT_ENTRY_TYPE = "state-flow-snapshot";
 
 interface BranchEntry {
@@ -15,6 +17,9 @@ export interface SessionEntryLookup {
 export interface PassiveStopBoundary {
 	at: number;
 	from?: number;
+	preserveContext?: true;
+	/** A same-owner failed Stop remains a write fence until a later accepted checkpoint. */
+	persistenceError?: string;
 }
 
 export interface SnapshotDiscovery {
@@ -58,6 +63,26 @@ export function hasPriorConversation(branch: readonly BranchEntry[]): boolean {
 	return false;
 }
 
+/** Native conversation after the latest valid checkpoint may contain uncompiled work, not a new semantic authority. */
+export function hasUncheckpointedConversation(branch: readonly BranchEntry[]): boolean {
+	for (let index = branch.length - 1; index >= 0; index--) {
+		try {
+			const entry = branch[index];
+			if (entry?.type === "message") {
+				const role = entry.message?.role;
+				if (role === "user" || role === "assistant" || role === "toolResult") return true;
+			}
+			if (entry?.type === "custom" && entry.customType === SNAPSHOT_ENTRY_TYPE) {
+				parseRetainedPiCheckpoint(entry.data);
+				return false;
+			}
+		} catch {
+			// Malformed entries cannot prove that pending input was checkpointed.
+		}
+	}
+	return false;
+}
+
 /** Auto-start eligibility is session identity/lifecycle, not the presence of CWD materialization. */
 export function isNewSession(reason: unknown, branch: readonly BranchEntry[]): boolean {
 	if (reason === "new") return true;
@@ -79,14 +104,24 @@ export function findAssistantToolBatch(session: SessionEntryLookup, toolCallId: 
 }
 
 export function findPassiveStopBoundary(branch: readonly BranchEntry[], sessionId: string, entryType: string): PassiveStopBoundary | undefined {
+	let checkpointSeen = false;
 	for (const entry of [...branch].reverse()) {
 		try {
-			if (entry?.type !== "custom" || entry.customType !== entryType) continue;
-			const { at, from, reset, owner } = (entry.data as { at?: unknown; from?: unknown; reset?: unknown; owner?: unknown } | undefined) ?? {};
+			if (entry?.type !== "custom") continue;
+			if (entry.customType === SNAPSHOT_ENTRY_TYPE) {
+				parseRetainedPiCheckpoint(entry.data);
+				checkpointSeen = true;
+				continue;
+			}
+			if (entry.customType !== entryType) continue;
+			const { at, from, reset, owner, preserveContext, persistenceError } = (entry.data as { at?: unknown; from?: unknown; reset?: unknown; owner?: unknown; preserveContext?: unknown; persistenceError?: unknown } | undefined) ?? {};
 			if (reset === true && owner === sessionId) return undefined;
+			if (owner !== undefined && owner !== sessionId) continue;
 			if (typeof at === "number" && Number.isSafeInteger(at) && at >= 0) return {
 				at,
 				...(typeof from === "number" && Number.isSafeInteger(from) && from >= 0 ? { from } : {}),
+				...(preserveContext === true ? { preserveContext: true } : {}),
+				...(!checkpointSeen && owner === sessionId && typeof persistenceError === "string" && persistenceError.trim().length > 0 ? { persistenceError } : {}),
 			};
 		} catch {
 			// A hostile unrelated branch entry cannot manufacture or suppress a valid marker.

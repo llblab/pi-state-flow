@@ -1,0 +1,18 @@
+export { ArtifactReadTracker, decideArtifactAcquisition } from "./lib/acquisition.js";
+export { classifyArtifactCompilationNeed, compileArtifact, hashArtifactSource, isArtifactHash, isArtifactMetadata, isArtifactRegistry, ORDINARY_ARTIFACT_COMPILER, parseArtifactProvenanceRegistry, projectArtifactForModel, projectArtifactsForModel, pruneArtifactProvenance, selectArtifactsByTags, serializeArtifactProvenanceRegistry, updateArtifactProvenance, updateArtifactRegistry, validateArtifactMetadata, validateArtifactRegistry } from "./lib/artifact.js";
+export { buildContinuationCandidates, discoverNativeSessionHeaders, inspectStateFlowContinuationProvenance, readNativeSessionHeader, recommendContinuationFromProvenance, resolveContinuationStartup } from "./lib/continuation.js";
+export { captureTemporalFileBases, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath, loadScopeStream, parseScopeProvenance, parseScopeStream, serializeScopeProvenance, serializeScopeStream, sessionRuntimePaths, sessionScopeKey, sessionStorageKey, temporalScopePaths, temporalStateFileUpdates } from "./lib/durable.js";
+export { default, PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME } from "./lib/extension.js";
+export { backupCurrentStateFlowFiles, pushCurrentStateFlowBackup } from "./lib/git.js";
+export { createAcceptedTransition, DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT, projectRecentTransitionsWithLimit, validateRecentTransition } from "./lib/history.js";
+export { applyPatch, canonicalJson, hashJson, isObject, validatePatch } from "./lib/json.js";
+export { appendStateFlowDiagnostic, projectDiagnosticContent, stateFlowLogPath } from "./lib/logging.js";
+export { retainedMemoryScopes } from "./lib/memory.js";
+export { planKnowledgeRehydration } from "./lib/rehydration.js";
+export { TemporalRuntime } from "./lib/runtime.js";
+export { hasCompiledSkillArtifact, hashSkillSource, SKILL_ARTIFACT_COMPILER } from "./lib/skills.js";
+export { emptyState, isMaterializedState, isStateDocument, overlayStates, projectStateForModel, updateMaterializedArtifacts } from "./lib/state.js";
+export { PublicationBusyError } from "./lib/storage.js";
+export { buildStateFlowSectionView, createStateFlowTelegramAdapter, formatStateFlowSectionLabel, loadStateFlowTelegramModules, STATE_FLOW_TELEGRAM_ID } from "./lib/telegram.js";
+export { advanceTemporalState, readTemporalState, temporalScopeRevisions } from "./lib/temporal.js";
+export { parseStateReadPath, readStatePath } from "./lib/query.js";

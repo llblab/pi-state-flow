@@ -204,11 +204,11 @@ export function isArtifactMetadata(value: unknown): value is ArtifactMetadata {
 	}
 }
 
-export function validateArtifactRegistry(value: unknown): asserts value is ArtifactRegistry {
+export function validateArtifactRegistry(value: unknown, context = "artifacts"): asserts value is ArtifactRegistry {
 	if (!isObject(value)) throw new Error("Artifacts must be a path-keyed JSON object");
 	for (const [path, metadata] of Object.entries(value)) {
 		if (path.trim().length === 0) throw new Error("Artifact path keys must be non-empty");
-		validateArtifactMetadata(metadata, path);
+		validateArtifactMetadata(metadata, `${context}[${JSON.stringify(path)}]`);
 	}
 }
 
@@ -368,7 +368,7 @@ export function compileArtifact(update: ArtifactCompilationUpdate): CompiledArti
 	// Timestamps are runtime evidence; the model-visible entry never retains them.
 	const semantic = structuredClone(update.output) as ArtifactMetadata;
 	delete semantic.compiled_at;
-	validateArtifactMetadata(semantic, update.source.path);
+	validateArtifactMetadata(semantic, `${update.source.scope ? `${update.source.scope}.` : ""}artifacts[${JSON.stringify(update.source.path)}]`);
 	return {
 		semantic,
 		provenance: {
@@ -441,11 +441,11 @@ export function updateArtifactRegistry(
 const RUNTIME_ARTIFACT_FIELDS = [...MODEL_FORBIDDEN_PROVENANCE_FIELDS, "compiled_at", "hint"] as const;
 
 /** Validate authored fields only: legacy retained evidence stays readable but cannot be model-edited. */
-export function validateModelArtifactPatch(patch: JsonObject): void {
+export function validateModelArtifactPatch(patch: JsonObject, context = "artifacts"): void {
 	for (const [path, entry] of Object.entries(patch)) {
 		if (!isObject(entry)) continue; // Whole-artifact deletion and materialized shape belong to the transition owner.
 		const field = RUNTIME_ARTIFACT_FIELDS.find((field) => Object.hasOwn(entry, field));
-		if (field !== undefined) throw new Error(`Artifact patch at ${path} cannot set runtime-owned field ${field}`);
+		if (field !== undefined) throw new Error(`Artifact patch at ${context}[${JSON.stringify(path)}] cannot set runtime-owned field ${field}`);
 	}
 }
 

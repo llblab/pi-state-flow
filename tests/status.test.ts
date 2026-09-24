@@ -105,9 +105,37 @@ test("reports inspectable stale reasons", () => {
 	assert.match(output, /\[global\] \/knowledge\/gone\.md — source-removed/);
 });
 
+test("a Stop write fence is not reported as unavailable accepted memory", () => {
+	const output = detailedStatus({ ...snapshot, config: { enabled: false } }, diagnostics({ publicationError: "Writer advanced\nRetry Start" }));
+	assert.match(output, /branch mode=inactive/);
+	assert.match(output, /^Memory writes paused after Stop: Writer advanced Retry Start$/m);
+	assert.match(output, /"response": "Done"/);
+	assert.doesNotMatch(output, /materialization unavailable|Effective memory: unavailable/);
+});
+
+test("unavailable-state status keeps its error reason on one line", () => {
+	const output = detailedStatus(snapshot, diagnostics({ temporal: undefined, durableStateError: "First cause\n\nSecond paragraph" }));
+	assert.match(output, /^Temporal materialization unavailable: First cause Second paragraph$/m);
+	assert.doesNotMatch(output, /First cause\n\nSecond paragraph/);
+});
+
+test("status preserves the reason and target of long-path availability and publication failures", () => {
+	const path = `/store/${"long directory/".repeat(40)}meta.json`;
+	const error = `State Flow provenance file: ${JSON.stringify(path)} contains invalid JSON`;
+	for (const unavailable of [false, true]) {
+		const output = detailedStatus(snapshot, diagnostics(unavailable
+			? { temporal: undefined, durableStateError: error }
+			: { publicationError: error }));
+		const line = output.split("\n").find((line) => line.startsWith(unavailable ? "Temporal materialization unavailable:" : "Memory writes paused after Stop:"))!;
+		assert.match(line, /meta\.json/);
+		assert.match(line, /contains invalid JSON$/);
+		assert.ok(line.length <= 260);
+	}
+});
+
 test("unavailable temporal state is not represented as empty materialization or zero history", async () => {
 	const h = harness();
-	h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	const before = execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
 	await h.commands.get("state-flow-status").handler("", h.ctx);
 	const output = h.notifications.at(-1)!;
@@ -138,7 +166,7 @@ test("status distinguishes live shared tails from fresh restored-session depth",
 	assert.match(h.notifications.at(-1)!, /Retained patch tails: global 7; CWD 0; session 0/);
 	assert.ok(h.notifications.at(-1)!.includes(`Temporal head: "${heads.at(-1)}"`));
 	const next = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, sessionId: "new-origin", autoStart: true });
-	next.handlers.get("session_start")!({ reason: "new" }, next.ctx);
+	await next.handlers.get("session_start")!({ reason: "new" }, next.ctx);
 	await next.commands.get("state-flow-status").handler("", next.ctx);
 	assert.match(next.notifications.at(-1)!, /Hot history: offsets 0\.\.0; maximum depth 7/);
 	assert.match(next.notifications.at(-1)!, /Retained patch tails: global 7; CWD 0; session 0/);
@@ -146,7 +174,7 @@ test("status distinguishes live shared tails from fresh restored-session depth",
 	const files = execFileSync("git", ["-C", h.repositoryRoot, "ls-files"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
 	const bytes = files.map((file) => readFileSync(join(h.repositoryRoot, file)));
 	h.ctx.sessionManager.getBranch = () => oldEntries;
-	h.handlers.get("session_tree")!({}, h.ctx);
+	await h.handlers.get("session_tree")!({}, h.ctx);
 	await h.commands.get("state-flow-status").handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /"n": 8/);
 	assert.match(h.notifications.at(-1)!, /Hot history: offsets 0\.\.[01]; maximum depth 7/);

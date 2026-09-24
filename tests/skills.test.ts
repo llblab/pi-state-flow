@@ -209,10 +209,10 @@ test("registered Skill acquisition does not block an independent patch and valid
 	await assert.rejects(patchCwdArtifacts(h, { [source]: {} }), (error: unknown) => {
 		return error instanceof Error
 			&& error.message.includes(`cwd.artifacts[${JSON.stringify(source)}]`)
-			&& error.message.includes("description must be a non-empty string")
+			&& error.message.includes("description must be non-empty")
 			&& error.message.includes('kind must be "skill"')
-			&& error.message.includes("compilation must be a non-empty object")
-			&& error.message.includes('"kind":"skill"');
+			&& error.message.includes("compilation object must be non-empty")
+			&& !error.message.includes("\n\n");
 	});
 	await patchCwdArtifacts(h, { [source]: compilerOutput() });
 	const artifact = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source];
@@ -300,7 +300,7 @@ test("ordinary answers may retain a registered Skill read as volatile context", 
 	h.handlers.get("tool_execution_end")!({ toolCallId: "plain", toolName: "read", isError: false }, h.ctx);
 	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Used the Skill without durable compilation." }] };
 	h.handlers.get("message_end")!({ message }, h.ctx);
-	h.handlers.get("turn_end")!({ message }, h.ctx);
+	await h.handlers.get("turn_end")!({ message }, h.ctx);
 	assert.equal(h.readState().response, "Used the Skill without durable compilation.");
 	assert.equal(loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source], undefined);
 });
@@ -314,7 +314,7 @@ test("a pending optional Skill compilation schedules no repair inference", async
 	h.handlers.get("tool_execution_end")!({ toolCallId: "pending", toolName: "read", isError: false }, h.ctx);
 	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Answer with pending compilation." }] };
 	h.handlers.get("message_end")!({ message }, h.ctx);
-	h.handlers.get("turn_end")!({ message }, h.ctx);
+	await h.handlers.get("turn_end")!({ message }, h.ctx);
 	assert.equal(h.readState().response, "Answer with pending compilation.");
 	assert.equal(h.sentMessages.length, 0, "pending acquisition must not schedule terminal repair");
 	assert.equal(h.notifications.some((notice) => /could not reconcile/.test(notice)), false);
@@ -375,7 +375,7 @@ test("a reread refreshes the runtime-owned source hash and replaces stale compil
 	const firstHash = loadCwdProvenance(h.ctx.cwd, h.repositoryRoot)[source]!.sourceHash;
 
 	writeFileSync(source, "second");
-	h.beforeAgentStart("Refresh");
+	await h.beginRun("Refresh");
 	recordRead(h, source, "second");
 	await commitTerminal(h, {}, {}, "Second", { [source]: compilerOutput("second") });
 	const refreshed = loadCwdState(h.ctx.cwd, h.repositoryRoot)!.artifacts[source];

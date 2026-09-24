@@ -1,10 +1,10 @@
 // Domain: optional settled-turn backup of already-accepted canonical State Flow files.
-import { closeSync, constants, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { constants, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { captureOwnedFileBases, isStateFlowOwnedPath } from "./durable.ts";
-import { acquirePublicationLock, withStoragePublicationLock } from "./storage.ts";
+import { withFilePublicationLock, withStorageTransaction } from "./storage.ts";
 
 const GIT_TIMEOUT_MS = 15_000;
 const STATE_FLOW_COMMIT_TRAILER = "State-Flow-Durable: v1";
@@ -63,20 +63,14 @@ function assertRepositoryRoot(repositoryRoot: string): string {
 	return expected;
 }
 
-function withBackupLock<T>(repositoryRoot: string, action: (root: string) => T): T {
+async function withBackupLock<T>(repositoryRoot: string, action: (root: string) => T | Promise<T>, signal?: AbortSignal, waitForLock = true): Promise<T> {
+	signal?.throwIfAborted();
 	const root = assertRepositoryRoot(repositoryRoot);
 	const common = resolve(root, git(root, ["rev-parse", "--git-common-dir"]).stdout.trim());
 	const path = resolve(common, "state-flow-backup.lock");
-	const descriptor = acquirePublicationLock(path, (cause) => new Error(
-		`State Flow backup lock is unavailable at ${path}; retry on a later settled turn`, { cause },
-	));
-	try {
-		writeFileSync(descriptor, `${process.pid}\n`);
-		return action(root);
-	} finally {
-		closeSync(descriptor);
-		rmSync(path);
-	}
+	return withFilePublicationLock(path, () => action(root), signal, (cause) => new Error(
+		`State Flow backup lock is unavailable at ${JSON.stringify(path)}; retry on a later settled turn`, { cause },
+	), waitForLock);
 }
 
 /** Inventory only the bounded canonical namespace, never artifact sources or unrelated directory trees. */
@@ -157,7 +151,7 @@ function configuredPushDestination(repositoryRoot: string): { remote: string; re
 	return { remote, ref };
 }
 
-function commitCurrentOwnedFiles(repositoryRoot: string, expectedHead: string | undefined): string | undefined {
+async function commitCurrentOwnedFiles(repositoryRoot: string, expectedHead: string | undefined, signal?: AbortSignal, waitForLock = true): Promise<string | undefined> {
 	const branchRef = currentBranchRef(repositoryRoot);
 	if (currentHead(repositoryRoot) !== expectedHead) throw new Error("State Flow backup Git base changed concurrently");
 	const temporary = mkdtempSync(`${tmpdir()}${sep}state-flow-backup-index-`);
@@ -169,7 +163,11 @@ function commitCurrentOwnedFiles(repositoryRoot: string, expectedHead: string | 
 		const headPaths = new Set(expectedHead === undefined ? [] : owned(git(repositoryRoot, ["ls-tree", "-r", "--name-only", "-z", expectedHead]).stdout));
 		const tracked = new Set([...headPaths, ...owned(git(repositoryRoot, ["ls-files", "--cached", "-z"]).stdout)]);
 		// No Git command, filter, staging write, or ref update runs inside this short capture lock.
-		const snapshot = withStoragePublicationLock(repositoryRoot, (root) => captureBackupFiles(root, tracked));
+		const snapshot = await withStorageTransaction(repositoryRoot, () => captureBackupFiles(repositoryRoot, tracked), signal, waitForLock);
+		signal?.throwIfAborted();
+		if (currentBranchRef(repositoryRoot) !== branchRef || currentHead(repositoryRoot) !== expectedHead) {
+			throw new Error("State Flow backup Git base changed concurrently");
+		}
 		const present = snapshot.filter((file) => file.bytes !== undefined).map((file) => file.path);
 		const ignore = present.length === 0 ? { status: 1, stdout: "", stderr: "" }
 			: git(repositoryRoot, ["check-ignore", "--no-index", "--stdin", "-z"], { input: `${present.join("\0")}\0`, allowFailure: true });
@@ -202,9 +200,9 @@ function commitCurrentOwnedFiles(repositoryRoot: string, expectedHead: string | 
 	}
 }
 
-/** Commit only current State Flow-owned files; never changes canonical acceptance. */
-export function backupCurrentStateFlowFiles(repositoryRoot: string): string | undefined {
-	return withBackupLock(repositoryRoot, (root) => commitCurrentOwnedFiles(root, currentHead(root)));
+/** Await a coherent capture; hosts without cancellation may refuse contention instead of hanging Abort. */
+export function backupCurrentStateFlowFiles(repositoryRoot: string, signal?: AbortSignal, waitForLock = true): Promise<string | undefined> {
+	return withBackupLock(repositoryRoot, (root) => commitCurrentOwnedFiles(root, currentHead(root), signal, waitForLock), signal, waitForLock);
 }
 
 /** Skip overlapping pushes; the next accepted turn can push the latest HEAD. */

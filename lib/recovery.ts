@@ -1,37 +1,50 @@
-import { emptySnapshot, parseRetainedPiCheckpoint, migrationFailure, type RetainedBoundaryCheckpoint, type Snapshot } from "./snapshot.ts";
+import { parseRetainedPiCheckpoint, migrationFailure, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot } from "./snapshot.ts";
 
-export interface SnapshotRecovery {
-	snapshot: Snapshot;
-	skipped: string[];
-	disabledMarker?: true;
-}
+export type RetainedCheckpointSelection =
+	| { kind: "boundary"; checkpoint: RetainedBoundaryCheckpoint; skipped: string[] }
+	| { kind: "disabled"; skipped: string[] }
+	| { kind: "unavailable"; snapshot: Snapshot; skipped: string[] };
 
-/** Recover the newest canonical retained-boundary checkpoint or disabled marker. */
-export function recoverSnapshot(
-	candidates: readonly unknown[],
-	resolveBoundary?: (checkpoint: RetainedBoundaryCheckpoint) => Snapshot,
-): SnapshotRecovery {
+/** Select the newest supported retained-boundary checkpoint or disabled marker; unsupported pointers fail closed. */
+export function selectRetainedCheckpoint(candidates: readonly unknown[]): RetainedCheckpointSelection {
 	const skipped: string[] = [];
 	for (const candidate of candidates) {
-		let selectedBoundary = false;
+		let retained: RetainedPiCheckpoint;
 		try {
 			if (typeof candidate === "object" && candidate !== null && Object.hasOwn(candidate, "revision")) {
-				return { snapshot: migrationFailure({}, "Snapshot restoration failed: revision-pointer checkpoints are unsupported"), skipped };
+				return { kind: "unavailable", snapshot: migrationFailure({}, "Snapshot restoration failed: revision-pointer checkpoints are unsupported"), skipped };
 			}
-			const retained = parseRetainedPiCheckpoint(candidate);
-			if ("disabled" in retained) return { snapshot: emptySnapshot(), skipped, disabledMarker: true };
-			selectedBoundary = true;
-			if (!resolveBoundary) throw new Error("Retained checkpoint requires temporal runtime resolution");
-			return { snapshot: resolveBoundary(retained), skipped };
+			retained = parseRetainedPiCheckpoint(candidate);
 		} catch (error) {
-			if (selectedBoundary) {
-				return { snapshot: migrationFailure({}, `Snapshot restoration failed: ${error instanceof Error ? error.message : String(error)}`), skipped };
-			}
 			skipped.push(`Snapshot restoration failed: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
 		}
+		return "disabled" in retained ? { kind: "disabled", skipped } : { kind: "boundary", checkpoint: retained, skipped };
 	}
 	return {
+		kind: "unavailable",
 		snapshot: migrationFailure({}, skipped[0] ?? "Snapshot restoration failed: no supported checkpoint"),
 		skipped,
 	};
+}
+
+/** Withdraw a caller's join without cancelling independently owned recovery or Stop persistence. */
+export function waitForRecovery<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const aborted = () => reject(signal.reason);
+		const finish = (settle: () => void) => {
+			signal.removeEventListener("abort", aborted);
+			if (signal.aborted) reject(signal.reason);
+			else settle();
+		};
+		// Observe the operation even when already cancelled: its later rejection still has an owner.
+		operation.then((value) => finish(() => resolve(value)), (error) => finish(() => reject(error)));
+		if (signal.aborted) aborted();
+		else signal.addEventListener("abort", aborted, { once: true });
+	});
+}
+
+/** A selected boundary that cannot be resolved stays unavailable; callers never fall through to older evidence. */
+export function selectedBoundaryFailure(cause: string): Snapshot {
+	return migrationFailure({}, `Snapshot restoration failed: ${cause}`);
 }

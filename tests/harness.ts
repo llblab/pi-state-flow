@@ -60,7 +60,7 @@ export function harness(options: HarnessOptions = {}) {
 			if (!activeTools.includes(definition.name)) activeTools.push(definition.name);
 		},
 		registerCommand(name: string, definition: any) { commands.set(name, definition); },
-		on(name: string, handler: Handler) { handlers.set(name, handler); },
+		on(name: string, handler: Handler) { handlers.set(name, (event, eventContext = ctx) => handler(event, eventContext)); },
 		appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
 		sendMessage(message: unknown, options: unknown) { sentMessages.push({ message, options }); },
 		getActiveTools() { return [...activeTools]; },
@@ -127,6 +127,15 @@ export function harness(options: HarnessOptions = {}) {
 	}
 	let accessor: { read(offset?: number, scope?: StateScope): ModelState };
 	stateFlowExtension(pi as any, { agentDir, repositoryRoot: options.useConfiguredDirectory ? undefined : repositoryRoot, passive: { bootstrap: options.passiveBootstrap ?? false, tools: options.passiveTools ?? false }, onRuntime: (value) => { accessor = value; }, ...(options.telegram === undefined ? {} : { telegram: options.telegram }) });
+	function beforeAgentStart(prompt: string) {
+		const systemPromptOptions = { sections: {} as Record<string, string> };
+		const handlerResult = handlers.get("before_agent_start")!({ type: "before_agent_start", prompt, systemPrompt: "base", systemPromptOptions }, ctx);
+		// Expose prompt inspection separately from the actual extension result.
+		return { handlerResult, systemPromptOptions, systemPrompt: handlerResult?.systemPrompt ?? ["base", ...Object.values(systemPromptOptions.sections)].join("\n\n") };
+	}
+	async function inferenceContext(messages: any[] = [], controller = new AbortController()) {
+		return await handlers.get("context")!({ messages }, { ...ctx, signal: controller.signal, abort: () => controller.abort() });
+	}
 	return {
 		handlers,
 		commands,
@@ -137,11 +146,12 @@ export function harness(options: HarnessOptions = {}) {
 		notifications,
 		statuses,
 		ctx,
-		beforeAgentStart(prompt: string) {
-			const systemPromptOptions = { sections: {} as Record<string, string> };
-			const handlerResult = handlers.get("before_agent_start")!({ type: "before_agent_start", prompt, systemPrompt: "base", systemPromptOptions }, ctx);
-			// Expose prompt inspection separately from the actual extension result.
-			return { handlerResult, systemPromptOptions, systemPrompt: handlerResult?.systemPrompt ?? ["base", ...Object.values(systemPromptOptions.sections)].join("\n\n") };
+		beforeAgentStart,
+		inferenceContext,
+		async beginRun(prompt: string) {
+			const protocol = beforeAgentStart(prompt);
+			await inferenceContext();
+			return protocol;
 		},
 		repositoryRoot,
 		agentDir,
@@ -173,7 +183,7 @@ export function toolAssistant(id: string, name = "read", args: unknown = { path:
 
 export async function start(h: ReturnType<typeof harness>, prompt = "Inspect README") {
 	await h.commands.get("state-flow-start")!.handler("", h.ctx);
-	return h.beforeAgentStart(prompt);
+	return h.beginRun(prompt);
 }
 
 export async function commitScopedTerminal(
@@ -191,7 +201,7 @@ export async function commitScopedTerminal(
 		content: [{ type: "text", text: prose }],
 	};
 	const result = h.handlers.get("message_end")!({ message }, h.ctx) ?? { message };
-	h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
+	await h.handlers.get("turn_end")!({ message: result.message }, h.ctx);
 	return result;
 }
 

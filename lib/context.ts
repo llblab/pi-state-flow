@@ -53,10 +53,11 @@ export function lazyNavigationHint(state: MaterializedState): { available: boole
 }
 
 
-/** Bounded context retained after semantic State Flow is stopped in this physical session. */
+/** Context retained after semantic State Flow is stopped in this physical session. */
 export interface PassiveContinuation {
 	startedAt: number;
 	activeRunStartedAt?: number;
+	preserveContext?: true;
 	handoff: AgentMessage;
 }
 
@@ -78,16 +79,20 @@ function messageText(message: AgentMessage): string {
 	return contentText((message as { content?: unknown }).content);
 }
 
-export function createPassiveContinuation(state: ModelState, startedAt = Date.now(), activeRunStartedAt?: number): PassiveContinuation {
+export function createPassiveContinuation(state: ModelState, startedAt = Date.now(), activeRunStartedAt?: number, preserveContext = false): PassiveContinuation {
 	return {
 		startedAt,
 		...(activeRunStartedAt === undefined ? {} : { activeRunStartedAt }),
-		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${presentationJson({ state, continuation: "State Flow semantics are disabled; this handoff replaces completed history while retaining the active and post-stop trajectory." })}`),
+		...(preserveContext ? { preserveContext: true as const } : {}),
+		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${presentationJson({ state, continuation: preserveContext
+			? "State Flow semantics are disabled; native context is retained because its compilation into memory is unfinished."
+			: "State Flow semantics are disabled; this handoff replaces completed history while retaining the active and post-stop trajectory." })}`),
 	};
 }
 
 /** Keep the interrupted run through later results; an idle stop retains only later conversation. */
 export function passiveContinuationMessages(messages: AgentMessage[], continuation: PassiveContinuation): AgentMessage[] {
+	if (continuation.preserveContext) return [continuation.handoff, ...messages];
 	if (continuation.activeRunStartedAt !== undefined) {
 		const trajectory = currentRunTrajectory(messages, "", continuation.activeRunStartedAt);
 		return [continuation.handoff, ...trajectory.messages];

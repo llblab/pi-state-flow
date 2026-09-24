@@ -1,8 +1,10 @@
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadScopeStream, resolveSessionAddress, sessionRuntimePaths } from "./durable.ts";
+import { parseScopeStream, resolveSessionAddress, sessionRuntimePaths, temporalScopePaths } from "./durable.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
+import { diagnosticText } from "./protocol.ts";
 import { parseSessionRuntime } from "./snapshot.ts";
+import { withStorageTransaction } from "./storage.ts";
 import { validateScopeLineage } from "./temporal.ts";
 
 export type ContinuationTransport = "local" | "sdk" | "telegram" | string;
@@ -62,7 +64,7 @@ export interface ContinuationSessionCandidate extends ContinuationCandidateSumma
 }
 
 export type ContinuationRecommender = (
-	context: Readonly<ContinuationHostContext>,
+	context: Readonly<ContinuationHostContext>, signal?: AbortSignal,
 ) => ContinuationRecommendation | Promise<ContinuationRecommendation>;
 
 /**
@@ -115,7 +117,9 @@ export async function resolveContinuationStartup(
 	context: ContinuationHostContext,
 	intent: ContinuationHostIntent,
 	recommend: ContinuationRecommender,
+	signal?: AbortSignal,
 ): Promise<ContinuationStartupDecision> {
+	signal?.throwIfAborted();
 	switch (intent.kind) {
 		case "new":
 			return { action: "new", reason: "explicit-new" };
@@ -127,8 +131,11 @@ export async function resolveContinuationStartup(
 			return { action: "native", mode: "continue-recent" };
 		case "no-session":
 			return { action: "native", mode: "no-session" };
-		case "default":
-			return recommend(Object.freeze({ ...context }));
+		case "default": {
+			const recommendation = await recommend(Object.freeze({ ...context }), signal);
+			signal?.throwIfAborted();
+			return recommendation;
+		}
 	}
 }
 
@@ -207,55 +214,65 @@ export function discoverNativeSessionHeaders(sessionDir: string): { headers: Nat
 	return { headers, invalid };
 }
 
-function readRegular(path: string): string | undefined {
-	if (!existsSync(path)) return undefined;
-	if (!lstatSync(path).isFile()) throw new Error("State Flow continuation provenance must be a regular file");
-	return readFileSync(path, "utf8");
-}
-
-/** Inspect only exact current runtime provenance; never initialize, migrate, lock, checkout, or publish. */
-export function inspectStateFlowContinuationProvenance(
-	header: NativeSessionHeader,
+/** Await one exact canonical cohort; never read transcript bodies, initialize, or publish. */
+export async function inspectStateFlowContinuationProvenance(
+	header: Readonly<NativeSessionHeader>,
 	repositoryRoot: string,
-): Pick<ContinuationCandidateProvenance, "stateFlow" | "reason"> {
-	const sessionKey = resolveSessionAddress(header.file, header.id, header.timestamp).key;
-	const paths = sessionRuntimePaths(header.cwd, header.id, repositoryRoot, sessionKey);
+	signal?: AbortSignal,
+): Promise<Pick<ContinuationCandidateProvenance, "stateFlow" | "reason">> {
+	signal?.throwIfAborted();
+	const selected = { ...header };
+	const root = resolve(repositoryRoot);
+	const sessionKey = resolveSessionAddress(selected.file, selected.id, selected.timestamp).key;
+	const paths = sessionRuntimePaths(selected.cwd, selected.id, root, sessionKey);
+	const absent = { stateFlow: { enabled: false, restorable: true }, reason: "no State Flow session runtime" };
 	try {
-		const config = readRegular(paths.config);
-		const runtimeSource = readRegular(paths.runtime);
-		const meta = readRegular(paths.meta);
-		if (config === undefined && runtimeSource === undefined && meta === undefined) {
-			return { stateFlow: { enabled: false, restorable: true }, reason: "no State Flow session runtime" };
-		}
-		const runtime = parseSessionRuntime(config, runtimeSource, header.cwd, header.id);
-		if (!runtime) return { stateFlow: { enabled: false, restorable: true }, reason: "no State Flow session runtime" };
-		if (!runtime.config.enabled) return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow stopped on selected runtime" };
-		const global = loadScopeStream(header.cwd, header.id, "global", repositoryRoot, sessionKey);
-		const cwd = loadScopeStream(header.cwd, header.id, "cwd", repositoryRoot, sessionKey);
-		const session = loadScopeStream(header.cwd, header.id, "session", repositoryRoot, sessionKey);
-		if (!global || !cwd || !session) throw new Error("incomplete canonical temporal cohort");
-		// Shared streams are current, independently validated by their codecs, not frozen to this session's history.
-		validateScopeLineage(session, "session", runtime.meta.lineage, MAX_HISTORY_LIMIT);
-		return { stateFlow: { enabled: true, restorable: true }, reason: "canonical session lineage is valid beside current shared streams" };
+		if (!lstatSync(root, { throwIfNoEntry: false })) return absent;
+		const result = await withStorageTransaction(root, (tx) => {
+			const files = new Map(tx.capture(selected.cwd, selected.id, root, sessionKey).files.map((file) => [file.path, file.content]));
+			const privatePaths = temporalScopePaths(selected.cwd, selected.id, "session", root, sessionKey);
+			if ([paths.config, paths.runtime, privatePaths.meta, privatePaths.checkpoint, privatePaths.patches].every((path) => files.get(path) === undefined)) return absent;
+			const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), selected.cwd, selected.id);
+			if (!runtime) throw new Error("incomplete canonical session runtime");
+			if (!runtime.config.enabled) return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow stopped on selected runtime" };
+			const streams = (["global", "cwd", "session"] as const).map((scope) => {
+				const owned = temporalScopePaths(selected.cwd, selected.id, scope, root, sessionKey);
+				return parseScopeStream(files.get(owned.checkpoint), files.get(owned.patches), scope,
+					scope === "cwd" ? selected.cwd : undefined, files.get(owned.meta));
+			});
+			if (streams.some((stream) => stream === undefined)) throw new Error("incomplete canonical temporal cohort");
+			// Shared streams remain current and independently valid; only the private stream binds to this lineage.
+			validateScopeLineage(streams[2]!, "session", runtime.meta.lineage, MAX_HISTORY_LIMIT);
+			return { stateFlow: { enabled: true, restorable: true }, reason: "canonical session lineage is valid beside current shared streams" };
+		}, signal);
+		signal?.throwIfAborted();
+		return result;
 	} catch (error) {
-		return { stateFlow: { enabled: true, restorable: false }, reason: `State Flow runtime is ineligible: ${error instanceof Error ? error.message : String(error)}` };
+		signal?.throwIfAborted();
+		return { stateFlow: { enabled: true, restorable: false }, reason: `State Flow runtime is ineligible: ${diagnosticText(error)}` };
 	}
 }
 
-export function buildContinuationCandidates(
+export async function buildContinuationCandidates(
 	headers: readonly NativeSessionHeader[],
-	inspect: (header: Readonly<NativeSessionHeader>) => ContinuationCandidateProvenance | undefined,
-): ContinuationSessionCandidate[] {
+	inspect: (header: Readonly<NativeSessionHeader>, signal?: AbortSignal) => ContinuationCandidateProvenance | undefined | Promise<ContinuationCandidateProvenance | undefined>,
+	signal?: AbortSignal,
+): Promise<ContinuationSessionCandidate[]> {
+	signal?.throwIfAborted();
+	const selected = headers.map((header) => Object.freeze({ ...header }));
 	const candidates: ContinuationSessionCandidate[] = [];
-	for (const header of headers) {
-		const provenance = inspect(Object.freeze({ ...header }));
+	for (const header of selected) {
+		signal?.throwIfAborted();
+		const provenance = await inspect(header, signal);
+		signal?.throwIfAborted();
 		if (!provenance) continue;
 		candidates.push({
+			...provenance,
+			stateFlow: { ...provenance.stateFlow },
 			sessionFile: header.file,
 			sessionId: header.id,
 			lastActivity: header.lastActivity,
 			cwd: header.cwd,
-			...provenance,
 		});
 	}
 	return candidates;

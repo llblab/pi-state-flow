@@ -121,6 +121,7 @@ export {
   type StateScope,
   type TerminalTransition
 } from "./lib/state.ts";
+export { PublicationBusyError } from "./lib/storage.ts";
 export {
   buildStateFlowSectionView,
   createStateFlowTelegramAdapter,
@@ -131,6 +132,8 @@ export {
   type StateFlowTelegramButton,
   type StateFlowTelegramCallbackContext,
   type StateFlowTelegramControlResult,
+  type StateFlowTelegramInspection,
+  type StateFlowTelegramInspectionPort,
   type StateFlowTelegramLoader,
   type StateFlowTelegramModules,
   type StateFlowTelegramPort,

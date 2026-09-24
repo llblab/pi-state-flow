@@ -3,6 +3,7 @@
 // This is a leaf adapter. Core semantics, storage, and inference never depend on it; when
 // pi-telegram is absent or its registry is not ready, registration fails open and retries.
 
+import { conciseDiagnostic, diagnosticText } from "./protocol.ts";
 import { formatScopeRevisionVector } from "./status.ts";
 import type { ScopeRevisions } from "./temporal.ts";
 
@@ -93,6 +94,15 @@ export type StateFlowTelegramLoader = () => Promise<StateFlowTelegramModules>;
 export interface StateFlowTelegramControlResult {
 	ok: boolean;
 	message: string;
+	/** A completed control can lose its presentation authority after a mode or selection change. */
+	signal?: AbortSignal;
+}
+
+export interface StateFlowTelegramInspection {
+	state: StateFlowTelegramState;
+	revisions: ScopeRevisions;
+	/** A selection can revoke a completed observation before the adapter presents it. */
+	signal?: AbortSignal;
 }
 
 export interface StateFlowTelegramPort {
@@ -105,6 +115,12 @@ export interface StateFlowTelegramPort {
 	stop(): StateFlowTelegramControlResult;
 	deferStart(): void;
 	cancelStart(): void;
+}
+
+export interface StateFlowTelegramInspectionPort extends Omit<StateFlowTelegramPort, "state" | "revisions" | "start" | "stop"> {
+	inspect(scope: StateFlowTelegramScope): StateFlowTelegramInspection | Promise<StateFlowTelegramInspection>;
+	start(): StateFlowTelegramControlResult | Promise<StateFlowTelegramControlResult>;
+	stop(): StateFlowTelegramControlResult | Promise<StateFlowTelegramControlResult>;
 }
 
 export interface StateFlowTelegramAdapter {
@@ -228,7 +244,8 @@ function isStateFlowTelegramScope(value: string): value is StateFlowTelegramScop
 	return value === "global" || value === "cwd" || value === "session" || value === "effective";
 }
 
-function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
+function buildStateFlowTelegramSection(port: StateFlowTelegramPort | StateFlowTelegramInspectionPort, isActive: () => boolean) {
+	let interaction = 0;
 	return {
 		id: STATE_FLOW_TELEGRAM_ID,
 		label: "🌀 State Flow",
@@ -238,7 +255,9 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
 		handleCallback: async (ctx: StateFlowTelegramCallbackContext) => {
 			// cancel/refresh remain routable for keyboards sent by earlier versions.
 			if (ctx.action !== "start" && ctx.action !== "stop" && ctx.action !== "cancel" && ctx.action !== "refresh" && ctx.action !== "show-state" && ctx.action !== "inspect" && ctx.action !== "back") return "pass" as const;
+			const request = ++interaction;
 			let notice: string | undefined;
+			let acknowledged = false;
 			try {
 				if (ctx.action === "show-state") {
 					await ctx.answerCallback();
@@ -247,30 +266,52 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort) {
 				}
 				if (ctx.action === "inspect") {
 					if (!isStateFlowTelegramScope(ctx.payload)) throw new Error("Unknown State Flow scope");
-					const state = port.state(ctx.payload);
-					const live = port.snapshot();
-					const revisions = port.revisions?.() ?? live.revisions ?? { global: live.step, cwd: live.step, session: live.step };
-					await ctx.openRich(renderStateFlowRichState(ctx.payload, revisions, state));
-					await ctx.answerCallback();
+					let observation: StateFlowTelegramInspection;
+					if ("inspect" in port) {
+						await ctx.answerCallback("Reading State Flow memory");
+						acknowledged = true;
+						observation = await port.inspect(ctx.payload);
+					} else {
+						const state = port.state(ctx.payload);
+						const live = port.snapshot();
+						observation = { state, revisions: port.revisions?.() ?? live.revisions ?? { global: live.step, cwd: live.step, session: live.step } };
+					}
+					observation.signal?.throwIfAborted();
+					if (request !== interaction || !isActive()) return "handled" as const;
+					await ctx.openRich(renderStateFlowRichState(ctx.payload, observation.revisions, observation.state));
+					if (!acknowledged) await ctx.answerCallback();
 					return "handled" as const;
 				}
-				if (ctx.action === "start") {
-					if (port.canStartNow()) notice = port.start().message;
-					else {
-						port.deferStart();
-						notice = "State Flow will start after the current turn";
-					}
-				} else if (ctx.action === "stop") {
-					notice = port.stop().message;
+				const action = ctx.action === "stop" || (ctx.action === "start" && port.canStartNow()) ? ctx.action : undefined;
+				if (action) {
+					if ("inspect" in port) {
+						acknowledged = true;
+						// Start the control immediately and acknowledge in parallel; neither promise can reject unobserved.
+						const [, result] = await Promise.all([
+							ctx.answerCallback(action === "stop" ? "Stopping State Flow" : "Starting State Flow"),
+							Promise.resolve().then(() => port[action]()),
+						]);
+						if (result.signal?.aborted) return "handled" as const;
+						notice = result.message;
+					} else notice = port[action]().message;
+				} else if (ctx.action === "start") {
+					port.deferStart();
+					notice = "State Flow will start after the current turn";
 				} else if (ctx.action === "cancel") {
 					port.cancelStart();
 					notice = "Pending start cancelled";
 				}
 			} catch (error) {
-				notice = error instanceof Error ? error.message : String(error);
+				notice = diagnosticText(error);
 			}
-			await ctx.answerCallback(notice);
-			await ctx.edit(buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action)));
+			if (request !== interaction || !isActive()) return "handled" as const;
+			const summary = notice === undefined ? undefined : conciseDiagnostic(notice, 200);
+			const view = buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action));
+			if (acknowledged && summary !== undefined) {
+				// Callback queries can expire during storage waits; retain errors in the existing menu instead.
+				view.text += `\n\n${summary.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}`;
+			} else if (!acknowledged) await ctx.answerCallback(summary);
+			await ctx.edit(view);
 			return "handled" as const;
 		},
 	};
@@ -302,7 +343,7 @@ export async function loadStateFlowTelegramModules(): Promise<StateFlowTelegramM
 }
 
 export function createStateFlowTelegramAdapter(options: {
-	port: StateFlowTelegramPort;
+	port: StateFlowTelegramPort | StateFlowTelegramInspectionPort;
 	load?: StateFlowTelegramLoader;
 }): StateFlowTelegramAdapter {
 	const load = options.load ?? loadStateFlowTelegramModules;
@@ -323,7 +364,7 @@ export function createStateFlowTelegramAdapter(options: {
 		if (epoch !== generation) return false;
 		if (!sectionRegistered && modules.sections) {
 			try {
-				const dispose = modules.sections.registerTelegramSection(buildStateFlowTelegramSection(options.port));
+				const dispose = modules.sections.registerTelegramSection(buildStateFlowTelegramSection(options.port, () => epoch === generation));
 				if (epoch === generation) {
 					disposers.push(dispose);
 					sectionRegistered = true;

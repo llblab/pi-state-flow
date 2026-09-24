@@ -7,6 +7,7 @@ import { captureTemporalFileBases } from "../lib/durable.ts";
 import test from "node:test";
 import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "../lib/episode.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
+import { withStorageTransaction } from "../lib/storage.ts";
 import { stateFlowLogPath } from "../lib/logging.ts";
 import { loadCwdState, loadSessionState } from "./temporal-fixture.ts";
 import { commitTerminal, harness, start } from "./harness.ts";
@@ -26,7 +27,7 @@ test("accepted turns defer canonical-file backup and replication until agent_bef
 	const before = head();
 	await commitTerminal(h, {}, { settled: true }, "Settled answer");
 	assert.equal(head(), before, "turn_end accepts canonical files without creating a Git commit");
-	h.handlers.get("agent_before_settle")!({}, h.ctx);
+	await h.handlers.get("agent_before_settle")!({}, h.ctx);
 	const backedUp = head();
 	assert.notEqual(backedUp, before);
 	const remote = execFileSync("git", ["-C", h.repositoryRoot, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
@@ -44,7 +45,7 @@ test("session shutdown awaits a slow failing push without post-shutdown writes o
 	writeFileSync(hook, `#!/bin/sh\nprintf 'entered\\n' > ${JSON.stringify(entered)}\nwhile [ ! -e ${JSON.stringify(release)} ]; do sleep 0.02; done\nexit 1\n`);
 	chmodSync(hook, 0o755);
 	await commitTerminal(h, {}, { accepted: 1 }, "Accepted answer");
-	h.handlers.get("agent_before_settle")!({}, h.ctx);
+	await h.handlers.get("agent_before_settle")!({}, h.ctx);
 	await waitFor(() => existsSync(entered));
 	const files = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const remote = execFileSync("git", ["-C", h.repositoryRoot, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
@@ -62,6 +63,68 @@ test("session shutdown awaits a slow failing push without post-shutdown writes o
 	assert.deepEqual(h.notifications, warnings);
 });
 
+for (const boundary of ["abort", "shutdown", "stop"] as const) test(`awaited backup preserves accepted memory across ${boundary}`, { timeout: 10_000 }, async (t) => {
+	const h = harness({ passiveTools: true });
+	await start(h);
+	await commitTerminal(h, {}, { accepted: true }, "Answer accepted before backup");
+	const files = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+	const head = () => execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+	const before = head();
+	const controller = new AbortController();
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const owner = withStorageTransaction(h.repositoryRoot, () => gate);
+	const backup = h.handlers.get("agent_before_settle")!({}, { ...h.ctx, signal: controller.signal });
+	t.after(async () => {
+		controller.abort();
+		release();
+		await Promise.allSettled([owner, backup]);
+		await awaitInFlightBackupPushes(h.repositoryRoot);
+	});
+	let settled = false;
+	backup.then(() => { settled = true; });
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	assert.equal(settled, false);
+	const notices = [...h.notifications];
+	if (boundary === "abort") controller.abort();
+	else if (boundary === "shutdown") await h.handlers.get("session_shutdown")!({}, h.ctx);
+	else {
+		const stopCancellation = new AbortController();
+		const stopping = h.commands.get("state-flow-stop").handler("", { ...h.ctx, signal: stopCancellation.signal });
+		stopCancellation.abort(new Error("Cancel only Stop persistence, not the accepted backup"));
+		await stopping;
+	}
+	const entries = structuredClone(h.entries);
+	if (boundary !== "stop") {
+		await backup;
+		assert.equal(existsSync(join(h.repositoryRoot, ".git", "state-flow-backup.lock")), false, "shutdown/cancellation returns after its mutex is released");
+		assert.deepEqual(h.notifications, notices);
+		assert.equal(head(), before);
+		await h.handlers.get("agent_before_settle")!({}, h.ctx);
+		assert.equal(head(), before, "an unaccepted repeat does not restart the canceled backup");
+	} else {
+		assert.equal(h.statuses.at(-1), undefined, "Stop disables local policy without waiting for backup");
+		assert.match(h.notifications.at(-1)!, /memory writes paused/);
+	}
+	assert.equal(h.readState().response, "Answer accepted before backup");
+	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), files);
+	assert.equal(readFileSync(join(h.repositoryRoot, ".state-flow-publication.lock"), "utf8"), `${process.pid}\n`);
+	release();
+	await owner;
+	await backup;
+	await awaitInFlightBackupPushes(h.repositoryRoot);
+	assert.deepEqual(h.entries, entries, "backup completion never checkpoints or replaces policy state");
+	if (boundary === "stop") {
+		assert.notEqual(head(), before);
+		await assert.rejects(h.tools.get("patch_state").execute("late", { session: { working: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after Stop/);
+	} else if (boundary === "abort") {
+		await commitTerminal(h, {}, { next: true }, "Accepted retry");
+		await h.handlers.get("agent_before_settle")!({}, h.ctx);
+		await awaitInFlightBackupPushes(h.repositoryRoot);
+		assert.notEqual(head(), before, "a later accepted turn can retry normally");
+	}
+});
+
 test("settled backup failure is diagnostic-only and is not retried without another accepted turn", async () => {
 	const h = harness();
 	await start(h);
@@ -71,8 +134,8 @@ test("settled backup failure is diagnostic-only and is not retried without anoth
 	const messages = h.sentMessages.length;
 	const lock = join(h.repositoryRoot, ".git", "state-flow-backup.lock");
 	writeFileSync(lock, "caller-owned interrupted backup\n");
-	for (let attempt = 0; attempt < 2; attempt++) assert.equal(h.handlers.get("agent_before_settle")!({}, h.ctx), undefined);
-	assert.equal(h.notifications.filter((message) => message.includes("accepted canonical state; Git backup failed")).length, 1);
+	for (let attempt = 0; attempt < 2; attempt++) assert.equal(await h.handlers.get("agent_before_settle")!({}, h.ctx), undefined);
+	assert.equal(h.notifications.filter((message) => message.includes("state saved; Git backup failed")).length, 1);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), files);
 	assert.deepEqual(h.resolveSnapshot(), snapshot);
 	assert.equal(h.readState().response, "Accepted answer");
@@ -96,10 +159,12 @@ test("missing Git commit identity cannot reject or roll back accepted canonical 
 		const files = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 		assert.ok(files.some((file) => file.bytes !== undefined));
 		assert.equal(loadSessionState(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot)?.response, "Accepted without Git identity");
-		assert.equal(h.handlers.get("agent_before_settle")!({}, h.ctx), undefined);
-		const warnings = h.notifications.filter((message) => message.includes("accepted canonical state; Git backup failed"));
+		assert.equal(await h.handlers.get("agent_before_settle")!({}, h.ctx), undefined);
+		const warnings = h.notifications.filter((message) => message.includes("state saved; Git backup failed"));
 		assert.equal(warnings.length, 1);
 		assert.match(warnings[0], /Git command failed \(commit-tree /);
+		assert.match(warnings[0], /unable to auto-detect email address/);
+		assert.ok(warnings[0].length <= 220);
 		assert.throws(() => execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "--verify", "HEAD"], { stdio: "ignore" }));
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), files);
 		assert.equal(h.readState().response, "Accepted without Git identity");
@@ -127,7 +192,7 @@ test("repeated server push failures warn once, retain local details, and reset a
 	reject();
 	for (const attempt of [1, 2]) {
 		await commitTerminal(h, {}, { accepted: attempt }, `Accepted ${attempt}`);
-		h.handlers.get("agent_before_settle")!({}, h.ctx);
+		await h.handlers.get("agent_before_settle")!({}, h.ctx);
 		await awaitInFlightBackupPushes(h.repositoryRoot);
 		assert.equal(h.readState().response, `Accepted ${attempt}`);
 		assert.equal(warnings().length, 1);
@@ -138,7 +203,7 @@ test("repeated server push failures warn once, retain local details, and reset a
 	assert.match(warnings()[0], /state is saved locally.*Details: .*logs\.jsonl.*later accepted turn retries/);
 	unlinkSync(hook);
 	await commitTerminal(h, {}, { accepted: 3 }, "Recovered");
-	h.handlers.get("agent_before_settle")!({}, h.ctx);
+	await h.handlers.get("agent_before_settle")!({}, h.ctx);
 	await awaitInFlightBackupPushes(h.repositoryRoot);
 	const head = execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 	assert.equal(execFileSync("git", ["-C", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), head);
@@ -146,7 +211,7 @@ test("repeated server push failures warn once, retain local details, and reset a
 	assert.equal(warnings().length, 1);
 	reject();
 	await commitTerminal(h, {}, { accepted: 4 }, "Accepted after recovery");
-	h.handlers.get("agent_before_settle")!({}, h.ctx);
+	await h.handlers.get("agent_before_settle")!({}, h.ctx);
 	await awaitInFlightBackupPushes(h.repositoryRoot);
 	assert.equal(warnings().length, 2, "a new failure after recovery warns again");
 	assert.equal(details().length, 3);
@@ -162,7 +227,7 @@ test("push failure remains diagnosable when the local log path overlaps the stor
 	chmodSync(hook, 0o755);
 	for (const attempt of [1, 2]) {
 		await commitTerminal(h, {}, { accepted: attempt }, `Accepted ${attempt}`);
-		h.handlers.get("agent_before_settle")!({}, h.ctx);
+		await h.handlers.get("agent_before_settle")!({}, h.ctx);
 		await awaitInFlightBackupPushes(h.repositoryRoot);
 	}
 	assert.equal(existsSync(stateFlowLogPath(h.agentDir)), false);
@@ -212,9 +277,9 @@ test("a preserved unresolved draft becomes response and the next user run rotate
 	await start(h, "Old request");
 	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Unresolved draft" }] };
 	assert.equal(h.handlers.get("message_end")!({ message }, h.ctx), undefined, "the primary draft is preserved instead of intercepted");
-	h.handlers.get("turn_end")!({ message }, h.ctx);
+	await h.handlers.get("turn_end")!({ message }, h.ctx);
 	assert.equal(h.readState().response, "Unresolved draft");
-	const next = h.beforeAgentStart("New request");
+	const next = await h.beginRun("New request");
 	assert.doesNotMatch(next.systemPrompt, /Old request|New request/);
 	assert.equal(h.resolveSnapshot().meta.specification, "New request");
 });

@@ -370,11 +370,11 @@ test("optional Skill acquisition leaves unrelated patches independent and valida
 	const unavailable = { path: skill.path, scope: "cwd" as const, error: "source disappeared" };
 	assert.equal(stageAtomicScopePatches(state, { session: { working: { stillAccepted: true } } }, [unavailable], "origin").nextStates.session.working.stillAccepted, true);
 	assert.throws(() => stageAtomicScopePatches(state, { cwd: { artifacts: { [skill.path]: { description: "Unavailable", kind: "skill", compilation: { route: "blocked" } } } } }, [unavailable], "origin"), /Could not capture the source hash.*source disappeared/);
-	const required = /Skill compiler output at cwd\.artifacts\["\/skills\/demo\/SKILL\.md"\] is invalid/;
+	const required = /Invalid Skill at cwd\.artifacts\["\/skills\/demo\/SKILL\.md"\]/;
 	const invalidOutputs: Array<readonly [JsonObject, readonly string[]]> = [
-		[{}, ["description must be a non-empty string", 'kind must be "skill"', "compilation must be a non-empty object"]],
-		[{ description: "", compilation: {} }, ["description must be a non-empty string", 'kind must be "skill"', "compilation must be a non-empty object"]],
-		[{ description: "Skill", kind: "document", compilation: {} }, ['kind must be "skill"', "compilation must be a non-empty object"]],
+		[{}, ["description must be non-empty", 'kind must be "skill"', "compilation object must be non-empty"]],
+		[{ description: "", compilation: {} }, ["description must be non-empty", 'kind must be "skill"', "compilation object must be non-empty"]],
+		[{ description: "Skill", kind: "document", compilation: {} }, ['kind must be "skill"', "compilation object must be non-empty"]],
 	];
 	for (const [output, problems] of invalidOutputs) {
 		const patch: AtomicScopePatches = { cwd: { artifacts: { [skill.path]: output } } };
@@ -382,7 +382,7 @@ test("optional Skill acquisition leaves unrelated patches independent and valida
 			assert.ok(error instanceof Error);
 			assert.match(error.message, required);
 			for (const problem of problems) assert.ok(error.message.includes(problem));
-			assert.match(error.message, /"description":"What this Skill provides","kind":"skill","compilation":\{"rules":\[/);
+			assert.doesNotMatch(error.message, /\n|Example:/);
 			return true;
 		});
 	}

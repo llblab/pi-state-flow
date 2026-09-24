@@ -29,19 +29,20 @@ import { awaitInFlightBackupPushes, backupCurrentStateFlowFiles, startStateFlowB
 import { projectRecentTransitionsWithLimit } from "./history.ts";
 import { isObject, presentationJson, sameJson, type JsonObject } from "./json.ts";
 import { StateFlowDiagnosticWriter, stateFlowLogPath, type DiagnosticExtras, type StateFlowDiagnosticCategory } from "./logging.ts";
-import { assistantToolCallCount, finalizedAssistantResponse, formatPatchStateArguments, PASSIVE_MEMORY_PROTOCOL, separatedFailure, separatedOutput, stateFlowProtocol } from "./protocol.ts";
+import { assistantToolCallCount, conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPatchStateArguments, PASSIVE_MEMORY_PROTOCOL, separatedFailure, separatedOutput, stateFlowProtocol } from "./protocol.ts";
 import { readProjectedState, readStatePath } from "./query.ts";
-import { recoverSnapshot } from "./recovery.ts";
+import { selectedBoundaryFailure, selectRetainedCheckpoint, waitForRecovery } from "./recovery.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
-import { SharedScopeRemovalConflictError, TemporalRuntime, type RuntimePublication } from "./runtime.ts";
-import { discoverSnapshotData, findAssistantToolBatch, findPassiveStopBoundary, hasPriorConversation, isNewSession, retainsPhysicalSessionProjection, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
+import { TemporalRuntime, type RuntimePublication } from "./runtime.ts";
+import { discoverSnapshotData, findAssistantToolBatch, findPassiveStopBoundary, hasPriorConversation, hasUncheckpointedConversation, isNewSession, retainsPhysicalSessionProjection, SNAPSHOT_ENTRY_TYPE } from "./session.ts";
 import { hasCompiledSkillArtifact, hashSkillSource, registeredSkillResolver, SkillReadTracker, type SuccessfulSkillRead } from "./skills.ts";
-import { emptySnapshot, migrationFailure, type Snapshot } from "./snapshot.ts";
+import { HistoryBoundaryExpiredError, emptySnapshot, migrationFailure, type RetainedBoundaryCheckpoint, type Snapshot } from "./snapshot.ts";
 import { emptyState, overlayStates, projectStateForModel, type AtomicScopePatches, type MaterializedState, type ModelState, type ScopedStates, type StateScope } from "./state.ts";
 import { compactStatus, detailedStatus, STATUS_KEY, type StatusDiagnostics } from "./status.ts";
-import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramLoader, type StateFlowTelegramScope } from "./telegram.ts";
+import { PublicationBusyError } from "./storage.ts";
+import { createStateFlowTelegramAdapter, type StateFlowTelegramControlResult, type StateFlowTelegramInspection, type StateFlowTelegramLoader, type StateFlowTelegramScope } from "./telegram.ts";
 import { temporalScopeRevisions, type ScopeRevisions } from "./temporal.ts";
-import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition, type StagedScopedTransition } from "./transition.ts";
+import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition } from "./transition.ts";
 
 export interface StateFlowExtensionOptions {
 	agentDir?: string;
@@ -58,6 +59,28 @@ export const PATCH_STATE_TOOL_NAME = "patch_state";
 export const READ_STATE_TOOL_NAME = "read_state";
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 
+interface InferencePreparation {
+	readonly controller: AbortController;
+	readonly prompt?: string;
+	accepted?: boolean;
+	operation?: Promise<void>;
+}
+
+interface BranchRestoration {
+	readonly controller: AbortController;
+	/** Memory acceptance is independent of the requested active/passive policy. */
+	awaitingAcceptance: boolean;
+	passiveRequested?: boolean;
+	operation?: Promise<void>;
+}
+
+type BranchSelection =
+	| { kind: "settled" }
+	| { kind: "current" }
+	| { kind: "restore"; checkpoint: RetainedBoundaryCheckpoint }
+	| { kind: "fork"; checkpoint: RetainedBoundaryCheckpoint; source: SessionAddress }
+	| { kind: "auto-start" };
+
 export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowExtensionOptions = {}): void {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const loadedConfig = loadStateFlowConfig(agentDir, options.repositoryRoot);
@@ -68,10 +91,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	};
 	let snapshot: Snapshot = emptySnapshot();
 	let scopeStates: ScopedStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
-	let branchHasSnapshot = false;
 	let branchStartsWithoutRuntime = false;
+	let selectedHistoryExpired = false;
+	let stopPersistenceError: string | undefined;
+	let stopPersistence: { controller: AbortController; operation?: Promise<StateFlowTelegramControlResult> } | undefined;
+	let startActivation: { controller: AbortController; operation?: Promise<StateFlowTelegramControlResult> } | undefined;
 	let forkInitialization = false;
-	let responseAwaitingReconciliation = false;
+	let branchRestoration: BranchRestoration | undefined;
+	const restorationOperations = new Set<Promise<void>>();
+	let responseReconciliation: AbortController | undefined;
+	let sharedInspectionLifetime = new AbortController();
 	let completedRunAccepted = false;
 	let turnAcceptedForBackup = false;
 	let compactionPlan: StateFlowCompactionPlan | undefined;
@@ -80,7 +109,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	const compactionMarker = `state-flow-boundary:${randomUUID()}`;
 	let passiveContinuation: PassiveContinuation | undefined;
 	let bootstrapContinuation: PassiveContinuation | undefined;
-	let artifactRefreshPending = false;
+	let inferencePreparation: InferencePreparation | undefined;
 	let runAnchorTimestamp: number | undefined;
 	let runtime: TemporalRuntime | undefined;
 	let activeContext: ExtensionContext | undefined;
@@ -88,6 +117,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	const repositoryRoot = resolve(options.repositoryRoot ?? config.directory);
 	const diagnosticWriter = new StateFlowDiagnosticWriter(config.logging, stateFlowLogPath(agentDir), repositoryRoot, (message) => notifyActiveContext(message));
 	let backupPending = false;
+	const backupLifetime = new AbortController();
+	const backupOperations = new Set<Promise<string | undefined>>();
 	let shuttingDown = false;
 	let pushFailureNotified = false;
 	const skillReads = new SkillReadTracker(hashSkillSource, (path) => activeContext
@@ -103,9 +134,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return resolveSessionAddress(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getSessionId(), ctx.sessionManager.getHeader()?.timestamp);
 	}
 
+	function notifyProblem(ctx: ExtensionContext, message: string, level: "warning" | "error"): void {
+		ctx.ui.notify(conciseDiagnostic(message), level);
+	}
+
 	function notifyActiveContext(message: string): void {
 		try {
-			activeContext?.ui.notify(message, "warning");
+			if (activeContext) notifyProblem(activeContext, message, "warning");
 		} catch {
 			// An asynchronous push attempt can outlive the Pi context that launched it.
 		}
@@ -121,7 +156,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	function assertSelectedBranchAvailable(): void {
 		if (snapshot.meta.validation?.attempt === 0) {
-			throw new Error(`State Flow selected branch is unavailable: ${snapshot.meta.validation.error}. Restore its canonical files and retry /state-flow-start, or select a retained boundary.`);
+			throw new Error(`State Flow selected branch is unavailable: ${snapshot.meta.validation.error}`);
 		}
 	}
 
@@ -131,12 +166,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return projectModelState(runtime.read(offset, scope));
 	} });
 
-	function persist(): void {
+	function assertPublicationAvailable(): void {
 		assertSelectedBranchAvailable();
-		const previousView = runtime?.view;
-		const publication = !branchStartsWithoutRuntime && runtime?.view ? runtime.publish(snapshot, false, undefined) : undefined;
-		if (runtime?.view !== previousView) installScopeStates();
-		if (publication && activeContext) recordPublication(publication, activeContext);
+		if (stopPersistenceError) throw new Error(`Memory writes paused after Stop: ${stopPersistenceError}; use /state-flow-start`);
+	}
+
+	function appendCheckpoint(): void {
 		const checkpoint = branchStartsWithoutRuntime ? { disabled: true } : runtime?.retainedCheckpoint(snapshot) ?? { disabled: true };
 		if ("disabled" in checkpoint && !branchStartsWithoutRuntime) {
 			throw new Error("State Flow cannot checkpoint an unproven branch as ordinary disabled; restore a valid checkpoint first");
@@ -155,8 +190,46 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		ctx.ui.setStatus(STATUS_KEY, compactStatus(snapshot, scopeRevisions(), (color, text) => ctx.ui.theme.fg(color, text)));
 	}
 
+	function cancelStopPersistence(): Promise<StateFlowTelegramControlResult> | undefined {
+		const pending = stopPersistence;
+		pending?.controller.abort();
+		stopPersistence = undefined;
+		return pending?.operation;
+	}
+
+	function cancelStartActivation(): Promise<StateFlowTelegramControlResult> | undefined {
+		const pending = startActivation;
+		pending?.controller.abort();
+		startActivation = undefined;
+		return pending?.operation;
+	}
+
+	function cancelBranchRestoration(): Promise<void> | undefined {
+		const pending = branchRestoration;
+		pending?.controller.abort();
+		branchRestoration = undefined;
+		return pending?.operation;
+	}
+
+	function cancelResponseReconciliation(): void {
+		responseReconciliation?.abort();
+		responseReconciliation = undefined;
+	}
+
+	function cancelSharedInspections(): void {
+		sharedInspectionLifetime.abort(new Error("State Flow inspection was cancelled; select the scope again"));
+		sharedInspectionLifetime = new AbortController();
+	}
+
+	function cancelInferencePreparation(): void {
+		inferencePreparation?.controller.abort();
+		inferencePreparation = undefined;
+	}
+
 	function clearRunTransient(): void {
-		responseAwaitingReconciliation = false;
+		cancelInferencePreparation();
+		cancelResponseReconciliation();
+		cancelSharedInspections();
 		completedRunAccepted = false;
 		turnAcceptedForBackup = false;
 		compactionPlan = undefined;
@@ -165,10 +238,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		artifactReads.clear();
 	}
 
-	function deferArtifactRefresh(): void {
+	function deferInferencePreparation(prompt?: string): void {
+		cancelInferencePreparation();
+		inferencePreparation = { controller: new AbortController(), prompt };
 		artifactInvalidations = [];
 		artifactReads.setCandidates([]);
-		artifactRefreshPending = true;
 	}
 
 	function refreshArtifactHints(): void {
@@ -202,10 +276,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		artifactReads.setCandidates(artifactInvalidations);
 	}
 
-	function removeMissingRegisteredArtifacts(ctx: ExtensionContext): void {
-		if (!snapshot.config.enabled || !runtime?.view) return;
+	function missingArtifactRemovals(states: ScopedStates): AtomicScopePatches {
 		const owners = new Map<string, StateScope[]>();
-		for (const scope of ["global", "cwd", "session"] as const) for (const path of Object.keys(scopeStates[scope].artifacts)) {
+		for (const scope of ["global", "cwd", "session"] as const) for (const path of Object.keys(states[scope].artifacts)) {
 			owners.set(path, [...owners.get(path) ?? [], scope]);
 		}
 		const removals: AtomicScopePatches = {};
@@ -216,12 +289,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				removals[scope] = { ...(removals[scope] ?? {}), artifacts: { ...artifacts, [observation.path]: null } };
 			}
 		}
-		if (Object.keys(removals).length > 0) {
-			const stage = stageAtomicScopePatches(scopeStates, removals, [], runtime.causalBasis());
-			commitStage(stage, ctx, false);
-			updateUi(ctx);
-		}
-		refreshArtifactHints();
+		return removals;
 	}
 
 
@@ -233,16 +301,21 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return snapshot.config.enabled || config.passiveTools;
 	}
 
-	function refreshTelegramStateView(scope: StateFlowTelegramScope): void {
+	async function inspectTelegramState(scope: StateFlowTelegramScope): Promise<StateFlowTelegramInspection> {
+		if (!activeContext || shuttingDown) throw new Error("State Flow is not attached to an active session yet");
 		if (scope === "session" || scope === "effective") assertSelectedBranchAvailable();
-		if (!runtime?.view) {
-			if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
-			runtime ??= createRuntime(activeContext);
-			runtime.loadPassive();
-		} else if (scope !== "session") {
-			runtime.refreshShared();
-		}
+		const selected = runtime ??= createRuntime(activeContext);
+		const signal = sharedInspectionLifetime.signal;
+		if (!selected.view || (scope !== "session" && !stopPersistenceError)) await selected.refreshShared(signal);
+		signal.throwIfAborted();
+		if (runtime !== selected) throw new Error("State Flow inspection selection changed; select the scope again");
+		if (scope === "session" || scope === "effective") assertSelectedBranchAvailable();
+		if (!selected.view) throw new Error("State Flow temporal runtime is unavailable");
 		installScopeStates();
+		const state = scope === "effective"
+			? overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)
+			: scopeStates[scope];
+		return { state: { ...projectModelState(state), lazy: structuredClone(state.lazy) }, revisions: scopeRevisions(), signal };
 	}
 
 	function syncStateFlowTools(): void {
@@ -287,29 +360,57 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return `State Flow acquisition: this registered Skill belongs at ${target}. If durable compiled guidance is useful, include a non-empty description, kind:"skill", and compilation object there. Unrelated semantic patches do not need to include it.`;
 	}
 
-	function commitStage(stage: StagedScopedTransition, ctx: ExtensionContext, finalizeRun: boolean): boolean {
-		const acquiredArtifactPaths = new Set(artifactReads.successful.keys());
-		let committed: boolean;
-		try {
-			committed = commitScopedTransition(snapshot, scopeStates, stage, (accepted, nextSnapshot) => {
-				if (!runtime?.view) throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
-				const publication = runtime.publish(nextSnapshot, accepted !== undefined, accepted, {
-					provenance: stage.provenanceUpdates,
-				});
-				if (publication) recordPublication(publication, ctx);
-			}, runtime!.causalBasis(), { finalizeRun });
-		} catch (error) {
-			if (error instanceof SharedScopeRemovalConflictError) installScopeStates();
-			throw error;
-		}
-		if (!committed) return false;
-		installScopeStates();
+	function clearAcceptedAcquisitions(acquiredArtifactPaths = new Set(artifactReads.successful.keys())): void {
 		artifactInvalidations = artifactInvalidations.filter(({ path }) => !acquiredArtifactPaths.has(path));
 		artifactReads.setCandidates(artifactInvalidations);
 		dropCurrentSkillReads();
 		artifactReads.clear();
-		persist();
-		return true;
+	}
+
+	async function prepareInference(pending: InferencePreparation, selected: TemporalRuntime | undefined, ctx: ExtensionContext, operationSignal: AbortSignal): Promise<void> {
+		const signal = AbortSignal.any([pending.controller.signal, operationSignal]);
+		try {
+			if (!selected?.view) throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
+			await selected.withPatchTransaction((transaction) => {
+				signal.throwIfAborted();
+				if (runtime !== selected || inferencePreparation !== pending || !snapshot.config.enabled || shuttingDown) {
+					throw new Error("State Flow inference selection changed while awaiting publication");
+				}
+				assertPublicationAvailable();
+				const nextSnapshot = structuredClone(snapshot);
+				const rotatesRun = pending.prompt !== undefined && nextSnapshot.meta.specification !== undefined;
+				if (pending.prompt !== undefined) prepareRun(nextSnapshot, pending.prompt);
+				// Exact-path metadata validation belongs to the locked current head, including newly adopted registrations.
+				const removals = missingArtifactRemovals(transaction.states);
+				let publication: RuntimePublication | undefined;
+				if (Object.keys(removals).length > 0) {
+					const stage = stageAtomicScopePatches(transaction.states, removals, [], transaction.causalBasis);
+					commitScopedTransition(nextSnapshot, transaction.states, stage, (transition, next) => {
+						publication = transaction.publish(next, transition);
+						pending.accepted = true;
+					}, transaction.causalBasis, { finalizeRun: false });
+				} else {
+					publication = transaction.publish(nextSnapshot);
+					pending.accepted = true;
+				}
+				snapshot = nextSnapshot;
+				installScopeStates();
+				if (rotatesRun && rehydrationPhase !== "new-bootstrap" && rehydrationPhase !== "resume-bootstrap") rehydrationPhase = "step";
+				if (publication?.changed) recordPublication(publication, ctx);
+				if (pending.prompt !== undefined || publication?.changed) appendCheckpoint();
+				if (Object.keys(removals).length > 0) clearAcceptedAcquisitions();
+				updateUi(ctx);
+			}, signal);
+		} catch (error) {
+			if (signal.aborted || runtime !== selected || inferencePreparation !== pending || shuttingDown) return;
+			// Pi reports context-hook exceptions and continues. Abort through its public port rather than infer from stale preparation.
+			ctx.abort();
+			const cause = diagnosticText(error);
+			recordDiagnostic(cause, "publication-conflict", ctx);
+			notifyProblem(ctx, pending.accepted
+				? `State Flow preparation saved; lifecycle update failed: ${cause}`
+				: `State Flow inference preparation failed: ${cause}`, "error");
+		}
 	}
 
 
@@ -344,6 +445,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			} }),
 			staleArtifacts,
 			...(durableStateError === undefined ? {} : { durableStateError }),
+			...(stopPersistenceError === undefined ? {} : { publicationError: stopPersistenceError }),
 		};
 	}
 
@@ -355,116 +457,224 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return resolveSessionAddress(parent.file, parent.id, parent.timestamp);
 	}
 
-	function restoreActiveBranch(ctx: ExtensionContext, sessionStartReason?: unknown): void {
+	/** Select the active native branch under one owned restoration lifetime; only current accepted work installs memory. */
+	function restoreActiveBranch(ctx: ExtensionContext, sessionStartReason?: unknown, notifyRecovery = true, startOwner?: AbortController): Promise<void> {
+		cancelBranchRestoration();
+		// Start-owned attachment/fork recovery keeps its owner; only accepted Start cancels Stop.
+		if (!startOwner) {
+			cancelStartActivation();
+			cancelStopPersistence();
+		}
 		clearRunTransient();
 		passiveContinuation = undefined;
 		bootstrapContinuation = undefined;
 		artifactInvalidations = [];
 		artifactReads.setCandidates([]);
-		artifactRefreshPending = false;
 		telegramStartPending = false;
 		activeContext = ctx;
-		const session = sessionAddress(ctx);
-		runtime = new TemporalRuntime(ctx.cwd, session, repositoryRoot, undefined, config.historyLimit);
+		runtime = createRuntime(ctx);
 		installScopeStates();
-		branchHasSnapshot = false;
 		branchStartsWithoutRuntime = false;
+		selectedHistoryExpired = false;
 		forkInitialization = sessionStartReason === "fork";
+		let selection: BranchSelection = { kind: "settled" };
+		let skipped = 0;
 		try {
 			const branch = ctx.sessionManager.getBranch();
-			const discovery = discoverSnapshotData(branch);
-			let restoreSelected: (() => Snapshot) | undefined;
-			const recovery = recoverSnapshot(discovery.candidates, (checkpoint) => {
-				if (forkInitialization) {
-					const prepared = runtime!.prepareBoundaryFork(forkSource(ctx), checkpoint);
-					restoreSelected = () => {
-						const accepted = prepared.fork();
-						snapshot = accepted.snapshot;
-						recordPolicyPublication(accepted.publication, ctx);
-						pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, { reset: true, owner: ctx.sessionManager.getSessionId() });
-						forkInitialization = false;
-						return snapshot;
-					};
-					return prepared.snapshot;
-				}
-				const prepared = runtime!.prepareBoundaryRestore(checkpoint);
-				restoreSelected = () => {
-					const restored = prepared.restore();
-					const publication = runtime!.acceptRestoredOrigin(restored);
-					recordPolicyPublication(publication, ctx);
-					return restored;
-				};
-				return prepared.snapshot;
-			});
-			branchStartsWithoutRuntime = recovery.disabledMarker === true
-				|| (discovery.candidates.length === 0 && discovery.errors.length === 0);
-			const skipped = discovery.errors.length + recovery.skipped.length;
-			branchHasSnapshot = recovery.skipped.length < discovery.candidates.length;
-			if (discovery.candidates.length === 0 && discovery.errors.length > 0) {
-				snapshot = migrationFailure({}, `Snapshot restoration failed: ${discovery.errors[0]}`);
-			} else if (discovery.candidates.length > 0) {
-				snapshot = recovery.snapshot;
-				if (branchHasSnapshot && restoreSelected) {
-					snapshot = restoreSelected();
-					persist();
-				} else if (branchHasSnapshot && snapshot.config.enabled) {
-					const publication = runtime.initialize(snapshot, true);
-					recordPolicyPublication(publication, ctx);
-				}
-				installScopeStates();
-			} else if (config.autoStart && isNewSession(sessionStartReason, branch)) {
-				snapshot = startEpisode(hasPriorConversation(branch));
-				runtime.prepare();
-				const initialization = runtime.initialize(snapshot, true);
-				recordPolicyPublication(initialization, ctx);
-				if (!runtime.view) snapshot = emptySnapshot();
-				installScopeStates();
-				if (snapshot.config.enabled) {
-					branchHasSnapshot = true;
-					persist();
-				}
+			const fence = retainsPhysicalSessionProjection(sessionStartReason)
+				? findPassiveStopBoundary(branch, ctx.sessionManager.getSessionId(), PASSIVE_STOP_ENTRY_TYPE)?.persistenceError
+				: undefined;
+			stopPersistenceError = fence ?? (startOwner ? stopPersistenceError : undefined);
+			if (fence) {
+				// The native Stop owns policy only: read proven memory, never replay or publish a stale selection.
+				selection = { kind: "current" };
 			} else {
-				snapshot = emptySnapshot();
-				installScopeStates();
-			}
-			if (snapshot.config.enabled && skipped > 0) {
-				ctx.ui.notify(`State Flow recovered the previous valid snapshot after skipping ${skipped} malformed newer snapshot(s).`, "warning");
+				const discovery = discoverSnapshotData(branch);
+				const selected = selectRetainedCheckpoint(discovery.candidates);
+				skipped = discovery.errors.length + selected.skipped.length;
+				branchStartsWithoutRuntime = selected.kind === "disabled" || (discovery.candidates.length === 0 && discovery.errors.length === 0);
+				if (discovery.candidates.length === 0 && discovery.errors.length > 0) {
+					snapshot = migrationFailure({}, `Snapshot restoration failed: ${discovery.errors[0]}`);
+				} else if (selected.kind === "boundary" && forkInitialization) {
+					try {
+						// Native parent acquisition stays outside canonical exclusion.
+						const source = forkSource(ctx);
+						const sourceStopped = findPassiveStopBoundary(branch, source.id, PASSIVE_STOP_ENTRY_TYPE)?.persistenceError !== undefined;
+						selection = { kind: "fork", source, checkpoint: sourceStopped ? { ...selected.checkpoint, enabled: false } : selected.checkpoint };
+					} catch (error) {
+						snapshot = selectedBoundaryFailure(diagnosticText(error));
+					}
+				} else if (selected.kind === "boundary") {
+					selection = { kind: "restore", checkpoint: selected.checkpoint };
+				} else if (discovery.candidates.length > 0) {
+					snapshot = selected.kind === "disabled" ? emptySnapshot() : selected.snapshot;
+				} else if (config.autoStart && isNewSession(sessionStartReason, branch)) {
+					selection = { kind: "auto-start" };
+				} else {
+					snapshot = emptySnapshot();
+				}
 			}
 		} catch (error) {
-			const failure = migrationFailure({}, `Snapshot restoration failed: ${error instanceof Error ? error.message : String(error)}`);
-			snapshot = {
-				...snapshot,
-				config: { ...snapshot.config, enabled: false },
-				meta: { ...snapshot.meta, validation: failure.meta.validation },
-			};
+			selection = { kind: "settled" };
+			snapshot = selectedBoundaryFailure(diagnosticText(error));
 		}
-		if (!snapshot.config.enabled && snapshot.meta.validation?.attempt === 0) {
-			// A failed acceptance may have installed a prepared view; only shared passive reads may survive.
-			runtime = createRuntime(ctx);
+		// Pending selection grants neither private reads nor publication until its acceptance installs memory.
+		if (selection.kind !== "settled") snapshot = migrationFailure({}, "State Flow branch restoration is pending");
+		const pending: BranchRestoration = {
+			controller: new AbortController(),
+			awaitingAcceptance: selection.kind !== "settled" && selection.kind !== "current",
+		};
+		branchRestoration = pending;
+		const operation = attachBranch(ctx, pending, selection, sessionStartReason, notifyRecovery, skipped);
+		pending.operation = operation;
+		restorationOperations.add(operation);
+		const finished = () => { restorationOperations.delete(operation); };
+		void operation.then(finished, finished);
+		return operation;
+	}
+
+	async function attachBranch(
+		ctx: ExtensionContext, pending: BranchRestoration, selection: BranchSelection,
+		reason: unknown, notifyRecovery: boolean, skipped: number,
+	): Promise<void> {
+		const placeholder = runtime;
+		let selected = runtime;
+		const owner = ctx.sessionManager.getSessionId();
+		const cwd = ctx.cwd;
+		const file = ctx.sessionManager.getSessionFile();
+		const timestamp = ctx.sessionManager.getHeader()?.timestamp;
+		const signal = AbortSignal.any([pending.controller.signal, ...(ctx.signal ? [ctx.signal] : [])]);
+		const isCurrent = () => branchRestoration === pending && !pending.controller.signal.aborted && !shuttingDown && runtime === selected
+			&& ctx.cwd === cwd && ctx.sessionManager.getSessionId() === owner && ctx.sessionManager.getSessionFile() === file
+			&& ctx.sessionManager.getHeader()?.timestamp === timestamp;
+		const assertCurrent = () => {
+			signal.throwIfAborted();
+			if (!isCurrent()) throw new Error("State Flow branch selection changed while awaiting publication");
+		};
+		let accepted = false;
+		// Install accepted memory before native writes; later ancillary failures cannot revert or replay it.
+		const accept = (candidate: TemporalRuntime, next: Snapshot, publication: RuntimePublication, nativeWrites: () => void): void => {
+			accepted = true;
+			pending.awaitingAcceptance = false;
+			runtime = selected = candidate;
+			snapshot = next;
 			installScopeStates();
-			ctx.ui.notify(`State Flow restored disabled: ${snapshot.meta.validation.error}`, "error");
+			recordPolicyPublication(publication, ctx);
+			let failure: unknown;
+			try { nativeWrites(); } catch (error) { failure = error; }
+			settleSelection(ctx, reason, notifyRecovery, skipped, true);
+			if (failure !== undefined) throw failure;
+		};
+		try {
+			if (selection.kind !== "settled") {
+				// Local policy is already passive while the selection waits for exclusion.
+				syncStateFlowTools();
+				updateUi(ctx);
+				const candidate = createRuntime(ctx);
+				try {
+					if (selection.kind === "current") {
+						const current = await candidate.refreshCurrentMemory(signal);
+						assertCurrent();
+						if (current) runtime = selected = candidate;
+						snapshot = current ?? migrationFailure({}, "Current State Flow session memory is unavailable");
+						installScopeStates();
+					} else if (selection.kind === "restore") {
+						await candidate.withRestoreTransaction(selection.checkpoint, (restored, publish) => {
+							assertCurrent();
+							// Canceled preparation or boundary continuation may have no specification. Retain uncompiled native context.
+							if (restored.config.enabled && restored.meta.specification === undefined
+								&& retainsPhysicalSessionProjection(reason) && hasUncheckpointedConversation(ctx.sessionManager.getBranch())) restored.meta.bootstrap = true;
+							const next = pending.passiveRequested ? stopEpisode(restored) : restored;
+							accept(candidate, next, publish(next), appendCheckpoint);
+						}, signal);
+					} else if (selection.kind === "fork") {
+						await candidate.withForkTransaction(selection.source, selection.checkpoint, (child, publish) => {
+							assertCurrent();
+							// Mode is selected independently of creating the child's private memory.
+							const next = pending.passiveRequested ? stopEpisode(child) : child;
+							const publication = publish(next);
+							forkInitialization = false;
+							accept(candidate, next, publication, () => {
+								pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, { reset: true, owner });
+								appendCheckpoint();
+							});
+						}, signal);
+					} else {
+						await candidate.withStartTransaction((current, publish) => {
+							assertCurrent();
+							// Truly new branch authority is rechecked after waiting; existing memory needs its own selection.
+							const branch = ctx.sessionManager.getBranch();
+							const discovery = discoverSnapshotData(branch);
+							if (current || discovery.candidates.length > 0 || discovery.errors.length > 0) throw new Error("Existing session runtime requires retained-boundary restoration");
+							const activated = startEpisode(hasPriorConversation(branch));
+							const next = pending.passiveRequested ? stopEpisode(activated) : activated;
+							accept(candidate, next, publish(next), appendCheckpoint);
+						}, signal, true);
+					}
+				} catch (error) {
+					if (accepted) {
+						if (isCurrent()) notifyProblem(ctx, `State Flow memory restored; lifecycle update failed: ${diagnosticText(error)}`, "warning");
+						return;
+					}
+					if (!isCurrent()) return;
+					if (error instanceof HistoryBoundaryExpiredError) selectedHistoryExpired = true;
+					snapshot = selectedBoundaryFailure(diagnosticText(error));
+					installScopeStates();
+				} finally {
+					pending.awaitingAcceptance = false;
+				}
+				if (accepted) return;
+			}
+			settleSelection(ctx, reason, notifyRecovery, skipped, selected !== placeholder);
+			if (snapshot.config.enabled || !(config.passiveBootstrap || config.passiveTools) || runtime?.view) return;
+			const passive = createRuntime(ctx);
+			const priorView = selected?.view;
+			try {
+				await passive.refreshShared(signal);
+			} catch (error) {
+				if (isCurrent() && !signal.aborted && notifyRecovery && !stopPersistenceError) notifyProblem(ctx, `State Flow passive memory is unavailable: ${diagnosticText(error)}`, "warning");
+				return;
+			}
+			assertCurrent();
+			// An intervening passive patch or inspection owns its newer cache, even on the same physical branch.
+			if (selected?.view !== priorView) return;
+			runtime = selected = passive;
+			installScopeStates();
+			updateUi(ctx);
+		} catch (error) {
+			// Host failures before acceptance leave the selection unavailable, never invented empty memory.
+			if (accepted || !isCurrent()) return;
+			snapshot = selectedBoundaryFailure(diagnosticText(error));
+			installScopeStates();
+		} finally {
+			pending.awaitingAcceptance = false;
+			if (branchRestoration === pending) branchRestoration = undefined;
 		}
-		if (retainsPhysicalSessionProjection(sessionStartReason) && runtime?.view) {
+	}
+
+	function settleSelection(ctx: ExtensionContext, reason: unknown, notifyRecovery: boolean, skipped: number, selectedMemory: boolean): void {
+		const failure = !snapshot.config.enabled && snapshot.meta.validation?.attempt === 0 ? snapshot.meta.validation.error : undefined;
+		if (failure !== undefined && notifyRecovery && !stopPersistenceError) {
+			if (selectedHistoryExpired) notifyProblem(ctx, "State Flow history is outside the retained temporal window; /state-flow-start can use current session memory.", "warning");
+			else notifyProblem(ctx, `State Flow restore failed: ${failure}`, "error");
+		}
+		if (selectedMemory && retainsPhysicalSessionProjection(reason) && runtime?.view) {
 			const boundary = findPassiveStopBoundary(ctx.sessionManager.getBranch(), ctx.sessionManager.getSessionId(), PASSIVE_STOP_ENTRY_TYPE);
 			if (boundary !== undefined) {
 				const continuation = createPassiveContinuation(
 					projectModelState(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)),
 					boundary.at,
 					boundary.from,
+					boundary.preserveContext,
 				);
 				if (!snapshot.config.enabled) passiveContinuation = continuation;
 				else if (snapshot.meta.bootstrap) bootstrapContinuation = continuation;
 			}
 		}
-		if (!snapshot.config.enabled && (config.passiveBootstrap || config.passiveTools) && !runtime?.view) {
-			try {
-				runtime?.loadPassive();
-				installScopeStates();
-			} catch (error) {
-				ctx.ui.notify(`State Flow passive memory is unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
-			}
+		if (notifyRecovery && snapshot.config.enabled && skipped > 0) {
+			notifyProblem(ctx, `State Flow skipped ${skipped} malformed snapshot(s); restored the last valid one.`, "warning");
 		}
-		if (snapshot.config.enabled) deferArtifactRefresh();
+		if (snapshot.config.enabled) deferInferencePreparation();
 		syncStateFlowTools();
 		updateUi(ctx);
 	}
@@ -540,9 +750,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			try {
 				if (!passiveToolsAvailable()) throw new Error("State Flow tools are disabled by configuration");
-				assertSelectedBranchAvailable();
+				assertPublicationAvailable();
 				if (signal?.aborted) throw new Error("State Flow patch was aborted before materialization");
 				if (!isObject(params)) throw new Error("patch_state requires an object");
+				params = structuredClone(params);
 				const allowed = new Set(["global", "cwd", "session"]);
 				for (const key of Object.keys(params)) {
 					if (!allowed.has(key)) throw new Error(`patch_state does not accept field ${key}`);
@@ -556,34 +767,48 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					patches[scope] = patch;
 				}
 				const scopes = Object.keys(patches) as StateScope[];
-				if (scopes.length === 0) throw new Error("patch_state requires at least one materially changed scope patch");
-				if (!runtime?.view) {
-					runtime ??= createRuntime(ctx);
-					runtime.prepare();
-					const publication = runtime.initialize(snapshot, true, undefined, true);
-					recordPolicyPublication(publication, ctx);
-					installScopeStates();
-					branchHasSnapshot = true;
-				}
-				installScopeStates();
-				for (const acquired of artifactReads.successful.values()) {
-					const observation = inspectRegisteredArtifactPaths([acquired.path])[0];
-					if (acquired.sourceFingerprint === undefined || observation?.kind !== "present"
-						|| !sameArtifactSourceFingerprint(acquired.sourceFingerprint, observation.fingerprint)) {
-						throw new Error(`Artifact source changed after acquisition: ${acquired.path}`);
+				if (scopes.length === 0) throw new Error("patch_state requires at least one scope patch");
+				const selected = runtime ??= createRuntime(ctx);
+				const acquiredArtifacts = structuredClone([...artifactReads.successful.values()]);
+				const acquiredSkills = structuredClone([...skillReads.successful.values()]);
+				return await selected.withPatchTransaction((transaction) => {
+					if (runtime !== selected) throw new Error("State Flow session selection changed while awaiting publication");
+					if (!passiveToolsAvailable()) throw new Error("State Flow tools are disabled by configuration");
+					assertPublicationAvailable();
+					for (const acquired of acquiredArtifacts) {
+						const observation = inspectRegisteredArtifactPaths([acquired.path])[0];
+						if (acquired.sourceFingerprint === undefined || observation?.kind !== "present"
+							|| !sameArtifactSourceFingerprint(acquired.sourceFingerprint, observation.fingerprint)) {
+							throw new Error(`Artifact source changed after acquisition: ${acquired.path}`);
+						}
 					}
-				}
-				const stage = stageAtomicScopePatches(scopeStates, patches, skillReads.successful.values(), runtime.causalBasis(), artifactReads.successful.values());
-				const semanticChange = (["global", "cwd", "session"] as const).some((scope) => !sameJson(scopeStates[scope], stage.nextStates[scope]));
-				const provenanceChange = Object.values(stage.provenanceUpdates).some((updates) => Object.keys(updates).length > 0);
-				if (!semanticChange && !provenanceChange) throw new Error("patch_state scope patches must materially update state or required provenance");
-				commitStage(stage, ctx, false);
-				updateUi(ctx);
-				return { content: [{ type: "text", text: `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.` }], details: { scopes, step: snapshot.meta.step } };
+					const stage = stageAtomicScopePatches(transaction.states, patches, acquiredSkills, transaction.causalBasis, acquiredArtifacts);
+					const changed = (["global", "cwd", "session"] as const).some((scope) =>
+						!sameJson(transaction.states[scope], stage.nextStates[scope])
+						|| Object.entries(stage.provenanceUpdates[scope]).some(([path, evidence]) =>
+							!Object.hasOwn(transaction.provenance[scope], path) || !sameJson(transaction.provenance[scope][path], evidence)));
+					const nextSnapshot = structuredClone(snapshot);
+					let publication: RuntimePublication | undefined;
+					commitScopedTransition(nextSnapshot, transaction.states, stage, (accepted, next) => {
+						publication = transaction.publish(next, accepted, stage.provenanceUpdates);
+					}, transaction.causalBasis, { finalizeRun: false });
+					snapshot = nextSnapshot;
+					installScopeStates();
+					if (publication?.changed) {
+						recordPublication(publication, ctx);
+						appendCheckpoint();
+					}
+					clearAcceptedAcquisitions(new Set(acquiredArtifacts.map(({ path }) => path)));
+					updateUi(ctx);
+					return { content: [{ type: "text" as const, text: changed
+						? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
+						: "\nState already current." }], details: { scopes, step: snapshot.meta.step, changed } };
+				}, signal);
 			} catch (error) {
 				let attempted: unknown;
 				try { attempted = structuredClone(params); } catch { attempted = undefined; }
-				recordDiagnostic(error instanceof Error ? error.message : String(error), /concurrently|advanced/.test(String(error)) ? "publication-conflict" : "invalid-patch", ctx, {
+				const cause = diagnosticText(error);
+				recordDiagnostic(cause, /concurrently|advanced/.test(cause) ? "publication-conflict" : "invalid-patch", ctx, {
 					input: attempted,
 					tool: PATCH_STATE_TOOL_NAME,
 					toolCallId,
@@ -593,74 +818,127 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		},
 	});
 
-	function startStateFlow(ctx: ExtensionContext): StateFlowTelegramControlResult {
-		if (!activeContext) restoreActiveBranch(ctx);
+	function startStateFlow(ctx: ExtensionContext): Promise<StateFlowTelegramControlResult> {
+		if (shuttingDown) return Promise.resolve({ ok: false, message: "State Flow is shutting down" });
+		if (startActivation?.operation) return startActivation.operation;
 		telegramStartPending = false;
-		const previousSnapshot = structuredClone(snapshot);
-		const previousPassiveContinuation = passiveContinuation;
-		const previousBootstrapContinuation = bootstrapContinuation;
-		const previousArtifactRefreshPending = artifactRefreshPending;
-		const previousArtifactInvalidations = structuredClone(artifactInvalidations);
+		if (activeContext && !branchRestoration && snapshot.config.enabled) {
+			return Promise.resolve({ ok: true, message: "State Flow is already enabled", signal: sharedInspectionLifetime.signal });
+		}
+		const pending: NonNullable<typeof startActivation> = { controller: new AbortController() };
+		startActivation = pending;
+		const operation = runStart(ctx, pending.controller);
+		pending.operation = operation;
+		const finished = () => { if (startActivation === pending) startActivation = undefined; };
+		void operation.then(finished, finished);
+		return operation;
+	}
+
+	/** Await restoration-owned attachment and exact-source fork recovery before current-head activation. */
+	async function runStart(ctx: ExtensionContext, pending: AbortController): Promise<StateFlowTelegramControlResult> {
+		const owner = ctx.sessionManager.getSessionId();
+		const cwd = ctx.cwd;
+		const file = ctx.sessionManager.getSessionFile();
+		const timestamp = ctx.sessionManager.getHeader()?.timestamp;
+		const signal = ctx.signal ? AbortSignal.any([pending.signal, ctx.signal]) : pending.signal;
+		const isOwner = () => startActivation?.controller === pending && !signal.aborted && !shuttingDown
+			&& ctx.cwd === cwd && ctx.sessionManager.getSessionId() === owner && ctx.sessionManager.getSessionFile() === file
+			&& ctx.sessionManager.getHeader()?.timestamp === timestamp;
+		const superseded = (): StateFlowTelegramControlResult => {
+			pending.abort();
+			return { ok: false, message: "State Flow Start was superseded", signal: pending.signal };
+		};
 		try {
-			if (!branchStartsWithoutRuntime && (!runtime?.view || snapshot.meta.validation?.attempt === 0)) {
-				const retryFork = forkInitialization;
-				restoreActiveBranch(ctx, retryFork ? "fork" : undefined);
+			if (!activeContext) await waitForRecovery(restoreActiveBranch(ctx, undefined, false, pending), signal);
+			else if (branchRestoration?.operation) await waitForRecovery(branchRestoration.operation, signal);
+			if (!isOwner()) return superseded();
+			if (snapshot.config.enabled) return { ok: true, message: "State Flow is already enabled", signal: sharedInspectionLifetime.signal };
+			if (forkInitialization) {
+				// Withdraw this join on cancellation without revoking the independently owned Stop.
+				const stopping = stopPersistence?.operation;
+				if (stopping) await waitForRecovery(stopping, signal);
+				if (!isOwner()) return superseded();
+				await waitForRecovery(restoreActiveBranch(ctx, "fork", false, pending), signal);
+				if (!isOwner()) return superseded();
+				assertSelectedBranchAvailable();
 			}
-			assertSelectedBranchAvailable();
-			if (!runtime?.view && !branchStartsWithoutRuntime) throw new Error("Selected State Flow boundary is unavailable; restore its canonical files before starting State Flow");
-			const branch = ctx.sessionManager.getBranch();
-			activeContext = ctx;
-			runtime ??= createRuntime(ctx);
-			if (branchStartsWithoutRuntime) runtime.prepare();
-			const bootstrap = (!branchHasSnapshot || !snapshot.config.enabled)
-				&& (hasPriorConversation(branch) || previousPassiveContinuation !== undefined);
-			const existingBranch = branchHasSnapshot;
-			snapshot = existingBranch
-				? resumeEpisode(snapshot, bootstrap)
-				: startEpisode(bootstrap);
-			branchHasSnapshot = true;
-			// Activation reasserts the selected session stream as a complete cohort. A resumed
-			// branch may have no reusable temporal revision after an extension upgrade; a
-			// runtime-only write would then reject its selected session as an omitted change.
-			const publication = runtime.view
-				? runtime.publish(snapshot, true)
-				: runtime.initialize(snapshot, true, undefined, branchStartsWithoutRuntime);
-			recordPolicyPublication(publication, ctx);
-			installScopeStates();
-			clearRunTransient();
-			passiveContinuation = undefined;
-			bootstrapContinuation = snapshot.meta.bootstrap
-				? previousPassiveContinuation ?? previousBootstrapContinuation
-				: undefined;
-			deferArtifactRefresh();
-			syncStateFlowTools();
-			persist();
-			updateUi(ctx);
-			ctx.ui.notify(
-				snapshot.meta.bootstrap
-					? "State Flow enabled. The next complete agent run will migrate active context into state."
-					: "State Flow enabled. The next prompt starts a stateful agent run.",
-				"info",
-			);
-			return { ok: true, message: "State Flow enabled" };
+			return activateCurrentState(ctx, pending);
 		} catch (error) {
-			snapshot = previousSnapshot;
-			passiveContinuation = previousPassiveContinuation;
-			bootstrapContinuation = previousBootstrapContinuation;
-			artifactRefreshPending = previousArtifactRefreshPending;
-			artifactInvalidations = previousArtifactInvalidations;
-			artifactReads.setCandidates(artifactInvalidations);
-			syncStateFlowTools();
-			const message = `State Flow could not initialize CWD state: ${error instanceof Error ? error.message : String(error)}`;
-			ctx.ui.notify(message, "error");
-			return { ok: false, message };
+			if (!isOwner()) return superseded();
+			const message = conciseDiagnostic(`State Flow Start failed: ${diagnosticText(error)}`);
+			notifyProblem(ctx, message, "error");
+			return { ok: false, message, signal: AbortSignal.any([pending.signal, sharedInspectionLifetime.signal]) };
+		}
+	}
+
+	async function activateCurrentState(ctx: ExtensionContext, pending: AbortController): Promise<StateFlowTelegramControlResult> {
+		let selected = runtime;
+		const owner = ctx.sessionManager.getSessionId();
+		const cwd = ctx.cwd;
+		const file = ctx.sessionManager.getSessionFile();
+		const timestamp = ctx.sessionManager.getHeader()?.timestamp;
+		const initiallyEnabled = snapshot.config.enabled;
+		let accepted = false;
+		let receipt = AbortSignal.any([pending.signal, sharedInspectionLifetime.signal]);
+		const isCurrent = () => startActivation?.controller === pending && runtime === selected && !shuttingDown
+			&& ctx.cwd === cwd && ctx.sessionManager.getSessionId() === owner && ctx.sessionManager.getSessionFile() === file
+			&& ctx.sessionManager.getHeader()?.timestamp === timestamp && snapshot.config.enabled === (accepted || initiallyEnabled);
+		const superseded = (): StateFlowTelegramControlResult => {
+			pending.abort();
+			return { ok: false, message: "State Flow Start was superseded", signal: pending.signal };
+		};
+		try {
+			const activation = createRuntime(ctx);
+			const signal = ctx.signal ? AbortSignal.any([pending.signal, ctx.signal]) : pending.signal;
+			const result = await activation.withStartTransaction((current, publish) => {
+				signal.throwIfAborted();
+				if (!isCurrent()) throw new Error("State Flow Start selection changed while awaiting publication");
+				if (!current && !branchStartsWithoutRuntime) throw new Error(snapshot.meta.validation?.error ?? "Current State Flow session memory is unavailable");
+				const continuation = passiveContinuation ?? bootstrapContinuation;
+				const bootstrap = hasPriorConversation(ctx.sessionManager.getBranch()) || passiveContinuation !== undefined;
+				const activated = current ? resumeEpisode(current, bootstrap) : startEpisode(bootstrap);
+				const recoveredCurrent = selectedHistoryExpired;
+				const publication = publish(activated);
+				accepted = true;
+				cancelStopPersistence();
+				runtime = selected = activation;
+				snapshot = activated;
+				activeContext = ctx;
+				selectedHistoryExpired = false;
+				stopPersistenceError = undefined;
+				installScopeStates();
+				clearRunTransient();
+				passiveContinuation = undefined;
+				bootstrapContinuation = snapshot.meta.bootstrap ? continuation : undefined;
+				deferInferencePreparation();
+				receipt = AbortSignal.any([pending.signal, sharedInspectionLifetime.signal]);
+				recordPolicyPublication(publication, ctx);
+				syncStateFlowTools();
+				updateUi(ctx);
+				appendCheckpoint();
+				ctx.ui.notify(
+					recoveredCurrent
+						? "State Flow enabled from current session memory; unavailable historical state was not restored."
+						: snapshot.meta.bootstrap
+							? "State Flow enabled. The next complete agent run will migrate active context into state."
+							: "State Flow enabled. The next prompt starts a stateful agent run.",
+					"info",
+				);
+				return { ok: true, message: "State Flow enabled", signal: receipt };
+			}, signal, branchStartsWithoutRuntime);
+			return isCurrent() ? result : superseded();
+		} catch (error) {
+			if (!isCurrent()) return superseded();
+			const message = conciseDiagnostic(`${accepted ? "State Flow enabled; lifecycle update failed" : "State Flow Start failed"}: ${diagnosticText(error)}`);
+			notifyProblem(ctx, message, accepted ? "warning" : "error");
+			return { ok: accepted, message, signal: receipt };
 		}
 	}
 
 	pi.registerCommand("state-flow-start", {
 		description: "Start State Flow mode",
 		handler: async (_args, ctx) => {
-			startStateFlow(ctx);
+			await startStateFlow(ctx);
 		},
 	});
 
@@ -671,47 +949,121 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		},
 	});
 
-	function stopStateFlow(ctx: ExtensionContext): StateFlowTelegramControlResult {
-		if (!activeContext) restoreActiveBranch(ctx);
-		assertSelectedBranchAvailable();
+	function stopStateFlow(ctx: ExtensionContext): Promise<StateFlowTelegramControlResult> {
+		cancelStartActivation();
+		if (shuttingDown) return Promise.resolve({ ok: false, message: "State Flow is shutting down" });
+		if (stopPersistence?.operation) return stopPersistence.operation;
+		if (!activeContext) void restoreActiveBranch(ctx, undefined, false);
+		const restoring = branchRestoration;
+		if (restoring?.awaitingAcceptance) {
+			// Stop changes policy without cancelling memory restoration or initialization.
+			restoring.passiveRequested = true;
+			snapshot = stopEpisode(snapshot);
+			clearRunTransient();
+			syncStateFlowTools();
+			updateUi(ctx);
+			return Promise.resolve({ ok: true, message: "State Flow disabled; memory restoration continues" });
+		}
+		const pending: NonNullable<typeof stopPersistence> = { controller: new AbortController() };
+		stopPersistence = pending;
+		const operation = persistStoppedState(ctx, pending.controller);
+		pending.operation = operation;
+		const finished = () => { if (stopPersistence === pending) stopPersistence = undefined; };
+		void operation.then(finished, finished);
+		return operation;
+	}
+
+	async function persistStoppedState(ctx: ExtensionContext, pending: AbortController): Promise<StateFlowTelegramControlResult> {
 		telegramStartPending = false;
+		const selected = runtime;
+		const owner = ctx.sessionManager.getSessionId();
 		const current = snapshot;
-		const stoppedAt = Date.now();
-		const stopped = stopEpisode(current);
-		const publication = !branchStartsWithoutRuntime && runtime?.view ? runtime.publish(stopped) : undefined;
-		installScopeStates();
-		// Freeze the accepted shared adoption, not the pre-publication cache.
-		const exitHandoff = current.config.enabled && runtime?.view
-			? createPassiveContinuation(
-				projectModelState(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)),
-				stoppedAt,
-				ctx.isIdle() ? undefined : runAnchorTimestamp,
-			)
-			: undefined;
-		const retainedHandoff = exitHandoff ?? (!current.config.enabled ? passiveContinuation : undefined);
-		snapshot = stopped;
-		recordPolicyPublication(publication, ctx);
-		branchHasSnapshot = true;
+		let unfinished = current.meta.specification !== undefined
+			|| (inferencePreparation?.prompt !== undefined && !inferencePreparation.accepted);
+		snapshot = stopEpisode(current);
 		clearRunTransient();
-		passiveContinuation = retainedHandoff;
-		bootstrapContinuation = undefined;
-		artifactInvalidations = [];
-		artifactReads.setCandidates([]);
-		artifactRefreshPending = false;
-		if (exitHandoff) pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, {
-			at: stoppedAt,
-			...(exitHandoff.activeRunStartedAt === undefined ? {} : { from: exitHandoff.activeRunStartedAt }),
-		});
 		syncStateFlowTools();
-		persist();
 		updateUi(ctx);
-		return { ok: true, message: "State Flow disabled" };
+		if (stopPersistenceError) return { ok: true, message: "State Flow disabled; memory writes remain paused" };
+		const stoppedAt = Date.now();
+		const incomingBoundary = current.meta.bootstrap ? bootstrapContinuation : undefined;
+		const anchor = runAnchorTimestamp;
+		const idle = ctx.isIdle();
+		const isCurrent = () => stopPersistence?.controller === pending && runtime === selected
+			&& !shuttingDown && ctx.sessionManager.getSessionId() === owner && !snapshot.config.enabled;
+		const superseded = (): StateFlowTelegramControlResult => ({ ok: false, message: "State Flow Stop was superseded" });
+		const freezeHandoff = (): PassiveContinuation | undefined => {
+			const handoff = (current.config.enabled || stopPersistenceError) && selected?.view && current.meta.validation?.attempt !== 0
+				? createPassiveContinuation(
+					projectModelState(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)),
+					incomingBoundary?.startedAt ?? stoppedAt,
+					incomingBoundary ? incomingBoundary.activeRunStartedAt : !idle || unfinished ? anchor : undefined,
+					stopPersistenceError !== undefined || (incomingBoundary ? incomingBoundary.preserveContext : current.meta.bootstrap === true || (unfinished && anchor === undefined)),
+				)
+				: undefined;
+			passiveContinuation = handoff ?? (!current.config.enabled ? passiveContinuation : undefined);
+			return handoff;
+		};
+		const complete = (): StateFlowTelegramControlResult => {
+			const exitHandoff = freezeHandoff();
+			if (exitHandoff || stopPersistenceError) pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, {
+				at: exitHandoff?.startedAt ?? stoppedAt,
+				...(exitHandoff?.activeRunStartedAt === undefined ? {} : { from: exitHandoff.activeRunStartedAt }),
+				...(exitHandoff?.preserveContext || stopPersistenceError ? { preserveContext: true } : {}),
+				...(stopPersistenceError === undefined ? {} : { owner, persistenceError: stopPersistenceError }),
+			});
+			if (!stopPersistenceError) {
+				appendCheckpoint();
+				return { ok: true, message: "State Flow disabled" };
+			}
+			const message = conciseDiagnostic(`State Flow disabled; memory writes paused: ${stopPersistenceError}`);
+			notifyProblem(ctx, message, "warning");
+			return { ok: true, message };
+		};
+		let accepted = false;
+		try {
+			unfinished ||= current.config.enabled && hasUncheckpointedConversation(ctx.sessionManager.getBranch());
+			// Projection changes before any wait; capture the old run's boundary before later native input can replace it.
+			freezeHandoff();
+			bootstrapContinuation = undefined;
+			artifactInvalidations = [];
+			artifactReads.setCandidates([]);
+			assertPublicationAvailable();
+			if (branchStartsWithoutRuntime || !selected?.view) return complete();
+			const signal = ctx.signal ? AbortSignal.any([pending.signal, ctx.signal]) : pending.signal;
+			const result = await selected.withLifecycleTransaction((publish) => {
+				signal.throwIfAborted();
+				if (!isCurrent()) throw new Error("State Flow Stop selection changed while awaiting publication");
+				assertPublicationAvailable();
+				const stopped = stopEpisode(snapshot);
+				const publication = publish(stopped);
+				accepted = true;
+				snapshot = stopped;
+				installScopeStates();
+				recordPolicyPublication(publication, ctx);
+				return complete();
+			}, signal);
+			return isCurrent() ? result : superseded();
+		} catch (error) {
+			if (!isCurrent()) return superseded();
+			const cause = diagnosticText(error);
+			if (accepted) {
+				const message = conciseDiagnostic(`State Flow disabled; lifecycle update failed: ${cause}`);
+				notifyProblem(ctx, message, "warning");
+				return { ok: true, message };
+			}
+			stopPersistenceError = cause.trim() ? cause : "Canonical State Flow persistence failed";
+			bootstrapContinuation = undefined;
+			artifactInvalidations = [];
+			artifactReads.setCandidates([]);
+			return complete();
+		}
 	}
 
 	pi.registerCommand("state-flow-stop", {
 		description: "Stop State Flow on the current session branch",
 		handler: async (_args, ctx) => {
-			stopStateFlow(ctx);
+			await stopStateFlow(ctx);
 		},
 	});
 
@@ -725,25 +1077,20 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				bootstrap: snapshot.meta.bootstrap === true,
 				startPending: telegramStartPending,
 			}),
-			state: (scope) => {
-				refreshTelegramStateView(scope);
-				const selected = scope === "effective"
-					? overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)
-					: scopeStates[scope];
-				return { ...projectModelState(selected), lazy: structuredClone(selected.lazy) };
-			},
-			revisions: () => scopeRevisions(),
+			inspect: inspectTelegramState,
 			canStartNow: () => activeContext === undefined || activeContext.isIdle(),
 			start: () => {
 				if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
 				return startStateFlow(activeContext);
 			},
-			stop: () => {
+			stop: async () => {
 				if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
+				const operation = stopStateFlow(activeContext);
+				const signal = sharedInspectionLifetime.signal;
 				try {
-					return stopStateFlow(activeContext);
+					return { ...await operation, signal };
 				} catch (error) {
-					return { ok: false, message: error instanceof Error ? error.message : String(error) };
+					return { ok: false, message: diagnosticText(error), signal };
 				}
 			},
 			deferStart: () => {
@@ -751,12 +1098,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			},
 			cancelStart: () => {
 				telegramStartPending = false;
+				cancelStartActivation();
 			},
 		},
 	});
 	void telegram.ensure();
 
-	pi.on("before_agent_start", (event, ctx) => {
+	pi.on("before_agent_start", (event) => {
 		// Native run identity is independent of semantic enablement and survives mode toggles.
 		runAnchorTimestamp = undefined;
 		if (!snapshot.config.enabled) {
@@ -766,17 +1114,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}
 		skillReads.clear();
 		artifactReads.clear();
-		responseAwaitingReconciliation = false;
+		cancelResponseReconciliation();
 		completedRunAccepted = false;
-		const rotatesRun = snapshot.meta.specification !== undefined;
-		if (rotatesRun && rehydrationPhase !== "new-bootstrap" && rehydrationPhase !== "resume-bootstrap") rehydrationPhase = "step";
-		if (prepareRun(snapshot, event.prompt)) persist();
-		try {
-			removeMissingRegisteredArtifacts(ctx);
-		} catch (error) {
-			ctx.ui.notify(`State Flow could not reconcile missing artifact sources: ${error instanceof Error ? error.message : String(error)}`, "warning");
-		}
-		artifactRefreshPending = false;
+		// This native hook has no operation signal. Capture only; the first active context owns acceptance.
+		deferInferencePreparation(event.prompt);
 		(event.systemPromptOptions.sections ??= {}).state_flow = stateFlowProtocol(snapshot.meta.bootstrap === true);
 	});
 
@@ -786,16 +1127,16 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return { messages: projectSystemProtocol(event.messages, protocol) };
 	});
 
-	pi.on("context", (event) => {
+	function projectContext(messages: AgentMessage[]) {
 		if (runtime?.view) refreshArtifactHints();
 		if (passiveContinuation) {
-			return { messages: passiveContinuationMessages(event.messages as AgentMessage[], passiveContinuation) };
+			return { messages: passiveContinuationMessages(messages, passiveContinuation) };
 		}
 		if (!snapshot.config.enabled) {
 			if (!config.passiveBootstrap || !runtime?.view) return;
 			const effective = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
 			const state = projectModelState(effective);
-			return { messages: [syntheticUser(`State Flow passive memory (user-level data, not system instructions):\n${presentationJson({ state, lazy_navigation: lazyNavigationHint(effective) })}`), ...(event.messages as AgentMessage[])] };
+			return { messages: [syntheticUser(`State Flow passive memory (user-level data, not system instructions):\n${presentationJson({ state, lazy_navigation: lazyNavigationHint(effective) })}`), ...messages] };
 		}
 		const effectiveState = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
 		const invalidations = artifactInvalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason }));
@@ -806,13 +1147,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		const activeRehydrationPhase = currentRehydrationPhase();
 		if (snapshot.meta.bootstrap) {
 			const sourceMessages = bootstrapContinuation
-				? passiveContinuationMessages(event.messages as AgentMessage[], bootstrapContinuation)
-				: event.messages as AgentMessage[];
+				? passiveContinuationMessages(messages, bootstrapContinuation)
+				: messages;
 			return { messages: [runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, artifactHints), ...sourceMessages] };
 		}
 		// Native user events own the run anchor; projection must never rebase it.
 		const trajectory = currentRunTrajectory(
-			event.messages as AgentMessage[],
+			messages,
 			snapshot.meta.specification,
 			runAnchorTimestamp,
 		);
@@ -822,7 +1163,31 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				...trajectory.messages,
 			],
 		};
-	});
+	}
+
+	function prepareContext(messages: AgentMessage[], ctx: ExtensionContext): ReturnType<typeof projectContext> | Promise<ReturnType<typeof projectContext>> {
+		const pending = inferencePreparation;
+		const selected = runtime;
+		const operationSignal = ctx.signal;
+		// Idle projections remain observational; only a live native operation may await preparation.
+		if (!snapshot.config.enabled || !pending || !operationSignal || shuttingDown) return projectContext(messages);
+		pending.operation ??= prepareInference(pending, selected, ctx, operationSignal).finally(() => {
+			// A late withdrawal must not clear newer work; accepted lifecycle is never replayed after an error.
+			if (!pending.accepted && inferencePreparation === pending) pending.operation = undefined;
+		});
+		return pending.operation.then(() => {
+			if (shuttingDown || operationSignal.aborted || runtime !== selected || ctx.signal !== operationSignal) return;
+			if (snapshot.config.enabled && inferencePreparation !== pending) {
+				// Start may require same-run maintenance. A new captured user prompt instead owns a different context request.
+				if (inferencePreparation?.prompt === undefined) return prepareContext(messages, ctx);
+				return;
+			}
+			if (snapshot.config.enabled && !pending.accepted) return;
+			return projectContext(messages);
+		});
+	}
+
+	pi.on("context", (event, ctx) => prepareContext(event.messages as AgentMessage[], ctx));
 
 	pi.on("tool_execution_start", (event) => {
 		if (!snapshot.config.enabled) return;
@@ -874,49 +1239,68 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	pi.on("message_end", (event, ctx): any => {
 		// Observe actual user events even while disabled; Start/Stop cannot invent or erase them.
 		if (event.message.role === "user" && runAnchorTimestamp === undefined) runAnchorTimestamp = event.message.timestamp;
-		if (!snapshot.config.enabled) return;
+		if (shuttingDown || !snapshot.config.enabled) return;
 		if (event.message.role !== "assistant") return;
+		cancelResponseReconciliation();
 		const message = event.message as unknown as { role: "assistant"; stopReason?: string; content?: unknown };
-		if (message.stopReason === "aborted" || assistantToolCallCount(message.content) > 0 || message.stopReason === "toolUse") {
-			responseAwaitingReconciliation = false;
-			return;
-		}
+		if (message.stopReason === "aborted" || assistantToolCallCount(message.content) > 0 || message.stopReason === "toolUse") return;
 		if (message.stopReason === "length" || message.stopReason === "error") {
-			responseAwaitingReconciliation = false;
 			recordDiagnostic(`Assistant response ended with ${message.stopReason}`, "finalization", ctx, { content: message.content });
 			return;
 		}
-		responseAwaitingReconciliation = true;
+		responseReconciliation = new AbortController();
 	});
 
-	pi.on("turn_end", (event, ctx) => {
-		const wasBootstrap = snapshot.meta.bootstrap === true;
-		if (!snapshot.config.enabled || !responseAwaitingReconciliation) {
+	pi.on("turn_end", async (event, ctx) => {
+		if (shuttingDown) return;
+		const pending = responseReconciliation;
+		if (!snapshot.config.enabled || !pending) {
 			updateUi(ctx);
 			return;
 		}
+		const selected = runtime;
+		const signal = ctx.signal ? AbortSignal.any([pending.signal, ctx.signal]) : pending.signal;
 		let responseCommitted = false;
-		const specification = snapshot.meta.specification;
 		try {
 			const response = finalizedAssistantResponse(event.message);
-			const stage = stageScopedTransition(scopeStates, { transitions: [], response }, [], runtime!.causalBasis());
-			completeRun(snapshot);
-			commitStage(stage, ctx, true);
-			responseCommitted = true;
-			bootstrapContinuation = undefined;
-			rehydrationPhase = "step";
-			completedRunAccepted = !wasBootstrap;
-			turnAcceptedForBackup = true;
+			if (!selected?.view) throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
+			await selected.withPatchTransaction((transaction) => {
+				signal.throwIfAborted();
+				if (runtime !== selected || responseReconciliation !== pending || !snapshot.config.enabled) {
+					throw new Error("State Flow response selection changed while awaiting publication");
+				}
+				assertPublicationAvailable();
+				const wasBootstrap = snapshot.meta.bootstrap === true;
+				const nextSnapshot = structuredClone(snapshot);
+				const stage = stageScopedTransition(transaction.states, { transitions: [], response }, [], transaction.causalBasis);
+				completeRun(nextSnapshot);
+				let publication: RuntimePublication | undefined;
+				commitScopedTransition(nextSnapshot, transaction.states, stage, (accepted, next) => {
+					publication = transaction.publish(next, accepted);
+				}, transaction.causalBasis, { finalizeRun: true });
+				snapshot = nextSnapshot;
+				installScopeStates();
+				responseCommitted = true;
+				if (publication?.changed) recordPublication(publication, ctx);
+				appendCheckpoint();
+				clearAcceptedAcquisitions();
+				bootstrapContinuation = undefined;
+				rehydrationPhase = "step";
+				completedRunAccepted = !wasBootstrap;
+				turnAcceptedForBackup = true;
+				updateUi(ctx);
+			}, signal);
 		} catch (error) {
-			if (!responseCommitted && specification !== undefined) snapshot.meta.specification = specification;
-			recordDiagnostic(error instanceof Error ? error.message : String(error), "finalization", ctx);
-			ctx.ui.notify(responseCommitted
-				? `State Flow accepted the final response; a post-acceptance lifecycle update failed: ${error instanceof Error ? error.message : String(error)}`
-				: `State Flow could not reconcile the final response: ${error instanceof Error ? error.message : String(error)}`, "error");
+			// Superseded completion owns neither the new lifecycle nor its diagnostics/UI.
+			if (signal.aborted || runtime !== selected || responseReconciliation !== pending) return;
+			const cause = diagnosticText(error);
+			recordDiagnostic(cause, "finalization", ctx);
+			notifyProblem(ctx, responseCommitted
+				? `State Flow response saved; lifecycle update failed: ${cause}`
+				: `State Flow response reconciliation failed: ${cause}`, "error");
 		} finally {
-			responseAwaitingReconciliation = false;
+			if (responseReconciliation === pending) responseReconciliation = undefined;
 		}
-		updateUi(ctx);
 	});
 
 	pi.on("session_before_compact", (event) => {
@@ -927,19 +1311,27 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		return { compaction: result };
 	});
 
-	pi.on("agent_before_settle", (_event, ctx) => {
-		if (!turnAcceptedForBackup) return;
+	pi.on("agent_before_settle", async (_event, ctx) => {
+		if (shuttingDown || !turnAcceptedForBackup) return;
 		turnAcceptedForBackup = false;
 		if (!backupPending) return;
 		backupPending = false;
+		const operationSignal = ctx.signal;
+		const signal = operationSignal ? AbortSignal.any([backupLifetime.signal, operationSignal]) : backupLifetime.signal;
+		const selected = runtime;
 		try {
 			if (existsSync(join(repositoryRoot, ".git"))) {
-				backupCurrentStateFlowFiles(repositoryRoot);
 				const pushSessionId = sessionAddress(ctx).id;
 				const pushCwd = ctx.cwd;
+				// Pi 0.87 settles after its agent signal ends; waiting there would strand native Abort.
+				const operation = backupCurrentStateFlowFiles(repositoryRoot, signal, operationSignal !== undefined);
+				backupOperations.add(operation);
+				try { await operation; }
+				finally { backupOperations.delete(operation); }
+				if (signal.aborted) return;
 				startStateFlowBackupPush(repositoryRoot, (error) => {
 					if (shuttingDown) return;
-					const message = error instanceof Error ? error.message : String(error);
+					const message = diagnosticText(error);
 					const recorded = diagnosticWriter.recordBackupPushFailure(pushSessionId, pushCwd, message);
 					if (pushFailureNotified) return;
 					pushFailureNotified = true;
@@ -949,16 +1341,20 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				}, () => { pushFailureNotified = false; });
 			}
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			if (signal.aborted || runtime !== selected) return;
+			const message = diagnosticText(error);
 			recordDiagnostic(message, "publication-conflict", ctx);
-			ctx.ui.notify(`State Flow accepted canonical state; Git backup failed: ${message}`, "warning");
+			notifyProblem(ctx, error instanceof PublicationBusyError
+				? "State Flow state saved; Git backup deferred: Pi supplied no cancellable settlement wait. A later accepted turn retries."
+				: `State Flow state saved; Git backup failed: ${message}`, "warning");
 		}
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (telegramStartPending && !snapshot.config.enabled) {
 			telegramStartPending = false;
-			startStateFlow(ctx);
+			await startStateFlow(ctx);
+			return;
 		}
 		if (!completedRunAccepted || compactionStopped || !snapshot.config.enabled || snapshot.meta.bootstrap
 			|| compactionInFlight || !ctx.isIdle() || ctx.hasPendingMessages() || !runtime?.view
@@ -977,24 +1373,31 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		});
 	});
 
-	pi.on("session_start", (event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		runAnchorTimestamp = undefined;
 		rehydrationPhase = event.reason === "resume" ? "resume-bootstrap" : "new-bootstrap";
-		restoreActiveBranch(ctx, event.reason);
-		updateUi(ctx);
-		void telegram.ensure();
+		await restoreActiveBranch(ctx, event.reason);
+		if (!shuttingDown) void telegram.ensure();
 	});
-	pi.on("session_tree", (_event, ctx) => {
+	pi.on("session_tree", async (_event, ctx) => {
 		runAnchorTimestamp = undefined;
-		restoreActiveBranch(ctx);
+		await restoreActiveBranch(ctx);
 	});
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		shuttingDown = true;
+		const restoring = cancelBranchRestoration();
+		const starting = cancelStartActivation();
+		const stopping = cancelStopPersistence();
+		backupLifetime.abort();
+		cancelInferencePreparation();
+		cancelResponseReconciliation();
+		cancelSharedInspections();
 		telegramStartPending = false;
 		compactionStopped = true;
 		completedRunAccepted = false;
 		activeContext = undefined;
 		telegram.dispose();
+		await Promise.allSettled([...backupOperations, ...restorationOperations, ...[restoring, stopping, starting].filter((operation) => operation !== undefined)]);
 		await awaitInFlightBackupPushes(repositoryRoot);
 	});
 }

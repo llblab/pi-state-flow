@@ -58,6 +58,8 @@ export async function realPiFixture(t: TestContext, options: {
 	passiveTools?: boolean;
 	stateFlow?: boolean;
 	extensions?: InlineExtension[];
+	/** Observe the public factory result before awaiting native extension binding. */
+	onSessionCreated?: (session: AgentSession, event: SessionStartEvent) => void;
 	models?: FauxModelDefinition[];
 	tools?: string[];
 	contextWindow?: number;
@@ -163,6 +165,7 @@ export async function realPiFixture(t: TestContext, options: {
 			tools: options.tools ?? (options.stateFlow === false ? ["read"] : ["read", "patch_state", "read_state"]),
 		});
 		const { session } = result;
+		options.onSessionCreated?.(session, sessionStartEvent);
 		await session.bindExtensions({
 			mode: "json",
 			uiContext: {

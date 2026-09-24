@@ -10,6 +10,9 @@ const MAX_LEGACY_VALIDATION_ATTEMPT = 7;
 /** Missing operational capability is not evidence that a checkpoint target is invalid. */
 export class RevisionUnavailableError extends Error {}
 
+/** Expired history cannot be restored, but explicit activation may use validated current memory. */
+export class HistoryBoundaryExpiredError extends RevisionUnavailableError {}
+
 export interface SnapshotConfig {
 	enabled: boolean;
 }

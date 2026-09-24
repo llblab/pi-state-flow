@@ -5,15 +5,16 @@ import { once } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
 import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { hashJson } from "../lib/json.ts";
-import { createSessionRuntime, emptySnapshot } from "../lib/snapshot.ts";
+import { createSessionRuntime, emptySnapshot, RevisionUnavailableError } from "../lib/snapshot.ts";
 import { emptyState } from "../lib/state.ts";
 import {
 	captureTemporalFileBase, initializeFileStore, isFileRevision,
-	loadTemporalFileRevision, publishTemporalStateToFiles, withStoragePublicationLock,
+	loadTemporalFileRevision, PublicationBusyError, publishTemporalStateToFiles, withStoragePublicationLock, withStorageTransaction, type StorageTransaction,
 } from "../lib/storage.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState } from "../lib/temporal.ts";
 
@@ -209,6 +210,229 @@ test("publication waits for a brief cooperating live owner", async (t) => {
 	assert.equal(entered, true);
 	assert.equal(existsSync(lock), false);
 	if (child.exitCode === null) await once(child, "exit");
+});
+
+test("async store transactions wait through a partial foreign publication without blocking the event loop", { timeout: 15_000 }, async (t) => {
+	const f = fixture(t);
+	publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
+	const next = advanceTemporalState(f.view, (["global", "cwd", "session"] as const).map((scope) => ({
+		scope, patch: { working: { cohort: "foreign" } },
+	})), "foreign");
+	f.snapshot.meta.step = 1;
+	const nextRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, next.lineage);
+	const partial = join(f.parent, "partial");
+	const release = join(f.parent, "release");
+	const receipt = join(f.parent, "receipt.json");
+	const child = childProcess.spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+		import fs from "node:fs";
+		import { syncBuiltinESMExports } from "node:module";
+		import { withStorageTransaction } from ${JSON.stringify(new URL("../lib/storage.ts", import.meta.url).href)};
+		const { cwd, sessionId, root, view, runtime, partial, release, receipt, pauseAt } = JSON.parse(process.argv[1]);
+		const rename = fs.renameSync;
+		let paused = false;
+		fs.renameSync = (from, to) => {
+			rename(from, to);
+			if (paused || to !== pauseAt) return;
+			paused = true;
+			fs.writeFileSync(partial, "half-published");
+			const deadline = Date.now() + 10_000;
+			while (!fs.existsSync(release)) {
+				if (Date.now() > deadline) throw new Error("fixture publication pause expired");
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+			}
+		};
+		syncBuiltinESMExports();
+		await withStorageTransaction(root, (tx) => {
+			const base = tx.capture(cwd, sessionId, root);
+			const result = tx.publish(cwd, sessionId, view, ["global", "cwd", "session"], base, root, runtime);
+			fs.writeFileSync(receipt, JSON.stringify({ revision: result.revision, files: result.base.files.map(({ path, identity }) => ({ path, identity })) }));
+		});
+	`, JSON.stringify({ cwd: f.cwd, sessionId: f.sessionId, root: f.root, view: next, runtime: nextRuntime,
+		partial, release, receipt, pauseAt: temporalScopePaths(f.cwd, f.sessionId, "global", f.root).patches })], { stdio: ["ignore", "ignore", "inherit"] });
+	t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+	const closed = once(child, "close");
+	const deadline = Date.now() + 5_000;
+	while (!existsSync(partial)) {
+		if (Date.now() > deadline || child.exitCode !== null) assert.fail("foreign writer did not reach the partial-cohort gate");
+		await delay(10);
+	}
+	let entered = false;
+	const observed = withStorageTransaction(f.root, (tx) => {
+		entered = true;
+		return tx.capture(f.cwd, f.sessionId, f.root).files.map(({ path, identity }) => ({ path, identity }));
+	});
+	let settled = false;
+	observed.then(() => { settled = true; }, () => { settled = true; });
+	await delay(2_200); // Live contention outlasts the legacy 2-second fail-fast budget.
+	assert.equal(entered, false);
+	assert.equal(settled, false, "ordinary live contention must still be waiting, not a failed model call");
+	assert.equal(readFileSync(join(f.root, ".state-flow-publication.lock"), "utf8").trim(), String(child.pid));
+	writeFileSync(release, "continue");
+	const files = await observed;
+	assert.equal((await closed)[0], 0);
+	const accepted = JSON.parse(readFileSync(receipt, "utf8"));
+	assert.deepEqual(files, accepted.files, "reader must see the complete checkpoint/tail/metadata/runtime cohort");
+	const loaded = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, accepted.revision);
+	assert.deepEqual(loaded.view, next);
+	for (const scope of ["global", "cwd", "session"] as const) assert.equal(readTemporalState(loaded.view, 0, scope).working.cohort, "foreign");
+});
+
+test("store transactions serialize local waiters, cancel without stealing, and expire borrowed operations", async (t) => {
+	const f = fixture(t);
+	const lock = join(f.root, ".state-flow-publication.lock");
+	const order: string[] = [];
+	const borrowed: StorageTransaction[] = [];
+	let enter!: () => void;
+	let release!: () => void;
+	const entered = new Promise<void>((resolve) => { enter = resolve; });
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	t.after(() => release());
+	const first = withStorageTransaction(f.root, async (tx) => {
+		borrowed.push(tx);
+		order.push("first");
+		assert.throws(() => tx.capture(f.cwd, f.sessionId, join(f.parent, "other")), /different store/);
+		await assert.rejects(withStorageTransaction(f.root, () => assert.fail("recursive acquisition")), /Recursive/);
+		enter();
+		await gate;
+		order.push("released");
+	});
+	await entered;
+	const second = withStorageTransaction(f.root, () => { order.push("second"); });
+	const controller = new AbortController();
+	const cancelled = withStorageTransaction(f.root, () => assert.fail("cancelled waiter entered"), controller.signal);
+	const cancellation = assert.rejects(cancelled, { name: "AbortError" });
+	await delay(50);
+	assert.deepEqual(order, ["first"]);
+	controller.abort();
+	await cancellation;
+	assert.equal(readFileSync(lock, "utf8"), `${process.pid}\n`);
+	assert.deepEqual(captureTemporalFileBases(f.cwd, f.sessionId, f.root), f.base.files);
+	release();
+	await Promise.all([first, second]);
+	assert.deepEqual(order, ["first", "released", "second"]);
+	assert.equal(existsSync(lock), false);
+	assert.throws(() => borrowed[0]!.capture(f.cwd, f.sessionId, f.root), /has ended/);
+	assert.throws(() => borrowed[0]!.publish(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime), /has ended/);
+	await assert.rejects(withStorageTransaction(f.root, () => assert.fail("aborted before acquisition"), AbortSignal.abort()), { name: "AbortError" });
+	assert.equal(existsSync(lock), false);
+});
+
+test("nonwaiting admission distinguishes occupied locks from invalid evidence without taking ownership", { timeout: 1_500 }, async (t) => {
+	const f = fixture(t);
+	const lock = join(f.root, ".state-flow-publication.lock");
+	for (const [contents, busy] of [[`${process.pid}\n`, true], ["", true], ["interrupted owner\n", false]] as const) {
+		writeFileSync(lock, contents);
+		await assert.rejects(withStorageTransaction(f.root, () => assert.fail("occupied lock was entered"), undefined, false), (error: unknown) => {
+			assert.equal(error instanceof PublicationBusyError, busy);
+			if (!busy) assert.ok(error instanceof RevisionUnavailableError);
+			return true;
+		});
+		assert.equal(readFileSync(lock, "utf8"), contents);
+		rmSync(lock);
+	}
+	assert.deepEqual(await withStorageTransaction(f.root, (tx) => tx.capture(f.cwd, f.sessionId, f.root), undefined, false), f.base);
+	assert.equal(existsSync(lock), false);
+});
+
+test("deferred work may acquire a new transaction after its inherited lock context ends", async (t) => {
+	const f = fixture(t);
+	let start!: () => void;
+	const gate = new Promise<void>((resolve) => { start = resolve; });
+	let deferred!: Promise<string>;
+	await withStorageTransaction(f.root, () => {
+		deferred = gate.then(() => withStorageTransaction(f.root, () => "new ownership"));
+	});
+	start();
+	assert.equal(await deferred, "new ownership");
+});
+
+test("invalid or interrupted locks remain explicit and untouched, including empty initialization", { timeout: 8_000 }, async (t) => {
+	const f = fixture(t);
+	const lock = join(f.root, ".state-flow-publication.lock");
+	const outside = join(f.parent, "outside");
+	writeFileSync(outside, `${process.pid}\n`);
+	const deadPid = execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+	for (const owner of ["unrecognized owner\n", `${deadPid}\n`, "", "directory", "symlink"]) {
+		if (owner === "directory") mkdirSync(lock);
+		else if (owner === "symlink") fs.symlinkSync(outside, lock);
+		else writeFileSync(lock, owner);
+		await assert.rejects(withStorageTransaction(f.root, () => assert.fail("invalid owner admitted")), /publication lock is unavailable/);
+		if (owner === "directory") assert.ok(fs.lstatSync(lock).isDirectory());
+		else if (owner === "symlink") assert.equal(fs.readlinkSync(lock), outside);
+		else assert.equal(readFileSync(lock, "utf8"), owner);
+		rmSync(lock, { recursive: true });
+	}
+	assert.equal(readFileSync(outside, "utf8"), `${process.pid}\n`);
+	writeFileSync(lock, "unreadable owner\n");
+	const read = fs.readFileSync;
+	const denied = Object.assign(new Error(`EACCES: permission denied, open '${lock}'`), { code: "EACCES" });
+	fs.readFileSync = ((...args: Parameters<typeof fs.readFileSync>) => {
+		if (args[0] === lock) throw denied;
+		return read(...args);
+	}) as typeof fs.readFileSync;
+	syncBuiltinESMExports();
+	const unavailable = (error: unknown) => error instanceof RevisionUnavailableError && error.cause === denied;
+	try {
+		assert.throws(() => withStoragePublicationLock(f.root, () => assert.fail("unreadable lock admitted")), unavailable);
+		await assert.rejects(withStorageTransaction(f.root, () => assert.fail("unreadable lock admitted")), unavailable);
+	} finally { fs.readFileSync = read; syncBuiltinESMExports(); }
+	assert.equal(readFileSync(lock, "utf8"), "unreadable owner\n");
+	assert.deepEqual(captureTemporalFileBases(f.cwd, f.sessionId, f.root), f.base.files);
+});
+
+test("transaction cancellation and failed publication preserve canonical bytes and release exclusion", async (t) => {
+	const f = fixture(t);
+	await withStorageTransaction(f.root, (tx) => {
+		const base = tx.capture(f.cwd, f.sessionId, f.root);
+		tx.publish(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], base, f.root, f.runtime);
+	});
+	const before = captureTemporalFileBases(f.cwd, f.sessionId, f.root);
+	const next = advanceTemporalState(f.view, [{ scope: "session", patch: { working: { accepted: true } } }], "next");
+	const runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, next.lineage);
+	const controller = new AbortController();
+	await assert.rejects(withStorageTransaction(f.root, (tx) => {
+		const base = tx.capture(f.cwd, f.sessionId, f.root);
+		controller.abort();
+		tx.publish(f.cwd, f.sessionId, next, ["session"], base, f.root, runtime);
+	}, controller.signal), { name: "AbortError" });
+	const rename = fs.renameSync;
+	let failed = false;
+	fs.renameSync = (from, to) => {
+		if (to === temporalScopePaths(f.cwd, f.sessionId, "session", f.root).patches) { failed = true; throw new Error("injected transaction rename failure"); }
+		rename(from, to);
+	};
+	syncBuiltinESMExports();
+	try {
+		await assert.rejects(withStorageTransaction(f.root, (tx) => {
+			tx.publish(f.cwd, f.sessionId, next, ["session"], tx.capture(f.cwd, f.sessionId, f.root), f.root, runtime);
+		}), /injected transaction rename failure/);
+	} finally { fs.renameSync = rename; syncBuiltinESMExports(); }
+	assert.equal(failed, true);
+	assert.deepEqual(captureTemporalFileBases(f.cwd, f.sessionId, f.root), before);
+	assert.equal(existsSync(join(f.root, ".state-flow-publication.lock")), false);
+	await withStorageTransaction(f.root, (tx) => {
+		tx.publish(f.cwd, f.sessionId, next, ["session"], tx.capture(f.cwd, f.sessionId, f.root), f.root, runtime);
+	});
+	assert.equal(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, actualReference(f.cwd, f.sessionId, f.root)).view.lineage.at(-1)!.id, "next");
+});
+
+test("transaction release preserves replaced or overwritten lock ownership and both failure causes", async (t) => {
+	const f = fixture(t);
+	const lock = join(f.root, ".state-flow-publication.lock");
+	for (const replacement of ["new-inode", "same-inode"]) {
+		await assert.rejects(withStorageTransaction(f.root, () => {
+			if (replacement === "new-inode") fs.renameSync(lock, join(f.parent, "displaced-lock"));
+			writeFileSync(lock, "other owner\n");
+			throw new Error("original action failure");
+		}), (error: unknown) => {
+			assert.ok(error instanceof AggregateError);
+			assert.match(error.errors[0].message, /original action failure/);
+			assert.match(error.errors[1].message, /lock changed.*current owner preserved/);
+			return true;
+		});
+		assert.equal(readFileSync(lock, "utf8"), "other owner\n");
+		rmSync(lock);
+	}
 });
 
 test("file preparation rollback restores opaque originals and preserves conflicting external output", (t) => {

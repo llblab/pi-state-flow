@@ -47,7 +47,7 @@ async function acceptRun(h: ReturnType<typeof harness>, label: string): Promise<
 	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `Accepted ${label}` }], timestamp: timestamp + 1 };
 	h.handlers.get("message_end")!({ message }, h.ctx);
 	h.entries.push({ type: "message", message });
-	h.handlers.get("turn_end")!({ message }, h.ctx);
+	await h.handlers.get("turn_end")!({ message }, h.ctx);
 	h.handlers.get("agent_settled")!({}, h.ctx);
 }
 
@@ -146,7 +146,7 @@ test("requests one owned compaction only after token-ready accepted non-bootstra
 	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted" }], timestamp: timestamp + 1 };
 	h.handlers.get("message_end")!({ message }, h.ctx);
 	h.entries.push({ type: "message", message }); // Native persistence occurs after message_end and before turn_end.
-	h.handlers.get("turn_end")!({ message }, h.ctx);
+	await h.handlers.get("turn_end")!({ message }, h.ctx);
 	h.handlers.get("agent_settled")!({}, h.ctx);
 	assert.equal(h.compactRequests.length, 1);
 	const request = h.compactRequests[0];
@@ -200,7 +200,7 @@ for (const boundary of ["missing", "ambiguous", "unobserved"] as const) {
 		const answer = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted without guessing a boundary" }], timestamp: 30 };
 		h.handlers.get("message_end")!({ message: answer }, h.ctx);
 		h.entries.push({ type: "message", message: answer });
-		h.handlers.get("turn_end")!({ message: answer }, h.ctx);
+		await h.handlers.get("turn_end")!({ message: answer }, h.ctx);
 		h.handlers.get("agent_settled")!({}, h.ctx);
 		assert.equal(h.readState().response, "Accepted without guessing a boundary");
 		assert.equal(h.compactRequests.length, 0, "projection must not promote a fallback timestamp to lifecycle authority");
@@ -220,7 +220,7 @@ test("native session boundaries invalidate observed run capture without projecti
 		const answer = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted after selection" }], timestamp: 20 };
 		h.handlers.get("message_end")!({ message: answer }, h.ctx);
 		h.entries.push({ type: "message", message: answer });
-		h.handlers.get("turn_end")!({ message: answer }, h.ctx);
+		await h.handlers.get("turn_end")!({ message: answer }, h.ctx);
 		const settling = h.handlers.get("agent_settled")!({}, h.ctx);
 		assert.equal(h.compactRequests.length, boundary === undefined ? 1 : 0, boundary ?? "unchanged native run");
 		h.compactRequests.at(-1)?.onComplete({});
@@ -235,7 +235,7 @@ test("benign native preparation refusal releases ownership for a later accepted 
 	await acceptRun(h, "first");
 	assert.equal(h.compactRequests.length, 1);
 	h.compactRequests[0].onError(new Error("Nothing to compact (session too small)"));
-	await h.beforeAgentStart("Second");
+	await h.beginRun("Second");
 	await acceptRun(h, "second");
 	assert.equal(h.compactRequests.length, 2);
 	assert.equal(h.compactRequests[1].customInstructions, h.compactRequests[0].customInstructions);
@@ -275,7 +275,7 @@ test("does not request compaction for queued work or a prefix containing foreign
 		const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted" }], timestamp: timestamp + 1 };
 		h.handlers.get("message_end")!({ message }, h.ctx);
 		h.entries.push({ type: "message", message });
-		h.handlers.get("turn_end")!({ message }, h.ctx);
+		await h.handlers.get("turn_end")!({ message }, h.ctx);
 		if (blocked === "queued") h.ctx.hasPendingMessages = () => true;
 		h.handlers.get("agent_settled")!({}, h.ctx);
 		assert.equal(h.compactRequests.length, 0, blocked);
