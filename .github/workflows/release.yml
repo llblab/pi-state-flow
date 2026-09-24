@@ -17,6 +17,9 @@ permissions:
 
 jobs:
   validate:
+    strategy:
+      matrix:
+        node: [22.19.0, 24]
     runs-on: ubuntu-latest
     steps:
       - name: Check out exact tag
@@ -24,7 +27,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - name: Install exact dependencies

@@ -2,6 +2,13 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.20.0: Cache-Stable Projection
+
+- `Cache-stable model projection`: Active/bootstrap heads freeze per accepted iteration; passive heads survive ordinary user turns. Native/mode boundaries rebase without semantic changes. Patch receipts and stable-position notices deliver current values, hints and invalidations without rewriting prior prefixes. Volatile projection IDs keep retained old results historical after rebasing. Native regressions cover repeated barriers, passive continuation and bootstrap; canonical history is unchanged.
+- `Accepted-state patch tails`: Successful active/passive patch results carry projected effective replacements and deletions for touched paths and transaction-adopted shared drift, including correct repeats and scope fallback/masking. Lazy bodies and artifact provenance stay hidden; changed bounded lazy navigation remains available. Native tests prove the next inference sees these values in active, passive and Stop-handoff modes. Interactive acknowledgement and patch-display policy stay unchanged.
+- `Trajectory-dominant prefix evidence`: Opt-in v3 reports exercise active, passive and Stop-handoff projection with six 20 KiB native reads before a patch and two before another. Reports retain every inference's byte prefix and read volume; native content, accepted barriers and completion are checked independently of provider callbacks. Source-bound baseline measurements distinguish frozen Stop handoff from regenerated active/passive heads without claiming provider cache-hit rates.
+- `Minimum-Node benchmark validation`: Optional `BENCH_REPORT_PATH` writes complete machine-readable reports independently of test-runner stdout chunking, while retaining human-readable stdout. Regression tests read file reports for successful and failed workloads, including 1 MiB backpressure. Release validation now covers Node 22.19.0 and Node 24; publication remains on Node 24.
+
 ## 0.19.1: Lazy Isolation and Task-Driven History
 
 - `Lazy projection isolation`: Automatic recent transitions omit entire lazy patches, including deletions, and discard empty visible records without renumbering history. Hot changes, artifact metadata filtering and bounded lazy navigation remain available. Canonical state/history, explicit reads and already communicated user/tool/response text are unchanged.

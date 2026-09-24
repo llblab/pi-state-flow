@@ -44,6 +44,146 @@ import {
 	type RealPiFixture,
 } from "./pi-harness.ts";
 
+for (const mode of ["bootstrap", "passive"] as const) test(`real Pi ${mode} keeps a byte-stable head across barriers and the intended run boundary`, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const session = await f.createSession("new");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { seed: true } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Seeded"),
+	]);
+	await session.prompt("Earlier context");
+	if (mode === "bootstrap") await session.prompt("/state-flow-start");
+	const seen: string[] = [];
+	const projections: string[] = [];
+	const capture = (context: Context) => {
+		seen.push(JSON.stringify(context.messages));
+		const ids = context.messages.flatMap((message) => Array.isArray(message.content)
+			? message.content.flatMap((part) => part.type === "text" && part.text.startsWith("State Flow projection: ") ? [part.text] : []) : []);
+		assert.equal(ids.length, 1);
+		projections.push(ids[0]!);
+	};
+	f.faux.setResponses([
+		(context) => { capture(context); return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { first: true } } }), { stopReason: "toolUse" }); },
+		(context) => { capture(context); return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { second: true } } }), { stopReason: "toolUse" }); },
+		(context) => { capture(context); return fauxAssistantMessage("Both accepted"); },
+	]);
+	await session.prompt("Patch twice");
+	assert.equal(seen.length, 3, "all provider assertions completed");
+	for (let index = 1; index < seen.length; index++) assert.ok(seen[index]!.startsWith(seen[index - 1]!.slice(0, -1)));
+	assert.equal(new Set(projections).size, 1);
+	f.faux.setResponses([(context) => { capture(context); return fauxAssistantMessage("Next run"); }]);
+	await session.prompt("Continue after completion");
+	assert.equal(seen.length, 4);
+	if (mode === "passive") {
+		assert.equal(projections[3], projections[2], "passive user turns do not rebase the head");
+		assert.ok(seen[3]!.startsWith(seen[2]!.slice(0, -1)));
+	} else assert.notEqual(projections[3], projections[2], "accepted active completion starts a fresh projection");
+	assert.deepEqual(f.readState(session).working, { seed: true, first: true, second: true });
+});
+
+test("real Pi passive reload distinguishes retained old receipts from the refreshed head", async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const session = await f.createSession("new");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { global: { working: { shared: "old" } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Saved old memory"),
+	]);
+	await session.prompt("Seed memory");
+	writeGlobalState({ ...loadGlobalState(f.repositoryRoot)!, working: { shared: "new external value" } }, f.repositoryRoot);
+	await session.reload();
+	let inspected = false;
+	f.faux.setResponses([(context) => {
+		const texts = context.messages.flatMap((message) => Array.isArray(message.content)
+			? message.content.flatMap((part) => part.type === "text" ? [part.text] : []) : []);
+		const head = texts.find((text) => text.startsWith("State Flow passive memory"));
+		assert.ok(head);
+		assert.equal(JSON.parse(head.slice(head.indexOf("\n") + 1)).state.working.shared, "new external value");
+		const id = texts.find((text) => text.startsWith("State Flow projection: "))?.slice("State Flow projection: ".length);
+		assert.ok(id);
+		const old = context.messages.find((message) => message.role === "toolResult" && message.toolName === "patch_state");
+		assert.ok(old?.role === "toolResult");
+		const receipt = old.content.find((part) => part.type === "text" && part.text.trim().startsWith('{"state_updates"'));
+		assert.ok(receipt?.type === "text");
+		const updates = JSON.parse(receipt.text).state_updates;
+		assert.notEqual(updates.projection, id, "old native results cannot supersede a new head");
+		assert.equal(updates.effective[0].value, "old", "historical native evidence remains exact");
+		inspected = true;
+		return fauxAssistantMessage("Fresh head observed");
+	}]);
+	await session.prompt("Inspect resumed passive memory");
+	assert.equal(inspected, true);
+});
+
+function projectedRuntime(context: Context) {
+	const texts = context.messages.flatMap((message) => Array.isArray(message.content)
+		? message.content.flatMap((part) => part.type === "text" ? [part.text] : []) : []);
+	const heads = texts.filter((text) => text.startsWith("State Flow runtime context"));
+	assert.equal(heads.length, 1, "one frozen runtime head per inference");
+	const view = JSON.parse(heads[0]!.slice(heads[0]!.indexOf("\n") + 1));
+	const projection = texts.find((text) => text.startsWith("State Flow projection: "))?.slice("State Flow projection: ".length);
+	assert.ok(projection);
+	for (const message of context.messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const part of message.content) {
+			if (part.type !== "text") continue;
+			const text = part.text.trim();
+			const updateText = message.role === "toolResult" && message.toolName === "patch_state" && text.startsWith('{"state_updates"') ? text
+				: text.startsWith("State Flow context update") ? text.slice(text.indexOf("\n") + 1) : undefined;
+			if (!updateText) continue;
+			const updates = JSON.parse(updateText).state_updates;
+			if (updates?.projection !== projection) continue;
+			for (const entry of updates?.effective ?? []) {
+				let owner = view.state;
+				for (const key of entry.path.slice(0, -1)) owner = owner?.[key];
+				const key = entry.path.at(-1);
+				if (entry.deleted) { if (owner) delete owner[key]; }
+				else { assert.ok(owner); Object.defineProperty(owner, key, { value: entry.value, enumerable: true, configurable: true, writable: true }); }
+			}
+			if (updates?.lazy_navigation) view.lazy_navigation = updates.lazy_navigation;
+		}
+	}
+	return view;
+}
+
+for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi ${mode} patch results expose accepted effective values and adopted shared drift`, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, autoStart: mode !== "passive", passiveTools: true, passiveBootstrap: true });
+	const session = await f.createSession("new");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", { global: { working: { fallback: "global" } }, session: { working: { fallback: "private", keep: "unchanged" } } }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Seeded"),
+	]);
+	await session.prompt("Seed scoped memory");
+	assert.equal(f.readState(session).working.fallback, "private");
+	if (mode === "stop-handoff") await session.prompt("/state-flow-stop");
+	let inspected = false;
+	f.faux.setResponses([
+		() => {
+			writeGlobalState({ ...loadGlobalState(f.repositoryRoot)!, working: { fallback: "global", foreign: "adopted" } }, f.repositoryRoot);
+			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { fallback: null, accepted: true }, lazy: { secret: "LAZY-BODY" } } }), { stopReason: "toolUse" });
+		},
+		(context) => {
+			const result = context.messages.findLast((message) => message.role === "toolResult" && message.toolName === "patch_state");
+			assert.ok(result?.role === "toolResult" && !result.isError);
+			const content = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+			const updates = JSON.parse(content.slice(content.indexOf('{"state_updates"'))).state_updates;
+			assert.ok(updates.effective.some((entry: any) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "fallback"], value: "global" })));
+			assert.ok(updates.effective.some((entry: any) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "foreign"], value: "adopted" })));
+			assert.ok(updates.effective.some((entry: any) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "accepted"], value: true })));
+			assert.deepEqual(updates.lazy_navigation, { available: true, path: "effective.lazy", keys: { secret: "string" } });
+			assert.doesNotMatch(content, /LAZY-BODY|unchanged/);
+			inspected = true;
+			return fauxAssistantMessage("Fresh tail observed");
+		},
+	]);
+	await session.prompt("Accept and inspect tail updates");
+	assert.equal(inspected, true, "provider-side assertions completed");
+	assert.equal(f.readState(session).working.foreign, "adopted");
+	assert.equal(f.readState(session).working.fallback, "global");
+	const terminal = session.messages.at(-1);
+	assert.ok(terminal?.role === "assistant");
+	assert.deepEqual(terminal.content, [{ type: "text", text: "Fresh tail observed" }]);
+});
+
 for (const mode of ["active", "bootstrap", "reload", "stop-start"] as const) test(`real Pi automatic lazy history stays hidden across ${mode} without redacting native evidence`, async (t) => {
 	const f = await realPiFixture(t, { initializeRepository: false, autoStart: mode !== "bootstrap", passiveTools: true, passiveBootstrap: true });
 	const session = await f.createSession("new");
@@ -2435,7 +2575,8 @@ for (const boundary of ["turn_end", "agent_before_settle"] as const) test(`real 
 		assert.equal(runtimeTexts.length, 1, "every enabled boundary continuation needs exactly one current memory projection");
 		const projected = JSON.parse(runtimeTexts[0]!.slice(runtimeTexts[0]!.indexOf("\n") + 1));
 		assert.equal(projected.state.working.marker, "ACCEPTED-MEMORY");
-		assert.equal(projected.state.working.continued, index === 0 ? undefined : boundary);
+		assert.equal(projected.state.working.continued, undefined, "the continuation head stays frozen across its barrier");
+		assert.equal(projectedRuntime(context).state.working.continued, index === 0 ? undefined : boundary);
 		assert.equal(projected.state.response, "First accepted answer.");
 		assert.equal(Object.hasOwn(projected, "specification"), false, "completed specifications must not be resurrected for a context-only continuation");
 		assert.match(JSON.stringify(context.messages), /CONTINUE-WITH-ACCEPTED-MEMORY/);
@@ -3111,14 +3252,7 @@ test("real Pi patch_state barriers rematerialize every scope before the next inf
 		finally { contextCopyCounts.push(contextCopies); contextCopies = undefined; }
 	});
 
-	function runtime(context: any): any {
-		const projections = context.messages
-			.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
-			.map((block: any) => block.text)
-			.filter((text: unknown) => typeof text === "string" && text.startsWith("State Flow runtime context"));
-		assert.equal(projections.length, 1, "each inference receives exactly one current State Flow projection");
-		return JSON.parse(projections[0].slice(projections[0].indexOf("\n") + 1));
-	}
+	const runtime = projectedRuntime;
 
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", {
@@ -3179,12 +3313,7 @@ test("real Pi reads prior scoped state lazily after a barrier and rejects path o
 	await session.prompt("Save the baseline");
 	let beforeReads: string;
 	let checkpointCount: number;
-	function projection(context: any) {
-		const messages = context.messages.filter((message: any) => message.content?.[0]?.text?.startsWith("State Flow runtime context"));
-		assert.equal(messages.length, 1);
-		const text = messages[0].content[0].text;
-		return JSON.parse(text.slice(text.indexOf("\n") + 1));
-	}
+	const projection = projectedRuntime;
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { version: "new" } } }), { stopReason: "toolUse" }),
 		(context) => {
@@ -3978,12 +4107,7 @@ test("real Pi persists without Git, resumes retained boundaries, and later backs
 	const fileKey = nativeSessionKey(session);
 	assert.equal(existsSync(temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "session", fixture.repositoryRoot, fileKey).directory), true);
 	assert.doesNotMatch(fileKey, /-[a-f0-9]{64}$/);
-	const current = (context: any) => {
-		const texts = context.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
-			.map((block: any) => block.text).filter((text: unknown) => typeof text === "string" && text.startsWith("State Flow runtime context"));
-		assert.equal(texts.length, 1);
-		return JSON.parse(texts[0].slice(texts[0].indexOf("\n") + 1)).state;
-	};
+	const current = (context: Context) => projectedRuntime(context).state;
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", { cwd: { working: { fileCwd: "visible" } } }), { stopReason: "toolUse" }),
 		(context) => {

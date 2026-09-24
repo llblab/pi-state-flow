@@ -87,6 +87,59 @@ export interface PromptPrefix {
 	specificationBytes: number | null;
 }
 
+function sharedPrefixLength(previous: Buffer | undefined, current: Buffer): number | null {
+	if (!previous) return null;
+	let length = 0;
+	while (length < Math.min(previous.length, current.length) && previous[length] === current[length]) length++;
+	return length;
+}
+
+// Two barriers with a trajectory much larger than state: six reads before the first, two between.
+export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSession, source: string, sourceText: string) {
+	const actions = ["read", "read", "read", "read", "read", "read", "patch", "read", "read", "patch", "answer"] as const;
+	const inferences: Array<{ contextBytes: number; sharedPrefixBytes: number | null; action: typeof actions[number]; retainedReadBytes: number }> = [];
+	let previous: Buffer | undefined;
+	let completedReads = 0;
+	let acceptedPatches = 0;
+	let observed = 0;
+	const readIds = new Set<string>();
+	fixture.faux.setResponses(actions.map((action) => (context: Context) => {
+		const serialized = Buffer.from(JSON.stringify(context.messages));
+		const reads = context.messages.filter((message) => message.role === "toolResult" && readIds.has(message.toolCallId));
+		assert.equal(reads.length, completedReads, "every completed native read must remain in the trajectory");
+		for (const read of reads) {
+			assert.deepEqual(read.content, [{ type: "text", text: sourceText }], "large read evidence must remain exact");
+		}
+		inferences.push({ contextBytes: serialized.length, sharedPrefixBytes: sharedPrefixLength(previous, serialized), action,
+			retainedReadBytes: completedReads * Buffer.byteLength(sourceText) });
+		previous = serialized;
+		observed++;
+		if (action === "answer") return fauxAssistantMessage("Trajectory accepted");
+		if (action === "patch") return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { trajectoryBarrier: acceptedPatches + 1 } } }), { stopReason: "toolUse" });
+		const call = fauxToolCall("read", { path: source });
+		readIds.add(call.id);
+		return fauxAssistantMessage(call, { stopReason: "toolUse" });
+	}));
+	const unsubscribe = session.subscribe((event) => {
+		if (event.type !== "tool_execution_end") return;
+		assert.equal(event.isError, false, "trajectory workload tools must succeed");
+		if (event.toolName === "read") completedReads++;
+		if (event.toolName === "patch_state") acceptedPatches++;
+	});
+	try {
+		await session.prompt("Measure trajectory prefix across two patches");
+		const terminal = session.messages.at(-1);
+		assert.ok(terminal?.role === "assistant");
+		assert.equal(terminal.stopReason, "stop", terminal.errorMessage ?? "trajectory inference did not complete");
+		assert.deepEqual(terminal.content, [{ type: "text", text: "Trajectory accepted" }]);
+		assert.equal(observed, actions.length, "provider assertions must not be swallowed");
+		assert.equal(completedReads, 8);
+		assert.equal(acceptedPatches, 2);
+		assert.equal(fixture.readState(session).working.trajectoryBarrier, 2);
+		return { inferences, patchStateBarriers: acceptedPatches, readResultBytes: Buffer.byteLength(sourceText), completedReads };
+	} finally { unsubscribe(); }
+}
+
 export interface PromptCase {
 	stateFlow: boolean;
 	counter: number;
@@ -115,11 +168,7 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 	const inferences: PromptPrefix["inferences"] = [];
 	const observe = (context: Context) => {
 		const serialized = Buffer.from(JSON.stringify(context.messages));
-		let sharedPrefixBytes: number | null = null;
-		if (previousContext) {
-			sharedPrefixBytes = 0;
-			while (sharedPrefixBytes < Math.min(previousContext.length, serialized.length) && previousContext[sharedPrefixBytes] === serialized[sharedPrefixBytes]) sharedPrefixBytes++;
-		}
+		const sharedPrefixBytes = sharedPrefixLength(previousContext, serialized);
 		previousContext = serialized;
 		lastContextBytes = serialized.length;
 		totalContextBytes += lastContextBytes;

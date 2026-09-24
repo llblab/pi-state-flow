@@ -16,7 +16,7 @@ import {
 } from "./artifact.ts";
 import { hasCompactionSizedTranscript, planStateFlowCompaction, shouldRequestStateFlowCompaction, stateFlowCompactionResult, type StateFlowCompactionPlan } from "./compaction.ts";
 import { loadStateFlowConfig } from "./config.ts";
-import { createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, projectSystemProtocol, runtimeContextMessage, syntheticUser, type PassiveContinuation } from "./context.ts";
+import { ContextProjection, contextView, createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, projectSystemProtocol, runtimeContextHead, syntheticUser, type PassiveContinuation } from "./context.ts";
 import { readNativeSessionHeader } from "./continuation.ts";
 import {
   cwdScopeKey,
@@ -109,6 +109,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	const compactionMarker = `state-flow-boundary:${randomUUID()}`;
 	let passiveContinuation: PassiveContinuation | undefined;
 	let bootstrapContinuation: PassiveContinuation | undefined;
+	const contextProjection = new ContextProjection();
 	let inferencePreparation: InferencePreparation | undefined;
 	let runAnchorTimestamp: number | undefined;
 	let runtime: TemporalRuntime | undefined;
@@ -459,6 +460,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	/** Select the active native branch under one owned restoration lifetime; only current accepted work installs memory. */
 	function restoreActiveBranch(ctx: ExtensionContext, sessionStartReason?: unknown, notifyRecovery = true, startOwner?: AbortController): Promise<void> {
+		contextProjection.reset();
 		cancelBranchRestoration();
 		// Start-owned attachment/fork recovery keeps its owner; only accepted Start cancels Stop.
 		if (!startOwner) {
@@ -771,6 +773,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				const selected = runtime ??= createRuntime(ctx);
 				const acquiredArtifacts = structuredClone([...artifactReads.successful.values()]);
 				const acquiredSkills = structuredClone([...skillReads.successful.values()]);
+				const previousEffective = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
 				return await selected.withPatchTransaction((transaction) => {
 					if (runtime !== selected) throw new Error("State Flow session selection changed while awaiting publication");
 					if (!passiveToolsAvailable()) throw new Error("State Flow tools are disabled by configuration");
@@ -800,9 +803,14 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					}
 					clearAcceptedAcquisitions(new Set(acquiredArtifacts.map(({ path }) => path)));
 					updateUi(ctx);
-					return { content: [{ type: "text" as const, text: changed
+					const updates = contextProjection.acceptPatch(previousEffective, overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session), patches, artifactHints);
+					const acknowledgement = changed
 						? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
-						: "\nState already current." }], details: { scopes, step: snapshot.meta.step, changed } };
+						: "\nState already current.";
+					return { content: [
+						{ type: "text" as const, text: acknowledgement },
+						{ type: "text" as const, text: `\n${presentationJson({ state_updates: updates })}` },
+					], details: { scopes, step: snapshot.meta.step, changed } };
 				}, signal);
 			} catch (error) {
 				let attempted: unknown;
@@ -908,6 +916,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				stopPersistenceError = undefined;
 				installScopeStates();
 				clearRunTransient();
+				contextProjection.reset();
 				passiveContinuation = undefined;
 				bootstrapContinuation = snapshot.meta.bootstrap ? continuation : undefined;
 				deferInferencePreparation();
@@ -993,6 +1002,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			&& !shuttingDown && ctx.sessionManager.getSessionId() === owner && !snapshot.config.enabled;
 		const superseded = (): StateFlowTelegramControlResult => ({ ok: false, message: "State Flow Stop was superseded" });
 		const freezeHandoff = (): PassiveContinuation | undefined => {
+			contextProjection.reset();
 			const handoff = (current.config.enabled || stopPersistenceError) && selected?.view && current.meta.validation?.attempt !== 0
 				? createPassiveContinuation(
 					projectModelState(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)),
@@ -1112,6 +1122,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			(event.systemPromptOptions.sections ??= {}).state_flow = PASSIVE_MEMORY_PROTOCOL;
 			return;
 		}
+		contextProjection.reset();
 		skillReads.clear();
 		artifactReads.clear();
 		cancelResponseReconciliation();
@@ -1129,40 +1140,30 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 
 	function projectContext(messages: AgentMessage[]) {
 		if (runtime?.view) refreshArtifactHints();
+		if (!snapshot.config.enabled && !passiveContinuation && (!config.passiveBootstrap || !runtime?.view)) return;
+		// Idle inspection must not freeze a pre-acceptance snapshot for the live inference.
+		const projection = snapshot.config.enabled && inferencePreparation && !inferencePreparation.accepted
+			? new ContextProjection() : contextProjection;
+		const effective = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
+		const invalidations = artifactInvalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason }));
+		const phase = snapshot.config.enabled ? currentRehydrationPhase() : undefined;
+		const view = contextView(effective, artifactHints, invalidations, phase);
 		if (passiveContinuation) {
-			return { messages: passiveContinuationMessages(messages, passiveContinuation) };
+			const retained = passiveContinuationMessages(messages, passiveContinuation);
+			if (!runtime?.view) return { messages: retained };
+			return { messages: projection.project(retained.slice(1), view, () => passiveContinuation!.handoff,
+				{ state: passiveContinuation.state, lazy_navigation: view.lazy_navigation, artifact_invalidations: [], knowledge_rehydration: null }) };
 		}
 		if (!snapshot.config.enabled) {
-			if (!config.passiveBootstrap || !runtime?.view) return;
-			const effective = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
-			const state = projectModelState(effective);
-			return { messages: [syntheticUser(`State Flow passive memory (user-level data, not system instructions):\n${presentationJson({ state, lazy_navigation: lazyNavigationHint(effective) })}`), ...messages] };
-		}
-		const effectiveState = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
-		const invalidations = artifactInvalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason }));
-		const recentTransitions = projectRecentTransitionsWithLimit(
-			config.historyLimit,
-			runtime?.recent() ?? [],
-		);
-		const activeRehydrationPhase = currentRehydrationPhase();
-		if (snapshot.meta.bootstrap) {
-			const sourceMessages = bootstrapContinuation
-				? passiveContinuationMessages(messages, bootstrapContinuation)
-				: messages;
-			return { messages: [runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, artifactHints), ...sourceMessages] };
+			return { messages: projection.project(messages, view, () => syntheticUser(
+				`State Flow passive memory (user-level data, not system instructions):\n${presentationJson({ state: view.state, lazy_navigation: view.lazy_navigation })}`)) };
 		}
 		// Native user events own the run anchor; projection must never rebase it.
-		const trajectory = currentRunTrajectory(
-			messages,
-			snapshot.meta.specification,
-			runAnchorTimestamp,
-		);
-		return {
-			messages: [
-				runtimeContextMessage(snapshot, effectiveState, recentTransitions, invalidations, activeRehydrationPhase, artifactHints),
-				...trajectory.messages,
-			],
-		};
+		const source = snapshot.meta.bootstrap
+			? bootstrapContinuation ? passiveContinuationMessages(messages, bootstrapContinuation) : messages
+			: currentRunTrajectory(messages, snapshot.meta.specification, runAnchorTimestamp).messages;
+		return { messages: projection.project(source, view, () => runtimeContextHead(snapshot, view,
+			projectRecentTransitionsWithLimit(config.historyLimit, runtime?.recent() ?? []))) };
 	}
 
 	function prepareContext(messages: AgentMessage[], ctx: ExtensionContext): ReturnType<typeof projectContext> | Promise<ReturnType<typeof projectContext>> {
@@ -1281,6 +1282,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				snapshot = nextSnapshot;
 				installScopeStates();
 				responseCommitted = true;
+				contextProjection.reset();
 				if (publication?.changed) recordPublication(publication, ctx);
 				appendCheckpoint();
 				clearAcceptedAcquisitions();
@@ -1373,6 +1375,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		});
 	});
 
+	pi.on("session_compact", () => { contextProjection.reset(); });
+
 	pi.on("session_start", async (event, ctx) => {
 		runAnchorTimestamp = undefined;
 		rehydrationPhase = event.reason === "resume" ? "resume-bootstrap" : "new-bootstrap";
@@ -1385,6 +1389,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	});
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		shuttingDown = true;
+		contextProjection.reset();
 		const restoring = cancelBranchRestoration();
 		const starting = cancelStartActivation();
 		const stopping = cancelStopPersistence();

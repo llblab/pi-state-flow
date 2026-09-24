@@ -7,10 +7,11 @@ import { join } from "node:path";
 import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
-import { createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, projectSystemProtocol, runtimeContextMessage } from "../lib/context.ts";
+import { acceptedStateUpdates, ContextProjection, contextView, createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, projectSystemProtocol, runtimeContextMessage } from "../lib/context.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { completeRun, startEpisode } from "../lib/episode.ts";
-import { emptyState, type MaterializedState } from "../lib/state.ts";
+import { emptyState, overlayStates, type MaterializedState } from "../lib/state.ts";
+import { applyPatch } from "../lib/json.ts";
 import { commitScopedTerminal, commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
 const message = (role: string, text: string, timestamp: number, customType?: string) => ({
@@ -19,6 +20,123 @@ const message = (role: string, text: string, timestamp: number, customType?: str
 	timestamp,
 	...(customType ? { customType } : {}),
 }) as any;
+
+test("frozen projection appends changing state and notices without moving earlier tail positions", () => {
+	const projection = new ContextProjection();
+	const initial = emptyState();
+	const native = [user("run", 1)];
+	let heads = 0;
+	const head = () => { heads++; return user(`HEAD-${heads}`, 0); };
+	const first = projection.project(native, contextView(initial, {}, [], "new-bootstrap"), head);
+	const changed = { ...initial, working: { external: true }, artifacts: { "/source": { description: "card" } } };
+	const result = message("toolResult", "evidence", 2);
+	const invalidations = [{ path: "/source", reason: "source-changed" as const }];
+	const second = projection.project([...native, result], contextView(changed, { "/source": "read again" }, invalidations, "resume-bootstrap"), head);
+	assert.equal(second[0], first[0]);
+	assert.ok(JSON.stringify(second).startsWith(JSON.stringify(first).slice(0, -1)));
+	const notice = second.at(-1)!;
+	const noticeData = JSON.parse((notice as any).content[0].text.split("\n")[1]);
+	assert.deepEqual(noticeData.artifact_invalidations, invalidations);
+	assert.deepEqual(noticeData.knowledge_rehydration, { phase: "resume-bootstrap" });
+	assert.match(JSON.stringify(noticeData.state_updates), /external/);
+	assert.match(JSON.stringify(noticeData.state_updates), /read again/);
+	const later = message("assistant", "continue", 3);
+	const third = projection.project([...native, result, later], contextView(changed, {}, [], undefined), head);
+	assert.ok(JSON.stringify(third).startsWith(JSON.stringify(second).slice(0, -1)), "prior notice stays before new native messages");
+	assert.equal(third[3], notice);
+	const cleared = JSON.parse((third.at(-1) as any).content[0].text.split("\n")[1]);
+	assert.deepEqual(cleared.state_updates.effective, [{ path: ["artifacts", "/source", "hint"], deleted: true }]);
+	assert.deepEqual(cleared.artifact_invalidations, []);
+	assert.equal(cleared.knowledge_rehydration, null);
+	const stable = projection.project([...native, result, later], contextView(changed, {}, []), head);
+	assert.deepEqual(stable, third, "unchanged inference emits no notice or timestamp churn");
+	assert.equal(heads, 1);
+	projection.reset();
+	const reset = projection.project([user("new boundary", 4)], contextView(changed, {}, []), head);
+	assert.equal(heads, 2);
+	assert.equal(reset.length, 2, "reset drops obsolete notices");
+	projection.project([user("native replacement", 5)], contextView(changed, {}, []), head);
+	assert.equal(heads, 3, "a replaced native prefix is a cache boundary");
+});
+
+test("patch receipts include all unseen drift and prevent duplicate synthetic state notices", () => {
+	const projection = new ContextProjection();
+	const start = { ...emptyState(), working: { shared: "head" } };
+	const messages = [user("run", 1)];
+	const first = projection.project(messages, contextView(start, {}, []), () => user("HEAD", 0));
+	const cache = { ...emptyState(), working: { shared: "adopted before patch" } };
+	const after = { ...cache, working: { ...cache.working, own: true } };
+	const updates = projection.acceptPatch(cache, after, { session: { working: { own: true } } }, {});
+	assert.deepEqual(updates.effective, [
+		{ path: ["working", "shared"], value: "adopted before patch" }, { path: ["working", "own"], value: true },
+	]);
+	const result = message("toolResult", JSON.stringify(updates), 2);
+	const next = projection.project([...messages, result], contextView(after, {}, []), () => { throw new Error("head rewritten"); });
+	assert.deepEqual(next, [...first, result]);
+	assert.ok(JSON.stringify(first[0]).includes(updates.projection), "receipt is bound to its frozen head");
+	projection.reset();
+	const rebased = projection.project([...messages, result, user("resume", 3)], contextView(after, {}, []), () => user("FRESH HEAD", 0));
+	assert.equal(JSON.stringify(rebased[0]).includes(updates.projection), false, "retained receipts cannot override a new head");
+	assert.equal(rebased[2], result, "old native evidence remains inspectable");
+});
+
+test("a frozen Stop handoff receives changes made before its first projection", () => {
+	const projection = new ContextProjection();
+	const initial = contextView(emptyState(), {}, []);
+	const current = contextView({ ...emptyState(), working: { afterStop: true } }, {}, []);
+	const result = projection.project([user("continue", 1)], current, () => user("FROZEN HANDOFF", 0), initial);
+	assert.match(JSON.stringify(result.at(-1)), /afterStop/);
+});
+
+test("accepted updates project effective touched values, deletions and adopted drift without unrelated state", () => {
+	const global = { ...emptyState(), working: { fallback: "global", masked: "global", other: "unchanged", removed: true } };
+	const session = { ...emptyState(), working: { fallback: "session", masked: "private", rows: [{ name: "old", keep: true }] } };
+	const before = overlayStates(global, session);
+	const patches = { session: { working: { fallback: null, rows: { "[0]": { name: "new" } }, absent: null } }, global: { working: { masked: "accepted-shared" } } };
+	const nextGlobal = applyPatch(global, { working: { foreign: "adopted", masked: "accepted-shared", removed: null } }) as MaterializedState;
+	const nextSession = applyPatch(session, patches.session) as MaterializedState;
+	const after = overlayStates(nextGlobal, nextSession);
+	const result = acceptedStateUpdates(before, after, patches);
+	assert.deepEqual(result, { effective: [
+		{ path: ["working", "fallback"], value: "global" },
+		{ path: ["working", "removed"], deleted: true },
+		{ path: ["working", "rows", 0, "name"], value: "new" },
+		{ path: ["working", "foreign"], value: "adopted" },
+		{ path: ["working", "absent"], deleted: true },
+		{ path: ["working", "masked"], value: "private" },
+	] });
+	assert.doesNotMatch(JSON.stringify(result), /unchanged|accepted-shared|"keep"/);
+});
+
+test("accepted updates coalesce replacements, preserve key identity and detach values", () => {
+	const before = { ...emptyState(), working: { rows: [1, 2], shape: { old: true } } };
+	const patch = JSON.parse('{"working":{"rows":[{"next":true}],"shape":"scalar","__proto__":{"safe":true},"a.b":{"[0]":"literal"}}}');
+	const after = applyPatch(before, patch) as MaterializedState;
+	const result = acceptedStateUpdates(before, after, { session: patch });
+	assert.deepEqual(result.effective, [
+		{ path: ["working", "rows"], value: [{ next: true }] },
+		{ path: ["working", "shape"], value: "scalar" },
+		{ path: ["working", "__proto__"], value: { safe: true } },
+		{ path: ["working", "a.b"], value: { "[0]": "literal" } },
+	]);
+	(result.effective[0] as { value: any }).value[0].next = false;
+	assert.deepEqual(after.working.rows, [{ next: true }]);
+	assert.deepEqual(patch.working.rows, [{ next: true }]);
+	assert.deepEqual(acceptedStateUpdates(after, after, { session: { working: { shape: "scalar", absent: null } } }).effective, [
+		{ path: ["working", "shape"], value: "scalar" }, { path: ["working", "absent"], deleted: true },
+	]);
+});
+
+test("accepted update projection excludes lazy bodies and artifact provenance even on whole replacements", () => {
+	const before = { ...emptyState(), lazy: { old: { secret: "OLD-LAZY" } }, artifacts: { "/card": { description: "old", obsolete: true } } };
+	const after = { ...emptyState(), lazy: { fresh: [{ secret: "NEW-LAZY" }] }, artifacts: { "/card": { description: "new", hash: "SECRET-HASH", compiler: "SECRET-COMPILER", compiled_at: "SECRET-TIME" } } };
+	const result = acceptedStateUpdates(before, after, { session: { lazy: { old: null, fresh: after.lazy.fresh }, artifacts: after.artifacts } });
+	assert.deepEqual(result, { effective: [{ path: ["artifacts", "/card"], value: { description: "new" } }],
+		lazy_navigation: { available: true, path: "effective.lazy", keys: { fresh: "array" } } });
+	assert.doesNotMatch(JSON.stringify(result), /SECRET|OLD-LAZY|NEW-LAZY|obsolete/);
+	const changedBody = { ...after, lazy: { fresh: [{ secret: "CHANGED" }] } };
+	assert.deepEqual(acceptedStateUpdates(after, changedBody, { session: { lazy: changedBody.lazy } }), { effective: [] });
+});
 
 test("refreshes only owned system protocol without mutating native frames", () => {
 	for (const tailProtocol of ["OLD-TAIL", null]) for (const protocol of [undefined, "PASSIVE", "ACTIVE"]) {
@@ -90,6 +208,7 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 				artifacts: { "/context/source": { description: "Retained route", compilation: { decision: "Keep semantic metadata" } } },
 			},
 		}, undefined, undefined, h.ctx);
+		await h.beginRun("Current request");
 		const state = h.readState();
 		const snapshot = h.resolveSnapshot();
 		assert.equal(snapshot.meta.bootstrap === true, bootstrap);

@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { projectArtifactForModel } from "./artifact.js";
-import { isObject, presentationJson } from "./json.js";
+import { isObject, presentationJson, sameJson } from "./json.js";
 import { projectStateForModel } from "./state.js";
 /** Refresh only our section; Pi owns system frames, tools and forced-prompt precedence. */
 export function projectSystemProtocol(messages, protocol) {
@@ -52,6 +53,141 @@ export function lazyNavigationHint(state) {
     const keys = Object.fromEntries(entries.map(([key, value]) => [key, lazyValueKind(value)]));
     return JSON.stringify(keys).length <= LAZY_HINT_MAX_JSON_CHARS ? { ...base, keys } : base;
 }
+/** Exact projected replacements, not authored merge patches; paths are unambiguous key/index segments. */
+export function acceptedStateUpdates(before, after, patches) {
+    return projectedStateUpdates(projectStateForModel(before), projectStateForModel(after), patches, lazyNavigationHint(before), lazyNavigationHint(after));
+}
+function projectedStateUpdates(previous, current, patches, beforeNavigation, navigation) {
+    const effective = [];
+    const prefix = (parent, child) => parent.length <= child.length && parent.every((part, index) => part === child[index]);
+    const put = (path, value) => {
+        if (effective.some((entry) => prefix(entry.path, path)))
+            return;
+        for (let index = effective.length - 1; index >= 0; index--) {
+            if (prefix(path, effective[index].path))
+                effective.splice(index, 1);
+        }
+        effective.push({ path, ...(value === undefined ? { deleted: true } : { value: structuredClone(value) }) });
+    };
+    const child = (value, key) => value !== null && typeof value === "object" && Object.hasOwn(value, key)
+        ? value[key] : undefined;
+    const diff = (left, right, path) => {
+        if (left === undefined && right === undefined || left !== undefined && right !== undefined && sameJson(left, right))
+            return;
+        if (isObject(left) && isObject(right)) {
+            for (const key of new Set([...Object.keys(left), ...Object.keys(right)]))
+                diff(child(left, key), child(right, key), [...path, key]);
+        }
+        else if (Array.isArray(left) && Array.isArray(right) && left.length === right.length) {
+            for (let index = 0; index < right.length; index++)
+                diff(left[index], right[index], [...path, index]);
+        }
+        else
+            put(path, right);
+    };
+    const touched = (patch, value, path) => {
+        if (!isObject(patch)) {
+            put(path, value);
+            return;
+        }
+        const keys = Object.keys(patch);
+        if (keys.length === 0)
+            return;
+        if (Array.isArray(value) && keys.every((key) => /^\[(0|[1-9]\d*)\]$/.test(key))) {
+            for (const key of keys) {
+                const index = Number(key.slice(1, -1));
+                // A higher-scope array may mask the patched array with a different length.
+                if (index >= value.length) {
+                    put(path, value);
+                    return;
+                }
+                touched(patch[key], value[index], [...path, index]);
+            }
+        }
+        else if (isObject(value)) {
+            for (const key of keys)
+                touched(patch[key], child(value, key), [...path, key]);
+        }
+        else
+            put(path, value);
+    };
+    diff(previous, current, []);
+    for (const patch of Object.values(patches))
+        for (const [plane, value] of Object.entries(patch)) {
+            if (plane === "lazy")
+                continue;
+            if (plane === "artifacts" && isObject(value)) {
+                for (const path of Object.keys(value))
+                    put([plane, path], child(current.artifacts, path));
+            }
+            else
+                touched(value, child(current, plane), [plane]);
+        }
+    return { effective, ...(navigation !== undefined && (beforeNavigation === undefined || !sameJson(beforeNavigation, navigation)) ? { lazy_navigation: navigation } : {}) };
+}
+export function contextView(state, hints, invalidations, phase) {
+    return { state: projectStateForModel(state, hints), lazy_navigation: lazyNavigationHint(state),
+        artifact_invalidations: structuredClone(invalidations), knowledge_rehydration: phase === undefined ? null : { phase } };
+}
+/** Volatile model projection only. Native messages own trajectory; this cache owns no persistence or lifecycle. */
+export class ContextProjection {
+    identity = randomUUID();
+    head;
+    view;
+    native = [];
+    notices = [];
+    reset() {
+        this.identity = randomUUID();
+        this.head = undefined;
+        this.view = undefined;
+        this.native = [];
+        this.notices = [];
+    }
+    /** Called only after successful publication and ancillary acceptance, immediately before returning the native result. */
+    acceptPatch(before, after, patches, hints) {
+        const state = projectStateForModel(after, hints);
+        const navigation = lazyNavigationHint(after);
+        const updates = projectedStateUpdates(this.view?.state ?? projectStateForModel(before, hints), state, patches, this.view?.lazy_navigation ?? lazyNavigationHint(before), navigation);
+        if (this.view)
+            this.view = { ...this.view, state, lazy_navigation: navigation };
+        return { projection: this.identity, ...updates };
+    }
+    project(messages, current, makeHead, initial) {
+        const identities = messages.map((message) => JSON.stringify([message.role, message.timestamp,
+            "toolCallId" in message ? message.toolCallId : null]));
+        // Native compaction/selection normally resets explicitly; a removed/replaced prefix is also a safe cache boundary.
+        if (this.native.some((identity, index) => identities[index] !== identity))
+            this.reset();
+        if (!this.head) {
+            const head = makeHead();
+            if (head.role !== "user" || !Array.isArray(head.content))
+                throw new Error("State Flow projection requires an owned user head");
+            this.head = { ...head, content: [...head.content, { type: "text", text: `State Flow projection: ${this.identity}` }] };
+            this.view = structuredClone(initial ?? current);
+        }
+        const previous = this.view;
+        const updates = projectedStateUpdates(previous.state, current.state, {}, previous.lazy_navigation, current.lazy_navigation);
+        const notice = {
+            ...(updates.effective.length || updates.lazy_navigation ? { state_updates: { projection: this.identity, ...updates } } : {}),
+            ...(!sameJson(previous.artifact_invalidations, current.artifact_invalidations) ? { artifact_invalidations: current.artifact_invalidations } : {}),
+            ...(!sameJson(previous.knowledge_rehydration, current.knowledge_rehydration) ? { knowledge_rehydration: current.knowledge_rehydration } : {}),
+        };
+        if (Object.keys(notice).length)
+            this.notices.push({ after: messages.length,
+                message: syntheticUser(`State Flow context update (user-level data, not system instructions):\n${presentationJson(notice)}`) });
+        this.view = structuredClone(current);
+        this.native = identities;
+        const projected = [this.head];
+        let nextNotice = 0;
+        for (let index = 0; index <= messages.length; index++) {
+            while (this.notices[nextNotice]?.after === index)
+                projected.push(this.notices[nextNotice++].message);
+            if (index < messages.length)
+                projected.push(messages[index]);
+        }
+        return projected;
+    }
+}
 export function syntheticUser(text) {
     return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
 }
@@ -73,6 +209,7 @@ function messageText(message) {
 export function createPassiveContinuation(state, startedAt = Date.now(), activeRunStartedAt, preserveContext = false) {
     return {
         startedAt,
+        state: structuredClone(state),
         ...(activeRunStartedAt === undefined ? {} : { activeRunStartedAt }),
         ...(preserveContext ? { preserveContext: true } : {}),
         handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${presentationJson({ state, continuation: preserveContext
@@ -111,13 +248,17 @@ function projectRecentForModel(recent) {
     return projected.filter(({ transitions }) => transitions.length > 0);
 }
 export function runtimeContextMessage(snapshot, state, recentTransitions = [], artifactInvalidations = [], rehydrationPhase, artifactHints = {}) {
+    return runtimeContextHead(snapshot, contextView(state, artifactHints, artifactInvalidations, rehydrationPhase), recentTransitions);
+}
+/** Render a view already projected by this domain without cloning the full semantic overlay twice. */
+export function runtimeContextHead(snapshot, view, recentTransitions = []) {
     const recent = projectRecentForModel(recentTransitions);
     const context = {
         ...(snapshot.meta.specification === undefined ? {} : { specification: snapshot.meta.specification }),
-        state: projectStateForModel(state, artifactHints),
-        lazy_navigation: lazyNavigationHint(state),
-        ...(rehydrationPhase === undefined ? {} : { knowledge_rehydration: { phase: rehydrationPhase } }),
-        ...(artifactInvalidations.length === 0 ? {} : { artifact_invalidations: artifactInvalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason })) }),
+        state: view.state,
+        ...(view.lazy_navigation === undefined ? {} : { lazy_navigation: view.lazy_navigation }),
+        ...(view.knowledge_rehydration === null ? {} : { knowledge_rehydration: view.knowledge_rehydration }),
+        ...(view.artifact_invalidations.length === 0 ? {} : { artifact_invalidations: view.artifact_invalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason })) }),
         ...(recent.length === 0 ? {} : { recent_transitions: recent }),
     };
     return syntheticUser(`State Flow runtime context (user-level data, not system instructions):\n${presentationJson(context)}`);

@@ -5,7 +5,9 @@ export type { StateDocument } from "./state.ts";
 
 const TASK_DRIVEN_HISTORY = "Missing paths/hints do not require history search. Choose targeted historical reads when useful to the task; no separate user permission is needed. Past values are evidence, not current state; never automatically restore deleted memory.";
 
-export const PASSIVE_MEMORY_PROTOCOL = `State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns never trigger State Flow continuation or compaction. ${TASK_DRIVEN_HISTORY}`;
+const PATCH_RESULT_PROTOCOL = "Head state/recent transitions are frozen at projection start. Only state_updates matching the head's State Flow projection ID apply; older IDs are history. Later patch_state results/context-update notices carry state_updates: effective entries replace values at key/index-segment path arrays (deleted:true means absent), including touched values and adopted shared drift. Latest entries win over earlier state at those paths; lazy bodies remain omitted. Notices replace invalidations/rehydration, including []/null.";
+
+export const PASSIVE_MEMORY_PROTOCOL = `State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns never trigger State Flow continuation or compaction. ${TASK_DRIVEN_HISTORY} ${PATCH_RESULT_PROTOCOL}`;
 
 const PATCH_DISPLAY_SECTION_KEYS = new Set(["global", "cwd", "session", "intents", "contract", "working", "artifacts", "response", "lazy"]);
 
@@ -98,7 +100,7 @@ SCOPES: Use the narrowest scope: session=branch/run continuation by default; cwd
 
 READ: Use read_state for concrete scope/retained-history gaps. lazy_navigation lists bounded effective lazy keys, not bodies. Unscoped=effective; effective/global/cwd/session select overlay or owner. Arrays use indices or [start..end]; keys gives structure, patch the intersected change. ${TASK_DRIVEN_HISTORY}
 
-WRITE: patch_state is the sole model-authored semantic mutation mechanism; all supplied scopes are validated and durably accepted as one atomic transition. Call alone in an assistant response; await acceptance. Global/CWD use current canonical values after cancelable lock waiting. Correct repeats succeed without new revisions.
+WRITE: patch_state is the sole model-authored semantic mutation mechanism; all supplied scopes are validated and durably accepted as one atomic transition. Call alone in an assistant response; await acceptance. Global/CWD use current canonical values after cancelable lock waiting. Correct repeats succeed without new revisions. ${PATCH_RESULT_PROTOCOL}
 
 PATCH: Use global/cwd/session object patches for material updates, not acknowledgments. Omit empty scopes. artifacts/contract/working/intents are objects; lazy is ordinary JSON. Omitted fields persist. Never patch runtime config/meta/response. Objects merge recursively; arrays/primitives replace. An object containing only canonical "[N]" keys recursively patches array elements. Indexed deletion is forbidden; nested object null deletes; materialized null is forbidden.
 

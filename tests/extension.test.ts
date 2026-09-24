@@ -648,6 +648,7 @@ test("global memory is always available while State Flow is enabled", async () =
 		"global-memory", { global: { working: { preference: "compact" } } }, undefined, undefined, h.ctx,
 	);
 	assert.equal(accepted.content[0].text, "\nState materialized atomically at global scope.");
+	assert.deepEqual(JSON.parse(accepted.content[1].text).state_updates.effective, [{ path: ["working", "preference"], value: "compact" }]);
 	assert.equal(h.readState(0, "global").working.preference, "compact");
 });
 
@@ -682,6 +683,7 @@ test("patch_state materializes session state before the next inference and respo
 		h.ctx,
 	);
 	assert.equal(result.content[0].text, "\nState materialized atomically at session scope.");
+	assert.deepEqual(JSON.parse(result.content[1].text).state_updates.effective, [{ path: ["working", "verified"], value: "intermediate" }]);
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
@@ -741,9 +743,11 @@ test("patch_state materializes session state before the next inference and respo
 	assert.match(hiddenText, /State materialized atomically at session scope\./);
 	assert.doesNotMatch(hiddenText, /secretFromToolRow|"hidden"/);
 
-	const projected = h.handlers.get("context")!({ messages: [user("Long-running task", 1)] }, h.ctx);
+	const acceptedResult = { role: "toolResult", toolCallId: "patch-1", toolName: "patch_state", content: result.content, timestamp: 2 };
+	const projected = h.handlers.get("context")!({ messages: [user("Long-running task", 1), acceptedResult] }, h.ctx);
 	assert.equal(projected.messages.filter((message: any) => message.content?.[0]?.text?.startsWith("State Flow runtime context")).length, 1);
-	assert.match(projected.messages[0].content[0].text, /"verified":"intermediate"/);
+	assert.doesNotMatch(projected.messages[0].content[0].text, /"verified":"intermediate"/, "the head stays at iteration start");
+	assert.equal(projected.messages.at(-1), acceptedResult, "accepted values reach the next inference in the native tail");
 
 	const terminal = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Complete." }] };
 	assert.equal(h.handlers.get("message_end")!({ message: terminal }, h.ctx), undefined);
@@ -866,12 +870,22 @@ test("patch_state tolerates shared-scope drift while preserving the session laye
 	await b.tools.get("patch_state")!.execute("b-global", { global: { working: { globalFromB: true } } }, undefined, undefined, b.ctx);
 	const beforeStep = a.resolveSnapshot().meta.step;
 	const result = await a.tools.get("patch_state")!.execute("a-session", { session: { working: { continued: true } } }, undefined, undefined, a.ctx);
-	assert.equal(result.content[0].text, "\nState materialized atomically at session scope.");
+	assert.deepEqual(JSON.parse(result.content[1].text).state_updates.effective, [
+		{ path: ["working", "globalFromB"], value: true },
+		{ path: ["working", "continued"], value: true },
+	]);
 	assert.equal(a.resolveSnapshot().meta.step, beforeStep + 1);
 	assert.equal(a.readState(0, "session").working.owner, "A");
 	assert.equal(a.readState(0, "session").working.continued, true);
 	assert.equal(a.readState(0, "global").working.globalFromB, true);
 	assert.equal(JSON.stringify(a.sentMessages).includes("cannot publish"), false);
+	await b.tools.get("patch_state")!.execute("b-drift", { global: { working: { globalFromB: "newer" } } }, undefined, undefined, b.ctx);
+	const repeated = await a.tools.get("patch_state")!.execute("a-repeat", { session: { working: { continued: true } } }, undefined, undefined, a.ctx);
+	assert.equal(repeated.details.changed, false, "adopting foreign memory is not a new authored change");
+	assert.deepEqual(JSON.parse(repeated.content[1].text).state_updates.effective, [
+		{ path: ["working", "globalFromB"], value: "newer" },
+		{ path: ["working", "continued"], value: true },
+	]);
 });
 
 
@@ -940,6 +954,9 @@ test("inference preparation captures without writing, then accepts current maint
 	const result = await waiting;
 	await sameRun;
 	assert.match(JSON.stringify(result), /NEXT-SPEC/);
+	const preparedHead = JSON.parse(result.messages[0].content[0].text.split("\n")[1]);
+	assert.equal(preparedHead.specification, "NEXT-SPEC", "idle inspection cannot freeze a head before preparation accepts");
+	assert.deepEqual(preparedHead.state.working, { globalPeer: "G", cwdPeer: "C", private: "LOCAL" });
 	assert.deepEqual(h.readState().working, { globalPeer: "G", cwdPeer: "C", private: "LOCAL" });
 	assert.equal(h.readState().response, "Previous answer");
 	for (const scope of ["global", "cwd"] as const) assert.equal(h.readState(0, scope).artifacts[missing], undefined);
@@ -1269,6 +1286,9 @@ test("accepts canonical atomic scope patches and correct repeats without another
 	const result = await execute({ session: { working: { value: true, alreadyAbsent: null } } });
 	assert.equal(result.details.changed, false);
 	assert.equal(result.content[0].text, "\nState already current.");
+	assert.deepEqual(JSON.parse(result.content[1].text).state_updates.effective, [
+		{ path: ["working", "value"], value: true }, { path: ["working", "alreadyAbsent"], deleted: true },
+	]);
 	assert.equal(h.entries.length, checkpointCount);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 	const message = finalMessage("Resolved directly.");

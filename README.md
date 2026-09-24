@@ -22,7 +22,7 @@ Patched state + Answer
 Updated state
 ```
 
-Within a run, the available request, intermediate responses, tool results and steering remain in context. A state patch updates memory without discarding that working trajectory. Persistent context-bearing messages from other extensions are preserved as well.
+Within a run, the available request, intermediate responses, tool results and steering remain in context. The initial memory head stays byte-stable: accepted changes arrive in patch results, and changing runtime notices append at the tail without moving earlier messages. Passive memory uses the same approach across ordinary user turns, rebasing at native or mode boundaries. Projection IDs distinguish current updates from retained historical results. A state patch neither rewrites the head nor discards the working trajectory. Persistent context-bearing messages from other extensions are preserved as well.
 
 This reduces reliance on repeated model-generated summaries of an accumulating transcript. Retaining the current trajectory also allows prompt-cache reuse while the relevant prefix remains unchanged. Avoiding summary calls and repeated prompt processing can improve responsiveness; the result depends on the model, provider, workload and frequency of state changes, not a fixed latency guarantee.
 

@@ -9,10 +9,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { realPiFixture, resolvedSnapshot, runGit, type RealPiFixture } from "../tests/pi-harness.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
 import { loadGlobalState, loadSessionState } from "../tests/temporal-fixture.ts";
-import { distribution, measure, prompt, resourcesEnabled as resources, summarize, summarizeReads, type Metrics } from "./benchmark-session.ts";
+import { distribution, measure, prompt, trajectoryPrompt, resourcesEnabled as resources, summarize, summarizeReads, type Metrics } from "./benchmark-session.ts";
 import type { ResumeProbeResult } from "./benchmark-resume.ts";
 
 // Opt-in observational workload. Assertions prove correctness, never a machine-specific timing threshold.
@@ -27,6 +28,8 @@ const rounds = positive("BENCH_ROUNDS", 10);
 const transcriptBytes = positive("BENCH_TRANSCRIPT_BYTES", 4096);
 assert.ok([undefined, "0", "1"].includes(process.env.BENCH_POST_RESUME), "BENCH_POST_RESUME must be 0 or 1");
 const postResume = process.env.BENCH_POST_RESUME === "1";
+assert.ok([undefined, "0", "1"].includes(process.env.BENCH_PREFIX), "BENCH_PREFIX must be 0 or 1");
+const prefixWorkload = process.env.BENCH_PREFIX === "1";
 const sizes = (process.env.BENCH_STATE_BYTES ?? "8192,131072").split(",").map(Number);
 assert.ok(sizes.length > 0 && sizes.every((size) => Number.isSafeInteger(size) && size > 0), "BENCH_STATE_BYTES must contain positive integers");
 const checkpoints = [...new Set([Math.min(20, patches), patches])];
@@ -64,9 +67,10 @@ const report: Record<string, unknown> = {
 	sourceCommit: runGit(repository, "rev-parse", "HEAD"),
 	runtimeSourceHash: sourceHash,
 	workloadSourceHash: workloadHash,
-	configuration: { patches, samples, rounds, transcriptBytes, sizes, resources, postResume },
+	configuration: { patches, samples, rounds, transcriptBytes, sizes, resources, postResume, prefixWorkload },
 	limits: "Synthetic faux-model/native-SDK workload; no real inference latency or quality measurement. Timings include instrumentation. Concurrent publishers use the same TemporalRuntime but separate OS processes, not two live Pi UIs. No timing threshold establishes correctness.",
 	lifecycle: [],
+	trajectory: [],
 	publishers: [],
 };
 function baselineFingerprint(paths: string[]): string {
@@ -133,6 +137,30 @@ function probeAfterResume(fixture: RealPiFixture, session: AgentSession, stateFl
 		firstContextBytes: distribution(probes.map((probe) => probe.firstContextBytes)), nativeRead: summarizeReads(probes.map((probe) => probe.wholeRun.nativeRead)),
 		promptPrefixRuns: probes.map((probe) => probe.wholeRun.promptPrefix) };
 }
+
+test("large-trajectory active and passive prompt prefixes", { skip: !prefixWorkload, timeout: 60_000 }, async (t) => {
+	for (const mode of ["active", "passive", "stop-handoff"] as const) {
+		const fixture = await realPiFixture(t, { passiveBootstrap: true, passiveTools: true });
+		const session = await fixture.createSession();
+		if (mode !== "passive") await session.prompt("/state-flow-start");
+		fixture.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { seed: "prefix baseline" } } }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Seed accepted"),
+		]);
+		await session.prompt("Seed memory before measurement");
+		assert.equal(fixture.readState(session).working.seed, "prefix baseline");
+		const seeded = session.messages.at(-1);
+		assert.ok(seeded?.role === "assistant");
+		assert.deepEqual(seeded.content, [{ type: "text", text: "Seed accepted" }]);
+		if (mode === "stop-handoff") await session.prompt("/state-flow-stop");
+		const source = join(fixture.cwd, "trajectory.txt");
+		const sourceText = `BENCH_TRAJECTORY\n${"t".repeat(20 * 1024)}`;
+		writeFileSync(source, sourceText);
+		const entry = { mode, promptPrefixRuns: [await trajectoryPrompt(fixture, session, source, sourceText)] };
+		(report.trajectory as unknown[]).push(entry);
+		console.log(`BENCH_PHASE ${JSON.stringify(entry)}`);
+	}
+});
 
 test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_000 }, async (t) => {
 	for (const stateFlow of [false, true]) for (const size of stateFlow ? sizes : [0]) {
@@ -249,5 +277,7 @@ process.once("beforeExit", (code) => setImmediate(() => {
 	if (!report.runtimeSourceUnchanged || !report.workloadSourceUnchanged) process.exitCode = 1;
 	report.exitCode = process.exitCode || code;
 	// Let the test runner settle its exit status, then keep the loop alive until pipe output drains.
-	console.log(`BENCH_RESULT ${JSON.stringify(report)}`);
+	const serialized = JSON.stringify(report);
+	if (process.env.BENCH_REPORT_PATH) writeFileSync(process.env.BENCH_REPORT_PATH, `${serialized}\n`);
+	console.log(`BENCH_RESULT ${serialized}`);
 }));

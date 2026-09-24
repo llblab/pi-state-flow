@@ -28,7 +28,53 @@ The v3 report records `promptPrefixRuns` for each State Flow and native Pi user 
 
 A bounded local sample used `BENCH_PATCHES=2 BENCH_SAMPLES=1 BENCH_ROUNDS=2 BENCH_STATE_BYTES=1024 BENCH_POST_RESUME=1 npm run benchmark` on Node 26.8.1 Linux/x64 and Pi/AI 0.87.0. The runtime-source SHA-256 was `0f4eea2394c52c6ac545260cae967a16581b8768a24a8c611c13a389e6df01a9`, workload-source SHA-256 `e9b8158d953d8622776aa075835c4aa95c98855ed5c90e85de05dccae1087e91`, base commit `5f0f688650738d4d0e9850b2529b0273c47121a8` (the measured tree had uncommitted 0.18.1 changes). Both source hashes stayed unchanged during the run and all correctness phases passed. At user run 1, native Pi's second inference shared 2,776 of 2,777 prior serialized bytes; State Flow shared 9,365 of 9,467 at inference 2 and 9,173 with inference 2 at inference 3 (one accepted barrier). In both State Flow runs, the 21-byte serialized `specification` value duplicated the 21-byte current native user string value; native Pi had no projection field. These are synthetic short-run observations, not representative cache-hit rates or timing predictions.
 
-A later 0.19 decision about freezing the projected head must compare compatible workloads and include correctness of fresh state visibility after barriers. Byte-prefix measurements omit provider framing, tool schemas, tokenization, cache policies and quality; this probe does **not** justify changing context projection in 0.18.1.
+Byte-prefix measurements omit provider framing, tool schemas, tokenization, cache policies and quality. In particular, serialized synthetic-message timestamps can shorten this proxy prefix without proving provider-visible cache churn. Fresh state visibility after barriers must be validated independently of prefix preservation.
+
+### Trajectory-dominant baseline
+
+The opt-in `BENCH_PREFIX=1` probe in the [benchmark guide](../benchmarks/README.md) exercises active memory, ordinary passive memory and Stop handoff separately. Each measured run issues six 20,497-byte native reads, a patch, two more reads and a second patch. Exact read content remains visible through all eleven inferences; both patches and terminal completion are checked outside the provider. The v3 `trajectory[].promptPrefixRuns` entries retain every inference, not just aggregate ratios.
+
+Baseline: Node 26.8.1 Linux/x64, Pi/AI 0.87.0, base commit `2834dcb447f58867b579c6f2709bc71211b9537a` with uncommitted benchmark changes; runtime SHA-256 `a5a961d4d706d4a2d6649201553e39484d0e4c29d27cf4014f072b39cd78a01a`, workload SHA-256 `1785e73e4992c3d986d2851f2d81963c0b0cfde8ceacfd4337659ebc9d1492ba`. Both source identities remained unchanged and the native workload passed. The local report is `/tmp/state-flow-prefix-baseline.json`; the reproducible command and measurements below do not depend on retaining that temporary file.
+
+Each cell is **shared prefix / current serialized context bytes**; `—` means first inference. Inferences 8 and 11 follow accepted patches.
+
+| Inference | Active | Passive | Stop handoff |
+| ---: | ---: | ---: | ---: |
+| 1 | — / 9860 | — / 7197 | — / 6019 |
+| 2 | 9732 / 31025 | 5801 / 28360 | 6018 / 27183 |
+| 3 | 9731 / 52193 | 5801 / 49528 | 27182 / 48353 |
+| 4 | 9732 / 73359 | 5801 / 70696 | 48352 / 69519 |
+| 5 | 9732 / 94528 | 5801 / 91865 | 69518 / 90688 |
+| 6 | 9733 / 115695 | 5802 / 113034 | 90687 / 111857 |
+| 7 | 9732 / 136864 | 5801 / 134201 | 111856 / 133026 |
+| 8 | 9212 / 137813 | 5666 / 134999 | 133025 / 133800 |
+| 9 | 9907 / 158983 | 5825 / 156169 | 133799 / 154965 |
+| 10 | 9907 / 180150 | 5825 / 177338 | 154964 / 176134 |
+| 11 | 9235 / 181075 | 5689 / 178112 | 176133 / 176908 |
+
+In that baseline, Stop handoff already reused a frozen message, unlike active and ordinary passive projection. A warm prefix alone does not prove updated memory reaches the model; freshness has separate native-SDK regressions.
+
+### Frozen-head measurement
+
+The implemented projection freezes whole heads, including timestamps, and delivers accepted values and changing notices at stable tail positions. Active completion/new runs, native compaction/selection and Start/Stop are cache boundaries; passive user turns and patches are not. Volatile projection IDs distinguish current updates from retained results after a rebase. See [projection semantics](architecture.md#pi-lifecycle) for ownership and limits.
+
+The identical trajectory workload (`1785e73e4992c3d986d2851f2d81963c0b0cfde8ceacfd4337659ebc9d1492ba`) on the same Node/Pi stack measured runtime SHA-256 `d2c424a52d55b0c1ca47a8b1a1beba9c0dda665c8f024d6aa3b6ad95af9d3b46`, with unchanged base commit and uncommitted implementation changes. Both source identities remained stable; all native workload assertions passed. Local report: `/tmp/state-flow-prefix-after.json`.
+
+| Inference | Active | Passive | Stop handoff |
+| ---: | ---: | ---: | ---: |
+| 1 | — / 10461 | — / 7985 | — / 6620 |
+| 2 | 10460 / 31625 | 7984 / 29148 | 6619 / 27784 |
+| 3 | 31624 / 52792 | 29147 / 50316 | 27783 / 48952 |
+| 4 | 52791 / 73959 | 50315 / 71484 | 48951 / 70120 |
+| 5 | 73958 / 95127 | 71483 / 92653 | 70119 / 91287 |
+| 6 | 95126 / 116295 | 92652 / 113822 | 91286 / 112456 |
+| 7 | 116294 / 137463 | 113821 / 134989 | 112455 / 133625 |
+| 8 | 137462 / 138416 | 134988 / 135941 | 133624 / 134579 |
+| 9 | 138415 / 159580 | 135940 / 157106 | 134578 / 155742 |
+| 10 | 159579 / 180746 | 157105 / 178275 | 155741 / 176911 |
+| 11 | 180745 / 181697 | 178274 / 179229 | 176910 / 177863 |
+
+Every continuation shares **all prior serialized bytes except the closing array bracket**, including both patch barriers in all three modes. At inference 8, the active prefix grows from 9,212 baseline bytes to 137,462; passive grows from 5,666 to 134,988. Initial contexts grow modestly because result guidance and projection identity are explicit. These are message-byte measurements, not provider cache accounting, latency, token-cost or quality guarantees. Regression tests assert prefix equality independently of exact host timestamps/IDs; separate native tests prove accepted-state freshness, repeated barriers, passive cross-turn stability and bootstrap rebasing.
 
 ## Current cost model
 
@@ -49,7 +95,7 @@ This is a bounded-allocation improvement, not an unconditional constant-time cla
 
 ## Context projection and trajectory selection
 
-`runtimeContextMessage` projects the cached semantic overlay once per context emission. `currentRunTrajectory` allocates one retained-message array rather than arrays for discarded ordinary prefixes. Foreign custom context may require scanning earlier entries, and Pi may clone native messages before the extension runs.
+The context domain projects the cached semantic overlay once per context emission to compare current state with its last communicated view. It serializes the complete head only at a projection boundary; later synthetic notices retain their original native-message positions. Projection caching targets request-prefix stability, not constant-time state processing: view copies/diffs remain state-dependent and notices accumulate until a natural reset, without a size threshold. `currentRunTrajectory` allocates one retained-message array rather than arrays for discarded ordinary prefixes. Foreign custom context may require scanning earlier entries, and Pi may clone native messages before the extension runs.
 
 `tests/context.test.ts` exercises small and large semantic payloads, zero and two hundred prior request/answer pairs, repeated requests, stale/missing anchors, foreign custom messages, and post-barrier context emission. These tests assert projection counts and retained identities; they impose no wall-time threshold.
 

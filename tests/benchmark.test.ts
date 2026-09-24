@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,13 +43,14 @@ process.stdout.write = function (chunk, ...args) {
 	let workloadHash: string | undefined;
 	let runtimeHash: string | undefined;
 	for (const mutate of [false, true]) {
+		const reportPath = join(root, `report-${mutate}.json`);
 		const child = spawnSync(process.execPath, [
 			...(mutate ? ["--import", "./source-change.mjs"] : []),
 			"--test", ...(mutate ? ["--experimental-test-isolation=none"] : []), "--test-name-pattern=native Pi and State Flow", "benchmarks/benchmark.ts",
 		], {
 			cwd: root,
 			// Admit an independent runner instead of inheriting this file's Node test-runner context.
-			env: { ...process.env, NODE_TEST_CONTEXT: undefined, BENCH_PATCHES: "1", BENCH_SAMPLES: "1", BENCH_ROUNDS: "1", BENCH_STATE_BYTES: "8192", BENCH_TRANSCRIPT_BYTES: mutate ? "4096" : "65536", BENCH_RESOURCES: mutate ? "0" : "1", BENCH_POST_RESUME: mutate ? "0" : "1" },
+			env: { ...process.env, NODE_TEST_CONTEXT: undefined, BENCH_REPORT_PATH: reportPath, BENCH_PATCHES: "1", BENCH_SAMPLES: "1", BENCH_ROUNDS: "1", BENCH_STATE_BYTES: "8192", BENCH_TRANSCRIPT_BYTES: mutate ? "4096" : "65536", BENCH_RESOURCES: mutate ? "0" : "1", BENCH_POST_RESUME: mutate ? "0" : "1" },
 			encoding: "utf8",
 			timeout: 25_000,
 			maxBuffer: 4 * 1024 * 1024,
@@ -57,9 +58,8 @@ process.stdout.write = function (chunk, ...args) {
 		assert.equal(child.error, undefined);
 		assert.equal(child.signal, null);
 		assert.equal(child.status, mutate ? 1 : 0, child.stdout + child.stderr);
-		const match = child.stdout.match(/BENCH_RESULT (\{[^\n]+\})/);
-		assert.ok(match, child.stdout + child.stderr);
-		const report = JSON.parse(match[1]!);
+		assert.match(child.stdout, /BENCH_RESULT /);
+		const report = JSON.parse(readFileSync(reportPath, "utf8"));
 		assert.equal(report.version, 3);
 		assert.equal(report.syntheticPadding, "x".repeat(1024 * 1024));
 		assert.equal(report.exitCode, mutate ? 1 : 0);
@@ -139,6 +139,46 @@ process.stdout.write = function (chunk, ...args) {
 	}
 });
 
+test("large-trajectory prefix reports retain native read evidence across active and passive barriers", { timeout: 30_000 }, (t) => {
+	const root = sourceFixture(t);
+	const reportPath = join(root, "prefix-report.json");
+	const child = spawnSync(process.execPath, ["--test", "--test-name-pattern=large-trajectory", "benchmarks/benchmark.ts"], {
+		cwd: root, encoding: "utf8", timeout: 25_000, maxBuffer: 4 * 1024 * 1024,
+		env: { ...process.env, NODE_TEST_CONTEXT: undefined, BENCH_PREFIX: "1", BENCH_REPORT_PATH: reportPath },
+	});
+	assert.equal(child.error, undefined);
+	assert.equal(child.signal, null);
+	assert.equal(child.status, 0, child.stdout + child.stderr);
+	const report = JSON.parse(readFileSync(reportPath, "utf8"));
+	assert.equal(report.version, 3);
+	assert.equal(report.exitCode, 0);
+	assert.equal(report.runtimeSourceUnchanged, true);
+	assert.equal(report.workloadSourceUnchanged, true);
+	assert.equal(report.configuration.prefixWorkload, true);
+	assert.deepEqual(report.trajectory.map((entry: { mode: string }) => entry.mode), ["active", "passive", "stop-handoff"]);
+	for (const entry of report.trajectory) {
+		assert.equal(entry.promptPrefixRuns.length, 1);
+		const run = entry.promptPrefixRuns[0];
+		assert.equal(run.patchStateBarriers, 2);
+		assert.equal(run.completedReads, 8);
+		assert.equal(run.readResultBytes, 20 * 1024 + Buffer.byteLength("BENCH_TRAJECTORY\n"));
+		assert.deepEqual(run.inferences.map((inference: { action: string }) => inference.action),
+			["read", "read", "read", "read", "read", "read", "patch", "read", "read", "patch", "answer"]);
+		assert.equal(run.inferences[0].sharedPrefixBytes, null);
+		for (let index = 1; index < run.inferences.length; index++) {
+			const inference = run.inferences[index];
+			assert.ok(inference.sharedPrefixBytes > 0);
+			assert.ok(inference.sharedPrefixBytes <= Math.min(inference.contextBytes, run.inferences[index - 1].contextBytes));
+			assert.equal(inference.sharedPrefixBytes, run.inferences[index - 1].contextBytes - 1,
+				`${entry.mode} preserves the previous serialized message array except its closing bracket`);
+		}
+		assert.equal(run.inferences[7].retainedReadBytes, 6 * run.readResultBytes);
+		assert.equal(run.inferences[10].retainedReadBytes, 8 * run.readResultBytes);
+		assert.ok(run.inferences[7].retainedReadBytes > 10 * run.inferences[0].contextBytes,
+			"trajectory must dominate the initial state/context size");
+	}
+});
+
 for (const target of ["session", "repository"] as const) {
 	test(`post-resume probe rejects baseline ${target} drift even after a successful child`, { timeout: 40_000 }, (t) => {
 		const root = sourceFixture(t);
@@ -152,15 +192,14 @@ process.once("exit", () => {
 `);
 		const child = spawnSync(process.execPath, ["--test", "--experimental-test-isolation=none", "--test-name-pattern=native Pi and State Flow", "benchmarks/benchmark.ts"], {
 			cwd: root, encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
-			env: { ...process.env, NODE_TEST_CONTEXT: undefined, BENCH_PATCHES: "1", BENCH_SAMPLES: "1", BENCH_ROUNDS: "1", BENCH_STATE_BYTES: "8192", BENCH_TRANSCRIPT_BYTES: "4096", BENCH_RESOURCES: "0", BENCH_POST_RESUME: "1" },
+			env: { ...process.env, NODE_TEST_CONTEXT: undefined, BENCH_REPORT_PATH: join(root, "report.json"), BENCH_PATCHES: "1", BENCH_SAMPLES: "1", BENCH_ROUNDS: "1", BENCH_STATE_BYTES: "8192", BENCH_TRANSCRIPT_BYTES: "4096", BENCH_RESOURCES: "0", BENCH_POST_RESUME: "1" },
 		});
 		assert.equal(child.error, undefined);
 		assert.equal(child.signal, null);
 		assert.equal(child.status, 1, child.stdout + child.stderr);
 		assert.match(child.stdout + child.stderr, /post-resume probe changed baseline files/);
-		const match = child.stdout.match(/BENCH_RESULT (\{[^\n]+\})/);
-		assert.ok(match, child.stdout + child.stderr);
-		const report = JSON.parse(match[1]!);
+		assert.match(child.stdout, /BENCH_RESULT /);
+		const report = JSON.parse(readFileSync(join(root, "report.json"), "utf8"));
 		assert.equal(report.runtimeSourceUnchanged, true);
 		assert.equal(report.workloadSourceUnchanged, true);
 		assert.equal(report.exitCode, 1);
