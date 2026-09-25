@@ -6,6 +6,7 @@ import type { AgentSession, ReadToolDetails } from "@earendil-works/pi-coding-ag
 import { fauxAssistantMessage, fauxToolCall, type Context } from "@earendil-works/pi-ai";
 import type { ModelState } from "../lib/state.ts";
 import type { RealPiFixture } from "../tests/pi-harness.ts";
+import { loadGlobalState, writeGlobalState } from "../tests/temporal-fixture.ts";
 
 assert.ok([undefined, "0", "1"].includes(process.env.BENCH_RESOURCES), "BENCH_RESOURCES must be 0 or 1");
 export const resourcesEnabled = process.env.BENCH_RESOURCES === "1";
@@ -101,6 +102,7 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 	let previous: Buffer | undefined;
 	let completedReads = 0;
 	let acceptedPatches = 0;
+	const reconciliationTailBytes: number[] = [];
 	let observed = 0;
 	const readIds = new Set<string>();
 	fixture.faux.setResponses(actions.map((action) => (context: Context) => {
@@ -115,7 +117,13 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 		previous = serialized;
 		observed++;
 		if (action === "answer") return fauxAssistantMessage("Trajectory accepted");
-		if (action === "patch") return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { trajectoryBarrier: acceptedPatches + 1 } } }), { stopReason: "toolUse" });
+		if (action === "patch") {
+			if (acceptedPatches === 1) {
+				const global = loadGlobalState(fixture.repositoryRoot)!;
+				writeGlobalState({ ...global, working: { ...global.working, trajectoryForeign: "adopted" } }, fixture.repositoryRoot);
+			}
+			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { trajectoryBarrier: acceptedPatches + 1 } } }), { stopReason: "toolUse" });
+		}
 		const call = fauxToolCall("read", { path: source });
 		readIds.add(call.id);
 		return fauxAssistantMessage(call, { stopReason: "toolUse" });
@@ -124,7 +132,17 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 		if (event.type !== "tool_execution_end") return;
 		assert.equal(event.isError, false, "trajectory workload tools must succeed");
 		if (event.toolName === "read") completedReads++;
-		if (event.toolName === "patch_state") acceptedPatches++;
+		if (event.toolName === "patch_state") {
+			const tail = event.result.content[1]?.text ?? "";
+			reconciliationTailBytes.push(Buffer.byteLength(tail));
+			if (acceptedPatches === 0) assert.equal(tail, "", "predictable patch needs only the acknowledgement");
+			else {
+				assert.equal(event.result.content.length, 2, "shared surprise needs one reconciliation tail");
+				assert.deepEqual(JSON.parse(tail).state_updates.effective,
+					[{ path: ["working", "trajectoryForeign"], value: "adopted" }]);
+			}
+			acceptedPatches++;
+		}
 	});
 	try {
 		await session.prompt("Measure trajectory prefix across two patches");
@@ -136,7 +154,9 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 		assert.equal(completedReads, 8);
 		assert.equal(acceptedPatches, 2);
 		assert.equal(fixture.readState(session).working.trajectoryBarrier, 2);
-		return { inferences, patchStateBarriers: acceptedPatches, readResultBytes: Buffer.byteLength(sourceText), completedReads };
+		assert.equal(fixture.readState(session).working.trajectoryForeign, "adopted");
+		return { inferences, patchStateBarriers: acceptedPatches, reconciliationTailBytes,
+			readResultBytes: Buffer.byteLength(sourceText), completedReads };
 	} finally { unsubscribe(); }
 }
 

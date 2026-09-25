@@ -798,7 +798,7 @@ export default function stateFlowExtension(pi, options = {}) {
                         : "\nState already current.";
                     return { content: [
                             { type: "text", text: acknowledgement },
-                            { type: "text", text: `\n${presentationJson({ state_updates: updates })}` },
+                            ...(updates ? [{ type: "text", text: `\n${presentationJson({ state_updates: updates })}` }] : []),
                         ], details: { scopes, step: snapshot.meta.step, changed } };
                 }, signal);
             }

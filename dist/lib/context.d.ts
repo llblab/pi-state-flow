@@ -56,7 +56,7 @@ export declare class ContextProjection {
             keys?: Record<string, LazyValueKind>;
         } | undefined;
         projection: `${string}-${string}-${string}-${string}-${string}`;
-    };
+    } | undefined;
     project(messages: AgentMessage[], current: ContextView, makeHead: () => AgentMessage, initial?: ContextView): AgentMessage[];
 }
 /** Context retained after semantic State Flow is stopped in this physical session. */

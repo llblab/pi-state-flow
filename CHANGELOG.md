@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.21.0: Minimal Reconciliation
+
+- `Sparse acceptance receipts`: Predictable direct/indexed writes, object replacements, disjoint scope writes, explicit Session scalar/array overrides, unchanged-effective deletions, artifact merges and complete lazy-navigation updates omit redundant semantic tails. Shared drift, changed hints, unknown fallback and ambiguous overlap still reconcile; lazy bodies and provenance stay hidden. Canonical storage, revisions and lifecycle formats are unchanged.
+- `Acceptance and projection safety`: Artifact prediction against a masked effective array cannot turn an accepted scoped patch into a tool failure. Conservative reconciliation preserves the successful acknowledgement. Native active, passive and Stop-handoff regressions cover accepted storage, while prefix probes distinguish predictable acceptance from a minimal shared-surprise tail without rewriting earlier context.
+
 ## 0.20.0: Cache-Stable Projection
 
 - `Cache-stable model projection`: Active/bootstrap heads freeze per accepted iteration; passive heads survive ordinary user turns. Native/mode boundaries rebase without semantic changes. Patch receipts and stable-position notices deliver current values, hints and invalidations without rewriting prior prefixes. Volatile projection IDs keep retained old results historical after rebasing. Native regressions cover repeated barriers, passive continuation and bootstrap; canonical history is unchanged.

@@ -16,7 +16,7 @@ import { emptySnapshot } from "../lib/snapshot.ts";
 import { temporalScopeRevisions } from "../lib/temporal.ts";
 import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { emptyState, projectStateForModel, type MaterializedState } from "../lib/state.ts";
-import type { JsonObject } from "../lib/json.ts";
+import { applyPatch, type JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
 import { withStorageTransaction } from "../lib/storage.ts";
@@ -103,10 +103,11 @@ test("real Pi passive reload distinguishes retained old receipts from the refres
 		const old = context.messages.find((message) => message.role === "toolResult" && message.toolName === "patch_state");
 		assert.ok(old?.role === "toolResult");
 		const receipt = old.content.find((part) => part.type === "text" && part.text.trim().startsWith('{"state_updates"'));
-		assert.ok(receipt?.type === "text");
-		const updates = JSON.parse(receipt.text).state_updates;
-		assert.notEqual(updates.projection, id, "old native results cannot supersede a new head");
-		assert.equal(updates.effective[0].value, "old", "historical native evidence remains exact");
+		if (receipt?.type === "text") {
+			const updates = JSON.parse(receipt.text).state_updates;
+			assert.notEqual(updates.projection, id, "old native results cannot supersede a new head");
+			assert.equal(updates.effective[0].value, "old", "historical native evidence remains exact");
+		}
 		inspected = true;
 		return fauxAssistantMessage("Fresh head observed");
 	}]);
@@ -124,6 +125,13 @@ function projectedRuntime(context: Context) {
 	assert.ok(projection);
 	for (const message of context.messages) {
 		if (!Array.isArray(message.content)) continue;
+		if (message.role === "assistant") for (const call of message.content) {
+			if (call.type !== "toolCall" || call.name !== "patch_state") continue;
+			const accepted = context.messages.some((result) => result.role === "toolResult" && result.toolCallId === call.id && !result.isError);
+			if (!accepted) continue;
+			const authored = call.arguments as Record<string, JsonObject>;
+			for (const scope of ["global", "cwd", "session"]) if (authored[scope]) view.state = applyPatch(view.state, authored[scope]);
+		}
 		for (const part of message.content) {
 			if (part.type !== "text") continue;
 			const text = part.text.trim();
@@ -168,8 +176,9 @@ for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi
 			const updates = JSON.parse(content.slice(content.indexOf('{"state_updates"'))).state_updates;
 			assert.ok(updates.effective.some((entry: any) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "fallback"], value: "global" })));
 			assert.ok(updates.effective.some((entry: any) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "foreign"], value: "adopted" })));
-			assert.ok(updates.effective.some((entry: any) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "accepted"], value: true })));
-			assert.deepEqual(updates.lazy_navigation, { available: true, path: "effective.lazy", keys: { secret: "string" } });
+			assert.equal(updates.effective.some((entry: any) => JSON.stringify(entry.path) === JSON.stringify(["working", "accepted"])), false,
+				"predictable direct write must not be echoed");
+			assert.equal(updates.lazy_navigation, undefined, "complete navigation from the authored lazy write needs no echo");
 			assert.doesNotMatch(content, /LAZY-BODY|unchanged/);
 			inspected = true;
 			return fauxAssistantMessage("Fresh tail observed");
@@ -182,6 +191,45 @@ for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi
 	const terminal = session.messages.at(-1);
 	assert.ok(terminal?.role === "assistant");
 	assert.deepEqual(terminal.content, [{ type: "text", text: "Fresh tail observed" }]);
+});
+
+for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi ${mode} acknowledges a published artifact patch when effective-array prediction fails`, async (t) => {
+	const f = await realPiFixture(t, { initializeRepository: false, autoStart: mode !== "passive", passiveTools: true, passiveBootstrap: true });
+	const session = await f.createSession("new");
+	const path = join(f.cwd, "masked-card.txt");
+	writeFileSync(path, "artifact source\n");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", {
+			global: { artifacts: { [path]: { description: "global", rows: [1, 2] } } },
+			session: { artifacts: { [path]: { description: "session", rows: [9] } } },
+		}), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Seeded"),
+	]);
+	await session.prompt("Seed masked artifact arrays");
+	assert.deepEqual(loadGlobalState(f.repositoryRoot)!.artifacts[path]!.rows, [1, 2]);
+	if (mode === "stop-handoff") await session.prompt("/state-flow-stop");
+	let inspected = false;
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("patch_state", {
+			global: { artifacts: { [path]: { description: "global updated", rows: { "[1]": 3 } } } },
+		}), { stopReason: "toolUse" }),
+		(context) => {
+			const result = context.messages.findLast((message) => message.role === "toolResult" && message.toolName === "patch_state");
+			assert.ok(result?.role === "toolResult" && !result.isError, "projection cannot report failure after canonical acceptance");
+			const texts = result.content.flatMap((part) => part.type === "text" ? [part.text] : []);
+			assert.match(texts[0]!, /State materialized atomically at global scope/);
+			const notice = JSON.parse(texts[1]!).state_updates;
+			assert.equal(notice.effective.length, 1);
+			assert.deepEqual(notice.effective[0].path, ["artifacts", path]);
+			assert.deepEqual(notice.effective[0].value.rows, [9]);
+			assert.deepEqual(loadGlobalState(f.repositoryRoot)!.artifacts[path]!.rows, [1, 3]);
+			inspected = true;
+			return fauxAssistantMessage("Accepted despite masked array");
+		},
+	]);
+	await session.prompt("Update only the lower array");
+	assert.equal(inspected, true, "provider assertions completed");
+	assert.deepEqual(f.readState(session).artifacts[path]!.rows, [9]);
 });
 
 for (const mode of ["active", "bootstrap", "reload", "stop-start"] as const) test(`real Pi automatic lazy history stays hidden across ${mode} without redacting native evidence`, async (t) => {

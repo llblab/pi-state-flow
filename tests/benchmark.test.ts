@@ -160,6 +160,8 @@ test("large-trajectory prefix reports retain native read evidence across active 
 		assert.equal(entry.promptPrefixRuns.length, 1);
 		const run = entry.promptPrefixRuns[0];
 		assert.equal(run.patchStateBarriers, 2);
+		assert.equal(run.reconciliationTailBytes[0], 0, "predictable patch appends no State Flow tail");
+		assert.ok(run.reconciliationTailBytes[1] > 0, "independent shared drift appends one minimal tail");
 		assert.equal(run.completedReads, 8);
 		assert.equal(run.readResultBytes, 20 * 1024 + Buffer.byteLength("BENCH_TRAJECTORY\n"));
 		assert.deepEqual(run.inferences.map((inference: { action: string }) => inference.action),

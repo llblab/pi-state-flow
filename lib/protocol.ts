@@ -5,7 +5,7 @@ export type { StateDocument } from "./state.ts";
 
 const TASK_DRIVEN_HISTORY = "Missing paths/hints do not require history search. Choose targeted historical reads when useful to the task; no separate user permission is needed. Past values are evidence, not current state; never automatically restore deleted memory.";
 
-const PATCH_RESULT_PROTOCOL = "Head state/recent transitions are frozen at projection start. Only state_updates matching the head's State Flow projection ID apply; older IDs are history. Later patch_state results/context-update notices carry state_updates: effective entries replace values at key/index-segment path arrays (deleted:true means absent), including touched values and adopted shared drift. Latest entries win over earlier state at those paths; lazy bodies remain omitted. Notices replace invalidations/rehydration, including []/null.";
+const PATCH_RESULT_PROTOCOL = "Head state/recent transitions are frozen at projection start. Only state_updates matching the head's State Flow projection ID apply; older IDs are history. When present, patch_state results/context-update notices carry state_updates: effective entries replace values at key/index-segment path arrays (deleted:true means absent); direct writes need no echo; shared drift remains visible. Latest entries win over earlier state at those paths; lazy bodies remain omitted. Notices replace invalidations/rehydration, including []/null.";
 
 export const PASSIVE_MEMORY_PROTOCOL = `State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns never trigger State Flow continuation or compaction. ${TASK_DRIVEN_HISTORY} ${PATCH_RESULT_PROTOCOL}`;
 

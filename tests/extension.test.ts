@@ -648,7 +648,7 @@ test("global memory is always available while State Flow is enabled", async () =
 		"global-memory", { global: { working: { preference: "compact" } } }, undefined, undefined, h.ctx,
 	);
 	assert.equal(accepted.content[0].text, "\nState materialized atomically at global scope.");
-	assert.deepEqual(JSON.parse(accepted.content[1].text).state_updates.effective, [{ path: ["working", "preference"], value: "compact" }]);
+	assert.equal(accepted.content.length, 1, "predictable direct write needs no semantic echo");
 	assert.equal(h.readState(0, "global").working.preference, "compact");
 });
 
@@ -662,6 +662,7 @@ test("patch_state commits global, CWD, and session as one model-facing atomic ba
 		session: { working: { continuation: "session" } },
 	}, undefined, undefined, h.ctx);
 	assert.deepEqual(result.details.scopes, ["global", "cwd", "session"]);
+	assert.equal(result.content.length, 1, "disjoint multi-scope writes need no echo");
 	assert.equal(h.resolveSnapshot().meta.step, beforeStep + 1);
 	assert.equal(h.readState(0, "global").contract.shared, "global");
 	assert.equal(h.readState(0, "cwd").working.project, "cwd");
@@ -683,7 +684,7 @@ test("patch_state materializes session state before the next inference and respo
 		h.ctx,
 	);
 	assert.equal(result.content[0].text, "\nState materialized atomically at session scope.");
-	assert.deepEqual(JSON.parse(result.content[1].text).state_updates.effective, [{ path: ["working", "verified"], value: "intermediate" }]);
+	assert.equal(result.content.length, 1, "predictable direct write needs no semantic echo");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
@@ -872,7 +873,6 @@ test("patch_state tolerates shared-scope drift while preserving the session laye
 	const result = await a.tools.get("patch_state")!.execute("a-session", { session: { working: { continued: true } } }, undefined, undefined, a.ctx);
 	assert.deepEqual(JSON.parse(result.content[1].text).state_updates.effective, [
 		{ path: ["working", "globalFromB"], value: true },
-		{ path: ["working", "continued"], value: true },
 	]);
 	assert.equal(a.resolveSnapshot().meta.step, beforeStep + 1);
 	assert.equal(a.readState(0, "session").working.owner, "A");
@@ -884,7 +884,6 @@ test("patch_state tolerates shared-scope drift while preserving the session laye
 	assert.equal(repeated.details.changed, false, "adopting foreign memory is not a new authored change");
 	assert.deepEqual(JSON.parse(repeated.content[1].text).state_updates.effective, [
 		{ path: ["working", "globalFromB"], value: "newer" },
-		{ path: ["working", "continued"], value: true },
 	]);
 });
 
@@ -1286,9 +1285,7 @@ test("accepts canonical atomic scope patches and correct repeats without another
 	const result = await execute({ session: { working: { value: true, alreadyAbsent: null } } });
 	assert.equal(result.details.changed, false);
 	assert.equal(result.content[0].text, "\nState already current.");
-	assert.deepEqual(JSON.parse(result.content[1].text).state_updates.effective, [
-		{ path: ["working", "value"], value: true }, { path: ["working", "alreadyAbsent"], deleted: true },
-	]);
+	assert.equal(result.content.length, 1, "no-op deletion and correct repeat need no semantic echo");
 	assert.equal(h.entries.length, checkpointCount);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 	const message = finalMessage("Resolved directly.");

@@ -67,17 +67,243 @@ test("patch receipts include all unseen drift and prevent duplicate synthetic st
 	const cache = { ...emptyState(), working: { shared: "adopted before patch" } };
 	const after = { ...cache, working: { ...cache.working, own: true } };
 	const updates = projection.acceptPatch(cache, after, { session: { working: { own: true } } }, {});
-	assert.deepEqual(updates.effective, [
-		{ path: ["working", "shared"], value: "adopted before patch" }, { path: ["working", "own"], value: true },
-	]);
+	assert.deepEqual(updates?.effective, [{ path: ["working", "shared"], value: "adopted before patch" }]);
 	const result = message("toolResult", JSON.stringify(updates), 2);
 	const next = projection.project([...messages, result], contextView(after, {}, []), () => { throw new Error("head rewritten"); });
 	assert.deepEqual(next, [...first, result]);
-	assert.ok(JSON.stringify(first[0]).includes(updates.projection), "receipt is bound to its frozen head");
+	assert.ok(JSON.stringify(first[0]).includes(updates!.projection), "receipt is bound to its frozen head");
 	projection.reset();
 	const rebased = projection.project([...messages, result, user("resume", 3)], contextView(after, {}, []), () => user("FRESH HEAD", 0));
-	assert.equal(JSON.stringify(rebased[0]).includes(updates.projection), false, "retained receipts cannot override a new head");
+	assert.equal(JSON.stringify(rebased[0]).includes(updates!.projection), false, "retained receipts cannot override a new head");
 	assert.equal(rebased[2], result, "old native evidence remains inspectable");
+});
+
+test("predictable direct leaves need no receipt while masked values remain conservative", () => {
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const projection = new ContextProjection();
+		const before = { ...emptyState(), working: { known: "old", sibling: 1 } };
+		projection.project([user("run", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+		const after = { ...before, working: { known: "new", sibling: 1 } };
+		assert.equal(projection.acceptPatch(before, after, { [scope]: { working: { known: "new" } } }, {}), undefined);
+		assert.equal(projection.acceptPatch(after, after, { [scope]: { working: { known: "new" } } }, {}), undefined);
+		assert.deepEqual(projection.project([user("run", 1), message("toolResult", "accepted", 2)], contextView(after, {}, []), () => { throw Error("head changed"); }).length, 3);
+	}
+	const projection = new ContextProjection();
+	const before = { ...emptyState(), working: { known: "old" } };
+	projection.project([user("run", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const masked = { ...before, working: { known: "masked" } };
+	assert.deepEqual(projection.acceptPatch(before, masked, { global: { working: { known: "requested" } } }, {})?.effective,
+		[{ path: ["working", "known"], value: "masked" }]);
+});
+
+test("coalesced object additions and replacements omit exact authored values but retain drift", () => {
+	const patch = { session: { working: { fresh: { nested: { a: 1 }, label: "new" } } } };
+	for (const working of [{}, { fresh: "old" }, { fresh: { nested: "old", label: "old" } }]) {
+		const before = { ...emptyState(), working } as MaterializedState;
+		const after = applyPatch(before, patch.session) as MaterializedState;
+		const projection = new ContextProjection();
+		const native = [user("object", 1)];
+		const first = projection.project(native, contextView(before, {}, []), () => user("HEAD", 0));
+		assert.equal(projection.acceptPatch(before, after, patch, {}), undefined);
+		assert.deepEqual(projection.project(native, contextView(after, {}, []), () => { throw Error("head rewritten"); }), first,
+			"accepted object advances the projection without a synthetic echo");
+	}
+	const before = emptyState();
+	const projection = new ContextProjection();
+	projection.project([user("object", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const drifted = { ...before, working: { fresh: { ...patch.session.working.fresh, external: true } } };
+	assert.deepEqual(projection.acceptPatch(before, drifted, patch, {})?.effective,
+		[{ path: ["working", "fresh"], value: drifted.working.fresh }], "coalescing cannot hide a foreign sibling");
+	const overlapping = new ContextProjection();
+	overlapping.project([user("object", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.ok(overlapping.acceptPatch(before, applyPatch(before, patch.session) as MaterializedState,
+		{ ...patch, global: { working: { fresh: { label: "other" } } } }, {})?.effective.length,
+		"overlapping object writes remain conservative until scope precedence is proven");
+});
+
+test("indexed array writes use numeric paths only for a communicated array basis", () => {
+	const before = { ...emptyState(), working: { rows: [{ name: "old", keep: true }], literal: { "[0]": "old" } } };
+	const patch = { session: { working: { rows: { "[0]": { name: "new" } }, literal: { "[0]": "new" } } } };
+	const after = { ...before, working: { rows: [{ name: "new", keep: true }], literal: { "[0]": "new" } } };
+	const projection = new ContextProjection();
+	projection.project([user("index", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.equal(projection.acceptPatch(before, after, patch, {}), undefined,
+		"array selector and literal object key both resolve to their known paths");
+	const stale = new ContextProjection();
+	stale.project([user("index", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const masked = { ...before, working: { ...after.working, rows: [{ name: "masked", keep: true }] } };
+	assert.deepEqual(stale.acceptPatch(before, masked, patch, {})?.effective,
+		[{ path: ["working", "rows", 0, "name"], value: "masked" }]);
+	const overlap = new ContextProjection();
+	overlap.project([user("index", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.equal(overlap.acceptPatch(before, after, {
+		global: { working: { rows: { "[0]": { name: "other" } } } }, session: patch.session,
+	}, {}), undefined, "the explicit Session scalar wins over a lower-scope write at the known array path");
+	const noHead = new ContextProjection();
+	assert.deepEqual(noHead.acceptPatch(before, after, patch, {})?.effective,
+		[{ path: ["working", "rows", 0, "name"], value: "new" }], "unknown communicated array basis stays conservative");
+});
+
+test("lazy navigation omits only predictable key/kind additions, never hidden bodies", () => {
+	const before = { ...emptyState(), lazy: { known: { secret: "OLD" } } };
+	const after = { ...before, lazy: { known: { secret: "OLD" }, fresh: { secret: "HIDDEN" } } };
+	const patch = { session: { lazy: { fresh: { secret: "HIDDEN" } } } };
+	const exact = new ContextProjection();
+	exact.project([user("lazy", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.equal(exact.acceptPatch(before, after, patch, {}), undefined);
+	const drift = new ContextProjection();
+	drift.project([user("lazy", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const drifted = { ...after, lazy: { ...after.lazy, foreign: "surprise" } };
+	const notice = drift.acceptPatch(before, drifted, patch, {});
+	assert.deepEqual(notice?.lazy_navigation?.keys, { known: "object", fresh: "object", foreign: "string" });
+	assert.doesNotMatch(JSON.stringify(notice), /HIDDEN|OLD|surprise/);
+	const fallback = new ContextProjection();
+	fallback.project([user("lazy", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const removed = emptyState();
+	assert.deepEqual(fallback.acceptPatch(before, removed, { session: { lazy: { known: null } } }, {})?.lazy_navigation,
+		{ available: false, path: "effective.lazy" });
+	const overlap = new ContextProjection();
+	overlap.project([user("lazy", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.deepEqual(overlap.acceptPatch(before, after, { global: { lazy: { fresh: "wrong" } }, session: patch.session }, {})?.lazy_navigation?.keys,
+		{ known: "object", fresh: "object" });
+});
+
+test("artifact prediction failure cannot reject an accepted scoped array update", () => {
+	const global = { ...emptyState(), artifacts: { "/card": { description: "global", rows: [1, 2] } } };
+	const session = { ...emptyState(), artifacts: { "/card": { description: "session", rows: [9] } } };
+	const before = overlayStates(global, session);
+	const patch = { global: { artifacts: { "/card": { description: "global", rows: { "[1]": 3 } } } } };
+	const after = overlayStates(applyPatch(global, patch.global) as MaterializedState, session);
+	const projection = new ContextProjection();
+	projection.project([user("masked array", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.deepEqual(projection.acceptPatch(before, after, patch, {})?.effective,
+		[{ path: ["artifacts", "/card"], value: after.artifacts["/card"] }]);
+	assert.equal(projection.project([user("masked array", 1)], contextView(after, {}, []), () => { throw Error("head rewritten"); }).length, 2,
+		"accepted view advances without a duplicate notice");
+});
+
+test("artifact semantic merges omit only the result derivable from the communicated card", () => {
+	const before = { ...emptyState(), artifacts: { "/card": { description: "old", kind: "report", compilation: { format: "text", version: 1 } } } };
+	const patch = { session: { artifacts: { "/card": { description: "new", compilation: { version: 2 } } } } };
+	const after = { ...before, artifacts: { "/card": { description: "new", kind: "report", compilation: { format: "text", version: 2 } } } };
+	const exact = new ContextProjection();
+	exact.project([user("merge", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.equal(exact.acceptPatch(before, after, patch, {}), undefined);
+	const drift = new ContextProjection();
+	drift.project([user("merge", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const changed = { ...after, artifacts: { "/card": { ...after.artifacts["/card"], kind: "surprise" } } };
+	assert.deepEqual(drift.acceptPatch(before, changed, patch, {})?.effective,
+		[{ path: ["artifacts", "/card"], value: changed.artifacts["/card"] }]);
+});
+
+test("artifact card receipts distinguish exact semantic replacements from hint and concurrent drift", () => {
+	const card = { description: "new", hash: "retired-provenance", compiled_at: "retired-time" };
+	const before = emptyState();
+	const after = { ...before, artifacts: { "/card": { ...card } } };
+	const patch = { session: { artifacts: { "/card": card } } };
+	const exact = new ContextProjection();
+	exact.project([user("card", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.equal(exact.acceptPatch(before, after, patch, {}), undefined);
+	const hinted = new ContextProjection();
+	hinted.project([user("card", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.deepEqual(hinted.acceptPatch(before, after, patch, { "/card": "source changed" })?.effective,
+		[{ path: ["artifacts", "/card"], value: { description: "new", hint: "source changed" } }]);
+	const retainedHint = new ContextProjection();
+	const existing = { ...before, artifacts: { "/card": { description: "new" } } };
+	retainedHint.project([user("card", 1)], contextView(existing, { "/card": "requires refresh" }, []), () => user("HEAD", 0));
+	assert.equal(retainedHint.acceptPatch(existing, existing, patch, { "/card": "requires refresh" }), undefined,
+		"a no-op artifact patch cannot echo an already communicated runtime hint");
+	const stableHint = new ContextProjection();
+	const oldCard = { ...before, artifacts: { "/card": { description: "old", kind: "report" } } };
+	const semanticPatch = { session: { artifacts: { "/card": { description: "new" } } } };
+	const newCard = { ...before, artifacts: { "/card": { description: "new", kind: "report" } } };
+	stableHint.project([user("card", 1)], contextView(oldCard, { "/card": "requires refresh" }, []), () => user("HEAD", 0));
+	assert.equal(stableHint.acceptPatch(oldCard, newCard, semanticPatch, { "/card": "requires refresh" }), undefined,
+		"a known unchanged hint is retained through the predictable semantic merge");
+	const changedHint = new ContextProjection();
+	changedHint.project([user("card", 1)], contextView(oldCard, { "/card": "requires refresh" }, []), () => user("HEAD", 0));
+	assert.deepEqual(changedHint.acceptPatch(oldCard, newCard, semanticPatch, { "/card": "read again" })?.effective,
+		[{ path: ["artifacts", "/card"], value: { description: "new", kind: "report", hint: "read again" } }]);
+	const lostHint = new ContextProjection();
+	lostHint.project([user("card", 1)], contextView({ ...before, artifacts: { "/card": { description: "old" } } },
+		{ "/card": "requires refresh" }, []), () => user("HEAD", 0));
+	assert.deepEqual(lostHint.acceptPatch(before, after, patch, {})?.effective,
+		[{ path: ["artifacts", "/card"], value: { description: "new" } }], "removing a runtime hint is model-visible surprise");
+	const drift = new ContextProjection();
+	drift.project([user("card", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const changed = { ...before, artifacts: { "/card": { description: "concurrent" } } };
+	assert.deepEqual(drift.acceptPatch(before, changed, patch, {})?.effective,
+		[{ path: ["artifacts", "/card"], value: { description: "concurrent" } }]);
+	const nav = new ContextProjection();
+	nav.project([user("card", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const lazy = { ...after, lazy: { hidden: { secret: "DO-NOT-LEAK" } } };
+	const notice = nav.acceptPatch(before, lazy, { session: { artifacts: { "/card": card }, lazy: { hidden: lazy.lazy.hidden } } }, {});
+	assert.equal(notice, undefined, "both projected card and lazy navigation are predictable");
+});
+
+test("explicit Session replacements dominate lower-scope overlap without hiding drift", () => {
+	for (const lower of [2, 3, null, { nested: true }]) {
+		for (const upper of [2, [1, 2]]) {
+			const before = { ...emptyState(), working: { x: 1, untouched: "old" } };
+			const after = { ...before, working: { x: upper, untouched: "old" } };
+			const patch = { global: { working: { x: lower } }, session: { working: { x: upper } } };
+			const projection = new ContextProjection();
+			projection.project([user("overlap", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+			assert.equal(projection.acceptPatch(before, after, patch, {}), undefined);
+			const drifted = { ...after, working: { x: upper, untouched: "foreign" } };
+			assert.deepEqual(projection.acceptPatch(after, drifted, patch, {})?.effective,
+				[{ path: ["working", "untouched"], value: "foreign" }]);
+		}
+	}
+	const before = { ...emptyState(), working: { x: 1 } };
+	const projection = new ContextProjection();
+	projection.project([user("overlap", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	assert.deepEqual(projection.acceptPatch(before, { ...before, working: { x: 4 } },
+		{ global: { working: { x: 2 } }, session: { working: { x: 3 } } }, {})?.effective,
+		[{ path: ["working", "x"], value: 4 }], "mismatching acceptance must still reconcile");
+});
+
+test("multi-scope disjoint writes omit echoes while overlapping writes remain conservative", () => {
+	const projection = new ContextProjection();
+	const initial = { ...emptyState(), working: { shared: "old", project: "old", private: "old", collision: "old", masked: "old" } };
+	projection.project([user("cohort", 1)], contextView(initial, {}, []), () => user("HEAD", 0));
+	const patches = {
+		global: { working: { shared: "new", collision: "global", masked: "requested" } },
+		cwd: { working: { project: "new", collision: "cwd" } },
+		session: { working: { private: "new", collision: null } },
+	};
+	const after = { ...initial, working: { shared: "new", project: "new", private: "new", collision: "cwd", masked: "unexpected", foreign: 2 } };
+	assert.deepEqual(projection.acceptPatch(initial, after, patches, {})?.effective, [
+		{ path: ["working", "collision"], value: "cwd" },
+		{ path: ["working", "masked"], value: "unexpected" },
+		{ path: ["working", "foreign"], value: 2 },
+	]);
+	const isolated = new ContextProjection();
+	isolated.project([user("cohort", 1)], contextView(initial, {}, []), () => user("HEAD", 0));
+	assert.equal(isolated.acceptPatch(initial, { ...initial, working: { ...initial.working, shared: "new", project: "new", private: "new" } },
+		{ global: { working: { shared: "new", absent: null } }, cwd: { working: { project: "new" } }, session: { working: { private: "new" } } }, {}), undefined);
+});
+
+test("deletion receipts omit only unchanged effective values, not unknown fallback or independent removals", () => {
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const projection = new ContextProjection();
+		const visible = { ...emptyState(), working: { retained: "same", other: "before" } };
+		projection.project([user("delete", 1)], contextView(visible, {}, []), () => user("HEAD", 0));
+		const patch = { [scope]: { working: { absent: null, retained: null } } };
+		assert.equal(projection.acceptPatch(visible, visible, patch, {}), undefined,
+			"masked/no-op deletion reveals no new effective information");
+		const changed = { ...visible, working: { retained: "unexpected fallback" } };
+		assert.deepEqual(projection.acceptPatch(visible, changed, patch, {})?.effective, [
+			{ path: ["working", "retained"], value: "unexpected fallback" },
+			{ path: ["working", "other"], deleted: true },
+		]);
+	}
+	const projection = new ContextProjection();
+	const visible = { ...emptyState(), working: { owned: "visible" } };
+	projection.project([user("delete", 1)], contextView(visible, {}, []), () => user("HEAD", 0));
+	const removed = emptyState();
+	assert.deepEqual(projection.acceptPatch(visible, removed, { session: { working: { owned: null } } }, {})?.effective,
+		[{ path: ["working", "owned"], deleted: true }], "effective-only head cannot prove the deleted key's scope owner");
 });
 
 test("a frozen Stop handoff receives changes made before its first projection", () => {

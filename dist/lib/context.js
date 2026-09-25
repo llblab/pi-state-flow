@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { projectArtifactForModel } from "./artifact.js";
-import { isObject, presentationJson, sameJson } from "./json.js";
+import { applyPatch, isObject, presentationJson, sameJson } from "./json.js";
 import { projectStateForModel } from "./state.js";
 /** Refresh only our section; Pi owns system frames, tools and forced-prompt precedence. */
 export function projectSystemProtocol(messages, protocol) {
@@ -147,10 +147,112 @@ export class ContextProjection {
     acceptPatch(before, after, patches, hints) {
         const state = projectStateForModel(after, hints);
         const navigation = lazyNavigationHint(after);
-        const updates = projectedStateUpdates(this.view?.state ?? projectStateForModel(before, hints), state, patches, this.view?.lazy_navigation ?? lazyNavigationHint(before), navigation);
+        const beforeNavigation = this.view?.lazy_navigation ?? lazyNavigationHint(before);
+        const updates = projectedStateUpdates(this.view?.state ?? projectStateForModel(before, hints), state, patches, beforeNavigation, navigation);
+        // Suppress direct writes only when the accepted effective value matches.
+        // Overlap stays conservative except for explicit top-scope replacements:
+        // Session scalars/arrays mask every lower-scope value at that path.
+        const leaves = [];
+        const objects = [];
+        const known = (path) => {
+            let value = this.view?.state;
+            for (const part of path) {
+                if (value === undefined || value === null || typeof value !== "object" || !Object.hasOwn(value, part))
+                    return undefined;
+                value = value[part];
+            }
+            return value;
+        };
+        const visit = (scope, value, path) => {
+            if (isObject(value) && Object.keys(value).length > 0) {
+                // Diff may coalesce a newly created/replaced object at this path.
+                // Keep its authored value without widening the overlap frontier.
+                objects.push({ scope, path, value });
+                const basis = known(path);
+                const entries = Object.entries(value);
+                const indexed = Array.isArray(basis) && entries.every(([key]) => {
+                    if (!/^\[(0|[1-9]\d*)\]$/.test(key))
+                        return false;
+                    const index = Number(key.slice(1, -1));
+                    return Number.isSafeInteger(index) && index < basis.length;
+                });
+                for (const [key, child] of entries)
+                    visit(scope, child, [...path, indexed ? Number(key.slice(1, -1)) : key]);
+            }
+            else
+                leaves.push({ scope, path, value });
+        };
+        for (const scope of ["global", "cwd", "session"])
+            for (const [plane, value] of Object.entries(patches[scope] ?? {})) {
+                if (plane === "lazy")
+                    continue;
+                if (plane === "artifacts" && isObject(value)) {
+                    for (const [path, card] of Object.entries(value))
+                        leaves.push({ scope, path: ["artifacts", path], value: card, artifact: true });
+                }
+                else
+                    visit(scope, value, [plane]);
+            }
+        const prefix = (a, b) => a.length <= b.length && a.every((part, index) => part === b[index]);
+        updates.effective = updates.effective.filter((entry) => {
+            const matches = ({ path }) => path.length === entry.path.length && prefix(path, entry.path);
+            const authored = leaves.findLast(matches) ?? objects.findLast(matches);
+            if (!authored)
+                return true;
+            const sessionReplacement = authored.scope === "session" && authored.value !== null && !isObject(authored.value);
+            if (!sessionReplacement && leaves.some(({ scope, path }) => scope !== authored.scope && (prefix(path, authored.path) || prefix(authored.path, path))))
+                return true;
+            if (authored.value !== null) {
+                if (authored.artifact) {
+                    // Projected authored fields merge into the communicated card. Hints
+                    // are not authored; keeping one is predictable, changing it is not.
+                    const prior = known(entry.path);
+                    const card = projectArtifactForModel(authored.value);
+                    if (!isObject(card))
+                        return true;
+                    let expected = card;
+                    if (isObject(prior)) {
+                        try {
+                            expected = applyPatch(prior, card);
+                        }
+                        catch {
+                            // Canonical acceptance already succeeded. A masked effective
+                            // array may reject an index valid in the authored scope.
+                            return true;
+                        }
+                    }
+                    return !("value" in entry && sameJson(entry.value, expected));
+                }
+                return !("value" in entry && sameJson(entry.value, authored.value));
+            }
+            // A deletion cannot predict a fallback from effective state alone. It
+            // needs no echo only when the communicated and accepted values coincide.
+            if (!this.view)
+                return true;
+            const before = known(entry.path);
+            return "value" in entry ? before === undefined || !sameJson(before, entry.value) : before !== undefined;
+        });
+        // A complete communicated key/kind catalog can predict non-deleting
+        // top-level lazy writes. Missing/over-budget catalogs, deletions and
+        // overlapping scopes cannot prove the post-patch navigation summary.
+        if (updates.lazy_navigation && this.view && (beforeNavigation.keys || !beforeNavigation.available) && navigation.keys) {
+            const expected = new Map(Object.entries(beforeNavigation.keys ?? {}));
+            let predictable = true;
+            const seen = new Set();
+            for (const scope of ["global", "cwd", "session"])
+                for (const [key, value] of Object.entries(patches[scope]?.lazy ?? {})) {
+                    if (seen.has(key) || value === null || isObject(value) && expected.get(key) === "array")
+                        predictable = false;
+                    seen.add(key);
+                    if (value !== null)
+                        expected.set(key, lazyValueKind(value));
+                }
+            if (predictable && seen.size > 0 && sameJson(Object.fromEntries(expected), navigation.keys))
+                delete updates.lazy_navigation;
+        }
         if (this.view)
             this.view = { ...this.view, state, lazy_navigation: navigation };
-        return { projection: this.identity, ...updates };
+        return updates.effective.length || updates.lazy_navigation ? { projection: this.identity, ...updates } : undefined;
     }
     project(messages, current, makeHead, initial) {
         const identities = messages.map((message) => JSON.stringify([message.role, message.timestamp,

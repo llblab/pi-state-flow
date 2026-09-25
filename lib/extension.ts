@@ -809,7 +809,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 						: "\nState already current.";
 					return { content: [
 						{ type: "text" as const, text: acknowledgement },
-						{ type: "text" as const, text: `\n${presentationJson({ state_updates: updates })}` },
+						...(updates ? [{ type: "text" as const, text: `\n${presentationJson({ state_updates: updates })}` }] : []),
 					], details: { scopes, step: snapshot.meta.step, changed } };
 				}, signal);
 			} catch (error) {
