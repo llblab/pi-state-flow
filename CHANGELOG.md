@@ -2,6 +2,15 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## Unreleased
+
+## 0.22.0: Sparse State and Session Modes
+
+- `Sparse semantic memory`: Checkpoints and retained patches may omit documented planes. Readers and writers select only known top-level fields while preserving nested data, causal identities and history boundaries. Current and historical views omit absent fields and empty responses; explicit reads of absent documented fields return `null`. Reads and activation do not normalize stored bytes; malformed data and unproven authority still fail closed.
+- `Minimal updates`: Patches emit only actual known-field changes without filling absent planes. Empty and absent responses are projection-equivalent: clearing a nonempty response creates a transition, but replacing absence with an empty string does not. No-ops advance no scope revision; retained empty records retain their identities.
+- `Session-owned modes`: `/state-flow-active`, `/state-flow-passive` and `/state-flow-off` replace Start/Stop. Active runs state-driven episodes; Passive (the new-session default) exposes memory tools and state context with ordinary conversation; Off exposes neither. Global `mode` affects only new sessions. Inactive choices persist in Pi before semantic initialization and leave semantic revisions and existing write fences unchanged; legacy flags remain readable.
+- `Focused controls and inspection`: Terminal shows `state-flow active/passive` or hides in Off; revisions move to `/state-flow-status`, whose semantic JSON separates top-level planes. Telegram shows a lowercase mode value with four direct scope buttons and the revision vector in Effective inspection. Pending mode selections, read-only recovery and revoked receipts cannot overwrite a newer choice.
+
 ## 0.21.0: Minimal Reconciliation
 
 - `Sparse acceptance receipts`: Predictable direct/indexed writes, object replacements, disjoint scope writes, explicit Session scalar/array overrides, unchanged-effective deletions, artifact merges and complete lazy-navigation updates omit redundant semantic tails. Shared drift, changed hints, unknown fallback and ambiguous overlap still reconcile; lazy bodies and provenance stay hidden. Canonical storage, revisions and lifecycle formats are unchanged.

@@ -1,6 +1,6 @@
 import { type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { type ScopeStream, type TemporalState } from "./temporal.ts";
-import type { StateScope } from "./state.ts";
+import { type StateScope } from "./state.ts";
 /** Canonical semantic sources plus runtime-owned temporal metadata. */
 export interface ScopeStreamSources {
     checkpoint: string;

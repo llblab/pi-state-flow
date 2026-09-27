@@ -9,14 +9,37 @@ function state(result: StateReadResult) {
 	return result.state;
 }
 
+test("optimistic views omit absent and unknown planes across scopes and history, with null for absent value reads", () => {
+	let view = createTemporalState({ global: { extra: { ignored: null } }, cwd: {}, session: { response: "" } }, "empty");
+	assert.deepEqual(readProjectedState(view, ["effective"]), { value: {} });
+	assert.deepEqual(readProjectedState(view, ["effective"], "keys"), { meta: { type: "object", size: 0 }, keys: {} });
+	assert.deepEqual(readProjectedState(view, ["session.response", "cwd.lazy", "global.intents"]), { value: [null, null, null] });
+	view = advanceTemporalState(view, [
+		{ scope: "global", patch: { working: { shared: true }, extra: { ignored: [1] } } },
+		{ scope: "session", patch: { response: "Answer" } },
+	], "answer");
+	view = advanceTemporalState(view, [{ scope: "session", patch: { response: "", surplus: "ignored" } }], "empty-answer");
+	const before = structuredClone(view);
+	assert.deepEqual(readProjectedState(view, ["effective"]), { value: { working: { shared: true } } });
+	assert.deepEqual(readProjectedState(view, ["session.response"]), { value: null });
+	assert.deepEqual(readProjectedState(view, ["session[1].response"]), { value: "Answer" });
+	assert.deepEqual(readProjectedState(view, ["effective[2]"]), { value: {} });
+	assert.deepEqual(readProjectedState(view, ["effective.response"], "patch"), { patch: null });
+	const tail = readStatePath(view, "session.patches");
+	assert.ok("patch" in tail);
+	assert.deepEqual(tail.patch, { response: null });
+	assert.throws(() => readProjectedState(view, ["global.extra"]), /does not exist/);
+	assert.deepEqual(view, before, "projection must not normalize or delete stored semantics");
+});
+
 test("current-as-zero projection roots resolve state on the shared causal lineage", () => {
 	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "T0");
 	view = advanceTemporalState(view, [{ scope: "global", patch: { working: { value: "G1" } } }], "T1");
 	view = advanceTemporalState(view, [{ scope: "session", patch: { working: { value: "S2" } } }], "T2");
 	assert.deepEqual(state(readStatePath(view, "effective")), state(readStatePath(view, "effective[0]")));
 	assert.deepEqual(state(readStatePath(view, "global")), state(readStatePath(view, "global[0]")));
-	assert.equal(state(readStatePath(view, "effective")).working.value, "S2");
-	assert.equal(state(readStatePath(view, "global[1]")).working.value, "G1");
+	assert.equal(state(readStatePath(view, "effective")).working!.value, "S2");
+	assert.equal(state(readStatePath(view, "global[1]")).working!.value, "G1");
 	assert.deepEqual(state(readStatePath(view, "session[1]")).working, {});
 });
 

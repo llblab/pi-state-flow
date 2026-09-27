@@ -56,7 +56,7 @@ In that baseline, Stop handoff already reused a frozen message, unlike active an
 
 ### Frozen-head measurement
 
-The implemented projection freezes whole heads, including timestamps, and delivers accepted values and changing notices at stable tail positions. Active completion/new runs, native compaction/selection and Start/Stop are cache boundaries; passive user turns and patches are not. Volatile projection IDs distinguish current updates from retained results after a rebase. See [projection semantics](architecture.md#pi-lifecycle) for ownership and limits.
+The implemented projection freezes whole heads, including timestamps, and delivers accepted values and changing notices at stable tail positions. Active completion/new runs, native compaction/selection and mode changes are cache boundaries; passive user turns and patches are not. Volatile projection IDs distinguish current updates from retained results after a rebase. See [projection semantics](architecture.md#pi-lifecycle) for ownership and limits.
 
 The identical trajectory workload (`1785e73e4992c3d986d2851f2d81963c0b0cfde8ceacfd4337659ebc9d1492ba`) on the same Node/Pi stack measured runtime SHA-256 `d2c424a52d55b0c1ca47a8b1a1beba9c0dda665c8f024d6aa3b6ad95af9d3b46`, with unchanged base commit and uncommitted implementation changes. Both source identities remained stable; all native workload assertions passed. Local report: `/tmp/state-flow-prefix-after.json`.
 

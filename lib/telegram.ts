@@ -4,6 +4,7 @@
 // pi-telegram is absent or its registry is not ready, registration fails open and retries.
 
 import { conciseDiagnostic, diagnosticText } from "./protocol.ts";
+import type { StateFlowMode } from "./snapshot.ts";
 import { formatScopeRevisionVector } from "./status.ts";
 import type { ScopeRevisions } from "./temporal.ts";
 
@@ -18,7 +19,8 @@ export function stateFlowTelegramSectionSpecifiers(moduleUrl = import.meta.url):
 }
 
 export interface StateFlowTelegramSnapshot {
-	enabled: boolean;
+	/** The current session's selected mode. */
+	mode: StateFlowMode;
 	/** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
 	step: number;
 	revisions?: ScopeRevisions;
@@ -29,11 +31,11 @@ export interface StateFlowTelegramSnapshot {
 export type StateFlowTelegramScope = "global" | "cwd" | "session" | "effective";
 
 export interface StateFlowTelegramState {
-	artifacts: Record<string, unknown>;
-	contract: Record<string, unknown>;
-	working: Record<string, unknown>;
-	intents: Record<string, unknown>;
-	response: string;
+	artifacts?: Record<string, unknown>;
+	contract?: Record<string, unknown>;
+	working?: Record<string, unknown>;
+	intents?: Record<string, unknown>;
+	response?: string;
 	lazy?: unknown;
 }
 
@@ -110,17 +112,17 @@ export interface StateFlowTelegramPort {
 	state(scope: StateFlowTelegramScope): StateFlowTelegramState;
 	/** Optional additive capability; absent legacy ports retain their branch-step presentation. */
 	revisions?(): ScopeRevisions;
+	/** Active may need a settled native boundary; inactive modes apply immediately. */
 	canStartNow(): boolean;
-	start(): StateFlowTelegramControlResult;
-	stop(): StateFlowTelegramControlResult;
+	/** Select the current session's mode through the same lifecycle owners as the terminal commands. */
+	select(mode: StateFlowMode): StateFlowTelegramControlResult;
 	deferStart(): void;
 	cancelStart(): void;
 }
 
-export interface StateFlowTelegramInspectionPort extends Omit<StateFlowTelegramPort, "state" | "revisions" | "start" | "stop"> {
+export interface StateFlowTelegramInspectionPort extends Omit<StateFlowTelegramPort, "state" | "revisions" | "select"> {
 	inspect(scope: StateFlowTelegramScope): StateFlowTelegramInspection | Promise<StateFlowTelegramInspection>;
-	start(): StateFlowTelegramControlResult | Promise<StateFlowTelegramControlResult>;
-	stop(): StateFlowTelegramControlResult | Promise<StateFlowTelegramControlResult>;
+	select(mode: StateFlowMode): StateFlowTelegramControlResult | Promise<StateFlowTelegramControlResult>;
 }
 
 export interface StateFlowTelegramAdapter {
@@ -128,41 +130,52 @@ export interface StateFlowTelegramAdapter {
 	dispose(): void;
 }
 
-/** Main-menu section label doubles as the live status value: the spiral identity is constant, the value is not. */
+/** Main-menu section label shows only the current session mode. */
 export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string {
-	if (!snapshot.enabled) return "🌀 State Flow: off";
-	return `🌀 State Flow: ${snapshot.revisions ? formatScopeRevisionVector(snapshot.revisions) : `#${snapshot.step}`}`;
+	return `🌀 State Flow: ${snapshot.mode}`;
 }
 
-/** Shared live value: plain in the button label, monospaced in the submenu state line. */
-function stateFlowLabelValue(snapshot: StateFlowTelegramSnapshot): string {
-	if (!snapshot.enabled) return "off";
-	return snapshot.revisions ? formatScopeRevisionVector(snapshot.revisions) : `#${snapshot.step}`;
+/** Match pi-telegram's settings-card value descriptions. */
+const STATE_FLOW_SECTION_HELP = [
+	"<code>-</code> <code>off</code>: no memory tools or state bootstrap.",
+	"<code>-</code> <code>passive</code> (default): memory tools and context with ordinary conversation.",
+	"<code>-</code> <code>active</code>: state-driven episodes.",
+].join("\n");
+
+export const STATE_FLOW_MODES = ["off", "passive", "active"] as const satisfies readonly StateFlowMode[];
+
+function isStateFlowModeAction(value: string): value is StateFlowMode {
+	return (STATE_FLOW_MODES as readonly string[]).includes(value);
 }
 
-/** Submenu state line: the same identity as the button label, with the live value in monospace. */
-function formatStateFlowSectionHeader(snapshot: StateFlowTelegramSnapshot): string {
-	return `<b>🌀 State Flow: <code>${stateFlowLabelValue(snapshot)}</code></b>`;
+function modeReceiptNotice(mode: StateFlowMode, result: StateFlowTelegramControlResult): string | undefined {
+	if (result.ok && (result.message === `State Flow ${mode}` || result.message === `State Flow is already ${mode}`)) return undefined;
+	return result.message;
 }
 
-/** Short help under the state line: what State Flow is and why its action button exists. */
-const STATE_FLOW_SECTION_HELP =
-	"Accepted memory remains visible in active and passive modes. Start or Stop changes episode behavior, not state access.";
-
-/** The submenu header repeats the button's state line; the single action matches the current state. */
+/** Compact option values followed directly by read-only scope actions. */
 export function buildStateFlowSectionView(
 	snapshot: StateFlowTelegramSnapshot,
-	callbackData: (action: string) => string,
+	callbackData: (action: string, payload?: string) => string,
 ): StateFlowTelegramView {
-	const action: StateFlowTelegramButton = snapshot.enabled
-		? { text: "⏹ Stop", callback_data: callbackData("stop") }
-		: { text: "▶️ Start", callback_data: callbackData("start") };
+	const modes: StateFlowTelegramButton[] = STATE_FLOW_MODES.map((mode) => ({
+		text: `${mode === snapshot.mode ? "🟢 " : ""}${mode}`,
+		callback_data: callbackData(mode),
+	}));
 	return {
-		text: [formatStateFlowSectionHeader(snapshot), "", STATE_FLOW_SECTION_HELP].join("\n"),
+		text: [
+			`<b>🌀 State Flow:</b> <code>${snapshot.mode}</code>`,
+			"",
+			"Choose how this session uses State Flow memory and context. Switching modes never erases stored memory.",
+			"",
+			STATE_FLOW_SECTION_HELP,
+		].join("\n"),
 		parseMode: "html",
 		replyMarkup: { inline_keyboard: [
-			[action],
-			[{ text: "👁 Show state", callback_data: callbackData("show-state") }],
+			modes,
+			...([["global", "cwd"], ["session", "effective"]] as const).map((row) => row.map((scope) => ({
+				text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope),
+			}))),
 		] },
 	};
 }
@@ -173,18 +186,6 @@ const STATE_FLOW_SCOPE_LABELS: Record<StateFlowTelegramScope, string> = {
 	session: "💬 Session",
 	effective: "🧬 Effective",
 };
-
-export function buildStateFlowScopeChooser(callbackData: (action: string, payload?: string) => string): StateFlowTelegramView {
-	return {
-		text: "<b>👁 Show state:</b>",
-		parseMode: "html",
-		replyMarkup: { inline_keyboard: [
-			...(["global", "cwd", "session", "effective"] as const).map((scope) => [
-				{ text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope) },
-			]),
-		] },
-	};
-}
 
 // The complete message serializes each preformatted field one additional time;
 // 3,000 leaves safe headroom for worst-case JSON escaping across all four fields.
@@ -230,10 +231,10 @@ export function renderStateFlowRichState(scope: StateFlowTelegramScope, revision
 				text: [`${STATE_FLOW_SCOPE_LABELS[scope]}: `, { type: "code", text: revision }],
 				size: 3,
 			},
-			...fields.map((field) => ({
+			...fields.filter((field) => state[field] !== undefined && state[field] !== "").map((field) => ({
 				type: "details" as const,
 				summary: { type: "code" as const, text: field },
-				blocks: [{ type: "pre" as const, language: "json", text: renderStateFlowTelegramField(state[field] ?? {}) }],
+				blocks: [{ type: "pre" as const, language: "json", text: renderStateFlowTelegramField(state[field]) }],
 			})),
 		],
 		skip_entity_detection: true,
@@ -251,19 +252,15 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort | StateFlowTe
 		label: "🌀 State Flow",
 		getLabel: () => formatStateFlowSectionLabel(port.snapshot()),
 		render: (ctx: StateFlowTelegramSectionContext) =>
-			buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action)),
+			buildStateFlowSectionView(port.snapshot(), (action, payload) => ctx.callbackData(action, payload)),
 		handleCallback: async (ctx: StateFlowTelegramCallbackContext) => {
-			// cancel/refresh remain routable for keyboards sent by earlier versions.
-			if (ctx.action !== "start" && ctx.action !== "stop" && ctx.action !== "cancel" && ctx.action !== "refresh" && ctx.action !== "show-state" && ctx.action !== "inspect" && ctx.action !== "back") return "pass" as const;
+			// Keyboards sent by earlier versions re-render (start/stop/refresh) or withdraw deferral (cancel); they change no mode.
+			const legacy = ctx.action === "start" || ctx.action === "stop" || ctx.action === "cancel" || ctx.action === "refresh";
+			if (!isStateFlowModeAction(ctx.action) && !legacy && ctx.action !== "show-state" && ctx.action !== "inspect" && ctx.action !== "back") return "pass" as const;
 			const request = ++interaction;
 			let notice: string | undefined;
 			let acknowledged = false;
 			try {
-				if (ctx.action === "show-state") {
-					await ctx.answerCallback();
-					await ctx.edit(buildStateFlowScopeChooser((action, payload) => ctx.callbackData(action, payload)));
-					return "handled" as const;
-				}
 				if (ctx.action === "inspect") {
 					if (!isStateFlowTelegramScope(ctx.payload)) throw new Error("Unknown State Flow scope");
 					let observation: StateFlowTelegramInspection;
@@ -282,21 +279,21 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort | StateFlowTe
 					if (!acknowledged) await ctx.answerCallback();
 					return "handled" as const;
 				}
-				const action = ctx.action === "stop" || (ctx.action === "start" && port.canStartNow()) ? ctx.action : undefined;
-				if (action) {
+				const mode = isStateFlowModeAction(ctx.action) && (ctx.action !== "active" || port.canStartNow()) ? ctx.action : undefined;
+				if (mode) {
 					if ("inspect" in port) {
 						acknowledged = true;
-						// Start the control immediately and acknowledge in parallel; neither promise can reject unobserved.
+						// Apply the control immediately and acknowledge in parallel; neither promise can reject unobserved.
 						const [, result] = await Promise.all([
-							ctx.answerCallback(action === "stop" ? "Stopping State Flow" : "Starting State Flow"),
-							Promise.resolve().then(() => port[action]()),
+							ctx.answerCallback(`Switching State Flow to ${mode}`),
+							Promise.resolve().then(() => port.select(mode)),
 						]);
 						if (result.signal?.aborted) return "handled" as const;
-						notice = result.message;
-					} else notice = port[action]().message;
-				} else if (ctx.action === "start") {
+						notice = modeReceiptNotice(mode, result);
+					} else notice = modeReceiptNotice(mode, port.select(mode));
+				} else if (ctx.action === "active") {
 					port.deferStart();
-					notice = "State Flow will start after the current turn";
+					notice = "State Flow will become active after the current turn";
 				} else if (ctx.action === "cancel") {
 					port.cancelStart();
 					notice = "Pending start cancelled";
@@ -306,7 +303,7 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort | StateFlowTe
 			}
 			if (request !== interaction || !isActive()) return "handled" as const;
 			const summary = notice === undefined ? undefined : conciseDiagnostic(notice, 200);
-			const view = buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action));
+			const view = buildStateFlowSectionView(port.snapshot(), (action, payload) => ctx.callbackData(action, payload));
 			if (acknowledged && summary !== undefined) {
 				// Callback queries can expire during storage waits; retain errors in the existing menu instead.
 				view.text += `\n\n${summary.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}`;

@@ -7,11 +7,11 @@ import { isAbsolute, join, resolve } from "node:path";
 import { ArtifactReadTracker } from "./acquisition.js";
 import { classifyArtifactCompilationNeed, inspectRegisteredArtifactPaths, ORDINARY_ARTIFACT_COMPILER, sameArtifactSourceFingerprint, } from "./artifact.js";
 import { hasCompactionSizedTranscript, planStateFlowCompaction, shouldRequestStateFlowCompaction, stateFlowCompactionResult } from "./compaction.js";
-import { loadStateFlowConfig } from "./config.js";
+import { inactiveModeFor, loadStateFlowConfig } from "./config.js";
 import { ContextProjection, contextView, createPassiveContinuation, currentRunTrajectory, passiveContinuationMessages, projectSystemProtocol, runtimeContextHead, syntheticUser } from "./context.js";
 import { readNativeSessionHeader } from "./continuation.js";
 import { cwdScopeKey, resolveSessionAddress, sessionScopeKey, } from "./durable.js";
-import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "./episode.js";
+import { completeRun, deactivateEpisode, prepareRun, resumeEpisode, startEpisode } from "./episode.js";
 import { awaitInFlightBackupPushes, backupCurrentStateFlowFiles, startStateFlowBackupPush } from "./git.js";
 import { projectRecentTransitionsWithLimit } from "./history.js";
 import { isObject, presentationJson, sameJson } from "./json.js";
@@ -22,8 +22,8 @@ import { selectedBoundaryFailure, selectRetainedCheckpoint, waitForRecovery } fr
 import { TemporalRuntime } from "./runtime.js";
 import { discoverSnapshotData, findAssistantToolBatch, findPassiveStopBoundary, hasPriorConversation, hasUncheckpointedConversation, isNewSession, retainsPhysicalSessionProjection, SNAPSHOT_ENTRY_TYPE } from "./session.js";
 import { hasCompiledSkillArtifact, hashSkillSource, registeredSkillResolver, SkillReadTracker } from "./skills.js";
-import { HistoryBoundaryExpiredError, emptySnapshot, migrationFailure } from "./snapshot.js";
-import { emptyState, overlayStates, projectStateForModel } from "./state.js";
+import { HistoryBoundaryExpiredError, emptySnapshot, migrationFailure, preRuntimeCheckpoint } from "./snapshot.js";
+import { emptyState, projectStateForModel } from "./state.js";
 import { compactStatus, detailedStatus, STATUS_KEY } from "./status.js";
 import { PublicationBusyError } from "./storage.js";
 import { createStateFlowTelegramAdapter } from "./telegram.js";
@@ -36,17 +36,16 @@ const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 export default function stateFlowExtension(pi, options = {}) {
     const agentDir = options.agentDir ?? getAgentDir();
     const loadedConfig = loadStateFlowConfig(agentDir, options.repositoryRoot);
-    const config = {
-        ...loadedConfig,
-        passiveBootstrap: options.passive?.bootstrap ?? loadedConfig.passiveBootstrap,
-        passiveTools: options.passive?.tools ?? loadedConfig.passiveTools,
-    };
-    let snapshot = emptySnapshot();
+    const config = options.mode === undefined ? loadedConfig
+        : { ...loadedConfig, mode: options.mode, inactiveMode: inactiveModeFor(options.mode) };
+    let snapshot = emptySnapshot(config.inactiveMode);
     let scopeStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
+    let effectiveState = {};
     let branchStartsWithoutRuntime = false;
     let selectedHistoryExpired = false;
-    let stopPersistenceError;
-    let stopPersistence;
+    let modePersistenceError;
+    /** One pending inactive-mode persistence; later inactive choices coalesce until it publishes. */
+    let inactivePersistence;
     let startActivation;
     let forkInitialization = false;
     let branchRestoration;
@@ -113,18 +112,26 @@ export default function stateFlowExtension(pi, options = {}) {
                 assertSelectedBranchAvailable();
             if (!runtime)
                 throw new Error("State Flow temporal runtime is unavailable");
-            return projectModelState(runtime.read(offset, scope));
+            const { lazy: _lazy, ...defaults } = emptyState();
+            return { ...defaults, ...projectModelState(runtime.readView(offset, scope)) };
         } });
     function assertPublicationAvailable() {
         assertSelectedBranchAvailable();
-        if (stopPersistenceError)
-            throw new Error(`Memory writes paused after Stop: ${stopPersistenceError}; use /state-flow-start`);
+        if (modePersistenceError)
+            throw new Error(`Memory writes paused after mode change: ${modePersistenceError}; use /state-flow-active`);
+    }
+    function isActive() {
+        return snapshot.config.mode === "active";
+    }
+    /** An unavailable or pending active selection keeps the configured inactive policy, never an invented one. */
+    function inactiveSelection(mode) {
+        return mode === "active" ? config.inactiveMode : mode;
     }
     function appendCheckpoint() {
-        const checkpoint = branchStartsWithoutRuntime ? { disabled: true } : runtime?.retainedCheckpoint(snapshot) ?? { disabled: true };
-        if ("disabled" in checkpoint && !branchStartsWithoutRuntime) {
-            throw new Error("State Flow cannot checkpoint an unproven branch as ordinary disabled; restore a valid checkpoint first");
-        }
+        const checkpoint = branchStartsWithoutRuntime ? preRuntimeCheckpoint(snapshot.config.mode)
+            : runtime?.view ? runtime.retainedCheckpoint(snapshot) : undefined;
+        if (!checkpoint)
+            throw new Error("State Flow cannot checkpoint an unproven branch; restore a valid checkpoint first");
         pi.appendEntry(SNAPSHOT_ENTRY_TYPE, checkpoint);
         if ("boundary" in checkpoint)
             branchStartsWithoutRuntime = false;
@@ -137,10 +144,10 @@ export default function stateFlowExtension(pi, options = {}) {
     function updateUi(ctx) {
         ctx.ui.setStatus(STATUS_KEY, compactStatus(snapshot, scopeRevisions(), (color, text) => ctx.ui.theme.fg(color, text)));
     }
-    function cancelStopPersistence() {
-        const pending = stopPersistence;
+    function cancelInactivePersistence() {
+        const pending = inactivePersistence;
         pending?.controller.abort();
-        stopPersistence = undefined;
+        inactivePersistence = undefined;
         return pending?.operation;
     }
     function cancelStartActivation() {
@@ -223,7 +230,7 @@ export default function stateFlowExtension(pi, options = {}) {
     function missingArtifactRemovals(states) {
         const owners = new Map();
         for (const scope of ["global", "cwd", "session"])
-            for (const path of Object.keys(states[scope].artifacts)) {
+            for (const path of Object.keys(states[scope].artifacts ?? {})) {
                 owners.set(path, [...owners.get(path) ?? [], scope]);
             }
         const removals = {};
@@ -239,9 +246,15 @@ export default function stateFlowExtension(pi, options = {}) {
     }
     function installScopeStates() {
         scopeStates = runtime?.view ? runtime.states() : { global: emptyState(), cwd: emptyState(), session: emptyState() };
+        effectiveState = runtime?.view ? runtime.readView() : {};
     }
-    function passiveToolsAvailable() {
-        return snapshot.config.enabled || config.passiveTools;
+    /** Active and passive expose both memory tools; Off exposes neither. */
+    function memoryToolsAvailable() {
+        return snapshot.config.mode !== "off";
+    }
+    /** Passive memory context needs a loaded view; Off and Active never inject it. */
+    function passiveMemoryAvailable() {
+        return snapshot.config.mode === "passive" && runtime?.view !== undefined;
     }
     async function inspectTelegramState(scope) {
         if (!activeContext || shuttingDown)
@@ -250,7 +263,7 @@ export default function stateFlowExtension(pi, options = {}) {
             assertSelectedBranchAvailable();
         const selected = runtime ??= createRuntime(activeContext);
         const signal = sharedInspectionLifetime.signal;
-        if (!selected.view || (scope !== "session" && !stopPersistenceError))
+        if (!selected.view || (scope !== "session" && !modePersistenceError))
             await selected.refreshShared(signal);
         signal.throwIfAborted();
         if (runtime !== selected)
@@ -260,15 +273,13 @@ export default function stateFlowExtension(pi, options = {}) {
         if (!selected.view)
             throw new Error("State Flow temporal runtime is unavailable");
         installScopeStates();
-        const state = scope === "effective"
-            ? overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)
-            : scopeStates[scope];
-        return { state: { ...projectModelState(state), lazy: structuredClone(state.lazy) }, revisions: scopeRevisions(), signal };
+        const state = scope === "effective" ? effectiveState : selected.readView(0, scope);
+        return { state: { ...projectModelState(state), ...(state.lazy === undefined ? {} : { lazy: structuredClone(state.lazy) }) }, revisions: scopeRevisions(), signal };
     }
     function syncStateFlowTools() {
         const active = pi.getActiveTools();
         const owned = [PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME];
-        const available = passiveToolsAvailable();
+        const available = memoryToolsAvailable();
         if (owned.every((name) => active.includes(name) === available))
             return;
         pi.setActiveTools(available
@@ -313,7 +324,7 @@ export default function stateFlowExtension(pi, options = {}) {
                 throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
             await selected.withPatchTransaction((transaction) => {
                 signal.throwIfAborted();
-                if (runtime !== selected || inferencePreparation !== pending || !snapshot.config.enabled || shuttingDown) {
+                if (runtime !== selected || inferencePreparation !== pending || !isActive() || shuttingDown) {
                     throw new Error("State Flow inference selection changed while awaiting publication");
                 }
                 assertPublicationAvailable();
@@ -379,6 +390,7 @@ export default function stateFlowExtension(pi, options = {}) {
             cwdScopeKey: cwdScopeKey(cwd),
             sessionScopeKey: sessionScopeKey(session.key),
             scopeStates: diagnosticStates,
+            effectiveState,
             recent: diagnosticRecent,
             historyLimit: config.historyLimit,
             ...(view === undefined ? {} : { temporal: {
@@ -389,7 +401,7 @@ export default function stateFlowExtension(pi, options = {}) {
                 } }),
             staleArtifacts,
             ...(durableStateError === undefined ? {} : { durableStateError }),
-            ...(stopPersistenceError === undefined ? {} : { publicationError: stopPersistenceError }),
+            ...(modePersistenceError === undefined ? {} : { publicationError: modePersistenceError }),
         };
     }
     function forkSource(ctx) {
@@ -408,7 +420,7 @@ export default function stateFlowExtension(pi, options = {}) {
         // Start-owned attachment/fork recovery keeps its owner; only accepted Start cancels Stop.
         if (!startOwner) {
             cancelStartActivation();
-            cancelStopPersistence();
+            cancelInactivePersistence();
         }
         clearRunTransient();
         passiveContinuation = undefined;
@@ -427,53 +439,66 @@ export default function stateFlowExtension(pi, options = {}) {
         try {
             const branch = ctx.sessionManager.getBranch();
             const fence = retainsPhysicalSessionProjection(sessionStartReason)
-                ? findPassiveStopBoundary(branch, ctx.sessionManager.getSessionId(), PASSIVE_STOP_ENTRY_TYPE)?.persistenceError
+                ? findPassiveStopBoundary(branch, ctx.sessionManager.getSessionId(), PASSIVE_STOP_ENTRY_TYPE)
                 : undefined;
-            stopPersistenceError = fence ?? (startOwner ? stopPersistenceError : undefined);
-            if (fence) {
-                // The native Stop owns policy only: read proven memory, never replay or publish a stale selection.
-                selection = { kind: "current" };
+            modePersistenceError = fence?.persistenceError ?? (startOwner ? modePersistenceError : undefined);
+            if (fence?.persistenceError) {
+                // The native marker owns policy only: read proven memory, never replay or publish a stale selection.
+                selection = { kind: "current", mode: fence.mode ?? config.inactiveMode };
             }
             else {
                 const discovery = discoverSnapshotData(branch);
-                const selected = selectRetainedCheckpoint(discovery.candidates);
+                const selected = selectRetainedCheckpoint(discovery.candidates, config.inactiveMode);
                 skipped = discovery.errors.length + selected.skipped.length;
-                branchStartsWithoutRuntime = selected.kind === "disabled" || (discovery.candidates.length === 0 && discovery.errors.length === 0);
+                branchStartsWithoutRuntime = selected.kind === "pre-runtime" || (discovery.candidates.length === 0 && discovery.errors.length === 0);
                 if (discovery.candidates.length === 0 && discovery.errors.length > 0) {
-                    snapshot = migrationFailure({}, `Snapshot restoration failed: ${discovery.errors[0]}`);
+                    snapshot = migrationFailure({}, `Snapshot restoration failed: ${discovery.errors[0]}`, config.inactiveMode);
                 }
                 else if (selected.kind === "boundary" && forkInitialization) {
                     try {
                         // Native parent acquisition stays outside canonical exclusion.
                         const source = forkSource(ctx);
-                        const sourceStopped = findPassiveStopBoundary(branch, source.id, PASSIVE_STOP_ENTRY_TYPE)?.persistenceError !== undefined;
-                        selection = { kind: "fork", source, checkpoint: sourceStopped ? { ...selected.checkpoint, enabled: false } : selected.checkpoint };
+                        const sourceFence = findPassiveStopBoundary(branch, source.id, PASSIVE_STOP_ENTRY_TYPE);
+                        selection = { kind: "fork", source, checkpoint: sourceFence?.persistenceError !== undefined
+                                ? { ...selected.checkpoint, mode: sourceFence.mode ?? config.inactiveMode } : selected.checkpoint };
                     }
                     catch (error) {
-                        snapshot = selectedBoundaryFailure(diagnosticText(error));
+                        snapshot = selectedBoundaryFailure(diagnosticText(error), inactiveSelection(selected.checkpoint.mode));
                     }
                 }
                 else if (selected.kind === "boundary") {
                     selection = { kind: "restore", checkpoint: selected.checkpoint };
                 }
-                else if (discovery.candidates.length > 0) {
-                    snapshot = selected.kind === "disabled" ? emptySnapshot() : selected.snapshot;
+                else if (selected.kind === "pre-runtime") {
+                    snapshot = emptySnapshot(selected.mode);
                 }
-                else if (config.autoStart && isNewSession(sessionStartReason, branch)) {
-                    selection = { kind: "auto-start" };
+                else if (discovery.candidates.length > 0) {
+                    snapshot = selected.snapshot;
+                }
+                else if (isNewSession(sessionStartReason, branch)) {
+                    // The repository mode is only a default for genuinely new sessions.
+                    if (config.mode === "active")
+                        selection = { kind: "auto-start" };
+                    else {
+                        snapshot = emptySnapshot(config.mode);
+                        // Adopt the default once without initializing semantic storage.
+                        appendCheckpoint();
+                    }
                 }
                 else {
-                    snapshot = emptySnapshot();
+                    snapshot = emptySnapshot(config.inactiveMode);
                 }
             }
         }
         catch (error) {
             selection = { kind: "settled" };
-            snapshot = selectedBoundaryFailure(diagnosticText(error));
+            snapshot = selectedBoundaryFailure(diagnosticText(error), config.inactiveMode);
         }
         // Pending selection grants neither private reads nor publication until its acceptance installs memory.
-        if (selection.kind !== "settled")
-            snapshot = migrationFailure({}, "State Flow branch restoration is pending");
+        if (selection.kind !== "settled") {
+            snapshot = migrationFailure({}, "State Flow branch restoration is pending", selection.kind === "current" ? selection.mode
+                : selection.kind === "auto-start" ? config.inactiveMode : inactiveSelection(selection.checkpoint.mode));
+        }
         const pending = {
             controller: new AbortController(),
             awaitingAcceptance: selection.kind !== "settled" && selection.kind !== "current",
@@ -534,17 +559,18 @@ export default function stateFlowExtension(pi, options = {}) {
                         assertCurrent();
                         if (current)
                             runtime = selected = candidate;
-                        snapshot = current ?? migrationFailure({}, "Current State Flow session memory is unavailable");
+                        snapshot = current ? deactivateEpisode(current, pending.requestedMode ?? selection.mode)
+                            : migrationFailure({}, "Current State Flow session memory is unavailable", pending.requestedMode ?? selection.mode);
                         installScopeStates();
                     }
                     else if (selection.kind === "restore") {
                         await candidate.withRestoreTransaction(selection.checkpoint, (restored, publish) => {
                             assertCurrent();
                             // Canceled preparation or boundary continuation may have no specification. Retain uncompiled native context.
-                            if (restored.config.enabled && restored.meta.specification === undefined
+                            if (restored.config.mode === "active" && restored.meta.specification === undefined
                                 && retainsPhysicalSessionProjection(reason) && hasUncheckpointedConversation(ctx.sessionManager.getBranch()))
                                 restored.meta.bootstrap = true;
-                            const next = pending.passiveRequested ? stopEpisode(restored) : restored;
+                            const next = pending.requestedMode ? deactivateEpisode(restored, pending.requestedMode) : restored;
                             accept(candidate, next, publish(next), appendCheckpoint);
                         }, signal);
                     }
@@ -552,7 +578,7 @@ export default function stateFlowExtension(pi, options = {}) {
                         await candidate.withForkTransaction(selection.source, selection.checkpoint, (child, publish) => {
                             assertCurrent();
                             // Mode is selected independently of creating the child's private memory.
-                            const next = pending.passiveRequested ? stopEpisode(child) : child;
+                            const next = pending.requestedMode ? deactivateEpisode(child, pending.requestedMode) : child;
                             const publication = publish(next);
                             forkInitialization = false;
                             accept(candidate, next, publication, () => {
@@ -570,7 +596,7 @@ export default function stateFlowExtension(pi, options = {}) {
                             if (current || discovery.candidates.length > 0 || discovery.errors.length > 0)
                                 throw new Error("Existing session runtime requires retained-boundary restoration");
                             const activated = startEpisode(hasPriorConversation(branch));
-                            const next = pending.passiveRequested ? stopEpisode(activated) : activated;
+                            const next = pending.requestedMode ? deactivateEpisode(activated, pending.requestedMode) : activated;
                             accept(candidate, next, publish(next), appendCheckpoint);
                         }, signal, true);
                     }
@@ -585,7 +611,7 @@ export default function stateFlowExtension(pi, options = {}) {
                         return;
                     if (error instanceof HistoryBoundaryExpiredError)
                         selectedHistoryExpired = true;
-                    snapshot = selectedBoundaryFailure(diagnosticText(error));
+                    snapshot = selectedBoundaryFailure(diagnosticText(error), snapshot.config.mode === "active" ? config.inactiveMode : snapshot.config.mode);
                     installScopeStates();
                 }
                 finally {
@@ -595,21 +621,14 @@ export default function stateFlowExtension(pi, options = {}) {
                     return;
             }
             settleSelection(ctx, reason, notifyRecovery, skipped, selected !== placeholder);
-            if (snapshot.config.enabled || !(config.passiveBootstrap || config.passiveTools) || runtime?.view)
+            if (snapshot.config.mode !== "passive" || runtime?.view)
                 return;
-            const passive = createRuntime(ctx);
-            const priorView = selected?.view;
-            try {
-                await passive.refreshShared(signal);
-            }
-            catch (error) {
-                if (isCurrent() && !signal.aborted && notifyRecovery && !stopPersistenceError)
-                    notifyProblem(ctx, `State Flow passive memory is unavailable: ${diagnosticText(error)}`, "warning");
+            const passive = await loadPassiveView(ctx, signal, isCurrent, notifyRecovery);
+            if (passive === undefined)
                 return;
-            }
             assertCurrent();
             // An intervening passive patch or inspection owns its newer cache, even on the same physical branch.
-            if (selected?.view !== priorView)
+            if (runtime?.view)
                 return;
             runtime = selected = passive;
             installScopeStates();
@@ -619,7 +638,7 @@ export default function stateFlowExtension(pi, options = {}) {
             // Host failures before acceptance leave the selection unavailable, never invented empty memory.
             if (accepted || !isCurrent())
                 return;
-            snapshot = selectedBoundaryFailure(diagnosticText(error));
+            snapshot = selectedBoundaryFailure(diagnosticText(error), snapshot.config.mode === "active" ? config.inactiveMode : snapshot.config.mode);
             installScopeStates();
         }
         finally {
@@ -628,28 +647,42 @@ export default function stateFlowExtension(pi, options = {}) {
                 branchRestoration = undefined;
         }
     }
+    /** Load current shared memory for passive projection without initializing or publishing it. */
+    async function loadPassiveView(ctx, signal, isCurrent, notify) {
+        const passive = createRuntime(ctx);
+        try {
+            await passive.refreshShared(signal);
+        }
+        catch (error) {
+            if (isCurrent() && !signal.aborted && notify && !modePersistenceError)
+                notifyProblem(ctx, `State Flow passive memory is unavailable: ${diagnosticText(error)}`, "warning");
+            return undefined;
+        }
+        return passive;
+    }
     function settleSelection(ctx, reason, notifyRecovery, skipped, selectedMemory) {
-        const failure = !snapshot.config.enabled && snapshot.meta.validation?.attempt === 0 ? snapshot.meta.validation.error : undefined;
-        if (failure !== undefined && notifyRecovery && !stopPersistenceError) {
+        const failure = !isActive() && snapshot.meta.validation?.attempt === 0 ? snapshot.meta.validation.error : undefined;
+        if (failure !== undefined && notifyRecovery && !modePersistenceError) {
             if (selectedHistoryExpired)
-                notifyProblem(ctx, "State Flow history is outside the retained temporal window; /state-flow-start can use current session memory.", "warning");
+                notifyProblem(ctx, "State Flow history is outside the retained temporal window; /state-flow-active can use current session memory.", "warning");
             else
                 notifyProblem(ctx, `State Flow restore failed: ${failure}`, "error");
         }
         if (selectedMemory && retainsPhysicalSessionProjection(reason) && runtime?.view) {
             const boundary = findPassiveStopBoundary(ctx.sessionManager.getBranch(), ctx.sessionManager.getSessionId(), PASSIVE_STOP_ENTRY_TYPE);
             if (boundary !== undefined) {
-                const continuation = createPassiveContinuation(projectModelState(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)), boundary.at, boundary.from, boundary.preserveContext);
-                if (!snapshot.config.enabled)
+                const continuation = createPassiveContinuation(projectModelState(effectiveState), boundary.at, boundary.from, boundary.preserveContext);
+                // Off retains the handoff boundary for a later Passive or Active choice but never projects it.
+                if (!isActive())
                     passiveContinuation = continuation;
                 else if (snapshot.meta.bootstrap)
                     bootstrapContinuation = continuation;
             }
         }
-        if (notifyRecovery && snapshot.config.enabled && skipped > 0) {
+        if (notifyRecovery && isActive() && skipped > 0) {
             notifyProblem(ctx, `State Flow skipped ${skipped} malformed snapshot(s); restored the last valid one.`, "warning");
         }
-        if (snapshot.config.enabled)
+        if (isActive())
             deferInferencePreparation();
         syncStateFlowTools();
         updateUi(ctx);
@@ -669,8 +702,8 @@ export default function stateFlowExtension(pi, options = {}) {
         }, { additionalProperties: false }),
         async execute(_toolCallId, params, signal) {
             try {
-                if (!passiveToolsAvailable())
-                    throw new Error("State Flow tools are disabled by configuration");
+                if (!memoryToolsAvailable())
+                    throw new Error("State Flow tools are off for this session");
                 if (signal?.aborted)
                     throw new Error("State Flow read was aborted");
                 if (!runtime?.view)
@@ -732,8 +765,8 @@ export default function stateFlowExtension(pi, options = {}) {
         },
         async execute(toolCallId, params, signal, _onUpdate, ctx) {
             try {
-                if (!passiveToolsAvailable())
-                    throw new Error("State Flow tools are disabled by configuration");
+                if (!memoryToolsAvailable())
+                    throw new Error("State Flow tools are off for this session");
                 assertPublicationAvailable();
                 if (signal?.aborted)
                     throw new Error("State Flow patch was aborted before materialization");
@@ -762,12 +795,12 @@ export default function stateFlowExtension(pi, options = {}) {
                 const selected = runtime ??= createRuntime(ctx);
                 const acquiredArtifacts = structuredClone([...artifactReads.successful.values()]);
                 const acquiredSkills = structuredClone([...skillReads.successful.values()]);
-                const previousEffective = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
+                const previousEffective = effectiveState;
                 return await selected.withPatchTransaction((transaction) => {
                     if (runtime !== selected)
                         throw new Error("State Flow session selection changed while awaiting publication");
-                    if (!passiveToolsAvailable())
-                        throw new Error("State Flow tools are disabled by configuration");
+                    if (!memoryToolsAvailable())
+                        throw new Error("State Flow tools are off for this session");
                     assertPublicationAvailable();
                     for (const acquired of acquiredArtifacts) {
                         const observation = inspectRegisteredArtifactPaths([acquired.path])[0];
@@ -792,7 +825,7 @@ export default function stateFlowExtension(pi, options = {}) {
                     }
                     clearAcceptedAcquisitions(new Set(acquiredArtifacts.map(({ path }) => path)));
                     updateUi(ctx);
-                    const updates = contextProjection.acceptPatch(previousEffective, overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session), patches, artifactHints);
+                    const updates = contextProjection.acceptPatch(previousEffective, effectiveState, patches, artifactHints);
                     const acknowledgement = changed
                         ? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
                         : "\nState already current.";
@@ -826,8 +859,8 @@ export default function stateFlowExtension(pi, options = {}) {
         if (startActivation?.operation)
             return startActivation.operation;
         telegramStartPending = false;
-        if (activeContext && !branchRestoration && snapshot.config.enabled) {
-            return Promise.resolve({ ok: true, message: "State Flow is already enabled", signal: sharedInspectionLifetime.signal });
+        if (activeContext && !branchRestoration && isActive()) {
+            return Promise.resolve({ ok: true, message: "State Flow is already active", signal: sharedInspectionLifetime.signal });
         }
         const pending = { controller: new AbortController() };
         startActivation = pending;
@@ -850,7 +883,7 @@ export default function stateFlowExtension(pi, options = {}) {
             && ctx.sessionManager.getHeader()?.timestamp === timestamp;
         const superseded = () => {
             pending.abort();
-            return { ok: false, message: "State Flow Start was superseded", signal: pending.signal };
+            return { ok: false, message: "State Flow activation was superseded", signal: pending.signal };
         };
         try {
             if (!activeContext)
@@ -859,11 +892,11 @@ export default function stateFlowExtension(pi, options = {}) {
                 await waitForRecovery(branchRestoration.operation, signal);
             if (!isOwner())
                 return superseded();
-            if (snapshot.config.enabled)
-                return { ok: true, message: "State Flow is already enabled", signal: sharedInspectionLifetime.signal };
+            if (isActive())
+                return { ok: true, message: "State Flow is already active", signal: sharedInspectionLifetime.signal };
             if (forkInitialization) {
-                // Withdraw this join on cancellation without revoking the independently owned Stop.
-                const stopping = stopPersistence?.operation;
+                // Withdraw this join on cancellation without revoking the independently owned mode persistence.
+                const stopping = inactivePersistence?.operation;
                 if (stopping)
                     await waitForRecovery(stopping, signal);
                 if (!isOwner())
@@ -878,7 +911,7 @@ export default function stateFlowExtension(pi, options = {}) {
         catch (error) {
             if (!isOwner())
                 return superseded();
-            const message = conciseDiagnostic(`State Flow Start failed: ${diagnosticText(error)}`);
+            const message = conciseDiagnostic(`State Flow activation failed: ${diagnosticText(error)}`);
             notifyProblem(ctx, message, "error");
             return { ok: false, message, signal: AbortSignal.any([pending.signal, sharedInspectionLifetime.signal]) };
         }
@@ -889,15 +922,15 @@ export default function stateFlowExtension(pi, options = {}) {
         const cwd = ctx.cwd;
         const file = ctx.sessionManager.getSessionFile();
         const timestamp = ctx.sessionManager.getHeader()?.timestamp;
-        const initiallyEnabled = snapshot.config.enabled;
+        const initiallyActive = isActive();
         let accepted = false;
         let receipt = AbortSignal.any([pending.signal, sharedInspectionLifetime.signal]);
         const isCurrent = () => startActivation?.controller === pending && runtime === selected && !shuttingDown
             && ctx.cwd === cwd && ctx.sessionManager.getSessionId() === owner && ctx.sessionManager.getSessionFile() === file
-            && ctx.sessionManager.getHeader()?.timestamp === timestamp && snapshot.config.enabled === (accepted || initiallyEnabled);
+            && ctx.sessionManager.getHeader()?.timestamp === timestamp && isActive() === (accepted || initiallyActive);
         const superseded = () => {
             pending.abort();
-            return { ok: false, message: "State Flow Start was superseded", signal: pending.signal };
+            return { ok: false, message: "State Flow activation was superseded", signal: pending.signal };
         };
         try {
             const activation = createRuntime(ctx);
@@ -905,7 +938,7 @@ export default function stateFlowExtension(pi, options = {}) {
             const result = await activation.withStartTransaction((current, publish) => {
                 signal.throwIfAborted();
                 if (!isCurrent())
-                    throw new Error("State Flow Start selection changed while awaiting publication");
+                    throw new Error("State Flow activation selection changed while awaiting publication");
                 if (!current && !branchStartsWithoutRuntime)
                     throw new Error(snapshot.meta.validation?.error ?? "Current State Flow session memory is unavailable");
                 const continuation = passiveContinuation ?? bootstrapContinuation;
@@ -914,12 +947,12 @@ export default function stateFlowExtension(pi, options = {}) {
                 const recoveredCurrent = selectedHistoryExpired;
                 const publication = publish(activated);
                 accepted = true;
-                cancelStopPersistence();
+                cancelInactivePersistence();
                 runtime = selected = activation;
                 snapshot = activated;
                 activeContext = ctx;
                 selectedHistoryExpired = false;
-                stopPersistenceError = undefined;
+                modePersistenceError = undefined;
                 installScopeStates();
                 clearRunTransient();
                 contextProjection.reset();
@@ -932,127 +965,176 @@ export default function stateFlowExtension(pi, options = {}) {
                 updateUi(ctx);
                 appendCheckpoint();
                 ctx.ui.notify(recoveredCurrent
-                    ? "State Flow enabled from current session memory; unavailable historical state was not restored."
+                    ? "State Flow active from current session memory; unavailable historical state was not restored."
                     : snapshot.meta.bootstrap
-                        ? "State Flow enabled. The next complete agent run will migrate active context into state."
-                        : "State Flow enabled. The next prompt starts a stateful agent run.", "info");
-                return { ok: true, message: "State Flow enabled", signal: receipt };
+                        ? "State Flow active. The next complete agent run will migrate active context into state."
+                        : "State Flow active. The next prompt starts a stateful agent run.", "info");
+                return { ok: true, message: "State Flow active", signal: receipt };
             }, signal, branchStartsWithoutRuntime);
             return isCurrent() ? result : superseded();
         }
         catch (error) {
             if (!isCurrent())
                 return superseded();
-            const message = conciseDiagnostic(`${accepted ? "State Flow enabled; lifecycle update failed" : "State Flow Start failed"}: ${diagnosticText(error)}`);
+            const message = conciseDiagnostic(`${accepted ? "State Flow active; lifecycle update failed" : "State Flow activation failed"}: ${diagnosticText(error)}`);
             notifyProblem(ctx, message, accepted ? "warning" : "error");
             return { ok: accepted, message, signal: receipt };
         }
     }
-    pi.registerCommand("state-flow-start", {
-        description: "Start State Flow mode",
-        handler: async (_args, ctx) => {
-            await startStateFlow(ctx);
-        },
-    });
+    const MODE_COMMAND_DESCRIPTIONS = {
+        active: "Make State Flow active on the current session branch",
+        passive: "Use passive State Flow memory on the current session branch",
+        off: "Turn State Flow tools and context off on the current session branch",
+    };
+    /** Terminal commands and Telegram controls share these lifecycle owners. */
+    function selectMode(ctx, mode) {
+        return mode === "active" ? startStateFlow(ctx) : deactivateStateFlow(ctx, mode);
+    }
+    for (const mode of ["active", "passive", "off"]) {
+        pi.registerCommand(`state-flow-${mode}`, {
+            description: MODE_COMMAND_DESCRIPTIONS[mode],
+            handler: async (_args, ctx) => {
+                await selectMode(ctx, mode);
+            },
+        });
+    }
     pi.registerCommand("state-flow-status", {
         description: "Show State Flow runtime status",
         handler: async (_args, ctx) => {
             ctx.ui.notify(detailedStatus(snapshot, statusDiagnostics(ctx)), "info");
         },
     });
-    function stopStateFlow(ctx) {
-        cancelStartActivation();
-        if (shuttingDown)
-            return Promise.resolve({ ok: false, message: "State Flow is shutting down" });
-        if (stopPersistence?.operation)
-            return stopPersistence.operation;
-        if (!activeContext)
-            void restoreActiveBranch(ctx, undefined, false);
-        const restoring = branchRestoration;
-        if (restoring?.awaitingAcceptance) {
-            // Stop changes policy without cancelling memory restoration or initialization.
-            restoring.passiveRequested = true;
-            snapshot = stopEpisode(snapshot);
-            clearRunTransient();
-            syncStateFlowTools();
-            updateUi(ctx);
-            return Promise.resolve({ ok: true, message: "State Flow disabled; memory restoration continues" });
-        }
-        const pending = { controller: new AbortController() };
-        stopPersistence = pending;
-        const operation = persistStoppedState(ctx, pending.controller);
-        pending.operation = operation;
-        const finished = () => { if (stopPersistence === pending)
-            stopPersistence = undefined; };
-        void operation.then(finished, finished);
-        return operation;
-    }
-    async function persistStoppedState(ctx, pending) {
-        telegramStartPending = false;
-        const selected = runtime;
-        const owner = ctx.sessionManager.getSessionId();
-        const current = snapshot;
-        let unfinished = current.meta.specification !== undefined
-            || (inferencePreparation?.prompt !== undefined && !inferencePreparation.accepted);
-        snapshot = stopEpisode(current);
+    /** Local policy, tools and UI change before any canonical wait. */
+    function applyInactiveMode(ctx, mode) {
+        snapshot = deactivateEpisode(snapshot, mode);
         clearRunTransient();
         syncStateFlowTools();
         updateUi(ctx);
-        if (stopPersistenceError)
-            return { ok: true, message: "State Flow disabled; memory writes remain paused" };
+    }
+    function deactivateStateFlow(ctx, mode) {
+        cancelStartActivation();
+        if (shuttingDown)
+            return Promise.resolve({ ok: false, message: "State Flow is shutting down" });
+        telegramStartPending = false;
+        const persisting = inactivePersistence;
+        if (persisting?.operation && !persisting.published) {
+            // Pending inactive choices coalesce: acceptance persists whichever inactive mode is current then.
+            if (snapshot.config.mode !== mode)
+                applyInactiveMode(ctx, mode);
+            return persisting.operation;
+        }
+        if (!activeContext)
+            void restoreActiveBranch(ctx, undefined, false);
+        const restoring = branchRestoration;
+        // Read-only recovery also retains the latest policy; its native write fence is updated below.
+        if (restoring)
+            restoring.requestedMode = mode;
+        if (restoring?.awaitingAcceptance) {
+            // A mode change never cancels memory restoration or initialization.
+            applyInactiveMode(ctx, mode);
+            return Promise.resolve({ ok: true, message: `State Flow ${mode}; memory restoration continues` });
+        }
+        if (snapshot.config.mode === mode) {
+            const retained = selectRetainedCheckpoint(discoverSnapshotData(ctx.sessionManager.getBranch()).candidates, config.inactiveMode);
+            const recordedMode = retained.kind === "pre-runtime" ? retained.mode : retained.kind === "boundary" ? retained.checkpoint.mode : undefined;
+            if (modePersistenceError || recordedMode === mode)
+                return Promise.resolve({ ok: true, message: `State Flow is already ${mode}` });
+        }
+        cancelInactivePersistence();
+        const pending = { controller: new AbortController() };
+        inactivePersistence = pending;
+        const operation = persistInactiveMode(ctx, pending, mode);
+        pending.operation = operation;
+        const finished = () => { if (inactivePersistence === pending)
+            inactivePersistence = undefined; };
+        void operation.then(finished, finished);
+        return operation;
+    }
+    async function persistInactiveMode(ctx, pending, mode) {
+        let selected = runtime;
+        const owner = ctx.sessionManager.getSessionId();
+        const current = snapshot;
+        const wasActive = current.config.mode === "active";
+        let unfinished = current.meta.specification !== undefined
+            || (inferencePreparation?.prompt !== undefined && !inferencePreparation.accepted);
+        applyInactiveMode(ctx, mode);
         const stoppedAt = Date.now();
+        if (modePersistenceError) {
+            // Writes stay paused; the native marker records only the newly selected inactive policy.
+            pending.published = true;
+            pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, {
+                at: passiveContinuation?.startedAt ?? stoppedAt,
+                ...(passiveContinuation?.activeRunStartedAt === undefined ? {} : { from: passiveContinuation.activeRunStartedAt }),
+                preserveContext: true, owner, persistenceError: modePersistenceError, mode,
+            });
+            return { ok: true, message: `State Flow ${mode}; memory writes remain paused` };
+        }
         const incomingBoundary = current.meta.bootstrap ? bootstrapContinuation : undefined;
         const anchor = runAnchorTimestamp;
         const idle = ctx.isIdle();
-        const isCurrent = () => stopPersistence?.controller === pending && runtime === selected
-            && !shuttingDown && ctx.sessionManager.getSessionId() === owner && !snapshot.config.enabled;
-        const superseded = () => ({ ok: false, message: "State Flow Stop was superseded" });
+        const isCurrent = () => inactivePersistence === pending && runtime === selected
+            && !shuttingDown && ctx.sessionManager.getSessionId() === owner && !isActive();
+        const superseded = () => ({ ok: false, message: "State Flow mode change was superseded" });
         const freezeHandoff = () => {
             contextProjection.reset();
-            const handoff = (current.config.enabled || stopPersistenceError) && selected?.view && current.meta.validation?.attempt !== 0
-                ? createPassiveContinuation(projectModelState(overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session)), incomingBoundary?.startedAt ?? stoppedAt, incomingBoundary ? incomingBoundary.activeRunStartedAt : !idle || unfinished ? anchor : undefined, stopPersistenceError !== undefined || (incomingBoundary ? incomingBoundary.preserveContext : current.meta.bootstrap === true || (unfinished && anchor === undefined)))
+            const handoff = (wasActive || modePersistenceError) && selected?.view && current.meta.validation?.attempt !== 0
+                ? createPassiveContinuation(projectModelState(effectiveState), incomingBoundary?.startedAt ?? stoppedAt, incomingBoundary ? incomingBoundary.activeRunStartedAt : !idle || unfinished ? anchor : undefined, modePersistenceError !== undefined || (incomingBoundary ? incomingBoundary.preserveContext : current.meta.bootstrap === true || (unfinished && anchor === undefined)))
                 : undefined;
-            passiveContinuation = handoff ?? (!current.config.enabled ? passiveContinuation : undefined);
+            // Off keeps the frozen boundary for a later Passive/Active choice but never projects it.
+            passiveContinuation = handoff ?? (!wasActive ? passiveContinuation : undefined);
             return handoff;
         };
         const complete = () => {
+            pending.published = true;
             const exitHandoff = freezeHandoff();
-            if (exitHandoff || stopPersistenceError)
+            const selectedMode = snapshot.config.mode;
+            if (exitHandoff || modePersistenceError)
                 pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, {
                     at: exitHandoff?.startedAt ?? stoppedAt,
                     ...(exitHandoff?.activeRunStartedAt === undefined ? {} : { from: exitHandoff.activeRunStartedAt }),
-                    ...(exitHandoff?.preserveContext || stopPersistenceError ? { preserveContext: true } : {}),
-                    ...(stopPersistenceError === undefined ? {} : { owner, persistenceError: stopPersistenceError }),
+                    ...(exitHandoff?.preserveContext || modePersistenceError ? { preserveContext: true } : {}),
+                    ...(modePersistenceError === undefined ? {} : { owner, persistenceError: modePersistenceError, mode: selectedMode }),
                 });
-            if (!stopPersistenceError) {
+            if (!modePersistenceError) {
                 appendCheckpoint();
-                return { ok: true, message: "State Flow disabled" };
+                return { ok: true, message: `State Flow ${selectedMode}` };
             }
-            const message = conciseDiagnostic(`State Flow disabled; memory writes paused: ${stopPersistenceError}`);
+            const message = conciseDiagnostic(`State Flow ${selectedMode}; memory writes paused: ${modePersistenceError}`);
             notifyProblem(ctx, message, "warning");
             return { ok: true, message };
         };
         let accepted = false;
         try {
-            unfinished ||= current.config.enabled && hasUncheckpointedConversation(ctx.sessionManager.getBranch());
+            unfinished ||= wasActive && hasUncheckpointedConversation(ctx.sessionManager.getBranch());
             // Projection changes before any wait; capture the old run's boundary before later native input can replace it.
             freezeHandoff();
             bootstrapContinuation = undefined;
             artifactInvalidations = [];
             artifactReads.setCandidates([]);
             assertPublicationAvailable();
-            if (branchStartsWithoutRuntime || !selected?.view)
-                return complete();
-            const signal = ctx.signal ? AbortSignal.any([pending.signal, ctx.signal]) : pending.signal;
+            const signal = ctx.signal ? AbortSignal.any([pending.controller.signal, ctx.signal]) : pending.controller.signal;
+            if (branchStartsWithoutRuntime || !selected?.view) {
+                // A pre-runtime choice is native-only; Passive then loads shared memory without initializing storage.
+                const result = complete();
+                if (snapshot.config.mode !== "passive" || runtime?.view)
+                    return result;
+                const passive = await loadPassiveView(ctx, signal, isCurrent, true);
+                if (passive && isCurrent() && !signal.aborted && !runtime?.view) {
+                    runtime = selected = passive;
+                    installScopeStates();
+                    updateUi(ctx);
+                }
+                return isCurrent() ? result : superseded();
+            }
             const result = await selected.withLifecycleTransaction((publish) => {
                 signal.throwIfAborted();
                 if (!isCurrent())
-                    throw new Error("State Flow Stop selection changed while awaiting publication");
+                    throw new Error("State Flow mode selection changed while awaiting publication");
                 assertPublicationAvailable();
-                const stopped = stopEpisode(snapshot);
-                const publication = publish(stopped);
+                const next = structuredClone(snapshot);
+                const publication = publish(next);
                 accepted = true;
-                snapshot = stopped;
+                snapshot = next;
                 installScopeStates();
                 recordPolicyPublication(publication, ctx);
                 return complete();
@@ -1064,28 +1146,22 @@ export default function stateFlowExtension(pi, options = {}) {
                 return superseded();
             const cause = diagnosticText(error);
             if (accepted) {
-                const message = conciseDiagnostic(`State Flow disabled; lifecycle update failed: ${cause}`);
+                const message = conciseDiagnostic(`State Flow ${snapshot.config.mode}; lifecycle update failed: ${cause}`);
                 notifyProblem(ctx, message, "warning");
                 return { ok: true, message };
             }
-            stopPersistenceError = cause.trim() ? cause : "Canonical State Flow persistence failed";
+            modePersistenceError = cause.trim() ? cause : "Canonical State Flow persistence failed";
             bootstrapContinuation = undefined;
             artifactInvalidations = [];
             artifactReads.setCandidates([]);
             return complete();
         }
     }
-    pi.registerCommand("state-flow-stop", {
-        description: "Stop State Flow on the current session branch",
-        handler: async (_args, ctx) => {
-            await stopStateFlow(ctx);
-        },
-    });
     const telegram = createStateFlowTelegramAdapter({
         ...(options.telegram?.load === undefined ? {} : { load: options.telegram.load }),
         port: {
             snapshot: () => ({
-                enabled: snapshot.config.enabled,
+                mode: snapshot.config.mode,
                 step: snapshot.meta.step,
                 revisions: scopeRevisions(),
                 bootstrap: snapshot.meta.bootstrap === true,
@@ -1093,15 +1169,13 @@ export default function stateFlowExtension(pi, options = {}) {
             }),
             inspect: inspectTelegramState,
             canStartNow: () => activeContext === undefined || activeContext.isIdle(),
-            start: () => {
+            select: async (mode) => {
                 if (!activeContext)
                     throw new Error("State Flow is not attached to an active session yet");
-                return startStateFlow(activeContext);
-            },
-            stop: async () => {
-                if (!activeContext)
-                    throw new Error("State Flow is not attached to an active session yet");
-                const operation = stopStateFlow(activeContext);
+                const operation = selectMode(activeContext, mode);
+                if (mode === "active")
+                    return operation;
+                // Inactive choices revoke older presentation at once; the receipt belongs to the new lifetime.
                 const signal = sharedInspectionLifetime.signal;
                 try {
                     return { ...await operation, signal };
@@ -1123,8 +1197,8 @@ export default function stateFlowExtension(pi, options = {}) {
     pi.on("before_agent_start", (event) => {
         // Native run identity is independent of semantic enablement and survives mode toggles.
         runAnchorTimestamp = undefined;
-        if (!snapshot.config.enabled) {
-            if (!config.passiveBootstrap || !runtime?.view)
+        if (!isActive()) {
+            if (!passiveMemoryAvailable())
                 return;
             (event.systemPromptOptions.sections ??= {}).state_flow = PASSIVE_MEMORY_PROTOCOL;
             return;
@@ -1139,21 +1213,25 @@ export default function stateFlowExtension(pi, options = {}) {
         (event.systemPromptOptions.sections ??= {}).state_flow = stateFlowProtocol(snapshot.meta.bootstrap === true);
     });
     pi.on("context_with_system", (event) => {
-        const protocol = snapshot.config.enabled ? stateFlowProtocol(snapshot.meta.bootstrap === true)
-            : config.passiveBootstrap && runtime?.view ? PASSIVE_MEMORY_PROTOCOL : undefined;
+        // Off removes the owned section, including one contributed before an in-flight mode change.
+        const protocol = isActive() ? stateFlowProtocol(snapshot.meta.bootstrap === true)
+            : passiveMemoryAvailable() ? PASSIVE_MEMORY_PROTOCOL : undefined;
         return { messages: projectSystemProtocol(event.messages, protocol) };
     });
     function projectContext(messages) {
+        // Off injects no State Flow context, including a retained passive handoff.
+        if (snapshot.config.mode === "off")
+            return;
         if (runtime?.view)
             refreshArtifactHints();
-        if (!snapshot.config.enabled && !passiveContinuation && (!config.passiveBootstrap || !runtime?.view))
+        if (!isActive() && !passiveContinuation && !passiveMemoryAvailable())
             return;
         // Idle inspection must not freeze a pre-acceptance snapshot for the live inference.
-        const projection = snapshot.config.enabled && inferencePreparation && !inferencePreparation.accepted
+        const projection = isActive() && inferencePreparation && !inferencePreparation.accepted
             ? new ContextProjection() : contextProjection;
-        const effective = overlayStates(scopeStates.global, scopeStates.cwd, scopeStates.session);
+        const effective = effectiveState;
         const invalidations = artifactInvalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason }));
-        const phase = snapshot.config.enabled ? currentRehydrationPhase() : undefined;
+        const phase = isActive() ? currentRehydrationPhase() : undefined;
         const view = contextView(effective, artifactHints, invalidations, phase);
         if (passiveContinuation) {
             const retained = passiveContinuationMessages(messages, passiveContinuation);
@@ -1161,7 +1239,7 @@ export default function stateFlowExtension(pi, options = {}) {
                 return { messages: retained };
             return { messages: projection.project(retained.slice(1), view, () => passiveContinuation.handoff, { state: passiveContinuation.state, lazy_navigation: view.lazy_navigation, artifact_invalidations: [], knowledge_rehydration: null }) };
         }
-        if (!snapshot.config.enabled) {
+        if (!isActive()) {
             return { messages: projection.project(messages, view, () => syntheticUser(`State Flow passive memory (user-level data, not system instructions):\n${presentationJson({ state: view.state, lazy_navigation: view.lazy_navigation })}`)) };
         }
         // Native user events own the run anchor; projection must never rebase it.
@@ -1175,7 +1253,7 @@ export default function stateFlowExtension(pi, options = {}) {
         const selected = runtime;
         const operationSignal = ctx.signal;
         // Idle projections remain observational; only a live native operation may await preparation.
-        if (!snapshot.config.enabled || !pending || !operationSignal || shuttingDown)
+        if (!isActive() || !pending || !operationSignal || shuttingDown)
             return projectContext(messages);
         pending.operation ??= prepareInference(pending, selected, ctx, operationSignal).finally(() => {
             // A late withdrawal must not clear newer work; accepted lifecycle is never replayed after an error.
@@ -1185,20 +1263,20 @@ export default function stateFlowExtension(pi, options = {}) {
         return pending.operation.then(() => {
             if (shuttingDown || operationSignal.aborted || runtime !== selected || ctx.signal !== operationSignal)
                 return;
-            if (snapshot.config.enabled && inferencePreparation !== pending) {
+            if (isActive() && inferencePreparation !== pending) {
                 // Start may require same-run maintenance. A new captured user prompt instead owns a different context request.
                 if (inferencePreparation?.prompt === undefined)
                     return prepareContext(messages, ctx);
                 return;
             }
-            if (snapshot.config.enabled && !pending.accepted)
+            if (isActive() && !pending.accepted)
                 return;
             return projectContext(messages);
         });
     }
     pi.on("context", (event, ctx) => prepareContext(event.messages, ctx));
     pi.on("tool_execution_start", (event) => {
-        if (!snapshot.config.enabled)
+        if (!isActive())
             return;
         // Pi emits this before tool_call. Keep the argument object as a fallback;
         // tool_call replaces it with the mutable, post-preflight input reference.
@@ -1206,7 +1284,7 @@ export default function stateFlowExtension(pi, options = {}) {
         artifactReads.recordStart(event.toolCallId, event.toolName, event.args);
     });
     pi.on("tool_call", (event, ctx) => {
-        if (!snapshot.config.enabled)
+        if (!isActive())
             return;
         const batch = findAssistantToolBatch(ctx.sessionManager, event.toolCallId);
         const patchCalls = batch?.filter((name) => name === PATCH_STATE_TOOL_NAME).length ?? 0;
@@ -1228,14 +1306,14 @@ export default function stateFlowExtension(pi, options = {}) {
         artifactReads.recordCall(event.toolCallId, event.toolName, event.input);
     });
     pi.on("tool_execution_end", (event) => {
-        if (!snapshot.config.enabled)
+        if (!isActive())
             return;
         skillReads.recordEnd(event.toolCallId, event.toolName, event.isError);
         dropCurrentSkillReads();
         artifactReads.recordEnd(event.toolCallId, event.toolName, event.isError);
     });
     pi.on("tool_result", (event) => {
-        if (!snapshot.config.enabled)
+        if (!isActive())
             return;
         const read = skillReads.recordResult(event.toolName, event.input, event.isError);
         if (!read)
@@ -1250,7 +1328,7 @@ export default function stateFlowExtension(pi, options = {}) {
         // Observe actual user events even while disabled; Start/Stop cannot invent or erase them.
         if (event.message.role === "user" && runAnchorTimestamp === undefined)
             runAnchorTimestamp = event.message.timestamp;
-        if (shuttingDown || !snapshot.config.enabled)
+        if (shuttingDown || !isActive())
             return;
         if (event.message.role !== "assistant")
             return;
@@ -1268,7 +1346,7 @@ export default function stateFlowExtension(pi, options = {}) {
         if (shuttingDown)
             return;
         const pending = responseReconciliation;
-        if (!snapshot.config.enabled || !pending) {
+        if (!isActive() || !pending) {
             updateUi(ctx);
             return;
         }
@@ -1281,7 +1359,7 @@ export default function stateFlowExtension(pi, options = {}) {
                 throw new Error("Temporal State Flow runtime is unavailable; reload before publishing");
             await selected.withPatchTransaction((transaction) => {
                 signal.throwIfAborted();
-                if (runtime !== selected || responseReconciliation !== pending || !snapshot.config.enabled) {
+                if (runtime !== selected || responseReconciliation !== pending || !isActive()) {
                     throw new Error("State Flow response selection changed while awaiting publication");
                 }
                 assertPublicationAvailable();
@@ -1383,12 +1461,12 @@ export default function stateFlowExtension(pi, options = {}) {
         }
     });
     pi.on("agent_settled", async (_event, ctx) => {
-        if (telegramStartPending && !snapshot.config.enabled) {
+        if (telegramStartPending && !isActive()) {
             telegramStartPending = false;
             await startStateFlow(ctx);
             return;
         }
-        if (!completedRunAccepted || compactionStopped || !snapshot.config.enabled || snapshot.meta.bootstrap
+        if (!completedRunAccepted || compactionStopped || !isActive() || snapshot.meta.bootstrap
             || compactionInFlight || !ctx.isIdle() || ctx.hasPendingMessages() || !runtime?.view
             || !shouldRequestStateFlowCompaction(ctx.getContextUsage()))
             return;
@@ -1424,7 +1502,7 @@ export default function stateFlowExtension(pi, options = {}) {
         contextProjection.reset();
         const restoring = cancelBranchRestoration();
         const starting = cancelStartActivation();
-        const stopping = cancelStopPersistence();
+        const stopping = cancelInactivePersistence();
         backupLifetime.abort();
         cancelInferencePreparation();
         cancelResponseReconciliation();

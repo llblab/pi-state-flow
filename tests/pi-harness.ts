@@ -20,7 +20,7 @@ import { fauxProvider, InMemoryCredentialStore, type FauxModelDefinition, type F
 import stateFlowExtension from "../index.ts";
 import type { ModelState, StateScope } from "../lib/state.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
-import type { RetainedPiCheckpoint, Snapshot } from "../lib/snapshot.ts";
+import type { RetainedPiCheckpoint, Snapshot, StateFlowMode } from "../lib/snapshot.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
 import "./git-environment.ts";
@@ -53,9 +53,8 @@ export interface RealPiFixture {
 export async function realPiFixture(t: TestContext, options: {
 	tokensPerSecond?: number;
 	initializeRepository?: boolean;
-	autoStart?: boolean;
-	passiveBootstrap?: boolean;
-	passiveTools?: boolean;
+	/** SDK default-mode override for new sessions; "configured" follows repository config.json. Defaults to off. */
+	mode?: StateFlowMode | "configured";
 	stateFlow?: boolean;
 	extensions?: InlineExtension[];
 	/** Observe the public factory result before awaiting native extension binding. */
@@ -85,9 +84,6 @@ export async function realPiFixture(t: TestContext, options: {
 	const agentDir = join(root, "agent");
 	const sessionDir = join(root, "sessions");
 	for (const path of [repositoryRoot, cwd, agentDir, join(agentDir, "knowledge"), sessionDir]) mkdirSync(path, { recursive: true });
-	if (options.autoStart !== undefined) writeFileSync(join(repositoryRoot, "config.json"), JSON.stringify({
-		...(options.autoStart === undefined ? {} : { autoStart: options.autoStart }),
-	}));
 	if (options.initializeRepository !== false) {
 		execFileSync("git", ["init", "-b", "main", repositoryRoot], { stdio: "ignore" });
 		git(repositoryRoot, "config", "user.name", "State Flow Integration Tests");
@@ -144,7 +140,7 @@ export async function realPiFixture(t: TestContext, options: {
 			extensionFactories: [
 				...(options.stateFlow === false ? [] : [{
 					name: "state-flow-integration",
-					factory: (pi: Parameters<typeof stateFlowExtension>[0]) => stateFlowExtension(pi, { agentDir, repositoryRoot, passive: { bootstrap: options.passiveBootstrap ?? false, tools: options.passiveTools ?? false }, onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
+					factory: (pi: Parameters<typeof stateFlowExtension>[0]) => stateFlowExtension(pi, { agentDir, repositoryRoot, ...(options.mode === "configured" ? {} : { mode: options.mode ?? "off" }), onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
 				}]),
 				...(options.extensions ?? []),
 			],

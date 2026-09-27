@@ -45,14 +45,14 @@ import {
 } from "./pi-harness.ts";
 
 for (const mode of ["bootstrap", "passive"] as const) test(`real Pi ${mode} keeps a byte-stable head across barriers and the intended run boundary`, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "passive" });
 	const session = await f.createSession("new");
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { seed: true } } }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("Seeded"),
 	]);
 	await session.prompt("Earlier context");
-	if (mode === "bootstrap") await session.prompt("/state-flow-start");
+	if (mode === "bootstrap") await session.prompt("/state-flow-active");
 	const seen: string[] = [];
 	const projections: string[] = [];
 	const capture = (context: Context) => {
@@ -82,7 +82,7 @@ for (const mode of ["bootstrap", "passive"] as const) test(`real Pi ${mode} keep
 });
 
 test("real Pi passive reload distinguishes retained old receipts from the refreshed head", async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "passive" });
 	const session = await f.createSession("new");
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", { global: { working: { shared: "old" } } }), { stopReason: "toolUse" }),
@@ -154,7 +154,7 @@ function projectedRuntime(context: Context) {
 }
 
 for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi ${mode} patch results expose accepted effective values and adopted shared drift`, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, autoStart: mode !== "passive", passiveTools: true, passiveBootstrap: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: mode === "passive" ? "passive" : "active" });
 	const session = await f.createSession("new");
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", { global: { working: { fallback: "global" } }, session: { working: { fallback: "private", keep: "unchanged" } } }), { stopReason: "toolUse" }),
@@ -162,7 +162,7 @@ for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi
 	]);
 	await session.prompt("Seed scoped memory");
 	assert.equal(f.readState(session).working.fallback, "private");
-	if (mode === "stop-handoff") await session.prompt("/state-flow-stop");
+	if (mode === "stop-handoff") await session.prompt("/state-flow-passive");
 	let inspected = false;
 	f.faux.setResponses([
 		() => {
@@ -194,7 +194,7 @@ for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi
 });
 
 for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi ${mode} acknowledges a published artifact patch when effective-array prediction fails`, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, autoStart: mode !== "passive", passiveTools: true, passiveBootstrap: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: mode === "passive" ? "passive" : "active" });
 	const session = await f.createSession("new");
 	const path = join(f.cwd, "masked-card.txt");
 	writeFileSync(path, "artifact source\n");
@@ -207,7 +207,7 @@ for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi
 	]);
 	await session.prompt("Seed masked artifact arrays");
 	assert.deepEqual(loadGlobalState(f.repositoryRoot)!.artifacts[path]!.rows, [1, 2]);
-	if (mode === "stop-handoff") await session.prompt("/state-flow-stop");
+	if (mode === "stop-handoff") await session.prompt("/state-flow-passive");
 	let inspected = false;
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", {
@@ -233,7 +233,7 @@ for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi
 });
 
 for (const mode of ["active", "bootstrap", "reload", "stop-start"] as const) test(`real Pi automatic lazy history stays hidden across ${mode} without redacting native evidence`, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, autoStart: mode !== "bootstrap", passiveTools: true, passiveBootstrap: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: mode === "bootstrap" ? "passive" : "active" });
 	const session = await f.createSession("new");
 	const scopes = ["global", "cwd", "session"] as const;
 	const body = "LAZY-HISTORY-BODY-".repeat(1024);
@@ -265,8 +265,8 @@ for (const mode of ["active", "bootstrap", "reload", "stop-start"] as const) tes
 	const before = semantic();
 	assert.match(before.map((file) => file.bytes ? Buffer.from(file.bytes).toString("utf8") : "").join("\n"), /LAZY-HISTORY-BODY-/, "canonical retained patches still contain the body");
 	if (mode === "reload") await session.reload();
-	if (mode === "stop-start") await session.prompt("/state-flow-stop");
-	if (mode === "bootstrap" || mode === "stop-start") await session.prompt("/state-flow-start");
+	if (mode === "stop-start") await session.prompt("/state-flow-passive");
+	if (mode === "bootstrap" || mode === "stop-start") await session.prompt("/state-flow-active");
 	const calls = f.faux.state.callCount;
 	let inspected = false;
 	f.faux.setResponses([(context) => {
@@ -293,7 +293,7 @@ for (const mode of ["active", "bootstrap", "reload", "stop-start"] as const) tes
 for (const active of [false, true]) for (const needHistory of [false, true]) test(`real Pi missing hint leaves historical reading to the task (active=${active}, history=${needHistory})`, async (t) => {
 	const tools: Array<{ name: string; input: unknown }> = [];
 	const f = await realPiFixture(t, {
-		initializeRepository: false, autoStart: active, passiveTools: true, passiveBootstrap: true,
+		initializeRepository: false, mode: active ? "active" : "passive",
 		extensions: [{ name: "observe-memory-tools", factory: (pi) => {
 			pi.on("tool_call", (event) => { tools.push({ name: event.toolName, input: structuredClone(event.input) }); });
 		} }],
@@ -367,7 +367,7 @@ for (const active of [false, true]) for (const needHistory of [false, true]) tes
 	if (!active) assert.deepEqual(files(), before, "passive hints and reads do not add a response publication either");
 });
 
-for (const control of ["stop", "start"] as const) test(`real Pi ${control} keeps local mode off while awaiting a partial foreign publication without private leakage`, { timeout: 20_000 }, async (t) => {
+for (const control of ["off", "active"] as const) test(`real Pi ${control} keeps local mode off while awaiting a partial foreign publication without private leakage`, { timeout: 20_000 }, async (t) => {
 	let child: ReturnType<typeof childProcess.spawn> | undefined;
 	let closed: ReturnType<typeof once> | undefined;
 	let stopping: Promise<void> | undefined;
@@ -376,14 +376,14 @@ for (const control of ["stop", "start"] as const) test(`real Pi ${control} keeps
 		await closed;
 		await stopping?.catch(() => undefined);
 	});
-	const f = await realPiFixture(t, { initializeRepository: false, autoStart: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active" });
 	const session = await f.createSession("new");
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { private: "LOCAL-PRIVATE" } } }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("Previous answer"),
 	]);
 	await session.prompt("Retain this private memory");
-	if (control === "start") await session.prompt("/state-flow-stop");
+	if (control === "active") await session.prompt("/state-flow-off");
 	const cached = f.readState(session);
 	const previous = latestSnapshot(session);
 	const count = snapshots(session).length;
@@ -445,19 +445,24 @@ for (const control of ["stop", "start"] as const) test(`real Pi ${control} keeps
 	const foreign = semantic();
 	await stopping;
 	assert.deepEqual(semantic(), foreign, "this mode change preserves accepted semantic and provenance bytes");
-	assert.equal(latestSnapshot(session).config.enabled, control === "start");
+	assert.equal(latestSnapshot(session).config.mode, control);
 	assert.equal(latestSnapshot(session).meta.step, previous.meta.step);
 	assert.equal(snapshots(session).length, count + 1);
 	assert.deepEqual(f.readState(session).working, { globalPeer: "FOREIGN-G", cwdPeer: "FOREIGN-C", private: "LOCAL-PRIVATE" });
 	assert.deepEqual(f.readState(session, 0, "session").working, { private: "LOCAL-PRIVATE" });
 	assert.equal(f.notifications.some((notice) => /paused|(?:Start|Stop).*failed/.test(notice)), false);
-	f.faux.setResponses([(context) => {
-		const text = JSON.stringify(context.messages);
-		for (const value of ["FOREIGN-G", "FOREIGN-C", "LOCAL-PRIVATE"]) assert.ok(text.includes(value), value);
-		assert.equal(text.includes("FOREIGN-PRIVATE-SECRET"), false);
-		return fauxAssistantMessage("Accepted mode change is visible");
-	}]);
+	let input: Context | undefined;
+	f.faux.setResponses([(context) => { input = context; return fauxAssistantMessage("Accepted mode change is visible"); }]);
 	await session.prompt("Continue with the accepted memory");
+	assert.ok(input, "the provider sees the accepted mode");
+	const text = JSON.stringify(input.messages);
+	if (control === "active") {
+		for (const value of ["FOREIGN-G", "FOREIGN-C", "LOCAL-PRIVATE"]) assert.ok(text.includes(value), value);
+	} else {
+		assert.equal(getCurrentSystemMessage(input.messages)?.sections?.state_flow, undefined);
+		assert.doesNotMatch(text, /FOREIGN-G|FOREIGN-C|State Flow exit handoff/);
+	}
+	assert.doesNotMatch(text, /FOREIGN-PRIVATE-SECRET/);
 });
 
 test("real Pi Abort cancels an in-run Start without waiting for the canonical owner or another provider call", { timeout: 15_000 }, async (t) => {
@@ -472,7 +477,7 @@ test("real Pi Abort cancels an in-run Start without waiting for the canonical ow
 	t.after(async () => { release(); await abortNative?.(); await holder; await Promise.allSettled([prompt, starting]); });
 	let nativeSignal: AbortSignal | undefined;
 	const f = await realPiFixture(t, {
-		initializeRepository: false, autoStart: true, tools: ["read", "patch_state", "read_state", "await_native_abort"],
+		initializeRepository: false, mode: "active", tools: ["read", "patch_state", "read_state", "await_native_abort"],
 		extensions: [{ name: "native-start-boundary", factory: (pi) => {
 			pi.registerTool({
 				name: "await_native_abort", label: "Await native Abort", description: "Isolated lifecycle witness", parameters: Type.Object({}),
@@ -490,7 +495,7 @@ test("real Pi Abort cancels an in-run Start without waiting for the canonical ow
 	assert.ok(session.getActiveToolNames().includes("await_native_abort"));
 	f.faux.setResponses([fauxAssistantMessage("Previous accepted answer")]);
 	await session.prompt("Keep this answer");
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-off");
 	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 	const before = files();
 	const entries = snapshots(session).length;
@@ -500,7 +505,7 @@ test("real Pi Abort cancels an in-run Start without waiting for the canonical ow
 	prompt = session.prompt("Retain this uncompiled request after Abort");
 	await reached;
 	assert.ok(nativeSignal && !nativeSignal.aborted);
-	starting = session.prompt("/state-flow-start");
+	starting = session.prompt("/state-flow-active");
 	await delay(40);
 	await Promise.race([session.abort(), delay(1_000).then(() => assert.fail("native Abort waited for Start's file owner"))]);
 	await Promise.all([prompt, starting]);
@@ -511,7 +516,7 @@ test("real Pi Abort cancels an in-run Start without waiting for the canonical ow
 	assert.match(JSON.stringify(session.sessionManager.getBranch()), /Retain this uncompiled request after Abort/);
 	assert.equal(calls, 1);
 	assert.equal(f.statuses.at(-1), undefined);
-	assert.match(f.notifications.at(-1)!, /Start failed/);
+	assert.match(f.notifications.at(-1)!, /activation failed/);
 	release(); await holder;
 	await delay(40);
 	assert.deepEqual(files(), before, "an aborted activation never revives when the lock becomes free");
@@ -530,7 +535,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi production pr
 	let beforeSeen = false;
 	let beforeSignal: AbortSignal | undefined;
 	const f = await realPiFixture(t, {
-		initializeRepository: false, autoStart: true,
+		initializeRepository: false, mode: "active",
 		extensions: [{ name: "observe-native-preparation", factory: (pi) => {
 			pi.on("before_agent_start", (_event, ctx) => { beforeSeen = true; beforeSignal = ctx.signal; });
 		} }],
@@ -634,7 +639,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi production pr
 		await session.reload();
 		assert.equal(latestSnapshot(session).meta.bootstrap, true, "native input survives even though canceled preparation wrote no checkpoint");
 		assert.equal(latestSnapshot(session).meta.specification, undefined);
-		await session.prompt("/state-flow-stop");
+		await session.prompt("/state-flow-off");
 		const file = session.sessionFile!;
 		session.dispose();
 		const resumed = await f.createSession("resume", SessionManager.open(file, f.sessionDir));
@@ -660,7 +665,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi production pr
 });
 
 test("real Pi aborts before the provider when atomic inference preparation fails, without losing accepted memory", { timeout: 20_000 }, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, autoStart: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active" });
 	const session = await f.createSession("new");
 	f.faux.setResponses([fauxAssistantMessage("Previous answer")]);
 	await session.prompt("Previously accepted request");
@@ -699,7 +704,7 @@ test("real Pi aborts before the provider when atomic inference preparation fails
 for (const reload of [false, true]) test(`real Pi retains interrupted boundary-continuation evidence at idle Stop${reload ? " after reload" : ""}`, async (t) => {
 	let continued = false;
 	const f = await realPiFixture(t, {
-		initializeRepository: false, autoStart: true,
+		initializeRepository: false, mode: "active",
 		extensions: [{ name: "interruptible-boundary-continuation", factory: (pi) => {
 			pi.on("turn_end", (event) => {
 				if (continued || event.outcome !== "completed") return;
@@ -718,7 +723,7 @@ for (const reload of [false, true]) test(`real Pi retains interrupted boundary-c
 	await session.prompt("Original request");
 	assert.equal(latestSnapshot(session).meta.specification, undefined, "boundary continuation does not invent a run specification");
 	if (reload) await session.reload();
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-off");
 	f.faux.setResponses([(context) => {
 		const text = JSON.stringify(context.messages);
 		assert.match(text, /State Flow exit handoff/);
@@ -744,7 +749,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi context provi
 	let waiting = false;
 	let failure: unknown;
 	let providerCalls = 0;
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	const specification = "Prepare lifecycle before inference";
 	// A host-capability probe, not State Flow's production caller cutover.
 	const f = await realPiFixture(t, {
@@ -814,7 +819,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi context provi
 });
 
 for (const outcome of ["accept", "cancel"] as const) test(`real Pi awaits foreign publication and ${outcome === "accept" ? "exposes the accepted current head to its next provider" : "cancels waiting without changing canonical memory"}`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, autoStart: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active" });
 	const session = await f.createSession("new");
 	const ready = join(f.root, "foreign-ready");
 	const release = join(f.root, "foreign-release");
@@ -912,7 +917,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi awaits respon
 	const answer = "Answer waiting for canonical acceptance";
 	let continued = false;
 	const f = await realPiFixture(t, {
-		initializeRepository: false, autoStart: true,
+		initializeRepository: false, mode: "active",
 		extensions: [{ name: "after-response-acceptance", factory: (pi) => {
 			pi.on("turn_end", (event) => {
 				if (outcome !== "accept" || continued || event.outcome !== "completed" || event.message.role !== "assistant"
@@ -1036,7 +1041,7 @@ for (const outcome of ["accept", "busy"] as const) test(`real Pi ${outcome === "
 	let acceptedFiles: ReturnType<typeof captureTemporalFileBases> | undefined;
 	const answer = "Answer accepted before optional backup";
 	const f = await realPiFixture(t, {
-		autoStart: true,
+		mode: "active",
 		extensions: [{ name: "awaited-backup-boundary", factory: (pi) => {
 			pi.on("turn_end", (event) => {
 				if (locked || event.outcome !== "completed" || event.message.role !== "assistant") return;
@@ -1086,8 +1091,8 @@ for (const outcome of ["accept", "busy"] as const) test(`real Pi ${outcome === "
 });
 
 for (const scope of ["global", "cwd", "session"] as const) test(`real Pi transports actionable long-path diagnostics and accepts an exact-target correction (${scope})`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false });
-	writeFileSync(join(f.repositoryRoot, "config.json"), JSON.stringify({ autoStart: true, logging: true }));
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "configured" });
+	writeFileSync(join(f.repositoryRoot, "config.json"), JSON.stringify({ mode: "active", logging: true }));
 	const session = await f.createSession("new");
 	const path = join(f.cwd, "long directory/".repeat(60), "knowledge.json");
 	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
@@ -1130,8 +1135,8 @@ for (const scope of ["global", "cwd", "session"] as const) test(`real Pi transpo
 });
 
 test("real Pi transports nested publication causes as text without requiring Error.cause", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false });
-	writeFileSync(join(f.repositoryRoot, "config.json"), JSON.stringify({ autoStart: true, logging: true }));
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "configured" });
+	writeFileSync(join(f.repositoryRoot, "config.json"), JSON.stringify({ mode: "active", logging: true }));
 	const session = await f.createSession("new");
 	const path = join(f.repositoryRoot, "long directory/".repeat(40), "runtime.json");
 	const cause = new Error(`EACCES: permission denied, open '${path}'`);
@@ -1167,17 +1172,17 @@ test("real Pi transports nested publication causes as text without requiring Err
 });
 
 test("real Pi starts State Flow in an ordinary conversation after reload", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: false, passiveBootstrap: true, passiveTools: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "passive", initializeRepository: false });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	for (let index = 1; index <= 4; index++) {
 		f.faux.setResponses([fauxAssistantMessage(`Ordinary answer ${index}`)]);
 		await session.prompt(`Ordinary question ${index}`);
 	}
-	assert.equal(snapshots(session).length, 0);
+	assert.deepEqual(snapshots(session).map(({ data }) => data), [{ mode: "passive" }]);
 	await session.reload();
-	await session.prompt("/state-flow-start");
-	assert.equal(latestSnapshot(session).config.enabled, true);
+	await session.prompt("/state-flow-active");
+	assert.equal(latestSnapshot(session).config.mode, "active");
 	assert.equal(latestSnapshot(session).meta.bootstrap, true);
 	let bootstrapInput: Context | undefined;
 	f.faux.setResponses([(context) => {
@@ -1197,7 +1202,7 @@ for (const fault of ["concurrent", "locked"] as const) test(`real Pi failed Stop
 	let canonical: ReturnType<typeof captureTemporalFileBases>;
 	const inputs: Context[] = [];
 	const f = await realPiFixture(t, {
-		initializeRepository: false, autoStart: true, passiveBootstrap: true, passiveTools: true,
+		initializeRepository: false, mode: "active",
 		extensions: [{ name: "stop-failure", factory: (pi) => {
 			pi.on("tool_result", async (event) => {
 				if (!armed || event.toolName !== "read") return;
@@ -1208,7 +1213,7 @@ for (const fault of ["concurrent", "locked"] as const) test(`real Pi failed Stop
 					const before = peer.states();
 					const next = structuredClone(before);
 					next.session.working.peer = "accepted";
-					snapshot.config.enabled = true;
+					snapshot.config.mode = "active";
 					snapshot.meta.step++;
 					peer.publish(snapshot, true, createAcceptedTransition(before, next));
 				}
@@ -1216,7 +1221,7 @@ for (const fault of ["concurrent", "locked"] as const) test(`real Pi failed Stop
 				const lock = join(f.repositoryRoot, ".state-flow-publication.lock");
 				if (fault === "locked") mkdirSync(lock);
 				try {
-					await session.prompt("/state-flow-stop");
+					await session.prompt("/state-flow-passive");
 					stopped = true;
 				} finally {
 					if (fault === "locked") rmSync(lock, { recursive: true });
@@ -1246,7 +1251,7 @@ for (const fault of ["concurrent", "locked"] as const) test(`real Pi failed Stop
 	assert.doesNotMatch(JSON.stringify(inputs[0]!.messages), /State Flow is enabled/);
 	const rejected = session.sessionManager.getEntries().findLast((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "patch_state");
 	assert.ok(rejected?.type === "message" && rejected.message.role === "toolResult" && rejected.message.isError);
-	assert.match(JSON.stringify(rejected.message.content), /paused after Stop/);
+	assert.match(JSON.stringify(rejected.message.content), /paused after mode change/);
 	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 	assert.deepEqual(files(), canonical!);
 	assert.deepEqual(readFileSync(session.sessionFile!).subarray(0, trace.length), trace);
@@ -1271,9 +1276,10 @@ for (const fault of ["concurrent", "locked"] as const) test(`real Pi failed Stop
 	assert.doesNotMatch(JSON.stringify(continued!.messages), /State Flow is enabled/);
 	assert.deepEqual(files(), canonical!);
 	await session.prompt("/state-flow-status");
-	assert.match(f.notifications.at(-1)!, /branch mode=inactive/);
-	assert.match(f.notifications.at(-1)!, /Memory writes paused after Stop/);
-	await session.prompt("/state-flow-start");
+	assert.equal(f.statuses.at(-1), "state-flow passive");
+	assert.doesNotMatch(f.notifications.at(-1)!, /session mode=/);
+	assert.match(f.notifications.at(-1)!, /Memory writes paused after mode change/);
+	await session.prompt("/state-flow-active");
 	f.faux.setResponses(sessionResponses({ working: { restarted: true } }, "Accepted after explicit Start"));
 	await session.prompt("Compile retained context and continue");
 	assert.equal(f.readState(session, 0, "session").working.restarted, true);
@@ -1282,7 +1288,7 @@ for (const fault of ["concurrent", "locked"] as const) test(`real Pi failed Stop
 });
 
 test("real Pi forks a failed-Stop source as disabled without inheriting its write fence", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, autoStart: true, passiveBootstrap: true, passiveTools: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active" });
 	const runtime = await f.createRuntime("new");
 	const parent = runtime.session;
 	f.faux.setResponses(sessionResponses({ working: { inherited: "retained" } }, "Parent answer"));
@@ -1291,36 +1297,36 @@ test("real Pi forks a failed-Stop source as disabled without inheriting its writ
 	const before = files();
 	const lock = join(f.repositoryRoot, ".state-flow-publication.lock");
 	mkdirSync(lock);
-	try { await parent.prompt("/state-flow-stop"); } finally { rmSync(lock, { recursive: true }); }
+	try { await parent.prompt("/state-flow-passive"); } finally { rmSync(lock, { recursive: true }); }
 	assert.deepEqual(files(), before);
 	assert.equal((await runtime.fork(parent.sessionManager.getLeafId()!, { position: "at" })).cancelled, false);
 	const child = runtime.session;
-	assert.equal(latestSnapshot(child).config.enabled, false);
+	assert.notEqual(latestSnapshot(child).config.mode, "active");
 	assert.equal(f.readState(child, 0, "session").working.inherited, "retained");
 	await child.reload();
 	f.faux.setResponses(sessionResponses({ working: { child: true } }, "Passive child answer"));
 	await child.prompt("Patch child memory while passive");
 	assert.equal(f.readState(child, 0, "session").working.child, true);
-	assert.equal(latestSnapshot(child).config.enabled, false);
+	assert.notEqual(latestSnapshot(child).config.mode, "active");
 	assert.deepEqual(files(), before, "child activation policy cannot repair or overwrite its parent's canonical files");
 });
 
 for (const priorActive of [false, true]) test(`real Pi repeated Start/Stop preserves uncompiled conversation and its prior boundary (${priorActive ? "restart" : "first activation"})`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "passive" });
 	const session = await f.createSession("new");
 	if (priorActive) {
-		await session.prompt("/state-flow-start");
+		await session.prompt("/state-flow-active");
 		f.faux.setResponses(sessionResponses({ working: { established: true } }, "Established memory."));
 		await session.prompt("ALREADY_COMPILED_CONVERSATION");
-		await session.prompt("/state-flow-stop");
+		await session.prompt("/state-flow-passive");
 	}
 	f.faux.setResponses([fauxAssistantMessage("Ordinary requirement acknowledged.")]);
 	await session.prompt("UNCOMPILED_REQUIREMENT: use a violet interface.");
 	const before = structuredClone(session.sessionManager.getEntries());
 	for (let cycle = 0; cycle < 2; cycle++) {
-		await session.prompt("/state-flow-start");
+		await session.prompt("/state-flow-active");
 		assert.equal(latestSnapshot(session).meta.bootstrap, true);
-		await session.prompt("/state-flow-stop");
+		await session.prompt("/state-flow-passive");
 		await session.reload();
 	}
 	assert.deepEqual(session.sessionManager.getEntries().slice(0, before.length), before, "mode changes preserve the native trace");
@@ -1329,7 +1335,7 @@ for (const priorActive of [false, true]) test(`real Pi repeated Start/Stop prese
 	await session.prompt("Continue without losing the earlier requirement");
 	assert.match(JSON.stringify(passiveInput!.messages), /UNCOMPILED_REQUIREMENT/);
 	assert.doesNotMatch(JSON.stringify(passiveInput!.messages), /ALREADY_COMPILED_CONVERSATION/);
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	let bootstrapInput: Context | undefined;
 	f.faux.setResponses([
 		(context) => {
@@ -1349,7 +1355,7 @@ for (const priorActive of [false, true]) test(`real Pi repeated Start/Stop prese
 });
 
 test("real Pi initializes wholly absent CWD files before inference without resurrecting them", { timeout: 30_000 }, async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	let session = await fixture.createSession("new");
 	t.after(() => session.dispose());
 	fixture.faux.setResponses(scopedResponses([{ scope: "cwd", patch: { working: { must_not_resurrect: "old-cwd-value" } } }], "Seeded CWD answer."));
@@ -1385,7 +1391,7 @@ test("real Pi initializes wholly absent CWD files before inference without resur
 });
 
 for (const limit of [0, 1]) test(`real Pi reload applies historyLimit ${limit} without losing accepted state`, { timeout: 30_000 }, async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const fixture = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const session = await fixture.createSession("new");
 	t.after(() => session.dispose());
 	for (let index = 1; index <= 3; index++) {
@@ -1403,7 +1409,7 @@ for (const limit of [0, 1]) test(`real Pi reload applies historyLimit ${limit} w
 	const config = join(fixture.repositoryRoot, "config.json");
 	writeFileSync(config, JSON.stringify({ autoStart: true, historyLimit: limit }));
 	await session.reload();
-	assert.equal(latestSnapshot(session).config.enabled, true);
+	assert.equal(latestSnapshot(session).config.mode, "active");
 	assert.equal(latestSnapshot(session).meta.step, step);
 	assert.deepEqual(scopes.map((scope) => fixture.readState(session, 0, scope)), before);
 	const tails = () => scopes.map((scope) => readFileSync(temporalScopePaths(fixture.cwd, session.sessionId, scope, fixture.repositoryRoot, nativeSessionKey(session)).patches, "utf8"));
@@ -1425,7 +1431,7 @@ test("real Pi retains large state and accepted answers across reload, resume and
 	const fixture = await realPiFixture(t, {});
 	let session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	const payload = "λ🧭".repeat(196_608);
 	fixture.faux.setResponses(scopedResponses([{ scope: "session", patch: { working: { payload } } }], "Large state accepted"));
 	await session.prompt("Retain the large payload");
@@ -1458,7 +1464,7 @@ test("real Pi restoration preserves current scoped state without requiring Git t
 	const fixture = await realPiFixture(t, {});
 	let session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	for (let counter = 1; counter <= 4; counter++) {
 		fixture.faux.setResponses(scopedResponses([
 			{ scope: "global", patch: { working: { globalCounter: counter } } },
@@ -1482,7 +1488,7 @@ test("real Pi restoration preserves current scoped state without requiring Git t
 	syncBuiltinESMExports();
 	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
 	for (const enabled of [true, false]) {
-		if (!enabled) await session.prompt("/state-flow-stop");
+		if (!enabled) await session.prompt("/state-flow-off");
 		for (const lifecycle of ["reload", "resume"]) {
 			reads.clear();
 			recording = true;
@@ -1531,7 +1537,7 @@ function durableSession(fixture: RealPiFixture, session: any) {
 }
 
 test("real Pi forks selected private memory over current shared scopes and reloads the child origin", { timeout: 40_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true });
+	const f = await realPiFixture(t, { mode: "active" });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
 	const parent = runtime.session;
@@ -1584,7 +1590,7 @@ test("real Pi forks selected private memory over current shared scopes and reloa
 });
 
 for (const operation of ["tree", "fork"] as const) test(`real Pi ${operation} selection awaits a held publisher and the next provider sees only the selected private memory`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
 	const parent = runtime.session;
@@ -1609,7 +1615,7 @@ for (const operation of ["tree", "fork"] as const) test(`real Pi ${operation} se
 	assert.equal(ended, false, "the native lifecycle awaits owned restoration under exclusion");
 	if (operation === "tree") {
 		assert.throws(() => f.readState(parent, 0, "session"), /restoration is pending/);
-		assert.equal(parent.getActiveToolNames().includes("patch_state"), false);
+		assert.equal(parent.getActiveToolNames().includes("patch_state"), true, "pending restoration uses passive policy without granting private-memory authority");
 	}
 	release();
 	await holder;
@@ -1635,7 +1641,7 @@ for (const restart of [false, true]) test(`public Pi child control during pendin
 	let capture!: (session: AgentSession) => void;
 	const created = new Promise<AgentSession>((resolve) => { capture = resolve; });
 	const f = await realPiFixture(t, {
-		autoStart: true, initializeRepository: false, passiveTools: true, passiveBootstrap: true,
+		mode: "active", initializeRepository: false,
 		onSessionCreated: (session, event) => { if (event.reason === "fork") capture(session); },
 	});
 	const runtime = await f.createRuntime();
@@ -1660,18 +1666,18 @@ for (const restart of [false, true]) test(`public Pi child control during pendin
 		const child = await Promise.race([created, delay(5_000).then(() => { throw new Error("native fork factory did not expose its child"); })]);
 		await delay(100);
 		assert.throws(() => f.readState(child, 0, "session"), /restoration is pending/);
-		await Promise.race([child.prompt("/state-flow-stop"), delay(1_000).then(() => assert.fail("Stop waited for child memory"))]);
-		if (restart) starting = child.prompt("/state-flow-start");
+		await Promise.race([child.prompt("/state-flow-passive"), delay(1_000).then(() => assert.fail("Stop waited for child memory"))]);
+		if (restart) starting = child.prompt("/state-flow-active");
 		await delay(20);
 		assert.equal(forked, false);
-		assert.equal(f.statuses.at(-1), undefined);
+		assert.equal(f.statuses.at(-1), "state-flow passive");
 		assert.deepEqual(parentFiles(), before);
 	} finally { release(); await holder; }
 	assert.equal((await forking).cancelled, false);
 	await starting;
 	const child = runtime.session;
 	assert.notEqual(child.sessionId, parent.sessionId);
-	assert.equal(latestSnapshot(child).config.enabled, restart);
+	assert.equal(latestSnapshot(child).config.mode === "active", restart);
 	assert.equal(f.readState(child, 0, "session").working.private, "SELECTED-FORK-PRIVATE");
 	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
 	let input = "";
@@ -1683,12 +1689,12 @@ for (const restart of [false, true]) test(`public Pi child control during pendin
 	assert.match(input, /SELECTED-FORK-PRIVATE/);
 	assert.doesNotMatch(input, /LATER-PARENT-PRIVATE/);
 	assert.equal(f.readState(child, 0, "session").working.childOnly, true);
-	assert.equal(latestSnapshot(child).config.enabled, restart);
+	assert.equal(latestSnapshot(child).config.mode === "active", restart);
 	assert.deepEqual(parentFiles(), before);
 });
 
 test("real Pi Stop during tree restoration preserves passive memory and next-provider context", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false, passiveTools: true, passiveBootstrap: true });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const runtime = await f.createRuntime();
 	const session = runtime.session;
 	f.faux.setResponses(sessionResponses({ working: { private: "SELECTED-PASSIVE-PRIVATE" } }, "Selected answer"));
@@ -1706,13 +1712,13 @@ test("real Pi Stop during tree restoration preserves passive memory and next-pro
 	try {
 		await delay(100);
 		assert.throws(() => f.readState(session, 0, "session"), /restoration is pending/);
-		await Promise.race([session.prompt("/state-flow-stop"), delay(1_000).then(() => assert.fail("Stop blocked on tree restoration"))]);
+		await Promise.race([session.prompt("/state-flow-passive"), delay(1_000).then(() => assert.fail("Stop blocked on tree restoration"))]);
 		await delay(20);
 		assert.equal(selected, false, "mode change must not cancel selected memory restoration");
-		assert.equal(f.statuses.at(-1), undefined);
+		assert.equal(f.statuses.at(-1), "state-flow passive");
 	} finally { release(); await holder; }
 	await navigating;
-	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.notEqual(latestSnapshot(session).config.mode, "active");
 	assert.equal(f.readState(session, 0, "session").working.private, "SELECTED-PASSIVE-PRIVATE");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
 	let input = "";
@@ -1725,12 +1731,12 @@ test("real Pi Stop during tree restoration preserves passive memory and next-pro
 	assert.match(input, /Selected request/);
 	assert.doesNotMatch(input, /LATER-PRIVATE/);
 	assert.equal(f.readState(session, 0, "session").working.passivePatch, true);
-	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.notEqual(latestSnapshot(session).config.mode, "active");
 	assert.equal(f.notifications.some((notice) => /writes paused|cancelled by Stop/.test(notice)), false);
 });
 
 for (const operation of ["restore", "fork"] as const) test(`real Pi ${operation} reacquires evidence for an older private artifact without changing its semantics early`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
 	let session = runtime.session;
@@ -1792,12 +1798,12 @@ for (const operation of ["restore", "fork"] as const) test(`real Pi ${operation}
 });
 
 test("real Pi fork rejects inherited history but explicit Start preserves its current child-owned memory", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: false });
+	const f = await realPiFixture(t, { mode: "off" });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
 	const parent = runtime.session;
-	await parent.prompt("/state-flow-stop"); // An older ordinary-disabled marker is not a child reset permission.
-	await parent.prompt("/state-flow-start");
+	await parent.prompt("/state-flow-off"); // An older ordinary-disabled marker is not a child reset permission.
+	await parent.prompt("/state-flow-active");
 	f.faux.setResponses(sessionResponses({ working: { retained: "private" } }, "Parent answer"));
 	await parent.prompt("Parent request");
 	const inheritedPoint = parent.sessionManager.getLeafId()!;
@@ -1813,7 +1819,7 @@ test("real Pi fork rejects inherited history but explicit Start preserves its cu
 	const head = runGit(f.repositoryRoot, "rev-parse", "HEAD");
 	await child.navigateTree(inheritedPoint, { summarize: false });
 	assert.equal(child.getActiveToolNames().includes("patch_state"), false);
-	await child.prompt("/state-flow-start");
+	await child.prompt("/state-flow-active");
 	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
 	assert.deepEqual(f.readState(child), selected, "activation uses the existing child's current memory, not an empty reset or a new parent copy");
 	assert.equal(runGit(f.repositoryRoot, "rev-parse", "HEAD"), head);
@@ -1824,20 +1830,20 @@ test("real Pi fork rejects inherited history but explicit Start preserves its cu
 });
 
 test("real Pi stopped fork copies memory but never inherits the parent's passive projection across reload", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true });
+	const f = await realPiFixture(t, { mode: "active" });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
 	const parent = runtime.session;
 	f.faux.setResponses(sessionResponses({ working: { inherited: true } }, "Parent retained"));
 	await parent.prompt("Parent request");
-	await parent.prompt("/state-flow-stop");
+	await parent.prompt("/state-flow-off");
 	const state = f.readState(parent, 0, "session");
 	const before = readFileSync(parent.sessionFile!);
 	assert.equal((await runtime.fork(parent.sessionManager.getLeafId()!, { position: "at" })).cancelled, false);
 	const child = runtime.session;
 	assert.equal(child.getActiveToolNames().includes("patch_state"), false);
 	assert.deepEqual(f.readState(child, 0, "session"), state);
-	assert.equal(latestSnapshot(child).config.enabled, false);
+	assert.notEqual(latestSnapshot(child).config.mode, "active");
 	await child.reload();
 	let input = "";
 	f.faux.setResponses([(context) => { input = JSON.stringify(context.messages); return fauxAssistantMessage("Ordinary child answer"); }]);
@@ -1849,10 +1855,11 @@ test("real Pi stopped fork copies memory but never inherits the parent's passive
 });
 
 for (const passive of [false, true]) for (const invalid of ["identity", "cwd"] as const) test(`real Pi fork rejects ${invalid} parent evidence without fallback and retries the exact source on Start (passive=${passive})`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, passiveBootstrap: passive, passiveTools: passive });
+	const f = await realPiFixture(t, { mode: passive ? "passive" : "off" });
 	const runtime = await f.createRuntime();
 	t.after(() => { runtime.setBeforeSessionInvalidate(undefined); return runtime.dispose(); });
 	const parent = runtime.session;
+	await parent.prompt("/state-flow-active");
 	f.faux.setResponses(sessionResponses({ working: { mustSurvive: true } }, "Selected source"));
 	await parent.prompt("Selected source request");
 	const sourceCheckpoint = structuredClone(snapshots(parent).at(-1)!.data);
@@ -1872,11 +1879,11 @@ for (const passive of [false, true]) for (const invalid of ["identity", "cwd"] a
 	assert.match(f.notifications.at(-1)!, /identity mismatch/);
 	assert.deepEqual(snapshots(child).at(-1)!.data, sourceCheckpoint);
 	const entries = structuredClone(child.sessionManager.getEntries());
-	await child.prompt("/state-flow-start");
+	await child.prompt("/state-flow-active");
 	assert.equal(child.getActiveToolNames().includes("patch_state"), passive);
 	assert.deepEqual(child.sessionManager.getEntries(), entries);
 	writeFileSync(file, before);
-	await child.prompt("/state-flow-start");
+	await child.prompt("/state-flow-active");
 	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
 	assert.deepEqual(f.readState(child, 0, "session"), state);
 	assert.notDeepEqual(snapshots(child).at(-1)!.data, sourceCheckpoint);
@@ -1884,7 +1891,7 @@ for (const passive of [false, true]) for (const invalid of ["identity", "cwd"] a
 });
 
 for (const scope of ["global", "cwd"] as const) for (const lifecycle of ["Stop", "next request"] as const) test(`real Pi ${lifecycle} adopts foreign ${scope} state without lifecycle semantic writes`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	f.faux.setResponses(sessionResponses({ working: { private: "retained" } }, "Own accepted answer"));
@@ -1892,7 +1899,7 @@ for (const scope of ["global", "cwd"] as const) for (const lifecycle of ["Stop",
 	const privateState = f.readState(session, 0, "session");
 	const step = latestSnapshot(session).meta.step;
 	const b = new TemporalRuntime(f.cwd, "other-session", f.repositoryRoot);
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	b.initialize(snapshot, true);
 	const before = b.states();
 	const next = structuredClone(before);
@@ -1905,8 +1912,8 @@ for (const scope of ["global", "cwd"] as const) for (const lifecycle of ["Stop",
 		.filter(({ path }) => path !== paths.config && path !== paths.runtime);
 	const retained = protectedFiles();
 	if (lifecycle === "Stop") {
-		await session.prompt("/state-flow-stop");
-		assert.equal(latestSnapshot(session).config.enabled, false);
+		await session.prompt("/state-flow-passive");
+		assert.notEqual(latestSnapshot(session).config.mode, "active");
 		assert.equal(latestSnapshot(session).meta.step, step);
 		assert.deepEqual(protectedFiles(), retained);
 	}
@@ -1925,21 +1932,21 @@ for (const scope of ["global", "cwd"] as const) for (const lifecycle of ["Stop",
 	if (lifecycle === "Stop") {
 		assert.deepEqual(f.readState(session, 0, "session"), privateState);
 		await session.reload();
-		assert.equal(latestSnapshot(session).config.enabled, false);
+		assert.notEqual(latestSnapshot(session).config.mode, "active");
 		assert.equal(f.readState(session, 0, scope).working.foreign, foreign);
 		assert.deepEqual(f.readState(session, 0, "session"), privateState);
 	}
 });
 
 test("real Pi maintains newly adopted registered artifacts before the first inference", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	f.faux.setResponses(unchangedResponses("Own accepted answer"));
 	await session.prompt("Seed the session");
 	const step = latestSnapshot(session).meta.step;
 	const b = new TemporalRuntime(f.cwd, "other-session", f.repositoryRoot);
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	b.initialize(snapshot, true);
 	const source = join(f.cwd, "removed-source.txt");
 	writeFileSync(source, "Temporary source");
@@ -1960,13 +1967,13 @@ test("real Pi maintains newly adopted registered artifacts before the first infe
 });
 
 for (const bootstrap of [false, true]) test(`real Pi mid-tool Stop retains the active trajectory through tree, reload, resume, and restart (${bootstrap ? "bootstrap" : "ordinary"} run)`, async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: !bootstrap });
+	const fixture = await realPiFixture(t, { mode: bootstrap ? "off" : "active" });
 	const session = await fixture.createSession("new");
 	t.after(() => session.dispose());
 	await session.sendCustomMessage({ customType: "foreign-policy", content: "PERSISTENT-FOREIGN-POLICY", display: false }, { triggerTurn: false });
 	fixture.faux.setResponses(bootstrap ? [fauxAssistantMessage("Earlier answer.")] : unchangedResponses("Earlier answer."));
 	await session.prompt("COMPLETED-RAW-REQUEST");
-	if (bootstrap) await session.prompt("/state-flow-start");
+	if (bootstrap) await session.prompt("/state-flow-active");
 	const frozen = fixture.readState(session);
 	const step = latestSnapshot(session).meta.step;
 	for (const name of ["early", "late"]) writeFileSync(join(fixture.cwd, `${name}.txt`), `${name.toUpperCase()}-TOOL-EVIDENCE`);
@@ -1976,7 +1983,7 @@ for (const bootstrap of [false, true]) test(`real Pi mid-tool Stop retains the a
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type !== "tool_execution_start" || event.toolCallId !== "late-read") return;
 		stoppedWhileBusy = !session.isIdle;
-		stop = session.prompt("/state-flow-stop").catch((error) => { stopError = error; });
+		stop = session.prompt("/state-flow-passive").catch((error) => { stopError = error; });
 	});
 	t.after(unsubscribe);
 	const inputs: unknown[] = [];
@@ -2008,7 +2015,7 @@ for (const bootstrap of [false, true]) test(`real Pi mid-tool Stop retains the a
 	assertContinuation(inputs[2]);
 	assert.deepEqual(fixture.readState(session), frozen);
 	assert.equal(latestSnapshot(session).meta.step, step);
-	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.notEqual(latestSnapshot(session).config.mode, "active");
 	const branch = session.sessionManager.getBranch();
 	const marker = branch.findIndex((entry) => entry.type === "custom" && entry.customType === "state-flow-passive-stop");
 	const early = branch.findIndex((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId === "early-read");
@@ -2034,7 +2041,7 @@ for (const bootstrap of [false, true]) test(`real Pi mid-tool Stop retains the a
 	await resumed.prompt("Continue after resume");
 	assertContinuation(resumedInput);
 	assert.deepEqual(fixture.readState(resumed), frozen);
-	await resumed.prompt("/state-flow-start");
+	await resumed.prompt("/state-flow-active");
 	await resumed.reload();
 	let restartInput: unknown;
 	fixture.faux.setResponses([
@@ -2053,7 +2060,7 @@ for (const bootstrap of [false, true]) test(`real Pi mid-tool Stop retains the a
 
 for (const stopDuringTool of [false, true]) test(`real Pi retains a native split-turn continuation through late tools (Stop=${stopDuringTool})`, { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, {
-		autoStart: true, initializeRepository: false, contextWindow: 4_000,
+		mode: "active", initializeRepository: false, contextWindow: 4_000,
 		compaction: { enabled: true, keepRecentTokens: 200, reserveTokens: 500 },
 	});
 	const session = await f.createSession("new");
@@ -2070,7 +2077,7 @@ for (const stopDuringTool of [false, true]) test(`real Pi retains a native split
 	t.after(session.subscribe((event) => {
 		if (!stopDuringTool || event.type !== "tool_execution_start" || event.toolCallId !== "late-read") return;
 		stoppedWhileBusy = !session.isIdle;
-		stop = session.prompt("/state-flow-stop").catch((error) => { stopError = error; });
+		stop = session.prompt("/state-flow-passive").catch((error) => { stopError = error; });
 	}));
 	const respond = async (context: Context) => {
 		if (context.messages.some((message) => message.role === "system" && getSystemMessageText(message).startsWith("You are a context summarization assistant."))) {
@@ -2125,7 +2132,7 @@ for (const stopDuringTool of [false, true]) test(`real Pi retains a native split
 	const assertFrozen = () => {
 		assert.deepEqual(f.readState(session), frozen);
 		assert.equal(latestSnapshot(session).meta.step, step);
-		assert.equal(latestSnapshot(session).config.enabled, false);
+		assert.notEqual(latestSnapshot(session).config.mode, "active");
 	};
 	assertFrozen();
 	const branch = session.sessionManager.getBranch();
@@ -2158,7 +2165,7 @@ for (const stopDuringTool of [false, true]) test(`real Pi retains a native split
 	assertContinuation(resumedInput!);
 	assert.deepEqual(f.readState(resumed), frozen);
 	assert.equal(latestSnapshot(resumed).meta.step, step);
-	await resumed.prompt("/state-flow-start");
+	await resumed.prompt("/state-flow-active");
 	let restartedInput: Context | undefined;
 	f.faux.setResponses([(context) => { restartedInput = context; return fauxAssistantMessage("Accepted the bootstrap continuation."); }]);
 	await resumed.prompt("Adopt the retained split-turn work");
@@ -2172,7 +2179,7 @@ for (const stopDuringTool of [false, true]) test(`real Pi retains a native split
 });
 
 test("real Pi edited-context accounting discards stale provider usage", { timeout: 15_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false, contextWindow: 4_000 });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false, contextWindow: 4_000 });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	f.faux.setResponses([fauxAssistantMessage("Accepted before usage edit.")]);
@@ -2209,7 +2216,7 @@ for (const pressure of [false, true, "refused"] as const) test(`real Pi settled 
 	let tokensBeforeSettled = 0;
 	const order: string[] = [];
 	const f = await realPiFixture(t, {
-		autoStart: true, initializeRepository: false, contextWindow: 400_000,
+		mode: "active", initializeRepository: false, contextWindow: 400_000,
 		extensions: [{ name: "sdk-settled-dispatch", factory: (pi) => {
 			pi.on("before_agent_start", (event) => { if (event.prompt === "DEFERRED-AFTER-SETTLED") order.push("deferred-start"); });
 			pi.on("session_before_compact", () => { if (pressure === "refused") return { cancel: true }; });
@@ -2259,7 +2266,7 @@ for (const pressure of [false, true, "refused"] as const) test(`real Pi settled 
 
 for (const recovery of ["retry", "length", "overflow"] as const) test(`real Pi recovery omits failed attempts without accepting them (${recovery})`, { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, {
-		autoStart: true, initializeRepository: false, contextWindow: 32_000,
+		mode: "active", initializeRepository: false, contextWindow: 32_000,
 		compaction: { enabled: recovery !== "retry", keepRecentTokens: 500, reserveTokens: 2_000 },
 	});
 	const session = await f.createSession("new");
@@ -2315,13 +2322,13 @@ for (const mode of ["captured", "midrun", "repeated"] as const) for (const passi
 	let reads = 0;
 	const count = mode === "repeated" ? 4 : 2;
 	const f = await realPiFixture(t, {
-		autoStart: mode === "captured", initializeRepository: false, passiveBootstrap: passive, passiveTools: false,
+		mode: mode === "captured" ? "active" : passive ? "passive" : "off", initializeRepository: false,
 		extensions: [{ name: "native-anchor-toggles", factory: (pi) => {
 			pi.on("tool_result", async (event) => {
 				if (event.toolName !== "read") return;
 				reads++;
-				if (reads % 2 === 0) await session.prompt("/state-flow-stop");
-				else if (mode !== "captured") await session.prompt("/state-flow-start");
+				if (reads % 2 === 0) await session.prompt("/state-flow-passive");
+				else if (mode !== "captured") await session.prompt("/state-flow-active");
 			});
 		} }],
 	});
@@ -2366,16 +2373,16 @@ for (const mode of ["captured", "midrun", "repeated"] as const) for (const passi
 	for (let read = 0; read < count; read++) assert.ok(restored.includes(`R15-READ-${read}`));
 	assert.deepEqual(f.readState(session), frozenState);
 	assert.ok(readFileSync(session.sessionFile!).subarray(0, trace.length).equals(trace));
-	assert.ok(f.notifications.every((message) => message.startsWith("State Flow enabled.")));
+	assert.ok(f.notifications.every((message) => message.startsWith("State Flow active.")));
 });
 
 for (const mode of ["stop", "passive-stop", "start", "boundary-stop"] as const) test(`real Pi refreshes protocol within the same run (${mode})`, async (t) => {
 	let session: Awaited<ReturnType<RealPiFixture["createSession"]>>;
 	let changed = false;
 	let starts = 0;
+	const targetMode = mode === "start" ? "active" : mode === "passive-stop" ? "passive" : "off";
 	const f = await realPiFixture(t, {
-		autoStart: mode !== "start", initializeRepository: false,
-		passiveBootstrap: mode === "passive-stop", passiveTools: false,
+		mode: mode === "start" ? "off" : "active", initializeRepository: false,
 		extensions: [{ name: "sdk-midrun-mode", factory: (pi) => {
 			pi.on("before_agent_start", (event) => {
 				starts++;
@@ -2384,12 +2391,12 @@ for (const mode of ["stop", "passive-stop", "start", "boundary-stop"] as const) 
 			pi.on("tool_result", async (event) => {
 				if (mode === "boundary-stop" || changed || event.toolName !== "read") return;
 				changed = true;
-				await session.prompt(mode === "start" ? "/state-flow-start" : "/state-flow-stop");
+				await session.prompt(`/state-flow-${targetMode}`);
 			});
 			pi.on("agent_before_settle", async (event) => {
 				if (mode !== "boundary-stop" || changed || event.outcome !== "completed") return;
 				changed = true;
-				await session.prompt("/state-flow-stop");
+				await session.prompt("/state-flow-off");
 				return { continue: true, entries: [{ type: "custom_message", customType: "mode-followup", content: "CONTINUE-AFTER-BOUNDARY-STOP", display: false }] };
 			});
 		} }],
@@ -2417,9 +2424,9 @@ for (const mode of ["stop", "passive-stop", "start", "boundary-stop"] as const) 
 	assert.equal(next.includes("State Flow passive memory is available"), mode === "passive-stop");
 	assert.match(next, /FOREIGN-MODE-CONTEXT/);
 	assert.doesNotMatch(next, /UNTRUSTED-MIDRUN-SPEC/);
-	assert.deepEqual(getCurrentTools(inputs[1]!.messages).map((tool) => tool.name).sort(), mode === "start" ? ["patch_state", "read", "read_state"] : ["read"]);
+	assert.deepEqual(getCurrentTools(inputs[1]!.messages).map((tool) => tool.name).sort(), targetMode === "off" ? ["read"] : ["patch_state", "read", "read_state"]);
 	assert.match(JSON.stringify(inputs[1]!.messages), mode === "boundary-stop" ? /CONTINUE-AFTER-BOUNDARY-STOP/ : /MODE-READ-EVIDENCE/);
-	assert.equal(latestSnapshot(session).config.enabled, mode === "start");
+	assert.equal(latestSnapshot(session).config.mode, targetMode);
 	assert.equal(f.readState(session).response, mode === "start" ? "After mode change." : mode === "boundary-stop" ? "Before boundary Stop." : "");
 	const rawSystems = session.sessionManager.getBranch().filter((entry) => entry.type === "message" && entry.message.role === "system");
 	assert.equal(JSON.stringify(rawSystems).includes("State Flow is enabled"), mode !== "start", "request projection does not rewrite earlier native system frames");
@@ -2430,8 +2437,7 @@ for (const mode of ["enabled", "passive", "disabled", "forced"] as const) test(`
 	const fullSystemPresence: boolean[] = [];
 	const stateFlowForcedPrompt: boolean[] = [];
 	const f = await realPiFixture(t, {
-		autoStart: mode !== "disabled", initializeRepository: false,
-		passiveBootstrap: mode === "passive", passiveTools: mode !== "disabled",
+		mode: mode === "disabled" ? "off" : "active", initializeRepository: false,
 		extensions: [{ name: "sdk-system-context", factory: (pi) => {
 			pi.on("before_agent_start", (event) => {
 				stateFlowForcedPrompt.push(event.systemPromptOptions.forceSystemPrompt !== undefined);
@@ -2451,7 +2457,7 @@ for (const mode of ["enabled", "passive", "disabled", "forced"] as const) test(`
 	});
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
-	if (mode === "passive") await session.prompt("/state-flow-stop");
+	if (mode === "passive") await session.prompt("/state-flow-passive");
 	const path = join(f.cwd, "system-hooks.txt");
 	writeFileSync(path, "HOOK-READ-EVIDENCE");
 	const inputs: Context[] = [];
@@ -2481,7 +2487,7 @@ for (const mode of ["enabled", "passive", "disabled", "forced"] as const) test(`
 	assert.match(JSON.stringify(inputs[1]!.messages), /HOOK-READ-EVIDENCE/);
 	if (mode === "enabled" || mode === "forced") assert.equal(f.readState(session).response, "System hooks accepted.");
 	if (mode === "enabled") {
-		await session.prompt("/state-flow-stop");
+		await session.prompt("/state-flow-off");
 		let lifecycleInput: Context | undefined;
 		f.faux.setResponses([(context) => { lifecycleInput = context; return fauxAssistantMessage("Paused answer."); }]);
 		await session.prompt("Continue with State Flow stopped");
@@ -2490,7 +2496,7 @@ for (const mode of ["enabled", "passive", "disabled", "forced"] as const) test(`
 		assert.doesNotMatch(getSystemMessageText(stoppedSystem), /State Flow is enabled|State Flow passive memory is available/);
 		assert.match(getSystemMessageText(stoppedSystem), /COMPANION-PER-REQUEST/);
 		assert.equal(f.readState(session).response, "System hooks accepted.", "disabled inference does not reconcile semantic response");
-		await session.prompt("/state-flow-start");
+		await session.prompt("/state-flow-active");
 		f.faux.setResponses([(context) => { lifecycleInput = context; return fauxAssistantMessage("Restarted answer."); }]);
 		await session.prompt("Restart structured protocol");
 		const restartedSystem = getCurrentSystemMessage(lifecycleInput!.messages)!;
@@ -2504,7 +2510,7 @@ test("real Pi context edits remain canonical through tools, tree selection and r
 	let session: Awaited<ReturnType<RealPiFixture["createSession"]>>;
 	let editedRead = false;
 	const f = await realPiFixture(t, {
-		autoStart: false, initializeRepository: false,
+		mode: "off", initializeRepository: false,
 		extensions: [{ name: "sdk-context-edits", factory: (pi) => {
 			pi.on("turn_end", (event) => {
 				if (editedRead || !event.toolResults.some((result) => result.toolName === "read")) return;
@@ -2530,7 +2536,7 @@ test("real Pi context edits remain canonical through tools, tree selection and r
 	session.sessionManager.appendContextEdit(oldUser.id, { content: "EDITED-HISTORY-USER" });
 	session.sessionManager.appendContextEdit(oldAnswer.id, null);
 	session.sessionManager.appendContextEdit(foreign.id, null);
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	const path = join(f.cwd, "native-context-edit.txt");
 	writeFileSync(path, "RAW-TOOL-RESULT");
 	const inputs: Context[] = [];
@@ -2570,7 +2576,7 @@ test("real Pi context edits remain canonical through tools, tree selection and r
 	assert.doesNotMatch(editedProjection, /RAW-HISTORY-USER|RAW-HISTORY-ANSWER|RAW-FOREIGN-OMIT|RAW-TOOL-RESULT/);
 	assert.equal(f.readState(session).working.independentMemory, "durable");
 	assert.equal(f.readState(session).response, "Edited context accepted.");
-	assert.deepEqual(f.notifications, ["State Flow enabled. The next complete agent run will migrate active context into state."]);
+	assert.deepEqual(f.notifications, ["State Flow active. The next complete agent run will migrate active context into state."]);
 });
 
 for (const boundary of ["turn_end", "agent_before_settle"] as const) test(`real Pi boundary continuation keeps accepted State Flow memory (${boundary})`, async (t) => {
@@ -2578,7 +2584,7 @@ for (const boundary of ["turn_end", "agent_before_settle"] as const) test(`real 
 	let boundaryValid = false;
 	let beforeAgentStarts = 0;
 	const f = await realPiFixture(t, {
-		autoStart: true, initializeRepository: false,
+		mode: "active", initializeRepository: false,
 		extensions: [{ name: "sdk-boundary-continuation", factory: (pi) => {
 			pi.on("before_agent_start", () => { beforeAgentStarts++; });
 			const continueOnce = (event: TurnEndEvent | AgentBeforeSettleEvent, ctx: ExtensionContext) => {
@@ -2640,7 +2646,7 @@ for (const boundary of ["turn_end", "agent_before_settle"] as const) test(`real 
 
 test("real Pi threshold compaction preserves partial tool work before the first State Flow patch", { timeout: 30_000 }, async (t) => {
 	const fixture = await realPiFixture(t, {
-		autoStart: true, contextWindow: 4_000,
+		mode: "active", contextWindow: 4_000,
 		compaction: { enabled: true, keepRecentTokens: 200, reserveTokens: 500 },
 	});
 	const session = await fixture.createSession("new");
@@ -2670,7 +2676,7 @@ test("real Pi threshold compaction preserves partial tool work before the first 
 });
 
 test("real Pi compacts accepted State Flow history without another model call and resumes from the same full session", { timeout: 30_000 }, async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	let session = await fixture.createSession("new");
 	t.after(() => session.dispose());
 	const id = session.sessionId;
@@ -2736,7 +2742,7 @@ function wideSyntheticImage(width = 3000, height = 10): ImageContent {
 for (const stateFlow of [false, true]) test(`real Pi applies image profiles only to newly admitted images (enabled=${stateFlow})`, { timeout: 30_000 }, async (t) => {
 	const images = [wideSyntheticImage(), wideSyntheticImage(30, 3000)];
 	const f = await realPiFixture(t, {
-		autoStart: false, initializeRepository: false, stateFlow,
+		mode: "off", initializeRepository: false, stateFlow,
 		tools: stateFlow ? ["read", "patch_state", "read_state", "profile_images"] : ["read", "profile_images"],
 		models: [
 			{ id: "large-profile", input: ["text", "image"], inputLimits: { images: { resize: { maxWidth: 1800, maxHeight: 1200 } } } },
@@ -2775,7 +2781,7 @@ for (const stateFlow of [false, true]) test(`real Pi applies image profiles only
 	const model = f.faux.getModel("small-profile");
 	assert.ok(model);
 	await session.setModel(model);
-	if (stateFlow) await session.prompt("/state-flow-start");
+	if (stateFlow) await session.prompt("/state-flow-active");
 	const inputs: Context[] = [];
 	f.faux.setResponses([
 		...(stateFlow ? [(context: Context) => { inputs.push(context); return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { imageProfiles: "historical large images retained; new small-profile images" } } }), { stopReason: "toolUse" }); }] : []),
@@ -2820,7 +2826,7 @@ function steeringInputEvidence(context: Context): { image: boolean; readResult: 
 }
 
 for (const stateFlow of [false, true]) test(`real Pi retains a normalized image and read evidence through steering without compaction (enabled=${stateFlow})`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false, stateFlow });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false, stateFlow });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	const source = join(f.cwd, "steering-evidence.txt");
@@ -2847,7 +2853,7 @@ for (const stateFlow of [false, true]) test(`real Pi retains a normalized image 
 });
 
 for (const normalizedImage of [false, true]) test(`real Pi compaction retains the original run through steering, tool results, and foreign context (normalized image=${normalizedImage})`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	const file = session.sessionFile!;
@@ -2921,24 +2927,25 @@ for (const normalizedImage of [false, true]) test(`real Pi compaction retains th
 });
 
 test("real Pi preserves branch-local state through compaction and rejects an expired sibling after fresh-origin navigation", async (t) => {
-	const fixture = await realPiFixture(t);
+	const fixture = await realPiFixture(t, { mode: "configured" });
+	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ mode: "off" }));
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
 
 	assert.equal(fixture.statuses.at(-1), undefined);
-	assert.equal(snapshots(session).length, 0);
+	assert.deepEqual(snapshots(session).map(({ data }) => data), [{ mode: "off" }]);
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	const key = nativeSessionKey(session);
 	assert.equal(key, basename(session.sessionManager.getSessionFile()!, ".jsonl"));
 	assert.equal(temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "session", fixture.repositoryRoot, key).directory,
 		join(fixture.repositoryRoot, `--${fixture.cwd.slice(1).replaceAll("/", "-")}--`, key));
 	assert.equal(existsSync(temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "session", fixture.repositoryRoot, key).checkpoint), true);
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
-	assert.deepEqual(latestSnapshot(session).config, { enabled: true });
-	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ autoStart: true }));
+	assert.deepEqual(latestSnapshot(session).config, { mode: "active" });
+	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ mode: "active" }));
 	const nextSession = await fixture.createSession("new");
-	assert.equal(latestSnapshot(nextSession).config.enabled, true);
+	assert.equal(latestSnapshot(nextSession).config.mode, "active");
 	assert.equal(nextSession.getActiveToolNames().includes("patch_state"), true);
 	assert.equal(latestSnapshot(nextSession).meta.step, 0);
 	nextSession.dispose();
@@ -2960,22 +2967,22 @@ test("real Pi preserves branch-local state through compaction and rejects an exp
 		working: { branch: "future", nextCheck: "return to base" },
 	}, "Future branch saved."));
 	await session.prompt("Advance the future branch");
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-off");
 	const stopped = snapshots(session).at(-1)!;
-	assert.equal(latestSnapshot(session, stopped.data).config.enabled, false);
+	assert.notEqual(latestSnapshot(session, stopped.data).config.mode, "active");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
 	assert.equal(latestSnapshot(session, stopped.data).meta.step, 4);
 	assert.equal(Object.hasOwn(stopped.data, "state"), false);
 	assert.equal(durableSession(fixture, session).working.branch, "future");
 
 	await session.navigateTree(base.id, { summarize: false });
-	assert.equal(latestSnapshot(session).config.enabled, true);
+	assert.equal(latestSnapshot(session).config.mode, "active");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
 	assert.equal(latestSnapshot(session).meta.step, 2);
 
 	await session.navigateTree(stopped.id, { summarize: false });
 	try {
-		assert.equal(latestSnapshot(session).config.enabled, false);
+		assert.notEqual(latestSnapshot(session).config.mode, "active");
 	} catch (error) {
 		assert.match(error instanceof Error ? error.message : String(error), /outside the retained temporal window/);
 	}
@@ -2983,31 +2990,31 @@ test("real Pi preserves branch-local state through compaction and rejects an exp
 });
 
 test("real Pi Stop preserves a global-only passive branch through reload, patch, and Start", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "passive" });
 	writeGlobalState({ ...emptyState(), working: { shared: "global" } }, f.repositoryRoot);
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 	const before = files();
-	await session.prompt("/state-flow-stop");
-	assert.deepEqual(snapshots(session).at(-1)?.data, { disabled: true });
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-passive");
+	assert.deepEqual(snapshots(session).at(-1)?.data, { mode: "passive" });
+	await session.prompt("/state-flow-passive");
 	await session.reload();
 	assert.deepEqual(files(), before);
 	assert.equal(f.readState(session, 0, "global").working.shared, "global");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
 	f.faux.setResponses(sessionResponses({ working: { local: "retained" } }, "Saved passively."));
 	await session.prompt("Save session memory without starting an episode");
-	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.notEqual(latestSnapshot(session).config.mode, "active");
 	assert.ok("boundary" in snapshots(session).at(-1)!.data);
 	await session.reload();
 	assert.equal(f.readState(session, 0, "session").working.local, "retained");
-	await session.prompt("/state-flow-start");
-	assert.equal(latestSnapshot(session).config.enabled, true);
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-active");
+	assert.equal(latestSnapshot(session).config.mode, "active");
+	await session.prompt("/state-flow-passive");
 	assert.ok("boundary" in snapshots(session).at(-1)!.data);
 	await session.reload();
-	assert.equal(latestSnapshot(session).config.enabled, false);
+	assert.notEqual(latestSnapshot(session).config.mode, "active");
 	assert.equal(f.readState(session, 0, "session").working.local, "retained");
 	assert.equal(existsSync(join(f.repositoryRoot, ".git")), false);
 });
@@ -3016,17 +3023,17 @@ for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi 
 	let session: Awaited<ReturnType<RealPiFixture["createSession"]>>;
 	let interrupted = false;
 	const f = await realPiFixture(t, {
-		initializeRepository: false, passiveBootstrap: true, passiveTools: true,
+		initializeRepository: false, mode: "passive",
 		extensions: [{ name: "interrupt-state-flow", factory: (pi) => {
 			pi.on("tool_result", async (event) => {
 				if (mode !== "interrupted" || interrupted || event.toolName !== "patch_state") return;
 				interrupted = true;
-				await session.prompt("/state-flow-stop");
+				await session.prompt("/state-flow-passive");
 			});
 		} }],
 	});
 	session = await f.createSession("new");
-	if (mode !== "passive") await session.prompt("/state-flow-start");
+	if (mode !== "passive") await session.prompt("/state-flow-active");
 	let old: ReturnType<typeof snapshots>[number] | undefined;
 	for (let index = 1; index <= 9; index++) {
 		f.faux.setResponses(scopedResponses([{ scope: "session", patch: { working: { private: index } } }], `Answer ${index}`));
@@ -3034,7 +3041,7 @@ for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi 
 		if (index === 1) old = snapshots(session).at(-1)!;
 	}
 	const step = latestSnapshot(session).meta.step;
-	assert.equal(latestSnapshot(session).config.enabled, mode === "active");
+	assert.equal(latestSnapshot(session).config.mode === "active", mode === "active");
 	assert.equal(latestSnapshot(session).meta.specification !== undefined, mode === "interrupted");
 	assert.equal(f.readState(session, 0, "session").working.private, 9);
 	await session.navigateTree(old!.id, { summarize: false });
@@ -3042,8 +3049,8 @@ for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi 
 	await session.reload();
 	const paths = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
 	const privateBefore = readFileSync(paths.checkpoint, "utf8");
-	await session.prompt("/state-flow-start");
-	assert.equal(latestSnapshot(session).config.enabled, true);
+	await session.prompt("/state-flow-active");
+	assert.equal(latestSnapshot(session).config.mode, "active");
 	assert.equal(latestSnapshot(session).meta.step, step);
 	assert.equal(latestSnapshot(session).meta.specification, undefined);
 	assert.equal(f.readState(session, 0, "session").working.private, 9);
@@ -3056,17 +3063,17 @@ for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi 
 	assert.ok(runtimeUser?.role === "user" && Array.isArray(runtimeUser.content));
 	assert.match(runtimeUser.content.find((block) => block.type === "text")?.text ?? "", /"private":9/);
 	assert.equal(f.readState(session).response, "Reconciled after activation.");
-	await session.prompt("/state-flow-stop");
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-passive");
+	await session.prompt("/state-flow-active");
 	assert.equal(f.readState(session, 0, "session").working.private, 9);
 });
 
 test("real Pi expired selection fences passive publication until explicit current-memory activation", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "passive" });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-stop");
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-passive");
+	await session.prompt("/state-flow-active");
 	const expired = snapshots(session).at(-1)!;
 	for (let index = 1; index <= 5; index++) {
 		f.faux.setResponses(scopedResponses([
@@ -3082,7 +3089,7 @@ test("real Pi expired selection fences passive publication until explicit curren
 	assert.match(f.notifications.at(-1)!, /outside the retained temporal window/);
 	assert.equal(f.readState(session, 0, "global").working.shared, "retained");
 	assert.throws(() => f.readState(session, 0, "session"), /selected branch is unavailable/);
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-passive");
 	assert.deepEqual(files(), before);
 	assert.deepEqual(snapshots(session).at(-1), expired);
 	const notices = f.notifications.length;
@@ -3097,13 +3104,13 @@ test("real Pi expired selection fences passive publication until explicit curren
 	await session.prompt("Try a passive patch after failed restoration");
 	const rejected = session.sessionManager.getEntries().findLast((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "patch_state");
 	assert.ok(rejected?.type === "message" && rejected.message.role === "toolResult" && rejected.message.isError);
-	assert.match(JSON.stringify(rejected.message.content), /paused after Stop/);
+	assert.match(JSON.stringify(rejected.message.content), /paused after mode change/);
 	assert.deepEqual(snapshots(session).at(-1), expired);
 	assert.deepEqual(files(), before, "passive tools and ordinary answers cannot publish an empty substitute session");
-	await session.prompt("/state-flow-start");
-	assert.equal(latestSnapshot(session).config.enabled, true);
+	await session.prompt("/state-flow-active");
+	assert.equal(latestSnapshot(session).config.mode, "active");
 	assert.equal(f.readState(session, 0, "session").working.private, 5);
-	assert.match(f.notifications.at(-1)!, /State Flow enabled/);
+	assert.match(f.notifications.at(-1)!, /State Flow active/);
 	await session.navigateTree(retained.id, { summarize: false });
 	assert.equal(f.readState(session, 0, "session").working.private, 5);
 	f.faux.setResponses(sessionResponses({ working: { continued: true } }, "Restored safely."));
@@ -3112,7 +3119,7 @@ test("real Pi expired selection fences passive publication until explicit curren
 });
 
 test("real Pi refuses contradictory session files without passive substitution and retries the repaired selection", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false, passiveBootstrap: true, passiveTools: true });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	writeGlobalState({ ...emptyState(), working: { shared: "retained" } }, f.repositoryRoot);
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
@@ -3122,7 +3129,7 @@ test("real Pi refuses contradictory session files without passive substitution a
 	const a = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
 	const original = (["checkpoint", "patches", "meta"] as const).map((key) => ({ path: a[key], bytes: readFileSync(a[key]) }));
 	const b = new TemporalRuntime(f.cwd, "foreign-b", f.repositoryRoot);
-	const other = emptySnapshot(true);
+	const other = emptySnapshot("active");
 	b.initialize(other, true);
 	const before = b.states();
 	const next = structuredClone(before);
@@ -3138,28 +3145,28 @@ test("real Pi refuses contradictory session files without passive substitution a
 	assert.equal(f.readState(session, 0, "global").working.shared, "retained");
 	assert.throws(() => f.readState(session, 0, "session"), /selected branch is unavailable/);
 	const notices = f.notifications.length;
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	assert.equal(f.notifications.length, notices + 1, "a refused activation emits only one final error");
-	assert.match(f.notifications.at(-1)!, /Start failed.*Conflicting State Flow temporal lineage/);
+	assert.match(f.notifications.at(-1)!, /activation failed.*Conflicting State Flow temporal lineage/);
 	assert.doesNotMatch(f.notifications.at(-1)!, /\n/);
 	assert.ok(f.notifications.at(-1)!.length <= 220);
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-passive");
 	assert.deepEqual(snapshots(session).at(-1), selected);
 	assert.deepEqual(files(), mixed, "failed selection cannot publish a passive replacement");
 	for (const { path, bytes } of original) writeFileSync(path, bytes);
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	assert.equal(f.readState(session, 0, "session").working.owner, "A");
-	assert.equal(latestSnapshot(session).config.enabled, true);
+	assert.equal(latestSnapshot(session).config.mode, "active");
 });
 
 test("real Pi explicit Start on a pre-runtime selection retains current same-session memory and shared streams", async (t) => {
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-off");
 	const marker = snapshots(session).at(-1)!;
-	assert.deepEqual(marker.data, { disabled: true });
-	await session.prompt("/state-flow-start");
+	assert.deepEqual(marker.data, { mode: "off" });
+	await session.prompt("/state-flow-active");
 	fixture.faux.setResponses(scopedResponses([
 		{ scope: "global", patch: { working: { sharedGlobal: "keep" } } },
 		{ scope: "cwd", patch: { working: { sharedCwd: "keep" } } },
@@ -3176,7 +3183,7 @@ test("real Pi explicit Start on a pre-runtime selection retains current same-ses
 	});
 	await session.navigateTree(marker.id, { summarize: false });
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
 	assert.equal(latestSnapshot(session).meta.step, acceptedStep);
 	assert.deepEqual(fixture.readState(session, 0, "session"), privateState);
@@ -3189,10 +3196,10 @@ test("real Pi explicit Start on a pre-runtime selection retains current same-ses
 });
 
 test("real Pi isolates same-CWD sessions and retains seven patches per scope", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const first = await fixture.createSession("new");
 	t.after(() => first.dispose());
-	await first.prompt("/state-flow-start");
+	await first.prompt("/state-flow-active");
 	const firstId = first.sessionManager.getSessionId();
 	const firstKey = nativeSessionKey(first);
 	fixture.faux.setResponses(Array.from({ length: 9 }, (_, index) => scopedResponses([
@@ -3226,8 +3233,9 @@ test("real Pi isolates same-CWD sessions and retains seven patches per scope", a
 	}
 	for (const { data } of snapshots(first)) {
 		const keys = Object.keys(data).sort();
-		assert.ok(keys.every((key) => ["boundary", "bootstrap", "enabled", "specification", "step"].includes(key)));
-		assert.ok(["boundary", "enabled", "step"].every((key) => keys.includes(key)));
+		assert.ok(keys.every((key) => ["boundary", "bootstrap", "mode", "specification", "step"].includes(key)));
+		assert.ok(["boundary", "mode", "step"].every((key) => keys.includes(key)));
+		assert.equal((data as any).mode, "active");
 		assert.equal(typeof (data as any).boundary, "string");
 	}
 });
@@ -3237,7 +3245,7 @@ test("real Pi logs rejected patches but not accepted patches or answers", async 
 	const logPath = join(fixture.agentDir, "tmp", "state-flow", "logs.jsonl");
 	const disabled = await fixture.createSession();
 	t.after(() => disabled.dispose());
-	await disabled.prompt("/state-flow-start");
+	await disabled.prompt("/state-flow-active");
 	fixture.faux.setResponses(sessionResponses({ working: { disabledRun: "accepted" } }, "No diagnostics."));
 	await disabled.prompt("Complete without diagnostics");
 	assert.equal(existsSync(logPath), false);
@@ -3245,7 +3253,7 @@ test("real Pi logs rejected patches but not accepted patches or answers", async 
 	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ logging: true }));
 	const logged = await fixture.createSession();
 	t.after(() => logged.dispose());
-	await logged.prompt("/state-flow-start");
+	await logged.prompt("/state-flow-active");
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("patch_state", { session: {} }, { id: "rejected" }), { stopReason: "toolUse" }),
 		...sessionResponses({ working: { loggedRun: "accepted" } }, "Accepted."),
@@ -3264,7 +3272,7 @@ test("real Pi diagnostic write failure leaves resolution and accepted state unto
 	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ logging: true }));
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	writeFileSync(join(fixture.agentDir, "tmp"), "blocked");
 	const beforeFailure = fixture.notifications.length;
 	fixture.faux.setResponses([
@@ -3281,15 +3289,14 @@ test("real Pi patch_state barriers rematerialize every scope before the next inf
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 
 	const clone = globalThis.structuredClone;
 	let contextCopies: number | undefined;
 	const contextCopyCounts: number[] = [];
 	t.mock.method(globalThis, "structuredClone", <T>(value: T, options?: Parameters<typeof clone>[1]): T => {
 		const candidate = value as Partial<MaterializedState> | null | undefined;
-		if (contextCopies !== undefined && candidate?.working?.sessionCheckpoint === "verified"
-			&& candidate.artifacts !== undefined && typeof candidate.response === "string") contextCopies++;
+		if (contextCopies !== undefined && candidate?.working?.sessionCheckpoint === "verified") contextCopies++;
 		return clone(value, options);
 	});
 	const emitContext = session.extensionRunner.emitContext.bind(session.extensionRunner);
@@ -3355,7 +3362,7 @@ test("real Pi reads prior scoped state lazily after a barrier and rejects path o
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	assert.equal(session.getActiveToolNames().includes("read_state"), true);
 	fixture.faux.setResponses(sessionResponses({ working: { version: "old" } }, "Baseline."));
 	await session.prompt("Save the baseline");
@@ -3411,7 +3418,7 @@ test("real Pi reads prior scoped state lazily after a barrier and rejects path o
 	const beforeStatus = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
 	await session.prompt("/state-flow-status");
 	assert.match(fixture.notifications.at(-1)!, /Hot history: offsets 0\.\.4; maximum depth 7/);
-	assert.match(fixture.notifications.at(-1)!, /Retained patch tails: global 0; CWD 0; session 4/);
+	assert.match(fixture.notifications.at(-1)!, /Scope revisions: g0c0s4/);
 	assert.equal(runGit(fixture.repositoryRoot, "rev-parse", "HEAD"), beforeStatus);
 });
 
@@ -3419,7 +3426,7 @@ test("real Pi executes only patch_state when a response also proposes a sibling 
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	const inFlight = new Set<string>();
 	let started = 0;
 	let ended = 0;
@@ -3468,7 +3475,7 @@ test("real Pi keeps a malformed patch_state failure separated from the invocatio
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	const beforeHead = runGit(fixture.repositoryRoot, "rev-parse", "HEAD");
 	const beforeStep = latestSnapshot(session).meta.step;
 	fixture.faux.setResponses([
@@ -3491,8 +3498,8 @@ test("real Pi preserves unrelated Git history and accepts a shared write against
 	const second = await fixture.createSession();
 	t.after(() => first.dispose());
 	t.after(() => second.dispose());
-	await first.prompt("/state-flow-start");
-	await second.prompt("/state-flow-start");
+	await first.prompt("/state-flow-active");
+	await second.prompt("/state-flow-active");
 
 	writeFileSync(join(fixture.repositoryRoot, "independent.md"), "Independent Knowledge history.\n");
 	runGit(fixture.repositoryRoot, "add", "independent.md");
@@ -3516,7 +3523,7 @@ test("real Pi preserves unrelated Git history and accepts a shared write against
 			observedWriter = text && JSON.parse(text.slice(text.indexOf("\n") + 1)).state.working.writer;
 			// Before-prompt drift is now adopted; a genuine race must happen after model input selection.
 			const competing = new TemporalRuntime(fixture.cwd, "racing-writer", fixture.repositoryRoot);
-			const snapshot = emptySnapshot(true);
+			const snapshot = emptySnapshot("active");
 			competing.initialize(snapshot, true);
 			const before = competing.states();
 			const next = structuredClone(before);
@@ -3532,7 +3539,7 @@ test("real Pi preserves unrelated Git history and accepts a shared write against
 	await second.prompt("Attempt a simultaneous durable transition");
 	assert.equal(observedWriter, "first");
 	assert.equal(latestSnapshot(second).meta.step, 2);
-	assert.equal(latestSnapshot(second).config.enabled, true);
+	assert.equal(latestSnapshot(second).config.mode, "active");
 	assert.equal(loadCwdState(fixture.cwd, fixture.repositoryRoot)!.working.writer, "second");
 	assert.equal(loadCwdMaterialization(fixture.cwd, fixture.repositoryRoot)!.recentTransitions.length, 3);
 	assert.equal(fixture.readState(second, 2, "cwd").working.writer, "racing", "the predecessor is the accepted current head, not model input");
@@ -3543,7 +3550,7 @@ test("real Pi preserves unrelated Git history and accepts a shared write against
 });
 
 for (const owner of ["global", "cwd", "session"] as const) test(`real Pi compiles an invalidated artifact only into its reported ${owner} scope`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	const source = join(f.cwd, "registered.txt");
@@ -3608,9 +3615,9 @@ for (const owner of ["global", "cwd", "session"] as const) test(`real Pi compile
 });
 
 test("real Pi ordinary artifact invalidations share the public fingerprint classifier", { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const seed = new TemporalRuntime(f.cwd, "seed", f.repositoryRoot);
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	seed.initialize(snapshot, true);
 	const before = seed.states();
 	const next = structuredClone(before);
@@ -3665,7 +3672,7 @@ test("real Pi ordinary artifact invalidations share the public fingerprint class
 });
 
 test("real Pi acquires only invalidated registered artifacts and attaches trusted compilation evidence", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const unchangedPath = join(fixture.agentDir, "knowledge", "unchanged.md");
 	const changedPath = join(fixture.agentDir, "knowledge", "changed.md");
 	writeFileSync(unchangedPath, "Unchanged routing guidance.\n");
@@ -3818,7 +3825,7 @@ test("real Pi acquires only invalidated registered artifacts and attaches truste
 });
 
 test("real Pi preserves registered artifacts across reactivation and removes an exact missing source after reload", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const root = join(fixture.agentDir, "knowledge");
 	const owned = join(root, "owned.md");
 	const foreign = [join(fixture.cwd, "external.txt"), join(fixture.cwd, "external.md"), join(root, "retained.txt"), join(root, "retained.MD")];
@@ -3834,8 +3841,8 @@ test("real Pi preserves registered artifacts across reactivation and removes an 
 	const paths = temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "global", fixture.repositoryRoot);
 	const files = [paths.checkpoint, paths.patches, paths.meta];
 	const bytes = files.map((path) => readFileSync(path));
-	await session.prompt("/state-flow-stop");
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-off");
+	await session.prompt("/state-flow-active");
 	fixture.faux.setResponses(unchangedResponses("Reactivated without deleting registered sources."));
 	await session.prompt("Reactivate artifact tracking");
 	assert.deepEqual(fixture.readState(session, 0, "global"), seeded);
@@ -3857,7 +3864,7 @@ test("real Pi preserves registered artifacts across reactivation and removes an 
 });
 
 test("real Pi rejects no-read provenance forgery atomically and accepts a corrected model patch", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const session = await fixture.createSession("new");
 	t.after(() => session.dispose());
 	const source = join(fixture.cwd, "unacquired.txt");
@@ -3900,7 +3907,7 @@ test("real Pi maps registered Skill source scope and leaves independent patches 
 	};
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	const toolResultText = (context: Context, id: string) => JSON.stringify(context.messages.find((message: any) => message.role === "toolResult" && message.toolCallId === id)?.content);
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("read", { path: registered.global }, { id: "read-user-skill" }), { stopReason: "toolUse" }),
@@ -3939,7 +3946,7 @@ test("real Pi maps registered Skill source scope and leaves independent patches 
 });
 
 for (const scope of ["global", "cwd"] as const) for (const variant of ["duplicate", "competing", "invalid"] as const) test(`real Pi ${scope} Skill compilation respects an independent writer (${variant})`, { timeout: 30_000 }, async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const skill = f.registerSkill(scope === "global" ? "user" : "project", `race-${scope}`, "# Shared Skill\n\nRetain the exact source identity.");
 	const session = await f.createSession("new");
 	const card = { description: "Shared Skill", kind: "skill", compilation: { rule: "LOCAL-COMPILED" } };
@@ -4022,7 +4029,7 @@ test("a fresh real Pi agent continues from compact state and a runtime-compiled 
 	const fixture = await realPiFixture(t);
 	const skill = fixture.registerSkill("project", "continuation", "# Continuation\n\nPreserve the next discriminating check.\n\nSOURCE-BODY-ONLY-MARKER");
 	const session = await fixture.createSession();
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	fixture.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("read", { path: skill }), { stopReason: "toolUse" }),
 		fauxAssistantMessage(fauxToolCall("patch_state", {
@@ -4086,7 +4093,7 @@ test("a fresh real Pi agent continues from compact state and a runtime-compiled 
 test("real Pi old tree branch stop and resume preserve selected semantics without rewinding shared files", async (t) => {
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	const sessionPaths = temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "session", fixture.repositoryRoot, nativeSessionKey(session));
 	const globalPaths = temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "global", fixture.repositoryRoot);
 	const cwdPaths = temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "cwd", fixture.repositoryRoot);
@@ -4105,14 +4112,14 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 	await session.prompt("New state");
 	await session.navigateTree(old.id, { summarize: false });
 	assert.equal(fixture.readState(session).working.selected, "old");
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-passive");
 	const stopped = latestSnapshot(session);
 	assert.equal(stopped.meta.step, 2);
 	const file = session.sessionFile!;
 	session.dispose();
 	const resumed = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
 	t.after(() => resumed.dispose());
-	assert.equal(latestSnapshot(resumed).config.enabled, false);
+	assert.notEqual(latestSnapshot(resumed).config.mode, "active");
 	let passiveContext = "";
 	fixture.faux.setResponses([(context) => {
 		passiveContext = JSON.stringify(context.messages);
@@ -4129,7 +4136,7 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 	} catch (error) {
 		assert.match(error instanceof Error ? error.message : String(error), /predates the proven temporal origin/);
 	}
-	await resumed.prompt("/state-flow-start");
+	await resumed.prompt("/state-flow-active");
 	assert.equal(resumed.getActiveToolNames().includes("patch_state"), true);
 	assert.equal(fixture.readState(resumed).working.selected, "old");
 	assert.equal(fixture.readState(resumed).working.branch, "new");
@@ -4150,7 +4157,7 @@ test("real Pi persists without Git, resumes retained boundaries, and later backs
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
-	await session.prompt("/state-flow-start");
+	await session.prompt("/state-flow-active");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
 	const fileKey = nativeSessionKey(session);
 	assert.equal(existsSync(temporalScopePaths(fixture.cwd, session.sessionManager.getSessionId(), "session", fixture.repositoryRoot, fileKey).directory), true);
@@ -4176,8 +4183,8 @@ test("real Pi persists without Git, resumes retained boundaries, and later backs
 	fixture.readState(session, 2, "cwd");
 	assert.equal(probes, beforeReads);
 	const before = [0, 1, 2, 3].map((offset) => fixture.readState(session, offset));
-	await session.prompt("/state-flow-stop");
-	assert.equal(latestSnapshot(session).config.enabled, false);
+	await session.prompt("/state-flow-off");
+	assert.notEqual(latestSnapshot(session).config.mode, "active");
 	assert.equal(latestSnapshot(session).meta.step, 3);
 	assert.equal(existsSync(join(fixture.repositoryRoot, ".git")), false);
 	const file = session.sessionFile!;
@@ -4200,7 +4207,7 @@ test("real Pi persists without Git, resumes retained boundaries, and later backs
 	runGit(fixture.repositoryRoot, "config", "branch.main.remote", "origin");
 	runGit(fixture.repositoryRoot, "config", "branch.main.merge", "refs/heads/main");
 	writeFileSync(join(fixture.remote, "hooks", "pre-receive"), "#!/bin/sh\nsleep 1\n", { mode: 0o755 });
-	await resumed.prompt("/state-flow-start");
+	await resumed.prompt("/state-flow-active");
 	assert.equal(resumed.getActiveToolNames().includes("patch_state"), true);
 	const restarted = latestSnapshot(resumed);
 	assert.equal(restarted.meta.step, 3);
@@ -4216,7 +4223,7 @@ test("real Pi persists without Git, resumes retained boundaries, and later backs
 });
 
 test("real Pi derives an in-memory session directory from the native header timestamp and UUID", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const manager = SessionManager.inMemory(fixture.cwd);
 	const session = await fixture.createSession("new", manager);
 	t.after(() => session.dispose());
@@ -4230,7 +4237,7 @@ test("real Pi derives an in-memory session directory from the native header time
 });
 
 test("real Pi baseline memory crosses CWDs while project memory remains scoped", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const first = await fixture.createSession("new");
 	t.after(() => first.dispose());
 	fixture.faux.setResponses(scopedResponses([
@@ -4250,7 +4257,7 @@ test("real Pi baseline memory crosses CWDs while project memory remains scoped",
 });
 
 test("real Pi preserves failed external promotion and recovers proven destination pointers", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const first = await fixture.createSession("new");
 	t.after(() => first.dispose());
 	fixture.faux.setResponses(scopedResponses([{
@@ -4296,14 +4303,14 @@ test("real Pi activation stays local without a remote attempt", async (t) => {
 	const session = await fixture.createSession();
 	t.after(() => session.dispose());
 	const remoteBefore = childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
-	await session.prompt("/state-flow-start");
-	assert.equal(latestSnapshot(session).config.enabled, true);
+	await session.prompt("/state-flow-active");
+	assert.equal(latestSnapshot(session).config.mode, "active");
 	assert.equal(fixture.notifications.some((message) => /push is pending/.test(message)), false);
 	assert.equal(childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteBefore);
 });
 
 test("real Pi canonical acceptance persists locally while replication settles asynchronously", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const session = await fixture.createSession("new");
 	t.after(() => session.dispose());
 	const remoteBefore = childProcess.execFileSync("git", ["--git-dir", fixture.remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
@@ -4317,7 +4324,7 @@ test("real Pi canonical acceptance persists locally while replication settles as
 });
 
 test("real Pi projects resume bootstrap once and then uses step rehydration", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true });
+	const fixture = await realPiFixture(t, { mode: "active" });
 	const first = await fixture.createSession("new");
 	fixture.faux.setResponses(unchangedResponses("Continuation established."));
 	await first.prompt("Establish a resumable session");
@@ -4349,8 +4356,9 @@ test("real Pi projects resume bootstrap once and then uses step rehydration", as
 	await resumed.prompt("Continue with a later step");
 });
 
-test("real Pi auto-start follows agent configuration without overriding resumed branch mode", async (t) => {
-	const fixture = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+test("real Pi global mode defaults never override a resumed session's selected mode", async (t) => {
+	const fixture = await realPiFixture(t, { mode: "configured", initializeRepository: false });
+	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ mode: "active" }));
 	const path = process.env.PATH;
 	process.env.PATH = fixture.root;
 	t.after(() => { process.env.PATH = path; });
@@ -4361,7 +4369,7 @@ test("real Pi auto-start follows agent configuration without overriding resumed 
 	assert.equal(existsSync(join(fixture.repositoryRoot, ".git")), false);
 	fixture.faux.setResponses(unchangedResponses("Automatically persisted."));
 	await session.prompt("Use automatic mode");
-	await session.prompt("/state-flow-stop");
+	await session.prompt("/state-flow-off");
 	const file = session.sessionFile!;
 	session.dispose();
 	const stopped = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
@@ -4376,14 +4384,14 @@ test("real Pi auto-start follows agent configuration without overriding resumed 
 	const enabledFile = next.sessionFile!;
 	assert.equal(existsSync(enabledFile), true);
 	next.dispose();
-	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ autoStart: false }));
+	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ mode: "off" }));
 	const manual = await fixture.createSession("new");
 	t.after(() => manual.dispose());
 	assert.equal(manual.getActiveToolNames().includes("patch_state"), false);
-	assert.equal(snapshots(manual).length, 0);
+	assert.deepEqual(snapshots(manual).map(({ data }) => data), [{ mode: "off" }]);
 	const enabled = await fixture.createSession("resume", SessionManager.open(enabledFile, fixture.sessionDir));
 	t.after(() => enabled.dispose());
 	assert.equal(enabled.getActiveToolNames().includes("patch_state"), true);
-	assert.equal(latestSnapshot(enabled).config.enabled, true);
-	assert.deepEqual(JSON.parse(readFileSync(join(fixture.repositoryRoot, "config.json"), "utf8")), { autoStart: false });
+	assert.equal(latestSnapshot(enabled).config.mode, "active");
+	assert.deepEqual(JSON.parse(readFileSync(join(fixture.repositoryRoot, "config.json"), "utf8")), { mode: "off" });
 });

@@ -6,6 +6,7 @@ import { parseArtifactProvenanceRegistry, serializeArtifactProvenanceRegistry, }
 import { MAX_HISTORY_LIMIT } from "./history.js";
 import { canonicalJson, isJsonValue, isObject } from "./json.js";
 import { validateScopeStream, validateTemporalState } from "./temporal.js";
+import { selectSemanticFields } from "./state.js";
 const SESSION_KEY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const STATE_FILE = "state.json";
 const CHECKPOINT_FILE = "checkpoint.json";
@@ -33,8 +34,8 @@ export function serializeScopeStream(stream, scope, cwdIdentity) {
     if (scope !== "cwd" && cwdIdentity !== undefined)
         throw new Error("Only State Flow CWD scope serialization accepts a CWD identity");
     return {
-        checkpoint: `${canonicalJson(stream.checkpoint.state)}\n`,
-        patches: stream.patches.map((record) => `${canonicalJson(record.patch)}\n`).join(""),
+        checkpoint: `${canonicalJson(selectSemanticFields(stream.checkpoint.state))}\n`,
+        patches: stream.patches.map((record) => `${canonicalJson(selectSemanticFields(record.patch))}\n`).join(""),
         temporal: {
             revision: stream.revision,
             checkpoint: structuredClone(stream.checkpoint.through),
@@ -96,8 +97,10 @@ export function classifyScopeStream(checkpointSource, patchesSource, scope, expe
         // 0.17.4 and earlier did not persist scope revisions. Credit only their still-retained
         // semantic tail; discarded ancestry cannot be reconstructed without inventing history.
         revision: temporal.revision === undefined ? patches.length : temporal.revision,
-        checkpoint: { through: temporal.checkpoint, state: checkpoint },
-        patches: patches.map((patch, index) => ({ transition: boundaries[index], patch })),
+        checkpoint: { through: temporal.checkpoint, state: isObject(checkpoint) ? selectSemanticFields(checkpoint) : checkpoint },
+        patches: patches.map((patch, index) => ({
+            transition: boundaries[index], patch: isObject(patch) ? selectSemanticFields(patch) : patch,
+        })),
     };
     validateScopeStream(stream, scope, MAX_HISTORY_LIMIT);
     return { kind: "present", stream };

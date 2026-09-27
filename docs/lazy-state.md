@@ -4,7 +4,7 @@ This document describes the implemented lazy-state contract. [BACKLOG.md](../BAC
 
 ## Thesis
 
-State Flow provides `lazy` as a required object-root semantic plane in every scope. Nested lazy values are ordinary JSON: durable and versioned with the same causal lineage as hot state, but excluded from ordinary baseline hydration.
+State Flow provides `lazy` as an object-root semantic plane in every scope's runtime view. It may be absent from stored state; reads then use `{}` or values inherited through the effective overlay without rewriting storage. Nested lazy values are ordinary JSON: durable and versioned with the same causal lineage as hot state, but excluded from ordinary baseline hydration.
 
 The model-facing surface remains small:
 
@@ -34,7 +34,7 @@ The model-facing surface remains small:
 
 ## Semantic model
 
-Each scope contains six semantic planes in intent-first presentation order:
+Runtime views select present documented semantic planes in intent-first order, omitting absent fields, empty responses and unknown fields:
 
 ```text
 global | CWD | session
@@ -46,7 +46,7 @@ global | CWD | session
 └── lazy
 ```
 
-`intents`, `contract`, `working`, and `artifacts` remain hot in every scope. Session-owned `response` is also hot; Global and CWD keep only its required empty structural slot, and Effective inherits the Session value. `intents` may keep compact active direction while referring to large supporting detail in `lazy`. `lazy` differs only in projection policy:
+`intents`, `contract`, `working`, and `artifacts` remain hot in every scope. Session-owned `response` is also hot; New Global and CWD states use an empty structural slot; stored scopes may omit it. Effective uses the highest-priority present response, and each newly accepted answer is written only in Session. `intents` may keep compact active direction while referring to large supporting detail in `lazy`. `lazy` differs only in projection policy:
 
 - It is canonical semantic JSON, validated and versioned with its owning scope.
 - Its bodies are excluded from automatic state and recent-transition projections, including lazy writes, replacements and deletions. Empty visible patches/transitions disappear without renumbering history; hot changes remain visible.
@@ -63,7 +63,7 @@ Reference repair is reactive, not a maintenance scan. The agent does not enumera
 
 Missing paths or runtime hints alone do not require historical search. The agent may choose a targeted historical read when a previous value is useful to the current task, without separate user permission; otherwise continue without searching. Found values are historical evidence, not automatically current memory. Never automatically restore deleted data, scan all offsets, hydrate bodies or trigger repair inference. The reverse lookup searches current reference owners only, never history. A proven stale reference can be repaired within touched work without resurrecting its target.
 
-The `lazy` root must be an object. Its nested values may include arrays, objects, and scalars, for example:
+When present, the `lazy` root must be an object. Its nested values may include arrays, objects, and scalars, for example:
 
 ```json
 ["important thought", "next thought"]
@@ -114,7 +114,7 @@ Active obligations, current constraints, unresolved next actions, and facts requ
 }
 ```
 
-`projection` defaults to `value`. A batch uses one projection for every path, evaluates every path against one captured state view, and returns results in request order. Duplicate paths remain duplicate results. If any path is invalid, the whole read fails; there is no mixed partial result.
+`projection` defaults to `value`. A batch uses one projection for every path, evaluates every path against one captured state view, and returns results in request order. Duplicate paths remain duplicate results. An absent documented top-level field has value `null`, including an empty or absent `response`; the root view simply omits it. If any other path is invalid, the whole read fails; there is no mixed partial result.
 
 The single `path` form is first-class. The retired top-level `offset` and `scope` inputs are rejected; history and ownership belong in the semantic path itself, such as `cwd[1].lazy.memory`.
 
@@ -456,7 +456,7 @@ Lazy trees are co-located in canonical scope checkpoints/tails and use the same 
 
 ## Normative invariants
 
-1. **Object root, ordinary JSON children**: Every scope has a lazy object whose nested values contain domain semantics, never mandatory State Flow record wrappers.
+1. **Object root, ordinary JSON children**: Every runtime scope view has a lazy object, defaulting to `{}` when absent from stored semantics. Its nested values contain domain semantics, never mandatory State Flow record wrappers.
 2. **Semantic snapshots**: `value` contains only the selected state snapshot and `patch` only the selected semantic patch; `keys` alone adds closed structural `meta` before `keys`.
 3. **Exact success**: A successful read returns everything requested; it never truncates or paginates silently.
 4. **Runtime-owned concurrency**: Revisions, locks, and CAS remain internal unless explicitly needed for diagnostics.

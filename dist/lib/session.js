@@ -92,7 +92,7 @@ export function findPassiveStopBoundary(branch, sessionId, entryType) {
             }
             if (entry.customType !== entryType)
                 continue;
-            const { at, from, reset, owner, preserveContext, persistenceError } = entry.data ?? {};
+            const { at, from, reset, owner, preserveContext, persistenceError, mode } = entry.data ?? {};
             if (reset === true && owner === sessionId)
                 return undefined;
             if (owner !== undefined && owner !== sessionId)
@@ -103,6 +103,7 @@ export function findPassiveStopBoundary(branch, sessionId, entryType) {
                     ...(typeof from === "number" && Number.isSafeInteger(from) && from >= 0 ? { from } : {}),
                     ...(preserveContext === true ? { preserveContext: true } : {}),
                     ...(!checkpointSeen && owner === sessionId && typeof persistenceError === "string" && persistenceError.trim().length > 0 ? { persistenceError } : {}),
+                    ...(mode === "passive" || mode === "off" ? { mode } : {}),
                 };
         }
         catch {

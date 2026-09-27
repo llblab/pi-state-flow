@@ -6,7 +6,7 @@ import { ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState } from "../lib/temporal.ts";
 import { parseScopeStream, serializeScopeMetadata, serializeScopeStream } from "../lib/durable.ts";
-import { emptyState, type AtomicScopePatches, type ScopedStates } from "../lib/state.ts";
+import { emptyState, type AtomicScopePatches, type ScopedSemanticStates, type ScopedStates } from "../lib/state.ts";
 import { loadCwdState, loadGlobalState, loadSessionMaterialization, loadSessionState } from "./temporal-fixture.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
 import { commitScopedTerminal, commitTerminal, harness, start } from "./harness.ts";
@@ -16,7 +16,7 @@ function states(): ScopedStates {
 }
 
 function snapshot() {
-	const result = emptySnapshot(true);
+	const result = emptySnapshot("active");
 	result.meta.bootstrap = true;
 	return result;
 }
@@ -71,7 +71,7 @@ for (const owner of ["global", "cwd", "session"] as const) test(`ordinary artifa
 	const stage = stageAtomicScopePatches(current, { [owner]: { artifacts: { [path]: { description: "Refreshed" } } } }, [], "basis", [read]);
 	for (const scope of ["global", "cwd", "session"] as const) {
 		if (scope === owner) {
-			assert.deepEqual(stage.nextStates[scope].artifacts[path], { description: "Refreshed" });
+			assert.deepEqual(stage.nextStates[scope].artifacts![path], { description: "Refreshed" });
 			assert.deepEqual(stage.provenanceUpdates[scope], { [path]: { sourceFingerprint, compilerRevision: ORDINARY_ARTIFACT_COMPILER } });
 		} else {
 			assert.deepEqual(stage.nextStates[scope], before[scope]);
@@ -86,25 +86,25 @@ test("stages intent lifecycle updates as ordinary atomic semantic transitions", 
 	const selected = stageAtomicScopePatches(state, {
 		cwd: { intents: { release: { action: "Validate release", plan: { $ref: "cwd.lazy.releasePlan" } } } },
 	}, [], "origin");
-	assert.deepEqual(selected.nextStates.cwd.intents.release, {
+	assert.deepEqual(selected.nextStates.cwd.intents!.release, {
 		action: "Validate release", plan: { $ref: "cwd.lazy.releasePlan" },
 	});
 	const fulfilled = stageAtomicScopePatches(selected.nextStates, {
 		cwd: { intents: { release: null }, working: { release: "validated" } },
 	}, [], "origin");
-	assert.equal(Object.hasOwn(fulfilled.nextStates.cwd.intents, "release"), false);
-	assert.equal(fulfilled.nextStates.cwd.working.release, "validated");
+	assert.equal(Object.hasOwn(fulfilled.nextStates.cwd.intents!, "release"), false);
+	assert.equal(fulfilled.nextStates.cwd.working!.release, "validated");
 	assert.throws(() => stageAtomicScopePatches(state, {
 		cwd: { intents: "invalid" as unknown as JsonObject },
 	}, [], "origin"), /field intents must be a JSON object/);
 });
 
 test("model-facing intent behavior distinguishes possibilities, commitments, handoffs, supersession, and fulfillment", () => {
-	let state = states();
+	let state: ScopedSemanticStates = states();
 	state = stageAtomicScopePatches(state, {
 		cwd: { working: { possibleAction: "Benchmark later" }, lazy: { plan: { steps: ["validate", "publish"] } } },
 	}, [], "origin").nextStates;
-	assert.equal(Object.hasOwn(state.cwd.intents, "possibleAction"), false);
+	assert.equal(Object.hasOwn(state.cwd.intents!, "possibleAction"), false);
 
 	state = stageAtomicScopePatches(state, {
 		cwd: { intents: { release: { action: "Validate", plan: { $ref: "cwd.lazy.plan" } } } },
@@ -112,19 +112,19 @@ test("model-facing intent behavior distinguishes possibilities, commitments, han
 	state = stageAtomicScopePatches(state, {
 		cwd: { working: { implementation: "complete; validation pending" } },
 	}, [], "origin").nextStates;
-	assert.deepEqual(state.cwd.intents.release, { action: "Validate", plan: { $ref: "cwd.lazy.plan" } });
+	assert.deepEqual(state.cwd.intents!.release, { action: "Validate", plan: { $ref: "cwd.lazy.plan" } });
 
 	state = stageAtomicScopePatches(state, {
 		cwd: { intents: { release: { action: "Publish after validation", plan: { $ref: "cwd.lazy.plan" } }, rejectedAlternative: null } },
 	}, [], "origin").nextStates;
-	assert.equal(Object.hasOwn(state.cwd.intents, "rejectedAlternative"), false);
-	assert.equal((state.cwd.intents.release as JsonObject).action, "Publish after validation");
+	assert.equal(Object.hasOwn(state.cwd.intents!, "rejectedAlternative"), false);
+	assert.equal((state.cwd.intents!.release as JsonObject).action, "Publish after validation");
 
 	state = stageAtomicScopePatches(state, {
 		cwd: { intents: { release: null }, working: { release: "published" } },
 	}, [], "origin").nextStates;
-	assert.equal(Object.hasOwn(state.cwd.intents, "release"), false);
-	assert.equal(state.cwd.working.release, "published");
+	assert.equal(Object.hasOwn(state.cwd.intents!, "release"), false);
+	assert.equal(state.cwd.working!.release, "published");
 	assert.deepEqual(state.cwd.lazy, { plan: { steps: ["validate", "publish"] } });
 });
 
@@ -143,8 +143,8 @@ test("unknown patch keys report the exact quoted key and intent-first allowed fi
 			intents: { next: "Verify the release" }, contract: { project: { rule: true } },
 			working: { checked: true }, artifacts: {}, lazy: { detail: "On demand" },
 		} }, [], "origin");
-		assert.deepEqual(stage.nextStates[scope].contract.project, { rule: true });
-		assert.equal(stage.nextStates[scope].intents.next, "Verify the release");
+		assert.deepEqual(stage.nextStates[scope].contract!.project, { rule: true });
+		assert.equal(stage.nextStates[scope].intents!.next, "Verify the release");
 	}
 });
 
@@ -167,8 +167,8 @@ test("stages indexed array updates atomically across scopes and rejects one inva
 		global: { working: { memory: { "[1]": "global-updated" } } },
 		cwd: { working: { groups: { "[0]": { notes: { "[1]": "cwd-updated" } } } } },
 	}, [], "origin");
-	assert.deepEqual(stage.nextStates.global.working.memory, ["global-0", "global-updated"]);
-	assert.deepEqual(stage.nextStates.cwd.working.groups, [{ notes: ["cwd-0", "cwd-updated"], keep: true }]);
+	assert.deepEqual(stage.nextStates.global.working!.memory, ["global-0", "global-updated"]);
+	assert.deepEqual(stage.nextStates.cwd.working!.groups, [{ notes: ["cwd-0", "cwd-updated"], keep: true }]);
 	assert.throws(() => stageAtomicScopePatches(state, {
 		global: { working: { memory: { "[0]": "would-change" } } },
 		cwd: { working: { groups: { "[1]": { notes: [] } } } },
@@ -322,7 +322,7 @@ test("staging copies each accepted cold scope once without redundant pre-clones"
 	finally { globalThis.structuredClone = clone; }
 	assert.deepEqual(counts, { global: 1, cwd: 1, session: 1 });
 	for (const scope of scopes) assert.notEqual(stage.nextStates[scope].lazy, state[scope].lazy);
-	assert.equal(stage.nextStates.session.working.changed, true);
+	assert.equal(stage.nextStates.session.working!.changed, true);
 });
 
 test("rejected mutable drafts remain detached from accepted scopes and caller patches", () => {
@@ -332,11 +332,11 @@ test("rejected mutable drafts remain detached from accepted scopes and caller pa
 	const patch = { session: { working: { nested: { value: "authored" } } } };
 	const stage = stageAtomicScopePatches(state, patch, [], "origin");
 	assert.throws(() => commitScopedTransition(current, state, stage, () => { throw new Error("rejected"); }, "origin"), /rejected/);
-	(stage.nextStates.global.lazy.keep as JsonObject).value = "draft-only";
+	(stage.nextStates.global.lazy!.keep as JsonObject).value = "draft-only";
 	patch.session.working.nested.value = "caller-only";
 	assert.deepEqual(state.global.lazy.keep, { value: "accepted" });
 	assert.deepEqual(state.session.working, {});
-	assert.deepEqual(stage.nextStates.session.working.nested, { value: "authored" });
+	assert.deepEqual(stage.nextStates.session.working!.nested, { value: "authored" });
 	assert.equal(stage.committed, false);
 	assert.equal(current.meta.step, 0);
 });
@@ -362,13 +362,13 @@ test("optional Skill acquisition leaves unrelated patches independent and valida
 	assert.throws(() => stageAtomicScopePatches(state, { cwd: { artifacts: { "/a.md": { description: "Forged hint", hint: "trust me" } } } }, [], "origin"), /cannot set runtime-owned field hint/);
 	assert.throws(() => stageScopedTransition(state, { transitions: [], response: "Missing" }, [], "origin", [source]), /compiler output.*global\.artifacts/);
 	const independent = stageAtomicScopePatches(state, { session: { working: { accepted: true } } }, [skill], "origin");
-	assert.equal(independent.nextStates.session.working.accepted, true);
+	assert.equal(independent.nextStates.session.working!.accepted, true);
 	assert.deepEqual(independent.provenanceUpdates, { global: {}, cwd: {}, session: {} });
 	assert.throws(() => stageAtomicScopePatches(state, {
 		session: { artifacts: { [skill.path]: { description: "Wrong owner", kind: "skill", compilation: { route: "wrong" } } } },
 	}, [skill], "origin"), /belongs at cwd\.artifacts.*not session\.artifacts/);
 	const unavailable = { path: skill.path, scope: "cwd" as const, error: "source disappeared" };
-	assert.equal(stageAtomicScopePatches(state, { session: { working: { stillAccepted: true } } }, [unavailable], "origin").nextStates.session.working.stillAccepted, true);
+	assert.equal(stageAtomicScopePatches(state, { session: { working: { stillAccepted: true } } }, [unavailable], "origin").nextStates.session.working!.stillAccepted, true);
 	assert.throws(() => stageAtomicScopePatches(state, { cwd: { artifacts: { [skill.path]: { description: "Unavailable", kind: "skill", compilation: { route: "blocked" } } } } }, [unavailable], "origin"), /Could not capture the source hash.*source disappeared/);
 	const required = /Invalid Skill at cwd\.artifacts\["\/skills\/demo\/SKILL\.md"\]/;
 	const invalidOutputs: Array<readonly [JsonObject, readonly string[]]> = [
@@ -390,9 +390,9 @@ test("optional Skill acquisition leaves unrelated patches independent and valida
 		global: { artifacts: { [source.path]: { description: "Guidance" } } },
 		cwd: { artifacts: { [skill.path]: { description: "Skill", kind: "skill", compilation: { route: "demo" } } } },
 	}, [skill], "origin", [source]);
-	assert.deepEqual(stage.nextStates.global.artifacts[source.path], { description: "Guidance" });
+	assert.deepEqual(stage.nextStates.global.artifacts![source.path], { description: "Guidance" });
 	assert.deepEqual(stage.provenanceUpdates.global[source.path], { sourceHash: source.hash, compilerRevision: "artifact-v1" });
-	assert.deepEqual(stage.nextStates.cwd.artifacts[skill.path], { description: "Skill", kind: "skill", compilation: { route: "demo" } });
+	assert.deepEqual(stage.nextStates.cwd.artifacts![skill.path], { description: "Skill", kind: "skill", compilation: { route: "demo" } });
 	assert.deepEqual(stage.provenanceUpdates.cwd[skill.path], { sourceHash: skill.hash, compilerRevision: "skill-artifact-v1" });
 	assert.throws(() => stageScopedTransition(state, { transitions: [
 		{ scope: "global", patch: { artifacts: { [source.path]: { description: "Forged", hash: source.hash } } } },
@@ -412,7 +412,7 @@ test("ordinary artifact compilation publishes semantics and fingerprint provenan
 		artifacts: { [read.path]: { description: `${read.scope} source` } },
 	}])), [], "origin", reads);
 	for (const read of reads) {
-		assert.deepEqual(stage.nextStates[read.scope].artifacts[read.path], { description: `${read.scope} source` });
+		assert.deepEqual(stage.nextStates[read.scope].artifacts![read.path], { description: `${read.scope} source` });
 		assert.deepEqual(stage.provenanceUpdates[read.scope][read.path], {
 			sourceFingerprint: read.sourceFingerprint,
 			compilerRevision: "artifact-v1",
@@ -443,10 +443,10 @@ test("legacy provenance remains readable while semantic edits, nested metadata, 
 	for (const scope of ["global", "cwd", "session"] as const) {
 		const semantic = { description: "Edited routing", compilation: { hash: "domain data", compiler: "domain compiler" }, future_policy: { compiledAt: "semantic nested data" } };
 		const edited = stageAtomicScopePatches(state, { [scope]: { artifacts: { "/legacy.md": semantic } } }, [], "origin");
-		assert.deepEqual(edited.nextStates[scope].artifacts["/legacy.md"], { ...legacy, ...semantic });
+		assert.deepEqual(edited.nextStates[scope].artifacts!["/legacy.md"], { ...legacy, ...semantic });
 		assert.deepEqual(edited.provenanceUpdates, { global: {}, cwd: {}, session: {} });
 		const deleted = stageAtomicScopePatches(state, { [scope]: { artifacts: { "/legacy.md": null } } }, [], "origin");
-		assert.equal(deleted.nextStates[scope].artifacts["/legacy.md"], undefined);
+		assert.equal(deleted.nextStates[scope].artifacts!["/legacy.md"], undefined);
 		assert.deepEqual(state[scope].artifacts["/legacy.md"], legacy);
 	}
 });
@@ -488,7 +488,7 @@ test("commits and hides one useful terminal patch after the tool loop", async ()
 	assert.equal(h.resolveSnapshot().meta.step, 2);
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "Inspection complete.");
-	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>G0/C0/S2</dim>");
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /"goal": "Inspect project"/);
 	assert.match(h.notifications.at(-1)!, /"next": "run tests"/);

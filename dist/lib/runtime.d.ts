@@ -3,11 +3,11 @@ import { type ArtifactProvenance, type ArtifactProvenanceRegistry } from "./arti
 import { publishTemporalStateToFiles } from "./storage.ts";
 import { type AcceptedTransition, type RecentTransitionWindow } from "./history.ts";
 import { type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot } from "./snapshot.ts";
-import { type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
+import { type MaterializedState, type SemanticState, type ScopedSemanticStates, type ScopedStates, type StateScope } from "./state.ts";
 import { type TemporalState } from "./temporal.ts";
 export type RuntimePublication = ReturnType<typeof publishTemporalStateToFiles>;
 export interface RuntimePatchTransaction {
-    readonly states: ScopedStates;
+    readonly states: ScopedSemanticStates;
     readonly causalBasis: string;
     readonly provenance: Record<StateScope, ArtifactProvenanceRegistry>;
     publish(snapshot: Snapshot, accepted?: AcceptedTransition, provenance?: Partial<Record<StateScope, Record<string, ArtifactProvenance>>>): RuntimePublication;
@@ -45,6 +45,7 @@ export declare class TemporalRuntime {
     /** Canonical preparation is the default; Git backup is a later independent concern. */
     prepare(): void;
     read(offset?: number, scope?: StateScope): MaterializedState;
+    readView(offset?: number, scope?: StateScope): SemanticState;
     states(): ScopedStates;
     causalBasis(): string;
     /** Encode Pi lifecycle state against the current retained semantic boundary. */

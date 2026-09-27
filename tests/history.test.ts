@@ -42,12 +42,12 @@ test("compact history preserves supplied lineage order and configured per-scope 
 
 test("replay patch validation rejects invalid identities, envelopes, scopes, and fields", () => {
 	assert.doesNotThrow(() => validateRecentTransition(recent("valid", 0)));
+	assert.doesNotThrow(() => validateRecentTransition({ id: "sparse", at: 0, transitions: [{ scope: "session", patch: { extra: [1], intents: null, lazy: null, response: null } }] }));
 	for (const value of [
 		{ ...recent("valid", 0), extra: true }, { ...recent("valid", 0), id: "" },
 		{ ...recent("valid", 0), at: -1 }, { ...recent("valid", 0), transitions: [] },
 		{ id: "bad", at: 0, transitions: [{ scope: "unknown", patch: {} }] },
 		{ id: "bad", at: 0, transitions: [{ scope: "cwd", patch: { response: "forbidden" } }] },
-		{ id: "bad", at: 0, transitions: [{ scope: "session", patch: { config: {} } }] },
 		{ id: "bad", at: 0, transitions: [{ scope: "session", patch: { working: [] } }] },
 		{ id: "bad", at: 0, transitions: [...recent("x", 0).transitions, ...recent("y", 1).transitions] },
 	]) assert.throws(() => validateRecentTransition(value));

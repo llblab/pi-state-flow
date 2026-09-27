@@ -1,3 +1,4 @@
+import { type InactiveMode } from "./snapshot.ts";
 export declare const SNAPSHOT_ENTRY_TYPE = "state-flow-snapshot";
 interface BranchEntry {
     type?: unknown;
@@ -21,8 +22,10 @@ export interface PassiveStopBoundary {
     at: number;
     from?: number;
     preserveContext?: true;
-    /** A same-owner failed Stop remains a write fence until a later accepted checkpoint. */
+    /** A same-owner failed mode change remains a write fence until a later accepted checkpoint. */
     persistenceError?: string;
+    /** The inactive mode selected by that failed change; legacy markers omit it. */
+    mode?: InactiveMode;
 }
 export interface SnapshotDiscovery {
     candidates: unknown[];

@@ -234,7 +234,7 @@ export async function inspectStateFlowContinuationProvenance(
 			if ([paths.config, paths.runtime, privatePaths.meta, privatePaths.checkpoint, privatePaths.patches].every((path) => files.get(path) === undefined)) return absent;
 			const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), selected.cwd, selected.id);
 			if (!runtime) throw new Error("incomplete canonical session runtime");
-			if (!runtime.config.enabled) return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow stopped on selected runtime" };
+			if (runtime.config.mode !== "active") return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow is not active on selected runtime" };
 			const streams = (["global", "cwd", "session"] as const).map((scope) => {
 				const owned = temporalScopePaths(selected.cwd, selected.id, scope, root, sessionKey);
 				return parseScopeStream(files.get(owned.checkpoint), files.get(owned.patches), scope,

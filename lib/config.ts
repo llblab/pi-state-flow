@@ -5,13 +5,15 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getDurableRepositoryRoot } from "./durable.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.ts";
 import { isObject } from "./json.ts";
+import { isStateFlowMode, type InactiveMode, type StateFlowMode } from "./snapshot.ts";
 
 export interface StateFlowConfig {
 	/** Canonical State Flow repository. SDK callers may still override it explicitly. */
 	directory: string;
-	autoStart: boolean;
-	passiveBootstrap: boolean;
-	passiveTools: boolean;
+	/** Default mode for genuinely new sessions only; each session owns its selected mode. */
+	mode: StateFlowMode;
+	/** Non-active fallback for legacy `enabled:false` evidence and unavailable selections; never serialized. */
+	inactiveMode: InactiveMode;
 	/** Opt-in local capture of rejected patch attempts and unresolved terminal drafts. */
 	logging: boolean;
 	/** Show successful patch_state arguments in the interactive tool row. */
@@ -25,9 +27,8 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 	const path = join(directory, "config.json");
 	const defaults: StateFlowConfig = {
 		directory,
-		autoStart: false,
-		passiveBootstrap: true,
-		passiveTools: true,
+		mode: "passive",
+		inactiveMode: "passive",
 		logging: false,
 		showSuccessfulPatches: true,
 		historyLimit: DEFAULT_HISTORY_LIMIT,
@@ -39,23 +40,31 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 	} catch (error) {
 		throw new Error(`Cannot read State Flow configuration: ${path}`, { cause: error });
 	}
-	const allowed = new Set(["autoStart", "passiveBootstrap", "passiveTools", "logging", "showSuccessfulPatches", "historyLimit"]);
+	// autoStart/passiveBootstrap/passiveTools are read-only compatibility inputs; explicit mode is authoritative.
+	const allowed = new Set(["mode", "autoStart", "passiveBootstrap", "passiveTools", "logging", "showSuccessfulPatches", "historyLimit"]);
 	if (!isObject(value) || Object.keys(value).some((key) => !allowed.has(key))) {
 		throw new Error(`State Flow configuration contains unknown settings: ${path}`);
 	}
+	if (Object.hasOwn(value, "mode") && !isStateFlowMode(value.mode)) throw new Error(`State Flow mode must be "active", "passive" or "off": ${path}`);
 	if (Object.hasOwn(value, "autoStart") && typeof value.autoStart !== "boolean") throw new Error(`State Flow autoStart must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "passiveBootstrap") && typeof value.passiveBootstrap !== "boolean") throw new Error(`State Flow passiveBootstrap must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "passiveTools") && typeof value.passiveTools !== "boolean") throw new Error(`State Flow passiveTools must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "logging") && typeof value.logging !== "boolean") throw new Error(`State Flow logging must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "showSuccessfulPatches") && typeof value.showSuccessfulPatches !== "boolean") throw new Error(`State Flow showSuccessfulPatches must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "historyLimit") && (!Number.isSafeInteger(value.historyLimit) || (value.historyLimit as number) < 0 || (value.historyLimit as number) > MAX_HISTORY_LIMIT)) throw new Error(`State Flow historyLimit must be an integer from 0 to ${MAX_HISTORY_LIMIT}: ${path}`);
+	const legacyInactive: InactiveMode = value.passiveBootstrap !== false || value.passiveTools !== false ? "passive" : "off";
+	const mode = isStateFlowMode(value.mode) ? value.mode : value.autoStart === true ? "active" : legacyInactive;
 	return {
 		directory,
-		autoStart: value.autoStart === true,
-		passiveBootstrap: value.passiveBootstrap !== false,
-		passiveTools: value.passiveTools !== false,
+		mode,
+		inactiveMode: isStateFlowMode(value.mode) ? inactiveModeFor(value.mode) : legacyInactive,
 		logging: value.logging === true,
 		showSuccessfulPatches: value.showSuccessfulPatches !== false,
 		historyLimit: typeof value.historyLimit === "number" ? value.historyLimit : DEFAULT_HISTORY_LIMIT,
 	};
+}
+
+/** Explicit modes never carry a separate passive policy: only Off stays off when inactive. */
+export function inactiveModeFor(mode: StateFlowMode): InactiveMode {
+	return mode === "off" ? "off" : "passive";
 }

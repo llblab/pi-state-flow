@@ -140,9 +140,9 @@ function probeAfterResume(fixture: RealPiFixture, session: AgentSession, stateFl
 
 test("large-trajectory active and passive prompt prefixes", { skip: !prefixWorkload, timeout: 60_000 }, async (t) => {
 	for (const mode of ["active", "passive", "stop-handoff"] as const) {
-		const fixture = await realPiFixture(t, { passiveBootstrap: true, passiveTools: true });
+		const fixture = await realPiFixture(t, { mode: "passive" });
 		const session = await fixture.createSession();
-		if (mode !== "passive") await session.prompt("/state-flow-start");
+		if (mode !== "passive") await session.prompt("/state-flow-active");
 		fixture.faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { seed: "prefix baseline" } } }), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Seed accepted"),
@@ -152,7 +152,7 @@ test("large-trajectory active and passive prompt prefixes", { skip: !prefixWorkl
 		const seeded = session.messages.at(-1);
 		assert.ok(seeded?.role === "assistant");
 		assert.deepEqual(seeded.content, [{ type: "text", text: "Seed accepted" }]);
-		if (mode === "stop-handoff") await session.prompt("/state-flow-stop");
+		if (mode === "stop-handoff") await session.prompt("/state-flow-passive");
 		const source = join(fixture.cwd, "trajectory.txt");
 		const sourceText = `BENCH_TRAJECTORY\n${"t".repeat(20 * 1024)}`;
 		writeFileSync(source, sourceText);
@@ -167,7 +167,7 @@ test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_0
 		const fixture = await realPiFixture(t, { stateFlow });
 		let session = await fixture.createSession();
 		t.after(() => session.dispose());
-		if (stateFlow) await session.prompt("/state-flow-start");
+		if (stateFlow) await session.prompt("/state-flow-active");
 		const source = join(fixture.cwd, "evidence.txt");
 		writeFileSync(source, `BENCH_EVIDENCE\n${"e".repeat(transcriptBytes)}`);
 		const sourceFileBytes = statSync(source).size;

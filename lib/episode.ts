@@ -1,7 +1,7 @@
-import { emptySnapshot, type Snapshot } from "./snapshot.ts";
+import { emptySnapshot, type InactiveMode, type Snapshot } from "./snapshot.ts";
 
 export function startEpisode(bootstrap: boolean): Snapshot {
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	if (bootstrap) snapshot.meta.bootstrap = true;
 	return snapshot;
 }
@@ -9,15 +9,15 @@ export function startEpisode(bootstrap: boolean): Snapshot {
 /** Re-enable a branch checkpoint without discarding its runtime config or provenance. */
 export function resumeEpisode(snapshot: Snapshot, bootstrap: boolean): Snapshot {
 	const next = structuredClone(snapshot);
-	next.config.enabled = true;
+	next.config.mode = "active";
 	if (bootstrap) next.meta.bootstrap = true;
 	return next;
 }
 
-/** Disable only this branch; durable defaults and session history remain intact. */
-export function stopEpisode(snapshot: Snapshot): Snapshot {
+/** Select an inactive mode for only this branch; durable defaults and session history remain intact. */
+export function deactivateEpisode(snapshot: Snapshot, mode: InactiveMode): Snapshot {
 	const next = structuredClone(snapshot);
-	next.config.enabled = false;
+	next.config.mode = mode;
 	return next;
 }
 

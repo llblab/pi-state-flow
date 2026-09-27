@@ -19,9 +19,9 @@ import {
 	type ArtifactProvenanceRegistry,
 } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
-import { canonicalJson, isJsonValue, isObject } from "./json.ts";
+import { canonicalJson, isJsonValue, isObject, type JsonObject } from "./json.ts";
 import { validateScopeStream, validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
-import type { StateScope } from "./state.ts";
+import { selectSemanticFields, type StateScope } from "./state.ts";
 
 const SESSION_KEY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const STATE_FILE = "state.json";
@@ -66,8 +66,8 @@ export function serializeScopeStream(stream: ScopeStream, scope: StateScope, cwd
 	if (scope === "cwd" && cwdIdentity === undefined) throw new Error("State Flow CWD scope serialization requires its canonical identity");
 	if (scope !== "cwd" && cwdIdentity !== undefined) throw new Error("Only State Flow CWD scope serialization accepts a CWD identity");
 	return {
-		checkpoint: `${canonicalJson(stream.checkpoint.state)}\n`,
-		patches: stream.patches.map((record) => `${canonicalJson(record.patch)}\n`).join(""),
+		checkpoint: `${canonicalJson(selectSemanticFields(stream.checkpoint.state))}\n`,
+		patches: stream.patches.map((record) => `${canonicalJson(selectSemanticFields(record.patch as JsonObject))}\n`).join(""),
 		temporal: {
 			revision: stream.revision,
 			checkpoint: structuredClone(stream.checkpoint.through),
@@ -129,8 +129,10 @@ export function classifyScopeStream(
 		// 0.17.4 and earlier did not persist scope revisions. Credit only their still-retained
 		// semantic tail; discarded ancestry cannot be reconstructed without inventing history.
 		revision: temporal.revision === undefined ? patches.length : temporal.revision,
-		checkpoint: { through: temporal.checkpoint, state: checkpoint },
-		patches: patches.map((patch, index) => ({ transition: boundaries[index], patch })),
+		checkpoint: { through: temporal.checkpoint, state: isObject(checkpoint) ? selectSemanticFields(checkpoint) : checkpoint },
+		patches: patches.map((patch, index) => ({
+			transition: boundaries[index], patch: isObject(patch) ? selectSemanticFields(patch) : patch,
+		})),
 	};
 	validateScopeStream(stream, scope, MAX_HISTORY_LIMIT);
 	return { kind: "present", stream };

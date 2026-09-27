@@ -1,4 +1,4 @@
-import { parseRetainedPiCheckpoint } from "./snapshot.ts";
+import { parseRetainedPiCheckpoint, type InactiveMode } from "./snapshot.ts";
 
 export const SNAPSHOT_ENTRY_TYPE = "state-flow-snapshot";
 
@@ -18,8 +18,10 @@ export interface PassiveStopBoundary {
 	at: number;
 	from?: number;
 	preserveContext?: true;
-	/** A same-owner failed Stop remains a write fence until a later accepted checkpoint. */
+	/** A same-owner failed mode change remains a write fence until a later accepted checkpoint. */
 	persistenceError?: string;
+	/** The inactive mode selected by that failed change; legacy markers omit it. */
+	mode?: InactiveMode;
 }
 
 export interface SnapshotDiscovery {
@@ -114,7 +116,7 @@ export function findPassiveStopBoundary(branch: readonly BranchEntry[], sessionI
 				continue;
 			}
 			if (entry.customType !== entryType) continue;
-			const { at, from, reset, owner, preserveContext, persistenceError } = (entry.data as { at?: unknown; from?: unknown; reset?: unknown; owner?: unknown; preserveContext?: unknown; persistenceError?: unknown } | undefined) ?? {};
+			const { at, from, reset, owner, preserveContext, persistenceError, mode } = (entry.data as { at?: unknown; from?: unknown; reset?: unknown; owner?: unknown; preserveContext?: unknown; persistenceError?: unknown; mode?: unknown } | undefined) ?? {};
 			if (reset === true && owner === sessionId) return undefined;
 			if (owner !== undefined && owner !== sessionId) continue;
 			if (typeof at === "number" && Number.isSafeInteger(at) && at >= 0) return {
@@ -122,6 +124,7 @@ export function findPassiveStopBoundary(branch: readonly BranchEntry[], sessionI
 				...(typeof from === "number" && Number.isSafeInteger(from) && from >= 0 ? { from } : {}),
 				...(preserveContext === true ? { preserveContext: true } : {}),
 				...(!checkpointSeen && owner === sessionId && typeof persistenceError === "string" && persistenceError.trim().length > 0 ? { persistenceError } : {}),
+				...(mode === "passive" || mode === "off" ? { mode } : {}),
 			};
 		} catch {
 			// A hostile unrelated branch entry cannot manufacture or suppress a valid marker.

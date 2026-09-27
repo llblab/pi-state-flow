@@ -35,6 +35,35 @@ function expectHistory(view: TemporalState, snapshots: ScopedStates[]): void {
 	}
 }
 
+test("sparse scopes ignore empty responses and unknown fields without rewriting retained data", () => {
+	for (const historyLimit of [0, 2]) {
+		const states = {
+			global: { intents: { keep: true }, lazy: { shared: 1 }, response: "legacy lower answer", extra: { global: true } },
+			cwd: { lazy: { project: 2 }, extra: { cwd: true } },
+			session: {},
+		};
+		let view = createTemporalState(states, "sparse", historyLimit);
+		const original = structuredClone(view);
+		assert.equal(readTemporalState(view, 0, undefined, historyLimit).response, "legacy lower answer");
+		assert.deepEqual(readTemporalState(view, 0, "session", historyLimit), emptyState());
+		assert.deepEqual(view, original, "defaults are read projections, not canonical mutations");
+		view = advanceTemporalState(view, [{ scope: "session", patch: { lazy: { private: 3 }, response: "" } }], "T1", historyLimit);
+		assert.equal(readTemporalState(view, 0, undefined, historyLimit).response, "legacy lower answer", "empty and absent responses have the same overlay meaning");
+		assert.deepEqual(readTemporalState(view, 0, undefined, historyLimit).lazy, { shared: 1, project: 2, private: 3 });
+		view = advanceTemporalState(view, [{ scope: "session", patch: { lazy: null, response: null, extra: { session: true } } }], "T2", historyLimit);
+		assert.equal(readTemporalState(view, 0, undefined, historyLimit).response, "legacy lower answer");
+		assert.deepEqual(readTemporalState(view, 0, undefined, historyLimit).lazy, { shared: 1, project: 2 });
+		assert.equal(readTemporalState(view, 0, undefined, historyLimit).extra, undefined);
+		assert.deepEqual(view.scopes.global.checkpoint.state.extra, { global: true });
+		view = advanceTemporalState(view, [{ scope: "session", patch: { working: { value: 1 } } }], "T3", historyLimit);
+		assert.equal(Object.hasOwn(view.scopes.session.checkpoint.state, "intents"), false);
+		if (historyLimit > 0) {
+			assert.equal(readTemporalState(view, 2, undefined, historyLimit).response, "legacy lower answer");
+			assert.deepEqual(readTemporalState(view, 2, "session", historyLimit).lazy, { private: 3 });
+		}
+	}
+});
+
 test("zero patches preserve the initial materialization without fabricating a past", () => {
 	const states = initial();
 	states.session.working = { retained: [1, 2], nested: { fact: true } };
@@ -127,7 +156,7 @@ test("seven patches and repeated eighth-patch folding preserve every hot state e
 		if (index === 7) assert.deepEqual(stream.checkpoint.state, initial().session);
 		if (index === 8) {
 			assert.equal(stream.checkpoint.through.id, "T1");
-			assert.equal(stream.checkpoint.state.working.value, 1);
+			assert.deepEqual(stream.checkpoint.state.working, { value: 1 });
 			assert.deepEqual(stream.patches.map((record) => record.transition.id), ["T2", "T3", "T4", "T5", "T6", "T7", "T8"]);
 		}
 	}

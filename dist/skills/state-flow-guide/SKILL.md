@@ -15,7 +15,7 @@ State Flow's on-demand operational reference. Resolve the usage question or iden
 
 Passive tools access memory without starting an episode. Missing tools or storage are blockers, not permission to enable an episode or bypass storage; explanation alone remains possible.
 
-Operator commands: `/state-flow-status` inspects; `/state-flow-start` enables the current branch; `/state-flow-stop` ends active semantics without erasing memory or necessarily disabling passive tools.
+Operator commands: `/state-flow-status` inspects; `/state-flow-active` selects state-driven episodes; `/state-flow-passive` selects ordinary conversation with both memory tools and existing-state projection; `/state-flow-off` removes both tools and all State Flow context, including frozen handoffs, without deleting memory. Commands and Telegram change only the current session's `mode`. Global `mode` defaults to Passive for new sessions and never overrides retained choices. Do not change mode without operator authorization.
 
 ## Map
 
@@ -56,7 +56,7 @@ Call `patch_state` alone per assistant response; await acceptance before depende
 
 The runtime waits cancelably for publication ownership, then applies authored Global/CWD operations to current canonical values. Untouched fields survive; overlapping targets follow successful acceptance order. Correct repeats succeed as `State already current.` without another semantic revision. Do not repeat external actions during a memory wait, or rebuild an entire scope from an older snapshot. Session ownership/history fences remain private, not a universal merge.
 
-Semantic planes `intents`, `contract`, `working`, `artifacts`, and the required `lazy` root are objects; nested lazy values may contain ordinary JSON without stored nulls. Objects merge, arrays/scalars replace, omitted fields persist. Nested `null` removes an owned object key; inherited content may reappear. Canonical `"[N]"` keys patch array elements; indexed deletion is forbidden.
+When present, semantic planes `intents`, `contract`, `working`, `artifacts`, and `lazy` are objects; nested lazy values may contain ordinary JSON without stored nulls. Stored checkpoints and patches may omit any documented plane. Current and historical views assemble only known fields present in the selected scopes. Absent fields and empty responses are omitted from views. Checkpoint/tail readers ignore unknown top-level fields, and writers emit only known fields. Nested data within known planes remains intact. Explicit value reads of an absent documented top-level field return `null`. Authored `patch_state` keeps its documented field grammar. Objects merge, arrays/scalars replace, omitted fields persist. Nested `null` removes an owned object key; inherited content may reappear. Canonical `"[N]"` keys patch array elements; indexed deletion is forbidden.
 
 Illustrative deletion, only for an actually completed intent and after satisfying pending acquisitions:
 

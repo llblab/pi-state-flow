@@ -1,9 +1,11 @@
+import type { StateFlowMode } from "./snapshot.ts";
 import type { ScopeRevisions } from "./temporal.ts";
 export declare const STATE_FLOW_TELEGRAM_ID = "@llblab/pi-state-flow";
 /** Resolve the package export or the compiled sibling-extension layout used in local development. */
 export declare function stateFlowTelegramSectionSpecifiers(moduleUrl?: string): string[];
 export interface StateFlowTelegramSnapshot {
-    enabled: boolean;
+    /** The current session's selected mode. */
+    mode: StateFlowMode;
     /** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
     step: number;
     revisions?: ScopeRevisions;
@@ -12,11 +14,11 @@ export interface StateFlowTelegramSnapshot {
 }
 export type StateFlowTelegramScope = "global" | "cwd" | "session" | "effective";
 export interface StateFlowTelegramState {
-    artifacts: Record<string, unknown>;
-    contract: Record<string, unknown>;
-    working: Record<string, unknown>;
-    intents: Record<string, unknown>;
-    response: string;
+    artifacts?: Record<string, unknown>;
+    contract?: Record<string, unknown>;
+    working?: Record<string, unknown>;
+    intents?: Record<string, unknown>;
+    response?: string;
     lazy?: unknown;
 }
 export type StateFlowTelegramRichText = string | StateFlowTelegramRichText[] | {
@@ -92,26 +94,26 @@ export interface StateFlowTelegramPort {
     state(scope: StateFlowTelegramScope): StateFlowTelegramState;
     /** Optional additive capability; absent legacy ports retain their branch-step presentation. */
     revisions?(): ScopeRevisions;
+    /** Active may need a settled native boundary; inactive modes apply immediately. */
     canStartNow(): boolean;
-    start(): StateFlowTelegramControlResult;
-    stop(): StateFlowTelegramControlResult;
+    /** Select the current session's mode through the same lifecycle owners as the terminal commands. */
+    select(mode: StateFlowMode): StateFlowTelegramControlResult;
     deferStart(): void;
     cancelStart(): void;
 }
-export interface StateFlowTelegramInspectionPort extends Omit<StateFlowTelegramPort, "state" | "revisions" | "start" | "stop"> {
+export interface StateFlowTelegramInspectionPort extends Omit<StateFlowTelegramPort, "state" | "revisions" | "select"> {
     inspect(scope: StateFlowTelegramScope): StateFlowTelegramInspection | Promise<StateFlowTelegramInspection>;
-    start(): StateFlowTelegramControlResult | Promise<StateFlowTelegramControlResult>;
-    stop(): StateFlowTelegramControlResult | Promise<StateFlowTelegramControlResult>;
+    select(mode: StateFlowMode): StateFlowTelegramControlResult | Promise<StateFlowTelegramControlResult>;
 }
 export interface StateFlowTelegramAdapter {
     ensure(): Promise<boolean>;
     dispose(): void;
 }
-/** Main-menu section label doubles as the live status value: the spiral identity is constant, the value is not. */
+/** Main-menu section label shows only the current session mode. */
 export declare function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string;
-/** The submenu header repeats the button's state line; the single action matches the current state. */
-export declare function buildStateFlowSectionView(snapshot: StateFlowTelegramSnapshot, callbackData: (action: string) => string): StateFlowTelegramView;
-export declare function buildStateFlowScopeChooser(callbackData: (action: string, payload?: string) => string): StateFlowTelegramView;
+export declare const STATE_FLOW_MODES: readonly ["off", "passive", "active"];
+/** Compact option values followed directly by read-only scope actions. */
+export declare function buildStateFlowSectionView(snapshot: StateFlowTelegramSnapshot, callbackData: (action: string, payload?: string) => string): StateFlowTelegramView;
 export declare function renderStateFlowRichState(scope: StateFlowTelegramScope, revisions: ScopeRevisions, state: StateFlowTelegramState): StateFlowTelegramRichMessage;
 /** Default loader; injectable so tests and embedded hosts can control transport presence. */
 export declare function loadStateFlowTelegramModules(): Promise<StateFlowTelegramModules>;

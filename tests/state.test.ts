@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emptyState, isStateDocument, overlayStates, projectStateForModel, updateMaterializedArtifacts } from "../lib/state.ts";
+import { emptyState, isSemanticState, isStateDocument, overlayStates, projectStateForModel, updateMaterializedArtifacts } from "../lib/state.ts";
 
 function state(contract: Record<string, any> = {}) {
 	return { artifacts: {}, contract, working: {}, intents: {}, response: "", lazy: {} };
@@ -14,7 +14,7 @@ test("creates isolated state documents with the exact public shape", () => {
 
 test("materialized and model-facing states preserve intentional intent-first plane order", () => {
 	assert.deepEqual(Object.keys(emptyState()), ["intents", "contract", "working", "artifacts", "response", "lazy"]);
-	assert.deepEqual(Object.keys(projectStateForModel({ ...emptyState(), lazy: { plan: true } })), [
+	assert.deepEqual(Object.keys(projectStateForModel({ ...emptyState(), response: "Answer", lazy: { plan: true } })), [
 		"intents", "contract", "working", "artifacts", "response",
 	]);
 });
@@ -27,7 +27,7 @@ test("adds deterministic runtime hints only to model artifact projection", () =>
 	assert.deepEqual(canonical.artifacts, { "/a.md": { description: "A" } });
 });
 
-test("accepts only exact materialized state documents with valid artifacts", () => {
+test("materialized views have defaulted planes and retain additional semantic fields", () => {
 	const artifact = {
 		description: "Artifact index",
 		hash: `sha256:${"a".repeat(64)}`,
@@ -41,7 +41,24 @@ test("accepts only exact materialized state documents with valid artifacts", () 
 	// Semantic-only artifacts are usable; missing provenance is not corrupt state.
 	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "Semantic only" } }, contract: {}, working: {}, intents: {}, response: "done", lazy: {} }), true);
 	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "" } }, contract: {}, working: {}, intents: {}, response: "done", lazy: {} }), false);
-	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "done", lazy: {}, extra: true }), false);
+	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "done", lazy: {}, extra: true }), true);
+});
+
+test("stored semantic objects may omit any documented plane without losing present fields", () => {
+	assert.equal(isSemanticState({}), true);
+	assert.equal(isSemanticState({ extra: { retained: true } }), true);
+	assert.deepEqual(overlayStates({ extra: { retained: true } }), { ...emptyState(), extra: { retained: true } });
+	assert.equal(projectStateForModel({ extra: { retained: true }, lazy: { hidden: true }, response: "" }).extra, undefined);
+	assert.deepEqual(projectStateForModel({ extra: { retained: true }, lazy: { hidden: true }, response: "" }), {});
+	for (const field of Object.keys(emptyState())) {
+		const sparse = emptyState();
+		delete sparse[field];
+		assert.equal(isSemanticState(sparse), true, field);
+		assert.deepEqual(overlayStates(sparse), emptyState());
+	}
+	for (const invalid of [[], null, { lazy: [] }, { response: {} }, { artifacts: { bad: {} } }]) {
+		assert.equal(isSemanticState(invalid), false);
+	}
 });
 
 test("overlays global, CWD, and session state recursively with session precedence", () => {

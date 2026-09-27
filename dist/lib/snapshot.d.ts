@@ -7,8 +7,12 @@ export declare class RevisionUnavailableError extends Error {
 /** Expired history cannot be restored, but explicit activation may use validated current memory. */
 export declare class HistoryBoundaryExpiredError extends RevisionUnavailableError {
 }
+export type StateFlowMode = "active" | "passive" | "off";
+export type InactiveMode = Exclude<StateFlowMode, "active">;
+export declare function isStateFlowMode(value: unknown): value is StateFlowMode;
+/** The session's selected mode is the only serialized behavior switch. */
 export interface SnapshotConfig {
-    enabled: boolean;
+    mode: StateFlowMode;
 }
 interface LegacyValidationFeedback {
     attempt: number;
@@ -52,23 +56,28 @@ export declare function serializeSessionRuntime(runtime: SessionRuntime, cwd: st
     config: string;
     runtime: string;
 };
+/** Legacy `enabled:false` decodes as non-active; native checkpoints, not this file, select branch policy. */
 export declare function parseSessionRuntime(config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string): SessionRuntime | undefined;
-export declare function emptySnapshot(enabled?: boolean): Snapshot;
+export declare function emptySnapshot(mode?: StateFlowMode): Snapshot;
 export type RetainedBoundaryCheckpoint = {
     boundary: string;
-    enabled: boolean;
+    mode: StateFlowMode;
     step: number;
     bootstrap?: true;
     specification?: string;
 };
-export type RetainedPiCheckpoint = RetainedBoundaryCheckpoint | {
-    disabled: true;
+/** A proven pre-runtime branch retains only its explicit inactive choice, never semantic storage. */
+export type PreRuntimeCheckpoint = {
+    mode: InactiveMode;
 };
+export type RetainedPiCheckpoint = RetainedBoundaryCheckpoint | PreRuntimeCheckpoint;
 export type FileRevision = `file:${string}`;
 export declare function isFileRevision(value: unknown): value is FileRevision;
 /** Encode branch lifecycle against one retained temporal identity without semantic or backup data. */
 export declare function retainedBoundaryCheckpoint(snapshot: Snapshot, boundary: string): RetainedBoundaryCheckpoint;
-/** Decode the 0.17 retained-window checkpoint contract. */
-export declare function parseRetainedPiCheckpoint(value: unknown): RetainedPiCheckpoint;
-export declare function migrationFailure(data: JsonObject, error: string): Snapshot;
+/** Encode an explicit inactive choice on a branch that has no accepted runtime. */
+export declare function preRuntimeCheckpoint(mode: StateFlowMode): PreRuntimeCheckpoint;
+/** Decode the retained-window checkpoint contract; legacy `enabled`/`{disabled:true}` markers map through `inactiveMode`. */
+export declare function parseRetainedPiCheckpoint(value: unknown, inactiveMode?: InactiveMode): RetainedPiCheckpoint;
+export declare function migrationFailure(data: JsonObject, error: string, mode?: InactiveMode): Snapshot;
 export {};

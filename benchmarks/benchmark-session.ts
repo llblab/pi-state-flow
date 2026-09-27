@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { freemem, loadavg } from "node:os";
 import type { AgentSession, ReadToolDetails } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall, type Context } from "@earendil-works/pi-ai";
-import type { ModelState } from "../lib/state.ts";
+import type { SemanticState } from "../lib/state.ts";
 import type { RealPiFixture } from "../tests/pi-harness.ts";
 import { loadGlobalState, writeGlobalState } from "../tests/temporal-fixture.ts";
 
@@ -120,7 +120,7 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 		if (action === "patch") {
 			if (acceptedPatches === 1) {
 				const global = loadGlobalState(fixture.repositoryRoot)!;
-				writeGlobalState({ ...global, working: { ...global.working, trajectoryForeign: "adopted" } }, fixture.repositoryRoot);
+				writeGlobalState({ working: { ...global.working, trajectoryForeign: "adopted" } }, fixture.repositoryRoot);
 			}
 			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { trajectoryBarrier: acceptedPatches + 1 } } }), { stopReason: "toolUse" });
 		}
@@ -167,7 +167,7 @@ export interface PromptCase {
 	source: string;
 	sourceFileBytes: number;
 	firstInference?: boolean;
-	expectedFirstState?: ModelState;
+	expectedFirstState?: SemanticState;
 }
 export async function prompt(fixture: RealPiFixture, session: AgentSession, options: PromptCase) {
 	const { stateFlow, counter, size, source, sourceFileBytes } = options;

@@ -13,8 +13,25 @@ export class RevisionUnavailableError extends Error {}
 /** Expired history cannot be restored, but explicit activation may use validated current memory. */
 export class HistoryBoundaryExpiredError extends RevisionUnavailableError {}
 
+export type StateFlowMode = "active" | "passive" | "off";
+export type InactiveMode = Exclude<StateFlowMode, "active">;
+
+export function isStateFlowMode(value: unknown): value is StateFlowMode {
+	return value === "active" || value === "passive" || value === "off";
+}
+
+/** The session's selected mode is the only serialized behavior switch. */
 export interface SnapshotConfig {
-	enabled: boolean;
+	mode: StateFlowMode;
+}
+
+/**
+ * Read-only compatibility for session config and native checkpoints written before `mode`:
+ * `enabled:true` stays active; `enabled:false` stays the caller's inactive policy.
+ */
+function decodeLegacyMode(value: JsonObject, inactiveMode: InactiveMode): StateFlowMode | undefined {
+	if (Object.hasOwn(value, "mode")) return Object.hasOwn(value, "enabled") || !isStateFlowMode(value.mode) ? undefined : value.mode;
+	return typeof value.enabled === "boolean" ? value.enabled ? "active" : inactiveMode : undefined;
 }
 
 interface LegacyValidationFeedback {
@@ -69,7 +86,7 @@ export function validateSessionRuntime(value: unknown, cwd: string, sessionId: s
 	}
 	const runtimeFields = Object.fromEntries(Object.entries(fields).filter(([key]) => known.has(key)));
 	const normalized: Snapshot = {
-		config: { enabled: value.config.enabled === true },
+		config: { mode: isStateFlowMode(value.config.mode) ? value.config.mode : "off" },
 		meta: restoredMeta(runtimeFields),
 	};
 	if (runtimeFields.bootstrap === false) normalized.meta.bootstrap = false;
@@ -108,6 +125,7 @@ export function serializeSessionRuntime(
 	return { config: `${canonicalJson(runtime.config)}\n`, runtime: `${canonicalJson(runtimeMeta)}\n` };
 }
 
+/** Legacy `enabled:false` decodes as non-active; native checkpoints, not this file, select branch policy. */
 export function parseSessionRuntime(
 	config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string,
 ): SessionRuntime | undefined {
@@ -115,13 +133,17 @@ export function parseSessionRuntime(
 	if (config === undefined || runtimeSource === undefined) throw new Error("Incomplete State Flow config/runtime pair");
 	let runtime: unknown;
 	try {
-		runtime = { config: JSON.parse(config), meta: JSON.parse(runtimeSource) };
-	} catch {
-		throw new Error("State Flow session runtime contains invalid JSON");
+		const settings: unknown = JSON.parse(config);
+		const mode = isObject(settings) && Object.keys(settings).length === 1 ? decodeLegacyMode(settings, "passive") : undefined;
+		if (mode === undefined) throw new Error("Invalid State Flow runtime configuration or counters");
+		runtime = { config: { mode }, meta: JSON.parse(runtimeSource) };
+	} catch (error) {
+		if (error instanceof SyntaxError) throw new Error("State Flow session runtime contains invalid JSON");
+		throw error;
 	}
 	validateSessionRuntime(runtime, cwd, sessionId);
 	const { temporal: _legacyTemporal, ...runtimeMeta } = runtime.meta;
-	return { config: { enabled: runtime.config.enabled }, meta: runtimeMeta };
+	return { config: { mode: runtime.config.mode }, meta: runtimeMeta };
 }
 
 function restoredStep(value: unknown): number {
@@ -158,22 +180,24 @@ function restoredMeta(value: unknown, legacy: JsonObject = {}): SnapshotMeta {
 	};
 }
 
-function envelope(enabled: boolean, meta: SnapshotMeta): Snapshot {
-	return { config: { enabled }, meta };
+function envelope(mode: StateFlowMode, meta: SnapshotMeta): Snapshot {
+	return { config: { mode }, meta };
 }
 
-export function emptySnapshot(enabled = false): Snapshot {
-	return envelope(enabled, { step: 0 });
+export function emptySnapshot(mode: StateFlowMode = "passive"): Snapshot {
+	return envelope(mode, { step: 0 });
 }
 
 export type RetainedBoundaryCheckpoint = {
 	boundary: string;
-	enabled: boolean;
+	mode: StateFlowMode;
 	step: number;
 	bootstrap?: true;
 	specification?: string;
 };
-export type RetainedPiCheckpoint = RetainedBoundaryCheckpoint | { disabled: true };
+/** A proven pre-runtime branch retains only its explicit inactive choice, never semantic storage. */
+export type PreRuntimeCheckpoint = { mode: InactiveMode };
+export type RetainedPiCheckpoint = RetainedBoundaryCheckpoint | PreRuntimeCheckpoint;
 export type FileRevision = `file:${string}`;
 
 export function isFileRevision(value: unknown): value is FileRevision {
@@ -185,7 +209,7 @@ export function retainedBoundaryCheckpoint(snapshot: Snapshot, boundary: string)
 	if (typeof boundary !== "string" || boundary.trim().length === 0) throw new Error("Checkpoint requires a retained temporal boundary identity");
 	const checkpoint: RetainedBoundaryCheckpoint = {
 		boundary,
-		enabled: snapshot.config.enabled,
+		mode: snapshot.config.mode,
 		step: snapshot.meta.step,
 		...(snapshot.meta.bootstrap === true ? { bootstrap: true as const } : {}),
 		...(snapshot.meta.specification === undefined ? {} : { specification: snapshot.meta.specification }),
@@ -193,14 +217,23 @@ export function retainedBoundaryCheckpoint(snapshot: Snapshot, boundary: string)
 	return parseRetainedPiCheckpoint(checkpoint) as RetainedBoundaryCheckpoint;
 }
 
-/** Decode the 0.17 retained-window checkpoint contract. */
-export function parseRetainedPiCheckpoint(value: unknown): RetainedPiCheckpoint {
+/** Encode an explicit inactive choice on a branch that has no accepted runtime. */
+export function preRuntimeCheckpoint(mode: StateFlowMode): PreRuntimeCheckpoint {
+	if (mode === "active") throw new Error("An active State Flow branch requires a retained semantic boundary");
+	return { mode };
+}
+
+/** Decode the retained-window checkpoint contract; legacy `enabled`/`{disabled:true}` markers map through `inactiveMode`. */
+export function parseRetainedPiCheckpoint(value: unknown, inactiveMode: InactiveMode = "passive"): RetainedPiCheckpoint {
 	if (!isObject(value)) throw new Error("Invalid State Flow retained-boundary checkpoint");
-	if (Object.keys(value).length === 1 && value.disabled === true) return { disabled: true };
-	const allowed = new Set(["boundary", "enabled", "step", "bootstrap", "specification"]);
-	if (Object.keys(value).some((key) => !allowed.has(key))
+	const keys = Object.keys(value);
+	if (keys.length === 1 && value.disabled === true) return { mode: inactiveMode };
+	if (keys.length === 1 && (value.mode === "passive" || value.mode === "off")) return { mode: value.mode };
+	const allowed = new Set(["boundary", "mode", "enabled", "step", "bootstrap", "specification"]);
+	const mode = decodeLegacyMode(value, inactiveMode);
+	if (keys.some((key) => !allowed.has(key))
 		|| typeof value.boundary !== "string" || value.boundary.trim().length === 0
-		|| typeof value.enabled !== "boolean"
+		|| mode === undefined
 		|| !Number.isSafeInteger(value.step) || (value.step as number) < 0 || (value.step as number) > MAX_RESTORED_STEP
 		|| (value.bootstrap !== undefined && value.bootstrap !== true)
 		|| (value.specification !== undefined && typeof value.specification !== "string")) {
@@ -208,19 +241,19 @@ export function parseRetainedPiCheckpoint(value: unknown): RetainedPiCheckpoint 
 	}
 	return {
 		boundary: value.boundary,
-		enabled: value.enabled,
+		mode,
 		step: value.step as number,
 		...(value.bootstrap === true ? { bootstrap: true } : {}),
 		...(typeof value.specification === "string" ? { specification: value.specification } : {}),
 	};
 }
 
-export function migrationFailure(data: JsonObject, error: string): Snapshot {
+export function migrationFailure(data: JsonObject, error: string, mode: InactiveMode = "passive"): Snapshot {
 	const meta = restoredMeta(data.meta, data);
 	meta.validation = {
 		attempt: 0,
 		error,
 		instruction: "Start a fresh State Flow episode; null is reserved for patch deletion.",
 	};
-	return envelope(false, meta);
+	return envelope(mode, meta);
 }

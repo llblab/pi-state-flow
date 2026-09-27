@@ -31,13 +31,20 @@ test("recovery skips malformed envelopes and selects the next retained boundary"
 	const checkpoint = { boundary: "turn-3", enabled: true, step: 3 };
 	const result = selectRetainedCheckpoint([
 		{ enabled: true, state: emptyState(), step: 2 },
-		{ config: { enabled: true }, meta: { step: 2 } },
+		{ config: { mode: "active" as const }, meta: { step: 2 } },
 		checkpoint,
 		{ boundary: "older", enabled: true, step: 1 },
 	]);
 	assert.equal(result.kind, "boundary");
-	assert.deepEqual(result.kind === "boundary" && result.checkpoint, checkpoint);
+	// Legacy enabled:true stays active; new writes carry only mode.
+	assert.deepEqual(result.kind === "boundary" && result.checkpoint, { boundary: "turn-3", mode: "active", step: 3 });
 	assert.equal(result.skipped.length, 2);
+	const current = selectRetainedCheckpoint([{ boundary: "turn-4", mode: "off", step: 4 }]);
+	assert.deepEqual(current.kind === "boundary" && current.checkpoint, { boundary: "turn-4", mode: "off", step: 4 });
+	for (const inactiveMode of ["passive", "off"] as const) {
+		const legacy = selectRetainedCheckpoint([{ boundary: "stopped", enabled: false, step: 2 }], inactiveMode);
+		assert.deepEqual(legacy.kind === "boundary" && legacy.checkpoint, { boundary: "stopped", mode: inactiveMode, step: 2 });
+	}
 });
 
 test("a selected boundary's resolution failure is final and never names an older candidate", () => {
@@ -46,16 +53,23 @@ test("a selected boundary's resolution failure is final and never names an older
 	assert.deepEqual(selection.kind === "boundary" && selection.checkpoint.boundary, "selected");
 	for (const cause of ["Invalid canonical JSON", "outside retained temporal window"]) {
 		const failure = selectedBoundaryFailure(cause);
-		assert.equal(failure.config.enabled, false);
+		assert.notEqual(failure.config.mode, "active");
 		assert.equal(failure.meta.validation?.attempt, 0);
 		assert.equal(failure.meta.validation?.error, `Snapshot restoration failed: ${cause}`);
 	}
 });
 
-test("disabled marker remains authoritative after malformed entries", () => {
-	const result = selectRetainedCheckpoint([{ enabled: true, state: emptyState() }, { disabled: true }, { boundary: "older", enabled: true, step: 1 }]);
-	assert.equal(result.kind, "disabled");
+test("pre-runtime mode marker remains authoritative after malformed entries", () => {
+	const result = selectRetainedCheckpoint([{ enabled: true, state: emptyState() }, { mode: "off" }, { boundary: "older", enabled: true, step: 1 }]);
+	assert.equal(result.kind, "pre-runtime");
+	assert.equal(result.kind === "pre-runtime" && result.mode, "off");
 	assert.equal(result.skipped.length, 1);
+	// A legacy disabled marker keeps the configured inactive policy and never becomes active.
+	for (const inactiveMode of ["passive", "off"] as const) {
+		const legacy = selectRetainedCheckpoint([{ disabled: true }, { boundary: "older", enabled: true, step: 1 }], inactiveMode);
+		assert.deepEqual(legacy.kind === "pre-runtime" && legacy.mode, inactiveMode);
+	}
+	assert.equal(selectRetainedCheckpoint([{ mode: "active" }]).kind, "unavailable", "an active branch needs a retained boundary");
 });
 
 test("revision-pointer checkpoints fail closed without falling through", () => {
@@ -63,7 +77,7 @@ test("revision-pointer checkpoints fail closed without falling through", () => {
 	const result = selectRetainedCheckpoint([{ revision }, { disabled: true }]);
 	assert.equal(result.kind, "unavailable");
 	if (result.kind !== "unavailable") return;
-	assert.equal(result.snapshot.config.enabled, false);
+	assert.notEqual(result.snapshot.config.mode, "active");
 	assert.match(result.snapshot.meta.validation?.error ?? "", /revision-pointer checkpoints are unsupported/);
 });
 
@@ -74,7 +88,7 @@ test("only unsupported candidates fail closed without semantic recovery", () => 
 	]);
 	assert.equal(result.kind, "unavailable");
 	if (result.kind !== "unavailable") return;
-	assert.equal(result.snapshot.config.enabled, false);
+	assert.notEqual(result.snapshot.config.mode, "active");
 	assert.equal(Object.hasOwn(result.snapshot, "legacySession"), false);
 	assert.equal(result.skipped.length, 2);
 	assert.equal(result.snapshot.meta.validation?.error, result.skipped[0]);

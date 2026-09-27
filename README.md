@@ -47,22 +47,25 @@ pi install git:github.com/llblab/pi-state-flow
 Enable active State Flow on the current branch:
 
 ```text
-/state-flow-start
+/state-flow-active
 ```
 
 Starting in an existing conversation retains its context for one complete bootstrap run so the agent can compile what matters.
 
-- `/state-flow-start`: Enable the active, state-driven iteration workflow and memory-based context projection; passive mode can already save explicit patches.
+- `/state-flow-active`: Select the active, state-driven iteration workflow.
+- `/state-flow-passive`: Select ordinary conversation with both memory tools and existing-memory projection.
+- `/state-flow-off`: Remove both memory tools and all State Flow model context, without deleting memory.
 - `/state-flow-status`: Inspect effective state, retained history and known recovery issues without scanning sources or changing state.
-- `/state-flow-stop`: End active episode semantics without deleting memory, even when canonical persistence fails. Interrupted work and uncompiled conversation remain available across toggles and reload; a failed write stays fenced until explicit Start safely reactivates current memory.
 
-Active mode is **opt-in**. Passive memory projection and the memory tools are enabled by default: existing state can be read or explicitly patched without an active episode or State Flow compaction. Every materially changed owner advances its independent scope revision even in passive mode, without displaying an active-mode status. When active, terminal and Telegram status render the Effective revision vector as `G15/C8/S31`; passive Telegram shows `State Flow: off`. Requested Global, CWD and Session snapshots show their own `#revision`, while Effective shows the vector. Inspection waits cancelably for a coherent shared view, with matching data and revisions, without publishing state or advancing a counter. Stop returns to the configured passive behavior. `autoStart` can enable active mode for genuinely new sessions; resumed branches restore their own enablement. See [configuration](docs/usage.md#configuration).
+Commands change only this session's selected mode. Telegram offers one horizontal **off | passive | active** option row with the current choice marked, followed immediately by Global, CWD, Session and Effective inspection buttons.
+
+Active mode is **opt-in**. Passive memory projection and the memory tools are enabled by default: existing state can be read or explicitly patched without an active episode or State Flow compaction. Every materially changed owner advances its independent scope revision even in passive mode. Terminal status shows accent `state-flow` followed by dim `active` or `passive`; it is hidden in Off. `/state-flow-status` shows the `g15c8s31` vector and effective semantic JSON, with blank lines between top-level planes. Telegram's section button shows `State Flow: active`, `State Flow: passive` or `State Flow: off` without a vector. The submenu title repeats that value in monospace; its option descriptions use the settings-card `<code>-</code> <code>value</code>` grammar. Requested Global, CWD and Session snapshots show their own `#revision`, while Effective shows the vector. Inspection waits cancelably for a coherent shared view, with matching data and revisions, without publishing state or advancing a counter. Global `mode` defaults to `"passive"` and applies only to new sessions; resumed branches retain their own mode. Commands and Telegram never change that default or other sessions. See [configuration](docs/usage.md#configuration).
 
 ### Active, passive, off
 
 - `Active`: Memory tools are available; the agent consolidates necessary final state changes before completing an iteration. Subsequent iterations use accepted state and new input rather than completed prior reasoning.
-- `Passive`: Memory tools and existing-state projection remain available by default. Patching is on demand, and ordinary conversation context continues without State Flow's active iteration reset.
-- `Configured off`: With the branch inactive and both `passiveTools` and `passiveBootstrap` false, neither memory tool nor bootstrap/state projection is exposed to the model. `autoStart: false` alone does not turn memory off.
+- `Passive`: Both memory tools and existing-state projection remain available. Patching is on demand, and ordinary conversation context continues without State Flow's active iteration reset.
+- `Off`: Neither memory tool nor State Flow context—including a frozen passive handoff—is exposed to the model. Stored memory and Pi's native trace remain intact.
 
 Modes select agent behavior, not a different disk persistence or fork-copy mechanism. Final consolidation does not require an empty ceremonial patch, and context projection does not delete native history. See [mode semantics and bootstrap terminology](docs/usage.md#active-passive-and-configured-off).
 
@@ -82,16 +85,18 @@ The agent receives the **effective view** of this composition, not three unrelat
 
 ### Semantic planes
 
-Every scope uses the same shape:
+Runtime views provide these documented planes:
 
 - `intents`: Active commitments to future action.
 - `contract`: Requirements, decisions, constraints and interface commitments.
 - `working`: Observations, results, uncertainties and current continuation.
 - `artifacts`: Source-addressed descriptions and compiled knowledge.
-- `response`: The exact latest accepted answer, including an empty string, captured by the runtime only in Session. Global and CWD retain an empty structural slot; Effective inherits the Session value.
+- `response`: The exact latest accepted answer, including an empty string, captured by the runtime only in Session. Global/CWD receive no newly accepted answers; stored scopes may omit response entirely. Effective uses the highest-priority nonempty value.
 - `lazy`: Supporting memory available through explicit reads, with its body omitted from baseline model context.
 
-These planes organize ordinary JSON rather than imposing a project-specific schema. The model updates the semantic planes except `response`, which is runtime-owned. Global and CWD revisions are shared by their canonical stores, Session has its own revision, and Effective has no scalar owner: its identity is the `G#/C#/S#` vector. One atomic patch advances each materially changed scope once. Memory remains fallible: storing an observation does not make it current or correct.
+Stored checkpoints and patches may omit any documented plane, including `intents`, `lazy` or `response`. Current and historical views assemble only known fields actually present in the selected scopes, without filling absent fields. Empty `response` is treated as absent. Checkpoint and patch readers ignore unknown top-level fields; writers emit only known fields. Nested data within known planes is unrestricted. Reading or starting never rewrites data just to normalize it; missing fields are not a storage-format error.
+
+These planes organize ordinary JSON rather than imposing a project-specific schema. The model updates the semantic planes except `response`, which is runtime-owned. Global and CWD revisions are shared by their canonical stores, Session has its own revision, and Effective has no scalar owner: its identity is the `g#c#s#` vector. One atomic patch advances each materially changed scope once. Memory remains fallible: storing an observation does not make it current or correct.
 
 Registered Pi Skills may be compiled into source-addressed artifacts when durable guidance is useful. Pi's resource provenance determines ownership: user Skills map to global, project Skills to CWD and temporary Skills to session. A matching source hash needs no update; an uncompiled read remains ordinary volatile context and does not block unrelated patches.
 
@@ -138,7 +143,7 @@ The default store is `~/.pi/agent/state-flow/`, independent of registered source
 
 Resume and tree navigation restore the selected retained session boundary over current shared global/CWD memory. A new session gets its own session layer. Supported native forks copy selected session state into a new owner without changing the parent's private data. Expired, incomplete or contradictory boundaries never silently substitute newer private state during restoration. Explicit Start is a mode change, not historical restoration: it activates validated **current** memory of that same session, including private state, even after expired active/passive, interrupted or pre-runtime selections. Available aligned history and revisions survive; unavailable history is not recreated. Malformed storage, unsafe fork copying and concurrent writes remain fenced. See [fork support](docs/usage.md#fork-support-and-limits) and [storage recovery](docs/usage.md#storage-and-recovery).
 
-SDK/launcher integrations can use [advisory continuation APIs](docs/architecture.md#session-continuation). Provenance inspection and candidate building are now asynchronous and accept host cancellation; they neither open native sessions nor install automatic resume. Run preparation and missing-artifact maintenance now wait cancelably before inference; embeddings can also use the [transaction APIs](docs/architecture.md#asynchronous-storage-transaction). Accepted-runtime Stop switches local policy/context immediately and awaits runtime-only persistence. Current-head Start also awaits coherent capture/acceptance before enabling mode; Stop or selection can cancel its wait. Telegram acknowledges controls early. Startup/recovery and exact restoration/fork still require migration, including Start's initial-attachment and unaccepted-fork paths.
+SDK/launcher integrations can use [advisory continuation APIs](docs/architecture.md#session-continuation). Provenance inspection and candidate building are now asynchronous and accept host cancellation; they neither open native sessions nor install automatic resume. Run preparation and missing-artifact maintenance now wait cancelably before inference; embeddings can also use the [transaction APIs](docs/architecture.md#asynchronous-storage-transaction). Selecting Passive or Off switches local policy/context immediately and awaits runtime-only persistence. Active waits for coherent capture/acceptance; another mode or selection can withdraw its wait. Telegram acknowledges controls early. Startup, recovery and exact restoration/fork also await their independently owned memory operation; mode changes never cancel required copying. A failed write preserves the selected inactive mode and fences publication until accepted activation.
 
 The canonical storage-format boundary introduced in 0.17 still applies: current versions accept only the canonical store contract and provide no in-place predecessor converter. Preserve existing data and check the [format boundary](docs/usage.md#moving-a-store-and-the-017-format-boundary) before changing versions or moving a store.
 

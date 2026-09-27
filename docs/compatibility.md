@@ -40,13 +40,21 @@ Pi catches context-hook errors and may otherwise continue inference. State Flow 
 
 Operation signals are not universal. Idle commands and session events can lack them. Do not infer native Abort cancellation from an extension-owned shutdown signal or generalize active-run tests to idle waits.
 
-## Start, Stop and memory restoration
+## Mode configuration compatibility
+
+Global `config.json` accepts `mode: "active" | "passive" | "off"`, defaulting to Passive, solely as the initial policy for new sessions. Session `config.json` uses the same key for the concrete retained choice; commands and Telegram never edit the global default. Before semantic initialization, an inactive choice is retained in a native `{mode}` checkpoint instead.
+
+Legacy decoding is read-only. Without explicit global mode, `autoStart: true` means Active; otherwise `passiveBootstrap: false` together with `passiveTools: false` means Off, and either enabled/defaulted flag means Passive. Explicit global mode overrides valid legacy flags; invalid values still fail validation. Session `enabled:true` remains Active, and `enabled:false` is non-active. Native legacy inactive checkpoints use the configured inactive fallback, never an Active default. Session config and native checkpoints reject mixed `mode`/`enabled` representations, even when apparently consistent, rather than choosing between two stored policies. Ordinary writers emit only mode; no eager migration or semantic normalization runs.
+
+The extension SDK uses an optional `mode` default override, and both Telegram port variants use `snapshot.mode` plus `select(mode)`. Old callback keyboards may refresh the view without selecting a mode. Synchronous enum-based ports remain supported; this does not promise the removed Start/Stop port signatures.
+
+## Mode selection and memory restoration
 
 Start activates current same-session authority under awaited exclusion. It rechecks physical identity and initialization permission after waiting, accepts once, then installs policy, memory and checkpoint. Explicit Start does not claim to restore an expired historical boundary. Native tests prove current shared plus local-private memory at the next provider and actual Abort withdrawal for in-run Start with an operation signal.
 
-Stop switches local policy and passive context before waiting for persistence. For accepted memory it publishes lifecycle metadata without rewriting semantic/provenance files. Repeated pending Stops share one acceptance. Selection, shutdown and accepted Start cancel obsolete Stop work; rejected Start does not. Genuine persistence failure retains readable memory and native context while fencing writes until accepted Start.
+Passive/Off selects local tools/context policy before waiting for persistence; Off injects no State Flow context, including a frozen handoff. For accepted memory it publishes lifecycle metadata without rewriting semantic/provenance files. Pending inactive choices share one acceptance of the latest mode. Selection, shutdown and accepted Start cancel obsolete Stop work; rejected Start does not. Genuine persistence failure retains readable memory and native context while fencing writes until accepted Start.
 
-Start/Stop choose workflow policy, not whether canonical memory exists. Stop does not cancel retained restoration, auto-start initialization or fork copying: passive policy is applied at that operation's acceptance. Cancelling a Start waiter does not cancel independently owned restoration. Selection changes, shutdown and an available native operation signal can revoke obsolete restoration; post-acceptance ancillary failure cannot undo memory.
+Mode choices select workflow policy, not whether canonical memory exists. Passive/Off never cancels retained restoration, Active-default initialization or fork copying: the latest inactive policy is applied at acceptance. Read-only recovery likewise preserves an intervening mode choice and its write fence. Cancelling a Start waiter does not cancel independently owned restoration. Selection changes, shutdown and an available native operation signal can revoke obsolete restoration; post-acceptance ancillary failure cannot undo memory.
 
 Native startup and tree handlers await restoration. Tests cover held-store tree/fork selection, exact private state over live shared streams, unchanged parent-private files, cold reopening, failed-Stop recovery and next-provider input without later-branch private values. A public SDK host can observe the child factory result before awaiting extension binding and send Stop or Stop→Start through the child's public `prompt` method while copying waits. This proves that embedding route, not that the installed CLI or Telegram exposes the child before runtime replacement finishes.
 
@@ -64,7 +72,7 @@ State Flow-owned compaction requires known sufficient context usage and a proven
 
 ## Telegram adapter
 
-The optional adapter uses the same Start/Stop and inspection owners as native commands. Inspection returns coherent state plus matching revisions without publication. Controls and inspections acknowledge callbacks before waiting, suppress revoked results and escape late failures in the current menu. Legacy synchronous presentation ports remain supported.
+The optional adapter presents one Off | Passive | Active row and uses the same mode-selection and inspection owners as native commands. Inspection returns coherent state plus matching revisions without publication. Controls and inspections acknowledge callbacks before waiting, suppress revoked results and escape late failures in the current menu. Synchronous mode-selection ports remain supported. A first Passive selection may install a read-only shared cache without invalidating its own success receipt; later controls, branch changes and cancellation still revoke obsolete presentation.
 
 Adapter tests establish those contracts with isolated transport fixtures. They are not a live Telegram smoke test. Missing or unready transport remains fail-open and cannot change core memory behavior.
 

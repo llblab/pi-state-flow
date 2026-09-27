@@ -25,7 +25,7 @@ function fixture(t: TestContext) {
 	initializeFileStore(root);
 	const cwd = join(parent, "project");
 	const sessionId = "file-session";
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
 	const runtime = createSessionRuntime(snapshot, cwd, sessionId, view.lineage);
 	const base = captureTemporalFileBase(cwd, sessionId, root);
@@ -75,11 +75,11 @@ test("file cohorts persist sparse hot history, terminal responses, and config-on
 		assert.equal(noOp.changed, false);
 		assert.equal(noOp.revision, publication.revision);
 		const semantics = publication.base.files.filter(({ path }) => path.endsWith("checkpoint.json") || path.endsWith("patches.jsonl"));
-		f.snapshot.config.enabled = false;
+		f.snapshot.config.mode = "passive";
 		f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
 		const stopped = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], publication.base, f.root, f.runtime, f.sessionId, undefined, true);
 		const restored = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, stopped.revision);
-		assert.equal(restored.runtime.config.enabled, false);
+		assert.notEqual(restored.runtime.config.mode, "active");
 		assert.deepEqual(restored.view, f.view);
 		for (const file of semantics) assert.deepEqual(readFileSync(file.path), file.bytes);
 		assert.equal(readFileSync(join(f.root, "unrelated.md"), "utf8"), "retained\n");
@@ -437,7 +437,7 @@ test("transaction release preserves replaced or overwritten lock ownership and b
 
 test("file preparation rollback restores opaque originals and preserves conflicting external output", (t) => {
 	const f = fixture(t);
-	f.view.scopes.session.checkpoint.state.working.raw = "\ufffd";
+	f.view.scopes.session.checkpoint.state.working = { raw: "\ufffd" };
 	const first = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
 	const paths = temporalScopePaths(f.cwd, f.sessionId, "session", f.root);
 	const source = readFileSync(paths.checkpoint, "utf8");

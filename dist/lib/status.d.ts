@@ -1,7 +1,7 @@
 import type { ArtifactInvalidationReason } from "./artifact.ts";
-import { type RecentTransitionWindow } from "./history.ts";
+import type { RecentTransitionWindow } from "./history.ts";
 import type { Snapshot } from "./snapshot.ts";
-import { type ScopedStates, type StateScope } from "./state.ts";
+import { type SemanticState, type ScopedStates, type StateScope } from "./state.ts";
 import type { ScopeRevisions, TransitionBoundary } from "./temporal.ts";
 export declare const STATUS_KEY = "state-flow";
 export type Colorize = (color: "accent" | "dim", text: string) => string;
@@ -16,6 +16,8 @@ export interface StatusDiagnostics {
     cwdScopeKey: string;
     sessionScopeKey: string;
     scopeStates: ScopedStates;
+    /** Overlay raw scopes before defaults so absent scalar planes cannot mask lower scopes. */
+    effectiveState?: SemanticState;
     recent: RecentTransitionWindow;
     historyLimit: number;
     temporal?: {
@@ -29,5 +31,5 @@ export interface StatusDiagnostics {
     publicationError?: string;
 }
 export declare function formatScopeRevisionVector(revisions: ScopeRevisions): string;
-export declare function compactStatus(snapshot: Snapshot, revisions: ScopeRevisions, colorize: Colorize): string | undefined;
+export declare function compactStatus(snapshot: Snapshot, _revisions: ScopeRevisions, colorize: Colorize): string | undefined;
 export declare function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostics): string;

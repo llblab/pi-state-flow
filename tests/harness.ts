@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stateFlowExtension from "../index.ts";
@@ -7,6 +7,7 @@ import type { StateFlowTelegramLoader, StateFlowTelegramModules } from "../lib/t
 import { loadStateFlowConfig } from "../lib/config.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 import type { ModelState, StateScope } from "../lib/state.ts";
+import type { StateFlowMode } from "../lib/snapshot.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
 import "./git-environment.ts";
 
@@ -31,9 +32,8 @@ function trackFixtureRoot(root: string): string {
 
 export interface HarnessOptions {
 	agentDir?: string;
-	autoStart?: boolean;
-	passiveBootstrap?: boolean;
-	passiveTools?: boolean;
+	/** SDK default-mode override for new sessions; "configured" follows repository config.json. Defaults to off. */
+	mode?: StateFlowMode | "configured";
 	cwd?: string;
 	repositoryRoot?: string;
 	useConfiguredDirectory?: boolean;
@@ -99,14 +99,6 @@ export function harness(options: HarnessOptions = {}) {
 	};
 	const fixtureRoot = options.repositoryRoot ?? trackFixtureRoot(mkdtempSync(join(tmpdir(), "state-flow-harness-")));
 	const agentDir = options.agentDir ?? join(fixtureRoot, "agent");
-	if (options.autoStart !== undefined) {
-		const configRoot = options.useConfiguredDirectory ? join(agentDir, "state-flow") : fixtureRoot;
-		mkdirSync(configRoot, { recursive: true });
-		const configPath = join(configRoot, "config.json");
-		if (!existsSync(configPath)) writeFileSync(configPath, JSON.stringify({
-			...(options.autoStart === undefined ? {} : { autoStart: options.autoStart }),
-		}));
-	}
 	const repositoryRoot = options.useConfiguredDirectory ? loadStateFlowConfig(agentDir).directory : fixtureRoot;
 	if (options.initializeRepository !== false) {
 		try {
@@ -126,7 +118,7 @@ export function harness(options: HarnessOptions = {}) {
 		}
 	}
 	let accessor: { read(offset?: number, scope?: StateScope): ModelState };
-	stateFlowExtension(pi as any, { agentDir, repositoryRoot: options.useConfiguredDirectory ? undefined : repositoryRoot, passive: { bootstrap: options.passiveBootstrap ?? false, tools: options.passiveTools ?? false }, onRuntime: (value) => { accessor = value; }, ...(options.telegram === undefined ? {} : { telegram: options.telegram }) });
+	stateFlowExtension(pi as any, { agentDir, repositoryRoot: options.useConfiguredDirectory ? undefined : repositoryRoot, ...(options.mode === "configured" ? {} : { mode: options.mode ?? "off" }), onRuntime: (value) => { accessor = value; }, ...(options.telegram === undefined ? {} : { telegram: options.telegram }) });
 	function beforeAgentStart(prompt: string) {
 		const systemPromptOptions = { sections: {} as Record<string, string> };
 		const handlerResult = handlers.get("before_agent_start")!({ type: "before_agent_start", prompt, systemPrompt: "base", systemPromptOptions }, ctx);
@@ -182,7 +174,7 @@ export function toolAssistant(id: string, name = "read", args: unknown = { path:
 }
 
 export async function start(h: ReturnType<typeof harness>, prompt = "Inspect README") {
-	await h.commands.get("state-flow-start")!.handler("", h.ctx);
+	await h.commands.get("state-flow-active")!.handler("", h.ctx);
 	return h.beginRun(prompt);
 }
 

@@ -20,35 +20,45 @@ export function stateFlowTelegramSectionSpecifiers(moduleUrl = import.meta.url) 
         new URL("../../../pi-telegram/dist/api/sections.js", moduleUrl).href,
     ];
 }
-/** Main-menu section label doubles as the live status value: the spiral identity is constant, the value is not. */
+/** Main-menu section label shows only the current session mode. */
 export function formatStateFlowSectionLabel(snapshot) {
-    if (!snapshot.enabled)
-        return "🌀 State Flow: off";
-    return `🌀 State Flow: ${snapshot.revisions ? formatScopeRevisionVector(snapshot.revisions) : `#${snapshot.step}`}`;
+    return `🌀 State Flow: ${snapshot.mode}`;
 }
-/** Shared live value: plain in the button label, monospaced in the submenu state line. */
-function stateFlowLabelValue(snapshot) {
-    if (!snapshot.enabled)
-        return "off";
-    return snapshot.revisions ? formatScopeRevisionVector(snapshot.revisions) : `#${snapshot.step}`;
+/** Match pi-telegram's settings-card value descriptions. */
+const STATE_FLOW_SECTION_HELP = [
+    "<code>-</code> <code>off</code>: no memory tools or state bootstrap.",
+    "<code>-</code> <code>passive</code> (default): memory tools and context with ordinary conversation.",
+    "<code>-</code> <code>active</code>: state-driven episodes.",
+].join("\n");
+export const STATE_FLOW_MODES = ["off", "passive", "active"];
+function isStateFlowModeAction(value) {
+    return STATE_FLOW_MODES.includes(value);
 }
-/** Submenu state line: the same identity as the button label, with the live value in monospace. */
-function formatStateFlowSectionHeader(snapshot) {
-    return `<b>🌀 State Flow: <code>${stateFlowLabelValue(snapshot)}</code></b>`;
+function modeReceiptNotice(mode, result) {
+    if (result.ok && (result.message === `State Flow ${mode}` || result.message === `State Flow is already ${mode}`))
+        return undefined;
+    return result.message;
 }
-/** Short help under the state line: what State Flow is and why its action button exists. */
-const STATE_FLOW_SECTION_HELP = "Accepted memory remains visible in active and passive modes. Start or Stop changes episode behavior, not state access.";
-/** The submenu header repeats the button's state line; the single action matches the current state. */
+/** Compact option values followed directly by read-only scope actions. */
 export function buildStateFlowSectionView(snapshot, callbackData) {
-    const action = snapshot.enabled
-        ? { text: "⏹ Stop", callback_data: callbackData("stop") }
-        : { text: "▶️ Start", callback_data: callbackData("start") };
+    const modes = STATE_FLOW_MODES.map((mode) => ({
+        text: `${mode === snapshot.mode ? "🟢 " : ""}${mode}`,
+        callback_data: callbackData(mode),
+    }));
     return {
-        text: [formatStateFlowSectionHeader(snapshot), "", STATE_FLOW_SECTION_HELP].join("\n"),
+        text: [
+            `<b>🌀 State Flow:</b> <code>${snapshot.mode}</code>`,
+            "",
+            "Choose how this session uses State Flow memory and context. Switching modes never erases stored memory.",
+            "",
+            STATE_FLOW_SECTION_HELP,
+        ].join("\n"),
         parseMode: "html",
         replyMarkup: { inline_keyboard: [
-                [action],
-                [{ text: "👁 Show state", callback_data: callbackData("show-state") }],
+                modes,
+                ...[["global", "cwd"], ["session", "effective"]].map((row) => row.map((scope) => ({
+                    text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope),
+                }))),
             ] },
     };
 }
@@ -58,17 +68,6 @@ const STATE_FLOW_SCOPE_LABELS = {
     session: "💬 Session",
     effective: "🧬 Effective",
 };
-export function buildStateFlowScopeChooser(callbackData) {
-    return {
-        text: "<b>👁 Show state:</b>",
-        parseMode: "html",
-        replyMarkup: { inline_keyboard: [
-                ...["global", "cwd", "session", "effective"].map((scope) => [
-                    { text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope) },
-                ]),
-            ] },
-    };
-}
 // The complete message serializes each preformatted field one additional time;
 // 3,000 leaves safe headroom for worst-case JSON escaping across all four fields.
 const STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS = 3_000;
@@ -113,10 +112,10 @@ export function renderStateFlowRichState(scope, revisions, state) {
                 text: [`${STATE_FLOW_SCOPE_LABELS[scope]}: `, { type: "code", text: revision }],
                 size: 3,
             },
-            ...fields.map((field) => ({
+            ...fields.filter((field) => state[field] !== undefined && state[field] !== "").map((field) => ({
                 type: "details",
                 summary: { type: "code", text: field },
-                blocks: [{ type: "pre", language: "json", text: renderStateFlowTelegramField(state[field] ?? {}) }],
+                blocks: [{ type: "pre", language: "json", text: renderStateFlowTelegramField(state[field]) }],
             })),
         ],
         skip_entity_detection: true,
@@ -131,20 +130,16 @@ function buildStateFlowTelegramSection(port, isActive) {
         id: STATE_FLOW_TELEGRAM_ID,
         label: "🌀 State Flow",
         getLabel: () => formatStateFlowSectionLabel(port.snapshot()),
-        render: (ctx) => buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action)),
+        render: (ctx) => buildStateFlowSectionView(port.snapshot(), (action, payload) => ctx.callbackData(action, payload)),
         handleCallback: async (ctx) => {
-            // cancel/refresh remain routable for keyboards sent by earlier versions.
-            if (ctx.action !== "start" && ctx.action !== "stop" && ctx.action !== "cancel" && ctx.action !== "refresh" && ctx.action !== "show-state" && ctx.action !== "inspect" && ctx.action !== "back")
+            // Keyboards sent by earlier versions re-render (start/stop/refresh) or withdraw deferral (cancel); they change no mode.
+            const legacy = ctx.action === "start" || ctx.action === "stop" || ctx.action === "cancel" || ctx.action === "refresh";
+            if (!isStateFlowModeAction(ctx.action) && !legacy && ctx.action !== "show-state" && ctx.action !== "inspect" && ctx.action !== "back")
                 return "pass";
             const request = ++interaction;
             let notice;
             let acknowledged = false;
             try {
-                if (ctx.action === "show-state") {
-                    await ctx.answerCallback();
-                    await ctx.edit(buildStateFlowScopeChooser((action, payload) => ctx.callbackData(action, payload)));
-                    return "handled";
-                }
                 if (ctx.action === "inspect") {
                     if (!isStateFlowTelegramScope(ctx.payload))
                         throw new Error("Unknown State Flow scope");
@@ -167,25 +162,25 @@ function buildStateFlowTelegramSection(port, isActive) {
                         await ctx.answerCallback();
                     return "handled";
                 }
-                const action = ctx.action === "stop" || (ctx.action === "start" && port.canStartNow()) ? ctx.action : undefined;
-                if (action) {
+                const mode = isStateFlowModeAction(ctx.action) && (ctx.action !== "active" || port.canStartNow()) ? ctx.action : undefined;
+                if (mode) {
                     if ("inspect" in port) {
                         acknowledged = true;
-                        // Start the control immediately and acknowledge in parallel; neither promise can reject unobserved.
+                        // Apply the control immediately and acknowledge in parallel; neither promise can reject unobserved.
                         const [, result] = await Promise.all([
-                            ctx.answerCallback(action === "stop" ? "Stopping State Flow" : "Starting State Flow"),
-                            Promise.resolve().then(() => port[action]()),
+                            ctx.answerCallback(`Switching State Flow to ${mode}`),
+                            Promise.resolve().then(() => port.select(mode)),
                         ]);
                         if (result.signal?.aborted)
                             return "handled";
-                        notice = result.message;
+                        notice = modeReceiptNotice(mode, result);
                     }
                     else
-                        notice = port[action]().message;
+                        notice = modeReceiptNotice(mode, port.select(mode));
                 }
-                else if (ctx.action === "start") {
+                else if (ctx.action === "active") {
                     port.deferStart();
-                    notice = "State Flow will start after the current turn";
+                    notice = "State Flow will become active after the current turn";
                 }
                 else if (ctx.action === "cancel") {
                     port.cancelStart();
@@ -198,7 +193,7 @@ function buildStateFlowTelegramSection(port, isActive) {
             if (request !== interaction || !isActive())
                 return "handled";
             const summary = notice === undefined ? undefined : conciseDiagnostic(notice, 200);
-            const view = buildStateFlowSectionView(port.snapshot(), (action) => ctx.callbackData(action));
+            const view = buildStateFlowSectionView(port.snapshot(), (action, payload) => ctx.callbackData(action, payload));
             if (acknowledged && summary !== undefined) {
                 // Callback queries can expire during storage waits; retain errors in the existing menu instead.
                 view.text += `\n\n${summary.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}`;

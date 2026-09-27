@@ -110,12 +110,13 @@ export {
 export {
   emptyState,
   isMaterializedState,
+  isSemanticState,
   isStateDocument,
   overlayStates,
   projectStateForModel,
   updateMaterializedArtifacts,
   type AtomicScopePatches, type MaterializedState, type ScopedPatch,
-  type ScopedStates, type ScopePatch, type SemanticTransition,
+  type ScopedStates, type ScopedSemanticStates, type ScopePatch, type SemanticState, type SemanticTransition,
   type StateDocument,
   type StatePatch,
   type StateScope,
@@ -142,5 +143,5 @@ export {
   type StateFlowTelegramSnapshot,
   type StateFlowTelegramView
 } from "./lib/telegram.ts";
-export { advanceTemporalState, readTemporalState, temporalScopeRevisions, type ScopeRevisions, type TemporalState } from "./lib/temporal.ts";
+export { advanceTemporalState, readTemporalState, readTemporalView, temporalScopeRevisions, type ScopeRevisions, type TemporalState } from "./lib/temporal.ts";
 export { parseStateReadPath, readStatePath, type StateReadQuery, type StateReadResult } from "./lib/query.ts";

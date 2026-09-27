@@ -1,6 +1,6 @@
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT, validateRecentTransition, type RecentScopePatch } from "./history.ts";
 import { applyPatch, containsNull, isJsonValue, isObject, sameJson, type JsonObject } from "./json.ts";
-import { isMaterializedState, overlayStates, type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
+import { emptyState, isSemanticState, overlayStates, projectSemanticState, type MaterializedState, type SemanticState, type ScopedSemanticStates, type StateScope } from "./state.ts";
 
 /** Owns hot temporal algebra; excludes filesystem, Git, identity allocation, and Pi lifecycle. */
 export interface TransitionBoundary {
@@ -12,7 +12,7 @@ export interface TransitionBoundary {
 
 export interface ScopeCheckpoint {
 	through: TransitionBoundary;
-	state: MaterializedState;
+	state: SemanticState;
 }
 
 export interface TemporalPatch {
@@ -52,15 +52,20 @@ function validateBoundary(boundary: TransitionBoundary): void {
 	}
 }
 
-function validateState(state: MaterializedState): void {
-	if (!isJsonValue(state) || !isMaterializedState(state) || containsNull(state)) {
-		throw new Error("Invalid temporal materialized semantic state");
-	}
+function validateState(state: JsonObject, location?: string): asserts state is SemanticState {
+	const json = isJsonValue(state);
+	const hasNull = json && isObject(state) && Object.keys(emptyState()).some((key) => containsNull(state[key]));
+	if (json && isSemanticState(state) && !hasNull) return;
+	const reason = !json ? "expected finite, acyclic JSON data"
+		: !isObject(state) ? "expected a semantic object"
+			: hasNull ? "null is not allowed"
+				: "invalid semantic fields or artifact metadata";
+	throw new Error(`Invalid temporal materialized semantic state${location ? ` in ${location}` : ""}: ${reason}`);
 }
 
-function apply(state: MaterializedState, patch: TemporalPatch["patch"]): MaterializedState {
-	const next = applyPatch(state, patch as JsonObject) as MaterializedState;
-	validateState(next);
+function apply(state: SemanticState, patch: TemporalPatch["patch"], location?: string): SemanticState {
+	const next = applyPatch(state, patch as JsonObject);
+	validateState(next, location);
 	return next;
 }
 
@@ -80,7 +85,7 @@ export function validateScopeStream(value: unknown, scope: StateScope, historyLi
 	}
 	const stream = value as unknown as ScopeStream;
 	validateBoundary(stream.checkpoint.through);
-	validateState(stream.checkpoint.state);
+	validateState(stream.checkpoint.state, `${scope} checkpoint`);
 	if (stream.patches.length > historyLimit) throw new Error(`Temporal scope tail exceeds configured history limit ${historyLimit}`);
 	if (stream.revision < stream.patches.length) throw new Error("Temporal scope revision predates its retained patch tail");
 	let previous = stream.checkpoint.through;
@@ -98,8 +103,7 @@ export function validateScopeStream(value: unknown, scope: StateScope, historyLi
 			throw new Error("Disconnected State Flow temporal ancestry");
 		}
 		validateRecentTransition({ id: record.transition.id, at: 0, transitions: [{ scope, patch: record.patch }] });
-		const next = apply(state, record.patch);
-		if (sameJson(next, state)) throw new Error("Temporal scope tail contains a semantic no-op");
+		const next = apply(state, record.patch, `${scope} tail`);
 		state = next;
 		previous = record.transition;
 		identities.add(previous.id);
@@ -193,7 +197,7 @@ export function adoptTemporalStreams(scopes: Record<StateScope, ScopeStream>, id
 }
 
 /** New or migrated state starts at a proven current boundary, with no invented past. */
-export function createTemporalState(states: ScopedStates, id: string, historyLimit = DEFAULT_HISTORY_LIMIT): TemporalState {
+export function createTemporalState(states: ScopedSemanticStates, id: string, historyLimit = DEFAULT_HISTORY_LIMIT): TemporalState {
 	const through: TransitionBoundary = { id, position: 0, parent: null };
 	const stream = (scope: StateScope): ScopeStream => ({
 		revision: 0,
@@ -205,7 +209,7 @@ export function createTemporalState(states: ScopedStates, id: string, historyLim
 	return view;
 }
 
-function scopeAt(stream: ScopeStream, boundary: TransitionBoundary): MaterializedState {
+function scopeAt(stream: ScopeStream, boundary: TransitionBoundary): SemanticState {
 	let state = structuredClone(stream.checkpoint.state);
 	for (const record of stream.patches) {
 		if (record.transition.position > boundary.position) break;
@@ -280,18 +284,34 @@ export function temporalScopeRevisions(view: TemporalState): ScopeRevisions {
 	return revisions;
 }
 
-/** Lazy scope/effective read at one shared transition boundary, never by local patch count. */
-export function readTemporalState(view: TemporalState, offset = 0, scope?: StateScope, historyLimit = DEFAULT_HISTORY_LIMIT): MaterializedState {
+function readBoundary(view: TemporalState, offset: number, historyLimit: number): TransitionBoundary {
 	validateHistoryLimit(historyLimit);
 	if (!Number.isSafeInteger(offset) || offset < 0 || offset > historyLimit) {
 		throw new Error(`State Flow hot-history offset must be an integer from 0 to ${historyLimit}`);
 	}
-	if (scope !== undefined && !SCOPES.includes(scope)) throw new Error("Unknown temporal scope");
 	validateTemporalState(view, historyLimit);
 	const boundary = view.lineage[view.lineage.length - 1 - offset];
 	if (!boundary) throw new Error("Requested history predates the proven temporal origin");
-	if (scope !== undefined) return scopeAt(view.scopes[scope], boundary);
-	return overlayStates(...SCOPES.map((owner) => scopeAt(view.scopes[owner], boundary)));
+	return boundary;
+}
+
+/** Exact scope semantics for authored staging; defaults must never become implicit writes. */
+export function readTemporalScopes(view: TemporalState, offset = 0, historyLimit = DEFAULT_HISTORY_LIMIT): ScopedSemanticStates {
+	const boundary = readBoundary(view, offset, historyLimit);
+	return { global: scopeAt(view.scopes.global, boundary), cwd: scopeAt(view.scopes.cwd, boundary), session: scopeAt(view.scopes.session, boundary) };
+}
+
+/** Sparse current/historical view: unknown planes and absent values never become effective data. */
+export function readTemporalView(view: TemporalState, offset = 0, scope?: StateScope, historyLimit = DEFAULT_HISTORY_LIMIT): SemanticState {
+	if (scope !== undefined && !SCOPES.includes(scope)) throw new Error("Unknown temporal scope");
+	const boundary = readBoundary(view, offset, historyLimit);
+	const owners = scope === undefined ? SCOPES : [scope];
+	return owners.reduce<SemanticState>((state, owner) => applyPatch(state, projectSemanticState(scopeAt(view.scopes[owner], boundary))), {});
+}
+
+/** Internal defaulted materialization for consumers that require object registries. */
+export function readTemporalState(view: TemporalState, offset = 0, scope?: StateScope, historyLimit = DEFAULT_HISTORY_LIMIT): MaterializedState {
+	return overlayStates(readTemporalView(view, offset, scope, historyLimit));
 }
 
 /** Allocate the identity outside this algebra; only materially effective patches accept it. */

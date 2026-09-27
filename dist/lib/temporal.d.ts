@@ -1,5 +1,5 @@
 import { type RecentScopePatch } from "./history.ts";
-import { type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
+import { type MaterializedState, type SemanticState, type ScopedSemanticStates, type StateScope } from "./state.ts";
 /** Owns hot temporal algebra; excludes filesystem, Git, identity allocation, and Pi lifecycle. */
 export interface TransitionBoundary {
     id: string;
@@ -9,7 +9,7 @@ export interface TransitionBoundary {
 }
 export interface ScopeCheckpoint {
     through: TransitionBoundary;
-    state: MaterializedState;
+    state: SemanticState;
 }
 export interface TemporalPatch {
     transition: TransitionBoundary;
@@ -37,7 +37,7 @@ export declare function validateTemporalState(view: TemporalState, historyLimit?
 /** Adopt revision-proven inherited streams without rewriting their checkpoints or tails. */
 export declare function adoptTemporalStreams(scopes: Record<StateScope, ScopeStream>, id: string, historyLimit?: number): TemporalState;
 /** New or migrated state starts at a proven current boundary, with no invented past. */
-export declare function createTemporalState(states: ScopedStates, id: string, historyLimit?: number): TemporalState;
+export declare function createTemporalState(states: ScopedSemanticStates, id: string, historyLimit?: number): TemporalState;
 /** Fold retained tails to a lower configured limit without inventing history. */
 export declare function constrainTemporalState(view: TemporalState, historyLimit: number): TemporalState;
 /** Select one scope at a proven retained boundary from its owning runtime lineage. */
@@ -46,7 +46,11 @@ export declare function selectScopeStreamAtBoundary(stream: ScopeStream, scope: 
 export declare function selectTemporalStateBoundary(view: TemporalState, boundaryId: string, historyLimit?: number): TemporalState;
 /** Current independent scope revisions; Effective uses this vector rather than inventing a scalar owner. */
 export declare function temporalScopeRevisions(view: TemporalState): ScopeRevisions;
-/** Lazy scope/effective read at one shared transition boundary, never by local patch count. */
+/** Exact scope semantics for authored staging; defaults must never become implicit writes. */
+export declare function readTemporalScopes(view: TemporalState, offset?: number, historyLimit?: number): ScopedSemanticStates;
+/** Sparse current/historical view: unknown planes and absent values never become effective data. */
+export declare function readTemporalView(view: TemporalState, offset?: number, scope?: StateScope, historyLimit?: number): SemanticState;
+/** Internal defaulted materialization for consumers that require object registries. */
 export declare function readTemporalState(view: TemporalState, offset?: number, scope?: StateScope, historyLimit?: number): MaterializedState;
 /** Allocate the identity outside this algebra; only materially effective patches accept it. */
 export declare function advanceTemporalState(view: TemporalState, transitions: readonly RecentScopePatch[], id: string, historyLimit?: number): TemporalState;

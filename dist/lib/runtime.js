@@ -6,9 +6,8 @@ import { pruneArtifactProvenance } from "./artifact.js";
 import { assertTemporalFileBase, captureTemporalFileBase, initializeFileStore, publishTemporalStateToFiles, withStorageTransaction } from "./storage.js";
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.js";
 import { hashJson, sameJson } from "./json.js";
-import { HistoryBoundaryExpiredError, RevisionUnavailableError, createSessionRuntime, parseSessionRuntime, retainedBoundaryCheckpoint } from "./snapshot.js";
-import { emptyState } from "./state.js";
-import { adoptTemporalStreams, advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalState, selectScopeStreamAtBoundary, validateScopeLineage } from "./temporal.js";
+import { HistoryBoundaryExpiredError, RevisionUnavailableError, createSessionRuntime, parseSessionRuntime, preRuntimeCheckpoint, retainedBoundaryCheckpoint } from "./snapshot.js";
+import { adoptTemporalStreams, advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalScopes, readTemporalState, readTemporalView, selectScopeStreamAtBoundary, validateScopeLineage } from "./temporal.js";
 const SCOPES = ["global", "cwd", "session"];
 const SHARED_SCOPES = ["global", "cwd"];
 function emptyProvenance() {
@@ -42,7 +41,7 @@ function removedTargetScopeConflict(scopes) {
     return new SharedScopeRemovalConflictError(scopes);
 }
 function freshEmptyScopeStream(scope, origin, historyLimit) {
-    return createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, origin, historyLimit).scopes[scope];
+    return createTemporalState({ global: {}, cwd: {}, session: {} }, origin, historyLimit).scopes[scope];
 }
 /** Cached branch-selected temporal state and publication basis; excludes Pi event policy. */
 export class TemporalRuntime {
@@ -89,7 +88,7 @@ export class TemporalRuntime {
             return false;
         if (!shared.global)
             throw new Error("Incomplete passive State Flow shared storage: CWD state exists without global state");
-        const fresh = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, randomUUID(), this.historyLimit);
+        const fresh = createTemporalState({ global: {}, cwd: {}, session: {} }, randomUUID(), this.historyLimit);
         // Global memory is valid before this CWD has ever materialized its own scope.
         const view = adoptTemporalStreams({ global: shared.global, cwd: shared.cwd ?? fresh.scopes.cwd, session: fresh.scopes.session }, `passive:files:${randomUUID()}`, this.historyLimit);
         const provenance = {
@@ -119,6 +118,11 @@ export class TemporalRuntime {
             throw new Error("State Flow temporal runtime is unavailable");
         return readTemporalState(this.view, offset, scope, this.historyLimit);
     }
+    readView(offset = 0, scope) {
+        if (!this.view)
+            throw new Error("State Flow temporal runtime is unavailable");
+        return readTemporalView(this.view, offset, scope, this.historyLimit);
+    }
     states() {
         return { global: this.read(0, "global"), cwd: this.read(0, "cwd"), session: this.read(0, "session") };
     }
@@ -130,7 +134,7 @@ export class TemporalRuntime {
     /** Encode Pi lifecycle state against the current retained semantic boundary. */
     retainedCheckpoint(snapshot) {
         if (!this.view)
-            return { disabled: true };
+            return preRuntimeCheckpoint(snapshot.config.mode);
         return retainedBoundaryCheckpoint(snapshot, this.causalBasis());
     }
     usesCanonicalFiles() {
@@ -179,7 +183,7 @@ export class TemporalRuntime {
             session: selectedSession,
         }, `restore:${checkpoint.boundary}:${randomUUID()}`, this.historyLimit);
         const snapshot = {
-            config: { enabled: checkpoint.enabled },
+            config: { mode: checkpoint.mode },
             meta: {
                 step: checkpoint.step,
                 ...(checkpoint.bootstrap === true ? { bootstrap: true } : {}),
@@ -195,7 +199,7 @@ export class TemporalRuntime {
                 for (const record of scopes.session.patches) {
                     if (record.transition.position <= boundary.position)
                         continue;
-                    for (const path of Object.keys(record.patch.artifacts ?? {}))
+                    for (const path of Object.keys(record.patch.artifacts === null ? retained : record.patch.artifacts ?? {}))
                         delete retained[path];
                 }
             }
@@ -266,8 +270,9 @@ export class TemporalRuntime {
             const meta = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey).meta;
             return [scope, parseScopeProvenance(files.get(meta), meta)];
         }));
+        // Read-only recovery grants no active policy; callers select the inactive mode.
         const snapshot = {
-            config: { enabled: false },
+            config: { mode: "passive" },
             meta: { step: document.meta.step, ...(document.meta.bootstrap === true ? { bootstrap: true } : {}) },
         };
         this.view = view;
@@ -355,7 +360,7 @@ export class TemporalRuntime {
             streams.session = undefined;
         if (copy)
             streams.session = copy.stream;
-        const fresh = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, randomUUID(), this.historyLimit);
+        const fresh = createTemporalState({ global: {}, cwd: {}, session: {} }, randomUUID(), this.historyLimit);
         const candidate = new TemporalRuntime(this.cwd, this.session, this.root, undefined, this.historyLimit);
         candidate.base = base;
         candidate.view = adoptTemporalStreams({ global: streams.global ?? fresh.scopes.global, cwd: streams.cwd ?? fresh.scopes.cwd, session: streams.session ?? fresh.scopes.session }, `files:${randomUUID()}`, this.historyLimit);
@@ -512,7 +517,7 @@ export class TemporalRuntime {
             if (!document || !stream)
                 throw new RevisionUnavailableError("Current State Flow session memory is incomplete");
             validateScopeLineage(stream, "session", document.meta.lineage, MAX_HISTORY_LIMIT);
-            throw new RevisionUnavailableError("Existing State Flow session memory is not selected; select an accepted boundary or use /state-flow-start");
+            throw new RevisionUnavailableError("Existing State Flow session memory is not selected; select an accepted boundary or use /state-flow-active");
         }
         const origin = `patch:${randomUUID()}`;
         const streams = Object.fromEntries(SCOPES.map((scope) => {
@@ -531,7 +536,7 @@ export class TemporalRuntime {
     /** Stage and accept synchronously inside an awaited lock; expose neither selection nor raw storage operations. */
     async withPatchTransaction(action, signal) {
         return this.withPublicationTransaction((candidate, publish) => action({
-            states: candidate.states(),
+            states: readTemporalScopes(candidate.view, 0, this.historyLimit),
             causalBasis: candidate.causalBasis(),
             provenance: structuredClone(candidate.provenanceByScope),
             publish,

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureTemporalFileBases } from "../lib/durable.ts";
 import test from "node:test";
-import { completeRun, prepareRun, resumeEpisode, startEpisode, stopEpisode } from "../lib/episode.ts";
+import { completeRun, deactivateEpisode, prepareRun, resumeEpisode, startEpisode } from "../lib/episode.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
 import { withStorageTransaction } from "../lib/storage.ts";
 import { stateFlowLogPath } from "../lib/logging.ts";
@@ -64,7 +64,7 @@ test("session shutdown awaits a slow failing push without post-shutdown writes o
 });
 
 for (const boundary of ["abort", "shutdown", "stop"] as const) test(`awaited backup preserves accepted memory across ${boundary}`, { timeout: 10_000 }, async (t) => {
-	const h = harness({ passiveTools: true });
+	const h = harness({ mode: "passive" });
 	await start(h);
 	await commitTerminal(h, {}, { accepted: true }, "Answer accepted before backup");
 	const files = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
@@ -90,7 +90,7 @@ for (const boundary of ["abort", "shutdown", "stop"] as const) test(`awaited bac
 	else if (boundary === "shutdown") await h.handlers.get("session_shutdown")!({}, h.ctx);
 	else {
 		const stopCancellation = new AbortController();
-		const stopping = h.commands.get("state-flow-stop").handler("", { ...h.ctx, signal: stopCancellation.signal });
+		const stopping = h.commands.get("state-flow-passive").handler("", { ...h.ctx, signal: stopCancellation.signal });
 		stopCancellation.abort(new Error("Cancel only Stop persistence, not the accepted backup"));
 		await stopping;
 	}
@@ -103,7 +103,7 @@ for (const boundary of ["abort", "shutdown", "stop"] as const) test(`awaited bac
 		await h.handlers.get("agent_before_settle")!({}, h.ctx);
 		assert.equal(head(), before, "an unaccepted repeat does not restart the canceled backup");
 	} else {
-		assert.equal(h.statuses.at(-1), undefined, "Stop disables local policy without waiting for backup");
+		assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>", "Stop switches to passive without waiting for backup");
 		assert.match(h.notifications.at(-1)!, /memory writes paused/);
 	}
 	assert.equal(h.readState().response, "Answer accepted before backup");
@@ -116,7 +116,7 @@ for (const boundary of ["abort", "shutdown", "stop"] as const) test(`awaited bac
 	assert.deepEqual(h.entries, entries, "backup completion never checkpoints or replaces policy state");
 	if (boundary === "stop") {
 		assert.notEqual(head(), before);
-		await assert.rejects(h.tools.get("patch_state").execute("late", { session: { working: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after Stop/);
+		await assert.rejects(h.tools.get("patch_state").execute("late", { session: { working: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 	} else if (boundary === "abort") {
 		await commitTerminal(h, {}, { next: true }, "Accepted retry");
 		await h.handlers.get("agent_before_settle")!({}, h.ctx);
@@ -238,19 +238,20 @@ test("push failure remains diagnosable when the local log path overlaps the stor
 	assert.equal(h.readState().response, "Accepted 2");
 });
 
-test("starts, resumes, and stops branch-local episodes without discarding state", () => {
+test("activates, resumes, and deactivates branch-local episodes without discarding state", () => {
 	const started = startEpisode(true);
 	assert.deepEqual(started, {
-		config: { enabled: true },
+		config: { mode: "active" as const },
 		meta: { step: 0, bootstrap: true },
 	});
 	started.meta.step = 3;
-	const stopped = stopEpisode(started);
+	const stopped = deactivateEpisode(started, "passive");
 	assert.deepEqual(stopped, {
-		config: { enabled: false },
+		config: { mode: "passive" as const },
 		meta: { step: 3, bootstrap: true },
 	});
-	assert.deepEqual(resumeEpisode(stopped, false), { ...stopped, config: { enabled: true } });
+	assert.deepEqual(deactivateEpisode(stopped, "off"), { ...stopped, config: { mode: "off" as const } });
+	assert.deepEqual(resumeEpisode(stopped, false), { ...stopped, config: { mode: "active" as const } });
 });
 
 test("rotates specifications at user-run boundaries", () => {
@@ -300,9 +301,9 @@ test("start creates the CWD activation marker and stop preserves branch state", 
 	await commitTerminal(h, { goal: "x" }, { next: "y" });
 	const committed = h.resolveSnapshot();
 	const semantic = structuredClone(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot));
-	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
+	await h.commands.get("state-flow-off")!.handler("", h.ctx);
 	const stopped = h.resolveSnapshot();
-	assert.equal(stopped.config.enabled, false);
+	assert.equal(stopped.config.mode, "off");
 	assert.equal(stopped.meta.step, committed.meta.step);
 	const checkpoint = h.entries.at(-1)!.data;
 	assert.equal(Object.hasOwn(checkpoint, "revision") || Object.hasOwn(checkpoint, "boundary"), true);

@@ -62,7 +62,8 @@ test("isolated first inference after native resume", { timeout: 35_000 }, async 
 		assert.ok(session.getActiveToolNames().includes("patch_state"));
 		const selected = resolvedSnapshot(session);
 		assert.equal(selected.meta.step, input.counter * 2);
-		expectedFirstState = fixture.readState(session);
+		const { working, response } = fixture.readState(session);
+		expectedFirstState = { working, response };
 		assert.equal(expectedFirstState.working.counter, input.counter);
 		assert.equal(expectedFirstState.response, `Accepted ${input.counter}`);
 	} else {

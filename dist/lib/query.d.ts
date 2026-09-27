@@ -1,5 +1,6 @@
+import { type RecentScopePatch } from "./history.ts";
 import { type JsonValue } from "./json.ts";
-import { type ModelState, type ScopePatch, type StateScope } from "./state.ts";
+import { type SemanticState, type StateScope } from "./state.ts";
 import { type TemporalState, type TransitionBoundary } from "./temporal.ts";
 export type StateReadQuery = {
     kind: "state";
@@ -15,13 +16,11 @@ export type StateReadQuery = {
 export type StateReadResult = {
     path: string;
     boundary: TransitionBoundary;
-    state: ModelState;
+    state: SemanticState;
 } | {
     path: string;
     boundary: TransitionBoundary;
-    patch: ScopePatch & {
-        response?: string;
-    };
+    patch: RecentScopePatch["patch"];
 };
 export type StateReadProjection = "value" | "keys" | "patch";
 type StateReadMeta = {

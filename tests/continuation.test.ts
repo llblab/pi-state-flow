@@ -185,7 +185,7 @@ test("discovers deterministic JSONL headers, isolates malformed files, and mutat
 });
 
 test("inspects exact canonical provenance and fails malformed runtime closed", async (t) => {
-	const f = await realPiFixture(t, { autoStart: true, initializeRepository: false });
+	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const originalPath = process.env.PATH;
 	process.env.PATH = f.root;
 	const session = await f.createSession("new");
@@ -203,7 +203,7 @@ test("inspects exact canonical provenance and fails malformed runtime closed", a
 	const address = resolveSessionAddress(header.file, header.id, header.timestamp);
 	const meta = sessionRuntimePaths(header.cwd, header.id, f.repositoryRoot, address.key).meta;
 	const other = new TemporalRuntime(header.cwd, "other", f.repositoryRoot);
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	other.initialize(snapshot, true);
 	const before = other.states();
 	const next = structuredClone(before);
@@ -231,7 +231,7 @@ for (const scope of ["global", "cwd"] as const) for (const limit of [0, 7]) {
 		const f = fixture(t);
 		const root = join(f.root, "store");
 		const a = new TemporalRuntime(f.root, "a", root, undefined, limit);
-		const snapshot = emptySnapshot(true);
+		const snapshot = emptySnapshot("active");
 		a.initialize(snapshot, true);
 		let before = a.states();
 		let next = structuredClone(before);
@@ -246,7 +246,7 @@ for (const scope of ["global", "cwd"] as const) for (const limit of [0, 7]) {
 		const checkpoint = a.retainedCheckpoint(snapshot);
 		assert.ok("boundary" in checkpoint);
 		const b = new TemporalRuntime(f.root, "b", root, undefined, limit);
-		const other = emptySnapshot(true);
+		const other = emptySnapshot("active");
 		b.initialize(other, true);
 		before = b.states();
 		next = structuredClone(before);
@@ -288,7 +288,7 @@ test("continuation waits through a partial independent publication and propagate
 		rmSync(parent, { recursive: true, force: true });
 	});
 	const local = new TemporalRuntime(parent, "a", root);
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	local.initialize(snapshot, true);
 	const file = join(parent, "a.jsonl");
 	writeSession(file, "a", parent);
@@ -368,7 +368,7 @@ for (const mode of ["absent", "empty", "stopped", "orphaned", "malformed", "inva
 	if (mode === "empty") mkdirSync(root);
 	else if (mode !== "absent") {
 		const runtime = new TemporalRuntime(f.root, "a", actual);
-		runtime.initialize(emptySnapshot(mode !== "stopped"), true);
+		runtime.initialize(emptySnapshot(mode !== "stopped" ? "active" : "passive"), true);
 		const paths = sessionRuntimePaths(f.root, "a", actual);
 		if (mode === "orphaned") { rmSync(paths.config); rmSync(paths.runtime); }
 		if (mode === "malformed") writeFileSync(paths.runtime, "not JSON\n");

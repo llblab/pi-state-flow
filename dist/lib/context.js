@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { projectArtifactForModel } from "./artifact.js";
 import { applyPatch, isObject, presentationJson, sameJson } from "./json.js";
-import { projectStateForModel } from "./state.js";
+import { projectSemanticPatch, projectStateForModel } from "./state.js";
 /** Refresh only our section; Pi owns system frames, tools and forced-prompt precedence. */
 export function projectSystemProtocol(messages, protocol) {
     let lastSystem = -1;
@@ -74,8 +74,8 @@ function projectedStateUpdates(previous, current, patches, beforeNavigation, nav
     const diff = (left, right, path) => {
         if (left === undefined && right === undefined || left !== undefined && right !== undefined && sameJson(left, right))
             return;
-        if (isObject(left) && isObject(right)) {
-            for (const key of new Set([...Object.keys(left), ...Object.keys(right)]))
+        if (isObject(right) && (isObject(left) || left === undefined && path.length === 1 && Object.keys(right).length > 0)) {
+            for (const key of new Set([...Object.keys(left ?? {}), ...Object.keys(right)]))
                 diff(child(left, key), child(right, key), [...path, key]);
         }
         else if (Array.isArray(left) && Array.isArray(right) && left.length === right.length) {
@@ -336,8 +336,9 @@ function projectRecentForModel(recent) {
     const projected = structuredClone(recent);
     for (const record of projected)
         for (const transition of record.transitions) {
+            transition.patch = projectSemanticPatch(transition.patch);
             delete transition.patch.lazy;
-            if (transition.patch.artifacts === undefined)
+            if (!isObject(transition.patch.artifacts))
                 continue;
             for (const [path, entry] of Object.entries(transition.patch.artifacts)) {
                 Object.defineProperty(transition.patch.artifacts, path, {

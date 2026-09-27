@@ -10,8 +10,11 @@ export function isMaterializedState(value) {
         && isObject(value.working)
         && isObject(value.intents)
         && typeof value.response === "string"
-        && isObject(value.lazy)
-        && Object.keys(value).every((key) => key === "artifacts" || key === "contract" || key === "working" || key === "intents" || key === "response" || key === "lazy");
+        && isObject(value.lazy);
+}
+/** Missing planes are valid storage, not missing authority. Present values retain their type checks. */
+export function isSemanticState(value) {
+    return isObject(value) && isMaterializedState({ ...emptyState(), ...value });
 }
 export const isStateDocument = isMaterializedState;
 /** Atomically replace compiled and removed artifacts inside one materialized scope. */
@@ -27,14 +30,31 @@ export function overlayStates(...scopes) {
         return applyPatch(effective, scope);
     }, emptyState());
 }
+/** Select only owned top-level fields, preserving nested data and replay deletion markers. */
+export function selectSemanticFields(value) {
+    return structuredClone(Object.fromEntries(Object.keys(emptyState())
+        .filter((key) => Object.hasOwn(value, key))
+        .map((key) => [key, value[key]])));
+}
+/** Read only documented, present planes; empty responses carry no semantic value. */
+export function projectSemanticState(state) {
+    const projected = selectSemanticFields(state);
+    if (projected.response === "")
+        delete projected.response;
+    return projected;
+}
+/** Preserve deletion meaning in visible history without exposing ignored fields or empty responses. */
+export function projectSemanticPatch(patch) {
+    const projected = selectSemanticFields(patch);
+    if (projected.response === "")
+        projected.response = null;
+    return projected;
+}
 /** Model-visible projection: lazy bodies and runtime artifact bookkeeping stay out of ordinary context. */
 export function projectStateForModel(state, artifactHints = {}) {
-    const cloned = structuredClone(state);
-    return {
-        intents: cloned.intents,
-        contract: cloned.contract,
-        working: cloned.working,
-        artifacts: projectArtifactsForModel(cloned.artifacts, artifactHints),
-        response: cloned.response,
-    };
+    const { lazy: _hidden, ...visible } = state;
+    const projected = projectSemanticState(visible);
+    if (projected.artifacts)
+        projected.artifacts = projectArtifactsForModel(projected.artifacts, artifactHints);
+    return projected;
 }

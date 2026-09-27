@@ -21,6 +21,19 @@ const message = (role: string, text: string, timestamp: number, customType?: str
 	...(customType ? { customType } : {}),
 }) as any;
 
+test("context omits absent planes, empty responses and unknown fields in current and recent views", () => {
+	const snapshot = startEpisode(false);
+	const projected = runtimeContextMessage(snapshot, { response: "", extra: "not semantic" }, [
+		{ id: "unknown", at: 1, transitions: [{ scope: "session", patch: { extra: "not semantic" } }] },
+	]);
+	assert.ok("content" in projected);
+	const text = (projected.content as Array<{ text: string }>)[0]!.text;
+	const payload = JSON.parse(text.slice(text.indexOf("\n") + 1));
+	assert.deepEqual(payload.state, {});
+	assert.equal(Object.hasOwn(payload, "recent_transitions"), false);
+	assert.equal(text.includes("not semantic"), false);
+});
+
 test("frozen projection appends changing state and notices without moving earlier tail positions", () => {
 	const projection = new ContextProjection();
 	const initial = emptyState();
@@ -458,8 +471,9 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		const text = projected.messages[0].content[0].text as string;
 		const serialized = text.slice(text.indexOf("\n") + 1);
 		const context = JSON.parse(serialized);
-		assert.match(serialized, /"state":\{"intents":.*,"contract":.*,"working":.*,"artifacts":.*,"response":/);
-		assert.deepEqual(context.state, state);
+		assert.match(serialized, /"state":\{"intents":.*,"contract":.*,"working":.*,"artifacts":/);
+		const { response: _emptyResponse, ...visibleState } = state;
+		assert.deepEqual(context.state, visibleState);
 		assert.deepEqual(context.state.intents.current, { action: "Continue accepted work", detail: { $ref: "session.lazy.plan" } });
 		assert.equal(Object.hasOwn(context.state, "lazy"), false);
 		assert.deepEqual(projected.messages.slice(1), bootstrap ? [persistent, old, current] : [persistent, current]);
@@ -857,7 +871,7 @@ test("new sessions project durable causality without old conversation trajectori
 	await start(first, "Persist project decision");
 	await commitScopedTerminal(first, [{ scope: "cwd", patch: { contract: { decision: "durable" } } }], "Saved.");
 
-	const second = harness({ cwd, repositoryRoot, sessionId: "second-session", autoStart: true });
+	const second = harness({ cwd, repositoryRoot, sessionId: "second-session", mode: "active" });
 	await second.handlers.get("session_start")!({ reason: "new" }, second.ctx);
 	await second.beginRun("Continue");
 	const projected = second.handlers.get("context")!({ messages: [user("Continue", 2)] });

@@ -8,7 +8,7 @@ import {
 } from "./artifact.ts";
 import { applyPatch, isObject, type JsonObject } from "./json.ts";
 
-/** The canonical semantic state shape shared by global, CWD, and session scopes. */
+/** Runtime defaults for documented semantic planes; stored objects may omit them or retain other fields. */
 export type MaterializedState = JsonObject & {
 	intents: JsonObject;
 	contract: JsonObject;
@@ -17,6 +17,17 @@ export type MaterializedState = JsonObject & {
 	response: string;
 	lazy: JsonObject;
 };
+
+/** Sparse semantic state: documented planes may be absent. Disk codecs select only known fields. */
+export type SemanticState = JsonObject & Partial<{
+	intents: JsonObject;
+	contract: JsonObject;
+	working: JsonObject;
+	artifacts: ArtifactRegistry;
+	response: string;
+	lazy: JsonObject;
+}>;
+export type ScopedSemanticStates = Record<StateScope, SemanticState>;
 
 /** Compatibility name for callers that still treat materialized state as a document. */
 export type StateDocument = MaterializedState;
@@ -79,8 +90,12 @@ export function isMaterializedState(value: unknown): value is MaterializedState 
 		&& isObject(value.working)
 		&& isObject(value.intents)
 		&& typeof value.response === "string"
-		&& isObject(value.lazy)
-		&& Object.keys(value).every((key) => key === "artifacts" || key === "contract" || key === "working" || key === "intents" || key === "response" || key === "lazy");
+		&& isObject(value.lazy);
+}
+
+/** Missing planes are valid storage, not missing authority. Present values retain their type checks. */
+export function isSemanticState(value: unknown): value is SemanticState {
+	return isObject(value) && isMaterializedState({ ...emptyState(), ...value });
 }
 
 export const isStateDocument = isMaterializedState;
@@ -97,12 +112,13 @@ export function updateMaterializedArtifacts(
 }
 
 /** Overlay lower-to-higher scopes without mutating any scope document. */
-export function overlayStates(...scopes: readonly MaterializedState[]): MaterializedState {
+export function overlayStates(...scopes: readonly JsonObject[]): MaterializedState {
 	return scopes.reduce<MaterializedState>((effective, scope) => {
 		return applyPatch(effective, scope) as MaterializedState;
 	}, emptyState());
 }
 
+/** Default-bearing SDK compatibility view; model transport uses sparse SemanticState instead. */
 export type ModelState = JsonObject & {
 	intents: JsonObject;
 	contract: JsonObject;
@@ -111,14 +127,31 @@ export type ModelState = JsonObject & {
 	response: string;
 };
 
+/** Select only owned top-level fields, preserving nested data and replay deletion markers. */
+export function selectSemanticFields(value: JsonObject): JsonObject {
+	return structuredClone(Object.fromEntries(Object.keys(emptyState())
+		.filter((key) => Object.hasOwn(value, key))
+		.map((key) => [key, value[key]])));
+}
+
+/** Read only documented, present planes; empty responses carry no semantic value. */
+export function projectSemanticState(state: JsonObject): SemanticState {
+	const projected = selectSemanticFields(state);
+	if (projected.response === "") delete projected.response;
+	return projected;
+}
+
+/** Preserve deletion meaning in visible history without exposing ignored fields or empty responses. */
+export function projectSemanticPatch(patch: JsonObject): JsonObject {
+	const projected = selectSemanticFields(patch);
+	if (projected.response === "") projected.response = null;
+	return projected;
+}
+
 /** Model-visible projection: lazy bodies and runtime artifact bookkeeping stay out of ordinary context. */
-export function projectStateForModel(state: MaterializedState, artifactHints: ArtifactModelHints = {}): ModelState {
-	const cloned = structuredClone(state);
-	return {
-		intents: cloned.intents,
-		contract: cloned.contract,
-		working: cloned.working,
-		artifacts: projectArtifactsForModel(cloned.artifacts, artifactHints),
-		response: cloned.response,
-	};
+export function projectStateForModel(state: SemanticState, artifactHints: ArtifactModelHints = {}): SemanticState {
+	const { lazy: _hidden, ...visible } = state;
+	const projected = projectSemanticState(visible);
+	if (projected.artifacts) projected.artifacts = projectArtifactsForModel(projected.artifacts, artifactHints);
+	return projected;
 }

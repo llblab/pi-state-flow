@@ -268,7 +268,7 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 	git(root, "commit", "-m", "baseline");
 	const cwd = join(root, "project");
 	const a = new TemporalRuntime(cwd, "writer-a", root);
-	const snapshot = emptySnapshot(true);
+	const snapshot = emptySnapshot("active");
 	a.initialize(snapshot, true);
 	const baseline = (await backupCurrentStateFlowFiles(root))!;
 	const publish = (generation: number) => {
@@ -327,7 +327,7 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 		assert.equal((ready as any).phase, "paused", JSON.stringify(ready));
 		publish(2);
 		const later = new TemporalRuntime(join(root, "later-project"), "later-session", root);
-		later.initialize(emptySnapshot(true), true);
+		later.initialize(emptySnapshot("active"), true);
 		capturedAfter = [...captureTemporalFileBases(cwd, a.sessionId, root), ...captureTemporalFileBases(later.cwd, later.sessionId, root)];
 	} finally {
 		writeFileSync(release, "resume\n");
@@ -382,7 +382,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`backup awaits a parti
 	git(root, "config", "user.name", "State Flow Test");
 	git(root, "config", "user.email", "state-flow@example.invalid");
 	const local = new TemporalRuntime(join(root, "project"), "local", root);
-	local.initialize(emptySnapshot(true), true);
+	local.initialize(emptySnapshot("active"), true);
 	const baseline = (await backupCurrentStateFlowFiles(root))!;
 	const index = readFileSync(join(root, ".git", "index"));
 	const cwd = join(root, "new-project");

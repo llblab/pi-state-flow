@@ -1,13 +1,21 @@
 import { randomUUID } from "node:crypto";
-import { isJsonValue, isObject, sameJson, validatePatch, type JsonObject } from "./json.ts";
-import type { ScopePatch, ScopedStates, StateScope } from "./state.ts";
+import { isJsonValue, isObject, sameJson, validatePatch, type JsonObject, type JsonValue } from "./json.ts";
+import type { ScopedSemanticStates, StateScope } from "./state.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 7;
 export const MAX_HISTORY_LIMIT = 100;
 
 export interface RecentScopePatch {
 	scope: StateScope;
-	patch: ScopePatch & { response?: string };
+	patch: {
+		[key: string]: JsonValue | undefined;
+		intents?: JsonObject | null;
+		contract?: JsonObject | null;
+		working?: JsonObject | null;
+		artifacts?: JsonObject | null;
+		lazy?: JsonObject | null;
+		response?: string | null;
+	};
 }
 
 /** Exact accepted replay cohort; temporal runtime owns its causal boundary. */
@@ -51,13 +59,9 @@ function validateScopedPatch(value: unknown): asserts value is RecentScopePatch 
 	validatePatch(value.patch);
 	for (const [key, field] of Object.entries(value.patch)) {
 		const valid = key === "response"
-			? value.scope === "session" && typeof field === "string"
-			: key === "lazy"
-				? field !== null
-				: PATCH_KEYS.has(key) && isObject(field);
-		if (!PATCH_KEYS.has(key) || !valid) {
-			throw new Error("Recent State Flow patches may contain hot object planes, ordinary-JSON lazy state, and a session response string");
-		}
+			? value.scope === "session" && (field === null || typeof field === "string")
+			: !PATCH_KEYS.has(key) || field === null || isObject(field);
+		if (!valid) throw new Error("Recent State Flow patches require object planes or deletion, and a session response string or deletion");
 	}
 }
 
@@ -74,10 +78,11 @@ export function validateRecentTransition(value: unknown): asserts value is Recen
 	}
 }
 
-export function createAcceptedTransition(currentStates: ScopedStates, nextStates: ScopedStates, id?: string): AcceptedTransition | undefined {
+export function createAcceptedTransition(currentStates: ScopedSemanticStates, nextStates: ScopedSemanticStates, id?: string): AcceptedTransition | undefined {
 	const transitions: RecentScopePatch[] = [];
 	for (const scope of SCOPES) {
 		const patch = replayPatch(currentStates[scope], nextStates[scope]);
+		if ((currentStates[scope].response ?? "") === (nextStates[scope].response ?? "")) delete patch.response;
 		if (Object.keys(patch).length > 0) transitions.push({ scope, patch });
 	}
 	if (transitions.length === 0) return undefined;

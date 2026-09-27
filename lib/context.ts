@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { projectArtifactForModel, type ArtifactInvalidationNotice, type ArtifactModelHints } from "./artifact.ts";
 import type { RecentTransitionWindow } from "./history.ts";
-import { applyPatch, isObject, presentationJson, sameJson, type JsonValue } from "./json.ts";
+import { applyPatch, isObject, presentationJson, sameJson, type JsonObject, type JsonValue } from "./json.ts";
 import type { Snapshot } from "./snapshot.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
-import { projectStateForModel, type AtomicScopePatches, type MaterializedState, type ModelState, type StateScope } from "./state.ts";
+import { projectSemanticPatch, projectStateForModel, type AtomicScopePatches, type SemanticState, type StateScope } from "./state.ts";
 
 /** Refresh only our section; Pi owns system frames, tools and forced-prompt precedence. */
 export function projectSystemProtocol(messages: AgentMessage[], protocol: string | undefined): AgentMessage[] {
@@ -44,7 +44,7 @@ function lazyValueKind(value: JsonValue): LazyValueKind {
 }
 
 /** Fixed-budget navigation only: never place lazy bodies or partial key catalogs in baseline context. */
-export function lazyNavigationHint(state: MaterializedState): { available: boolean; path: string; keys?: Record<string, LazyValueKind> } {
+export function lazyNavigationHint(state: SemanticState): { available: boolean; path: string; keys?: Record<string, LazyValueKind> } {
 	const entries = isObject(state.lazy) ? Object.entries(state.lazy) : [];
 	const base = { available: entries.length > 0, path: LAZY_HINT_PATH };
 	if (!base.available) return base;
@@ -57,11 +57,11 @@ export function lazyNavigationHint(state: MaterializedState): { available: boole
 export type ModelStateUpdate = { path: (string | number)[] } & ({ value: JsonValue } | { deleted: true });
 
 /** Exact projected replacements, not authored merge patches; paths are unambiguous key/index segments. */
-export function acceptedStateUpdates(before: MaterializedState, after: MaterializedState, patches: AtomicScopePatches) {
+export function acceptedStateUpdates(before: SemanticState, after: SemanticState, patches: AtomicScopePatches) {
 	return projectedStateUpdates(projectStateForModel(before), projectStateForModel(after), patches, lazyNavigationHint(before), lazyNavigationHint(after));
 }
 
-function projectedStateUpdates(previous: ModelState, current: ModelState, patches: AtomicScopePatches,
+function projectedStateUpdates(previous: SemanticState, current: SemanticState, patches: AtomicScopePatches,
 	beforeNavigation: ReturnType<typeof lazyNavigationHint> | undefined, navigation: ReturnType<typeof lazyNavigationHint> | undefined) {
 	const effective: ModelStateUpdate[] = [];
 	const prefix = (parent: readonly (string | number)[], child: readonly (string | number)[]) =>
@@ -78,8 +78,8 @@ function projectedStateUpdates(previous: ModelState, current: ModelState, patche
 			? (value as Record<string | number, JsonValue>)[key] : undefined;
 	const diff = (left: JsonValue | undefined, right: JsonValue | undefined, path: (string | number)[]) => {
 		if (left === undefined && right === undefined || left !== undefined && right !== undefined && sameJson(left, right)) return;
-		if (isObject(left) && isObject(right)) {
-			for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) diff(child(left, key), child(right, key), [...path, key]);
+		if (isObject(right) && (isObject(left) || left === undefined && path.length === 1 && Object.keys(right).length > 0)) {
+			for (const key of new Set([...Object.keys(left ?? {}), ...Object.keys(right)])) diff(child(left, key), child(right, key), [...path, key]);
 		} else if (Array.isArray(left) && Array.isArray(right) && left.length === right.length) {
 			for (let index = 0; index < right.length; index++) diff(left[index], right[index], [...path, index]);
 		} else put(path, right);
@@ -110,13 +110,13 @@ function projectedStateUpdates(previous: ModelState, current: ModelState, patche
 }
 
 export interface ContextView {
-	state: ModelState;
+	state: SemanticState;
 	lazy_navigation?: ReturnType<typeof lazyNavigationHint>;
 	artifact_invalidations: readonly ArtifactInvalidationNotice[];
 	knowledge_rehydration: { phase: RehydrationPhase } | null;
 }
 
-export function contextView(state: MaterializedState, hints: ArtifactModelHints, invalidations: readonly ArtifactInvalidationNotice[], phase?: RehydrationPhase): ContextView {
+export function contextView(state: SemanticState, hints: ArtifactModelHints, invalidations: readonly ArtifactInvalidationNotice[], phase?: RehydrationPhase): ContextView {
 	return { state: projectStateForModel(state, hints), lazy_navigation: lazyNavigationHint(state),
 		artifact_invalidations: structuredClone(invalidations), knowledge_rehydration: phase === undefined ? null : { phase } };
 }
@@ -138,7 +138,7 @@ export class ContextProjection {
 	}
 
 	/** Called only after successful publication and ancillary acceptance, immediately before returning the native result. */
-	acceptPatch(before: MaterializedState, after: MaterializedState, patches: AtomicScopePatches, hints: ArtifactModelHints) {
+	acceptPatch(before: SemanticState, after: SemanticState, patches: AtomicScopePatches, hints: ArtifactModelHints) {
 		const state = projectStateForModel(after, hints);
 		const navigation = lazyNavigationHint(after);
 		const beforeNavigation = this.view?.lazy_navigation ?? lazyNavigationHint(before);
@@ -269,7 +269,7 @@ export interface PassiveContinuation {
 	activeRunStartedAt?: number;
 	preserveContext?: true;
 	handoff: AgentMessage;
-	state: ModelState;
+	state: SemanticState;
 }
 
 export function syntheticUser(text: string): AgentMessage {
@@ -290,7 +290,7 @@ function messageText(message: AgentMessage): string {
 	return contentText((message as { content?: unknown }).content);
 }
 
-export function createPassiveContinuation(state: ModelState, startedAt = Date.now(), activeRunStartedAt?: number, preserveContext = false): PassiveContinuation {
+export function createPassiveContinuation(state: SemanticState, startedAt = Date.now(), activeRunStartedAt?: number, preserveContext = false): PassiveContinuation {
 	return {
 		startedAt,
 		state: structuredClone(state),
@@ -319,8 +319,9 @@ export function passiveContinuationMessages(messages: AgentMessage[], continuati
 function projectRecentForModel(recent: RecentTransitionWindow): RecentTransitionWindow {
 	const projected = structuredClone(recent);
 	for (const record of projected) for (const transition of record.transitions) {
+		transition.patch = projectSemanticPatch(transition.patch as JsonObject);
 		delete transition.patch.lazy;
-		if (transition.patch.artifacts === undefined) continue;
+		if (!isObject(transition.patch.artifacts)) continue;
 		for (const [path, entry] of Object.entries(transition.patch.artifacts)) {
 			Object.defineProperty(transition.patch.artifacts, path, {
 				value: projectArtifactForModel(entry), enumerable: true, configurable: true, writable: true,
@@ -333,7 +334,7 @@ function projectRecentForModel(recent: RecentTransitionWindow): RecentTransition
 
 export function runtimeContextMessage(
 	snapshot: Snapshot,
-	state: MaterializedState,
+	state: SemanticState,
 	recentTransitions: RecentTransitionWindow = [],
 	artifactInvalidations: readonly ArtifactInvalidationNotice[] = [],
 	rehydrationPhase?: RehydrationPhase,

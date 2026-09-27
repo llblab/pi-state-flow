@@ -2,6 +2,7 @@ import { compileArtifact, ORDINARY_ARTIFACT_COMPILER, validateArtifactMetadata, 
 import { createAcceptedTransition } from "./history.js";
 import { applyPatch, containsNull, hashJson, isObject, validatePatch } from "./json.js";
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER } from "./skills.js";
+import { emptyState } from "./state.js";
 const SCOPES = new Set(["global", "cwd", "session"]);
 const PATCH_KEYS = new Set(["intents", "contract", "working", "artifacts", "lazy"]);
 function compileReadArtifacts(nextState, patch, successfulArtifactReads, provenance) {
@@ -82,7 +83,7 @@ function compileReadSkills(scope, nextState, patch, successfulSkillReads, proven
     }
 }
 function validateMaterializedTransition(nextState, scope) {
-    if (containsNull(nextState)) {
+    if (Object.keys(emptyState()).some((key) => containsNull(nextState[key]))) {
         throw new Error("Materialized state cannot contain null; use null only as an object-key deletion marker");
     }
     validateArtifactRegistry(nextState.artifacts, `${scope}.artifacts`);
@@ -111,16 +112,6 @@ function validateScopePatch(scope, patch) {
     if (isObject(patch.artifacts))
         validateModelArtifactPatch(patch.artifacts, `${scope}.artifacts`);
 }
-function completePatch(patch, response) {
-    return {
-        artifacts: patch.artifacts ?? {},
-        contract: patch.contract ?? {},
-        working: patch.working ?? {},
-        intents: patch.intents ?? {},
-        response,
-        lazy: structuredClone(patch.lazy ?? {}),
-    };
-}
 /** Stage all scope updates against one immutable basis before any state is published. */
 function stageScopedSemanticTransition(currentStates, transition, successfulSkillReads, causalBasis, successfulArtifactReads, acceptedResponse) {
     if (!Array.isArray(transition.transitions))
@@ -146,14 +137,17 @@ function stageScopedSemanticTransition(currentStates, transition, successfulSkil
     const provenanceUpdates = { global: {}, cwd: {}, session: {} };
     for (const scope of SCOPES) {
         const authored = patches.get(scope) ?? {};
-        const response = scope === "session" && acceptedResponse !== undefined
-            ? acceptedResponse
-            : currentStates[scope].response;
-        const patch = completePatch(authored, response);
-        const nextState = applyPatch(currentStates[scope], patch);
-        compileReadArtifacts(nextState, { artifacts: authored.artifacts ?? {} }, artifactReads.filter((read) => (read.scope ?? "global") === scope), provenanceUpdates[scope]);
-        compileReadSkills(scope, nextState, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
-        validateMaterializedTransition(nextState, scope);
+        const patch = { ...authored, ...(scope === "session" && acceptedResponse !== undefined ? { response: acceptedResponse } : {}) };
+        const materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch);
+        compileReadArtifacts(materialized, { artifacts: authored.artifacts ?? {} }, artifactReads.filter((read) => (read.scope ?? "global") === scope), provenanceUpdates[scope]);
+        compileReadSkills(scope, materialized, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
+        validateMaterializedTransition(materialized, scope);
+        const nextState = materialized;
+        for (const key of Object.keys(emptyState())) {
+            if (!Object.hasOwn(currentStates[scope], key) && !Object.hasOwn(patch, key)
+                && !(key === "artifacts" && Object.keys(provenanceUpdates[scope]).length > 0))
+                delete nextState[key];
+        }
         nextStates[scope] = nextState;
     }
     return {

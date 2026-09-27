@@ -1,15 +1,15 @@
-import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.ts";
-import { isObject, sameJson, type JsonValue } from "./json.ts";
-import { projectStateForModel, type ModelState, type ScopePatch, type StateScope } from "./state.ts";
-import { readTemporalState, type TemporalState, type TransitionBoundary } from "./temporal.ts";
+import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT, type RecentScopePatch } from "./history.ts";
+import { isObject, sameJson, type JsonObject, type JsonValue } from "./json.ts";
+import { emptyState, projectSemanticPatch, projectStateForModel, type SemanticState, type StateScope } from "./state.ts";
+import { readTemporalView, type TemporalState, type TransitionBoundary } from "./temporal.ts";
 
 export type StateReadQuery =
 	| { kind: "state"; path: string; offset: number; scope?: StateScope }
 	| { kind: "patch"; path: string; offset: number; scope: StateScope };
 
 export type StateReadResult =
-	| { path: string; boundary: TransitionBoundary; state: ModelState }
-	| { path: string; boundary: TransitionBoundary; patch: ScopePatch & { response?: string } };
+	| { path: string; boundary: TransitionBoundary; state: SemanticState }
+	| { path: string; boundary: TransitionBoundary; patch: RecentScopePatch["patch"] };
 
 export type StateReadProjection = "value" | "keys" | "patch";
 type StateReadMeta = { type: "object"; size: number } | { type: "array"; length: number } | { type: "string"; length: number } | { type: "number" | "boolean" };
@@ -61,11 +61,11 @@ export function readStatePath(view: TemporalState, path: string, historyLimit = 
 	if (query.kind === "state") {
 		const boundary = view.lineage[view.lineage.length - 1 - query.offset];
 		if (!boundary) throw new Error("Requested history predates the proven temporal origin");
-		return { path, boundary: structuredClone(boundary), state: projectStateForModel(readTemporalState(view, query.offset, query.scope, historyLimit)) };
+		return { path, boundary: structuredClone(boundary), state: projectStateForModel(readTemporalView(view, query.offset, query.scope, historyLimit)) };
 	}
 	const record = view.scopes[query.scope].patches.at(-1 - query.offset);
 	if (!record) throw new Error(`Requested ${query.scope} patch predates retained hot history`);
-	return { path, boundary: structuredClone(record.transition), patch: structuredClone(record.patch) };
+	return { path, boundary: structuredClone(record.transition), patch: projectSemanticPatch(record.patch as JsonObject) };
 }
 
 function parseValuePath(path: string): { root: string; selectors: ValueSelector[] } {
@@ -170,7 +170,7 @@ export function findStateReferenceSources(view: TemporalState, path: string, his
 		}
 	};
 	for (const scope of ["global", "cwd", "session"] as const) {
-		const state = readTemporalState(view, 0, scope, historyLimit);
+		const state = readTemporalView(view, 0, scope, historyLimit);
 		for (const plane of ["artifacts", "contract", "working", "intents", "lazy"] as const) {
 			const value = state[plane];
 			if (value !== undefined) visit(value as JsonValue, scope, `${scope}.${plane}`);
@@ -213,12 +213,12 @@ function patchAtPath(view: TemporalState, root: string, selectors: readonly Valu
 	if (!boundary) throw new Error("Requested history predates the proven temporal origin");
 	let patch: JsonValue = {};
 	if (rootQuery.scope) {
-		patch = structuredClone(view.scopes[rootQuery.scope].patches.find((record) => record.transition.id === boundary.id)?.patch ?? {}) as JsonValue;
+		patch = projectSemanticPatch((view.scopes[rootQuery.scope].patches.find((record) => record.transition.id === boundary.id)?.patch ?? {}) as JsonObject);
 	} else {
 		const before = view.lineage.at(-2 - rootQuery.offset);
 		if (before) {
-			const current = readTemporalState(view, rootQuery.offset, undefined, historyLimit);
-			const previous = readTemporalState(view, rootQuery.offset + 1, undefined, historyLimit);
+			const current = readTemporalView(view, rootQuery.offset, undefined, historyLimit);
+			const previous = readTemporalView(view, rootQuery.offset + 1, undefined, historyLimit);
 			patch = diffObjects(previous, current);
 		}
 	}
@@ -274,10 +274,10 @@ export function readProjectedState(view: TemporalState, paths: readonly string[]
 			const query = parseStateReadPath(root, historyLimit);
 			if (query.kind !== "state") throw new Error("Value and keys projections require a state path");
 			const readsLazy = selectors[0]?.kind === "key" && selectors[0].key === "lazy";
-			const state = readsLazy
-				? readTemporalState(view, query.offset, query.scope, historyLimit)
-				: projectStateForModel(readTemporalState(view, query.offset, query.scope, historyLimit));
-			if (readsLazy && !Object.hasOwn(state, "lazy")) state.lazy = {};
+			const raw = readTemporalView(view, query.offset, query.scope, historyLimit);
+			const state = readsLazy ? raw : projectStateForModel(raw);
+			const field = selectors.length === 1 && selectors[0]?.kind === "key" ? selectors[0].key : undefined;
+			if (projection === "value" && field !== undefined && Object.hasOwn(emptyState(), field) && !Object.hasOwn(state, field)) return { value: null };
 			return projectValue(selectValue(state, selectors, path), projection);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

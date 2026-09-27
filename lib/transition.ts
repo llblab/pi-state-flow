@@ -12,12 +12,13 @@ import { createAcceptedTransition, type AcceptedTransition } from "./history.ts"
 import { applyPatch, containsNull, hashJson, isObject, validatePatch, type JsonObject } from "./json.ts";
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER, type SuccessfulSkillRead } from "./skills.ts";
 import type { Snapshot } from "./snapshot.ts";
+import { emptyState } from "./state.ts";
 import type {
 	AtomicScopePatches,
-	MaterializedState,
+	SemanticState,
 	ScopePatch,
 	ScopedPatch,
-	ScopedStates,
+	ScopedSemanticStates,
 	SemanticTransition,
 	StateDocument,
 	StatePatch,
@@ -26,7 +27,7 @@ import type {
 } from "./state.ts";
 
 export interface StagedScopedTransition {
-	nextStates: ScopedStates;
+	nextStates: ScopedSemanticStates;
 	stateHashes: Record<StateScope, string>;
 	/** Fresh runtime-owned provenance for artifacts compiled in this transition. */
 	provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>>;
@@ -126,7 +127,7 @@ function compileReadSkills(
 }
 
 function validateMaterializedTransition(nextState: StateDocument, scope: StateScope): void {
-	if (containsNull(nextState)) {
+	if (Object.keys(emptyState()).some((key) => containsNull(nextState[key]))) {
 		throw new Error("Materialized state cannot contain null; use null only as an object-key deletion marker");
 	}
 	validateArtifactRegistry(nextState.artifacts, `${scope}.artifacts`);
@@ -156,20 +157,9 @@ function validateScopePatch(scope: unknown, patch: unknown): asserts patch is Sc
 	if (isObject(patch.artifacts)) validateModelArtifactPatch(patch.artifacts, `${scope}.artifacts`);
 }
 
-function completePatch(patch: ScopePatch, response: string): StatePatch {
-	return {
-		artifacts: patch.artifacts ?? {},
-		contract: patch.contract ?? {},
-		working: patch.working ?? {},
-		intents: patch.intents ?? {},
-		response,
-		lazy: structuredClone(patch.lazy ?? {}),
-	};
-}
-
 /** Stage all scope updates against one immutable basis before any state is published. */
 function stageScopedSemanticTransition(
-	currentStates: ScopedStates,
+	currentStates: ScopedSemanticStates,
 	transition: SemanticTransition,
 	successfulSkillReads: Iterable<SuccessfulSkillRead>,
 	causalBasis: string,
@@ -197,19 +187,21 @@ function stageScopedSemanticTransition(
 	const provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>> = { global: {}, cwd: {}, session: {} };
 	for (const scope of SCOPES) {
 		const authored = patches.get(scope) ?? {};
-		const response = scope === "session" && acceptedResponse !== undefined
-			? acceptedResponse
-			: currentStates[scope].response;
-		const patch = completePatch(authored, response);
-		const nextState = applyPatch(currentStates[scope], patch) as MaterializedState;
+		const patch = { ...authored, ...(scope === "session" && acceptedResponse !== undefined ? { response: acceptedResponse } : {}) };
+		const materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch) as StateDocument;
 		compileReadArtifacts(
-			nextState,
+			materialized,
 			{ artifacts: authored.artifacts ?? {} },
 			artifactReads.filter((read) => (read.scope ?? "global") === scope),
 			provenanceUpdates[scope],
 		);
-		compileReadSkills(scope, nextState, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
-		validateMaterializedTransition(nextState, scope);
+		compileReadSkills(scope, materialized, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
+		validateMaterializedTransition(materialized, scope);
+		const nextState: SemanticState = materialized;
+		for (const key of Object.keys(emptyState())) {
+			if (!Object.hasOwn(currentStates[scope], key) && !Object.hasOwn(patch, key)
+				&& !(key === "artifacts" && Object.keys(provenanceUpdates[scope]).length > 0)) delete nextState[key];
+		}
 		nextStates[scope] = nextState;
 	}
 	return {
@@ -227,7 +219,7 @@ function stageScopedSemanticTransition(
 
 /** Stage one canonical atomic scope cohort without changing the finalized response. */
 export function stageAtomicScopePatches(
-	currentStates: ScopedStates,
+	currentStates: ScopedSemanticStates,
 	patches: AtomicScopePatches,
 	successfulSkillReads: Iterable<SuccessfulSkillRead>,
 	causalBasis: string,
@@ -251,7 +243,7 @@ export function stageAtomicScopePatches(
 }
 
 export function stageScopedTransition(
-	currentStates: ScopedStates,
+	currentStates: ScopedSemanticStates,
 	transition: TerminalTransition,
 	successfulSkillReads: Iterable<SuccessfulSkillRead>,
 	causalBasis: string,
@@ -278,7 +270,7 @@ export interface CommitScopedTransitionOptions {
 
 export function commitScopedTransition(
 	snapshot: Snapshot,
-	states: ScopedStates,
+	states: ScopedSemanticStates,
 	stage: StagedScopedTransition,
 	publishDurable: (accepted: AcceptedTransition | undefined, nextSnapshot: Snapshot) => void,
 	causalBasis: string,

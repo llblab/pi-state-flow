@@ -149,8 +149,8 @@ export async function inspectStateFlowContinuationProvenance(header, repositoryR
             const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), selected.cwd, selected.id);
             if (!runtime)
                 throw new Error("incomplete canonical session runtime");
-            if (!runtime.config.enabled)
-                return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow stopped on selected runtime" };
+            if (runtime.config.mode !== "active")
+                return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow is not active on selected runtime" };
             const streams = ["global", "cwd", "session"].map((scope) => {
                 const owned = temporalScopePaths(selected.cwd, selected.id, scope, root, sessionKey);
                 return parseScopeStream(files.get(owned.checkpoint), files.get(owned.patches), scope, scope === "cwd" ? selected.cwd : undefined, files.get(owned.meta));

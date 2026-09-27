@@ -91,7 +91,7 @@ test("manual defaults ignore existing CWD state while configured new sessions in
 	const h = harness({ cwd: "/tmp/state-flow-new-session" });
 	await h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	assert.equal(h.statuses.at(-1), undefined);
-	assert.equal(h.entries.length, 0);
+	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "off" }]);
 
 	const global = emptyState();
 	global.contract.shared = "global";
@@ -100,17 +100,17 @@ test("manual defaults ignore existing CWD state while configured new sessions in
 	cwd.working.next = "resume";
 	writeGlobalState(global, h.repositoryRoot);
 	writeCwdState(h.ctx.cwd, cwd, h.repositoryRoot);
-	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.handlers.get("session_start")!({ reason: "reload" }, h.ctx);
 	assert.equal(h.statuses.at(-1), undefined);
-	assert.equal(h.entries.length, 0);
-	const automatic = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, autoStart: true });
+	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "off" }]);
+	const automatic = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, mode: "active" });
 	await automatic.handlers.get("session_start")!({ reason: "new" }, automatic.ctx);
-	assert.equal(automatic.statuses.at(-1), "<accent>state-flow</accent> <dim>G0/C0/S0</dim>");
-	assert.deepEqual(automatic.resolveSnapshot().config, { enabled: true });
+	assert.equal(automatic.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
+	assert.deepEqual(automatic.resolveSnapshot().config, { mode: "active" });
 	assert.equal(automatic.resolveSnapshot().meta.step, 0);
 	const checkpoint = automatic.entries.at(-1)!.data;
 	assert.equal(typeof checkpoint.boundary, "string");
-	assert.equal(checkpoint.enabled, true);
+	assert.equal(checkpoint.mode, "active");
 	assert.equal(checkpoint.step, 0);
 	assert.equal(Object.hasOwn(automatic.entries.at(-1)!.data, "state"), false);
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), emptyState());
@@ -130,7 +130,7 @@ test("two Pi sessions in one CWD persist distinct canonical session layers", asy
 		cwd: first.ctx.cwd,
 		repositoryRoot: first.repositoryRoot,
 		sessionId: "session-b",
-		autoStart: true,
+		mode: "active",
 	});
 	await second.handlers.get("session_start")!({ reason: "new" }, second.ctx);
 	assert.deepEqual(loadSessionState(first.ctx.cwd, "session-a", first.repositoryRoot), {
@@ -139,23 +139,24 @@ test("two Pi sessions in one CWD persist distinct canonical session layers", asy
 	assert.deepEqual(loadSessionState(first.ctx.cwd, "session-b", first.repositoryRoot), emptyState());
 });
 
-test("a stopped branch stays disabled on resume while the global flag enables a later new session", async () => {
-	const h = harness({ cwd: "/tmp/state-flow-stopped-branch", autoStart: true });
+test("an Off branch stays Off on resume while the Active default applies to a later new session", async () => {
+	const h = harness({ cwd: "/tmp/state-flow-offped-branch", mode: "active" });
 	await start(h);
 	await commitTerminal(h, { branch: "kept" }, { next: "later" });
-	await h.commands.get("state-flow-stop")!.handler("", h.ctx);
+	await h.commands.get("state-flow-off")!.handler("", h.ctx);
 	const stopped = structuredClone(h.entries.at(-1)!);
 
 	await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 	assert.equal(h.statuses.at(-1), undefined);
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /config\.enabled=false; branch mode=inactive/);
+	assert.equal(h.resolveSnapshot().config.mode, "off");
+	assert.doesNotMatch(h.notifications.at(-1)!, /session mode=/);
 	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #2/);
 	assert.match(h.notifications.at(-1)!, /"branch": "kept"/);
 
-	const next = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, sessionId: "next-session" });
+	const next = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, sessionId: "next-session", mode: "active" });
 	await next.handlers.get("session_start")!({ reason: "new" }, next.ctx);
-	assert.equal(next.statuses.at(-1), "<accent>state-flow</accent> <dim>G0/C0/S0</dim>");
+	assert.equal(next.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
 	assert.notDeepEqual(next.entries.at(-1), stopped);
 });
 
@@ -197,7 +198,7 @@ test("restores State Flow from a canonical active branch pointer after tree navi
 	await commitTerminal(h, { branch: "abandoned" }, { next: "old" });
 	h.entries.splice(0, h.entries.length, ...activeBranch);
 	await h.handlers.get("session_tree")!({}, h.ctx);
-	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>G0/C0/S2</dim>");
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /"branch": "active"/);
 	assert.doesNotMatch(h.notifications.at(-1)!, /"branch": "abandoned"/);

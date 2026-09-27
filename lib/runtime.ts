@@ -6,16 +6,16 @@ import { parseArtifactProvenanceRegistry, pruneArtifactProvenance, type Artifact
 import { assertTemporalFileBase, captureTemporalFileBase, initializeFileStore, publishTemporalStateToFiles, withStorageTransaction, type StorageTransaction, type TemporalFileBase } from "./storage.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT, type AcceptedTransition, type RecentTransitionWindow } from "./history.ts";
 import { hashJson, sameJson } from "./json.ts";
-import { HistoryBoundaryExpiredError, RevisionUnavailableError, createSessionRuntime, parseSessionRuntime, retainedBoundaryCheckpoint, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot } from "./snapshot.ts";
-import { emptyState, type MaterializedState, type ScopedStates, type StateScope } from "./state.ts";
-import { adoptTemporalStreams, advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalState, selectScopeStreamAtBoundary, validateScopeLineage, type ScopeStream, type TemporalState } from "./temporal.ts";
+import { HistoryBoundaryExpiredError, RevisionUnavailableError, createSessionRuntime, parseSessionRuntime, preRuntimeCheckpoint, retainedBoundaryCheckpoint, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot } from "./snapshot.ts";
+import { type MaterializedState, type SemanticState, type ScopedSemanticStates, type ScopedStates, type StateScope } from "./state.ts";
+import { adoptTemporalStreams, advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalScopes, readTemporalState, readTemporalView, selectScopeStreamAtBoundary, validateScopeLineage, type ScopeStream, type TemporalState } from "./temporal.ts";
 
 const SCOPES = ["global", "cwd", "session"] as const;
 const SHARED_SCOPES = ["global", "cwd"] as const;
 export type RuntimePublication = ReturnType<typeof publishTemporalStateToFiles>;
 
 export interface RuntimePatchTransaction {
-	readonly states: ScopedStates;
+	readonly states: ScopedSemanticStates;
 	readonly causalBasis: string;
 	readonly provenance: Record<StateScope, ArtifactProvenanceRegistry>;
 	publish(snapshot: Snapshot, accepted?: AcceptedTransition, provenance?: Partial<Record<StateScope, Record<string, ArtifactProvenance>>>): RuntimePublication;
@@ -68,7 +68,7 @@ function removedTargetScopeConflict(scopes: readonly StateScope[]): Error {
 }
 
 function freshEmptyScopeStream(scope: StateScope, origin: string, historyLimit: number): ScopeStream {
-	return createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, origin, historyLimit).scopes[scope];
+	return createTemporalState({ global: {}, cwd: {}, session: {} }, origin, historyLimit).scopes[scope];
 }
 
 /** Cached branch-selected temporal state and publication basis; excludes Pi event policy. */
@@ -117,7 +117,7 @@ export class TemporalRuntime {
 		})) as Record<(typeof SHARED_SCOPES)[number], ScopeStream | undefined>;
 		if (!shared.global && !shared.cwd) return false;
 		if (!shared.global) throw new Error("Incomplete passive State Flow shared storage: CWD state exists without global state");
-		const fresh = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, randomUUID(), this.historyLimit);
+		const fresh = createTemporalState({ global: {}, cwd: {}, session: {} }, randomUUID(), this.historyLimit);
 		// Global memory is valid before this CWD has ever materialized its own scope.
 		const view = adoptTemporalStreams({ global: shared.global, cwd: shared.cwd ?? fresh.scopes.cwd, session: fresh.scopes.session }, `passive:files:${randomUUID()}`, this.historyLimit);
 		const provenance = {
@@ -151,6 +151,11 @@ export class TemporalRuntime {
 		return readTemporalState(this.view, offset, scope, this.historyLimit);
 	}
 
+	readView(offset = 0, scope?: StateScope): SemanticState {
+		if (!this.view) throw new Error("State Flow temporal runtime is unavailable");
+		return readTemporalView(this.view, offset, scope, this.historyLimit);
+	}
+
 	states(): ScopedStates {
 		return { global: this.read(0, "global"), cwd: this.read(0, "cwd"), session: this.read(0, "session") };
 	}
@@ -162,7 +167,7 @@ export class TemporalRuntime {
 
 	/** Encode Pi lifecycle state against the current retained semantic boundary. */
 	retainedCheckpoint(snapshot: Snapshot): RetainedPiCheckpoint {
-		if (!this.view) return { disabled: true };
+		if (!this.view) return preRuntimeCheckpoint(snapshot.config.mode);
 		return retainedBoundaryCheckpoint(snapshot, this.causalBasis());
 	}
 
@@ -211,7 +216,7 @@ export class TemporalRuntime {
 			session: selectedSession,
 		}, `restore:${checkpoint.boundary}:${randomUUID()}`, this.historyLimit);
 		const snapshot: Snapshot = {
-			config: { enabled: checkpoint.enabled },
+			config: { mode: checkpoint.mode },
 			meta: {
 				step: checkpoint.step,
 				...(checkpoint.bootstrap === true ? { bootstrap: true } : {}),
@@ -226,7 +231,7 @@ export class TemporalRuntime {
 				// Live evidence cannot prove an earlier artifact version, even after a change-away-and-back.
 				for (const record of scopes.session.patches) {
 					if (record.transition.position <= boundary.position) continue;
-					for (const path of Object.keys(record.patch.artifacts ?? {})) delete retained[path];
+					for (const path of Object.keys(record.patch.artifacts === null ? retained : record.patch.artifacts ?? {})) delete retained[path];
 				}
 			}
 			return [scope, retained];
@@ -294,8 +299,9 @@ export class TemporalRuntime {
 			const meta = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey).meta;
 			return [scope, parseScopeProvenance(files.get(meta), meta)];
 		})) as Record<StateScope, ArtifactProvenanceRegistry>;
+		// Read-only recovery grants no active policy; callers select the inactive mode.
 		const snapshot: Snapshot = {
-			config: { enabled: false },
+			config: { mode: "passive" },
 			meta: { step: document.meta.step, ...(document.meta.bootstrap === true ? { bootstrap: true } : {}) },
 		};
 		this.view = view;
@@ -380,7 +386,7 @@ export class TemporalRuntime {
 		// A pre-runtime branch may establish an empty origin, never import a later session layer.
 		if (newSessionOrigin) streams.session = undefined;
 		if (copy) streams.session = copy.stream;
-		const fresh = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, randomUUID(), this.historyLimit);
+		const fresh = createTemporalState({ global: {}, cwd: {}, session: {} }, randomUUID(), this.historyLimit);
 		const candidate = new TemporalRuntime(this.cwd, this.session, this.root, undefined, this.historyLimit);
 		candidate.base = base;
 		candidate.view = adoptTemporalStreams({ global: streams.global ?? fresh.scopes.global, cwd: streams.cwd ?? fresh.scopes.cwd, session: streams.session ?? fresh.scopes.session }, `files:${randomUUID()}`, this.historyLimit);
@@ -534,7 +540,7 @@ export class TemporalRuntime {
 			const stream = parseScopeStream(files.get(session.checkpoint), files.get(session.patches), "session", undefined, files.get(session.meta));
 			if (!document || !stream) throw new RevisionUnavailableError("Current State Flow session memory is incomplete");
 			validateScopeLineage(stream, "session", document.meta.lineage, MAX_HISTORY_LIMIT);
-			throw new RevisionUnavailableError("Existing State Flow session memory is not selected; select an accepted boundary or use /state-flow-start");
+			throw new RevisionUnavailableError("Existing State Flow session memory is not selected; select an accepted boundary or use /state-flow-active");
 		}
 		const origin = `patch:${randomUUID()}`;
 		const streams = Object.fromEntries(SCOPES.map((scope) => {
@@ -555,7 +561,7 @@ export class TemporalRuntime {
 	/** Stage and accept synchronously inside an awaited lock; expose neither selection nor raw storage operations. */
 	async withPatchTransaction<T>(action: (transaction: RuntimePatchTransaction) => T, signal?: AbortSignal): Promise<T> {
 		return this.withPublicationTransaction((candidate, publish) => action({
-			states: candidate.states(),
+			states: readTemporalScopes(candidate.view!, 0, this.historyLimit),
 			causalBasis: candidate.causalBasis(),
 			provenance: structuredClone(candidate.provenanceByScope),
 			publish,

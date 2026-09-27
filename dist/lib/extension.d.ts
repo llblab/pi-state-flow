@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatPatchStateArguments } from "./protocol.ts";
+import { type StateFlowMode } from "./snapshot.ts";
 import { type ModelState, type StateScope } from "./state.ts";
 import { type StateFlowTelegramLoader } from "./telegram.ts";
 export interface StateFlowExtensionOptions {
@@ -11,11 +12,8 @@ export interface StateFlowExtensionOptions {
     telegram?: {
         load?: StateFlowTelegramLoader;
     };
-    /** Test/SDK capability override; repository config remains the Pi default. */
-    passive?: {
-        bootstrap?: boolean;
-        tools?: boolean;
-    };
+    /** Test/SDK override of the default mode for new sessions; repository config remains the Pi default. */
+    mode?: StateFlowMode;
 }
 export { formatPatchStateArguments };
 export declare const PATCH_STATE_TOOL_NAME = "patch_state";

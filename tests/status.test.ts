@@ -8,7 +8,7 @@ import { emptyState } from "../lib/state.ts";
 import { harness, start } from "./harness.ts";
 
 const snapshot = {
-	config: { enabled: true },
+	config: { mode: "active" as const },
 	meta: { step: 7 },
 };
 const sessionState = { ...emptyState(), response: "Done" };
@@ -35,38 +35,40 @@ test("uses one stable status ownership key", () => {
 	assert.equal(STATUS_KEY, "state-flow");
 });
 
-test("renders the effective revision vector only while active mode is enabled", () => {
+test("renders only the state-flow name and mode, hiding only off", () => {
 	const colorize = (color: "accent" | "dim", text: string) => `<${color}>${text}</${color}>`;
 	const revisions = { global: 15, cwd: 8, session: 31 };
-	assert.equal(compactStatus(snapshot, revisions, colorize), "<accent>state-flow</accent> <dim>G15/C8/S31</dim>");
-	assert.equal(compactStatus({ ...snapshot, config: { enabled: false } }, revisions, colorize), undefined);
+	assert.equal(compactStatus(snapshot, revisions, colorize), "<accent>state-flow</accent> <dim>active</dim>");
+	const passive = { ...snapshot, config: { mode: "passive" as const } };
+	assert.equal(compactStatus(passive, revisions, colorize), "<accent>state-flow</accent> <dim>passive</dim>");
+	assert.equal(compactStatus({ ...snapshot, config: { mode: "off" as const } }, revisions, colorize), undefined);
 });
 
-test("a passive patch advances semantic history without rendering active status", async () => {
-	const h = harness({ passiveTools: true });
+test("a passive patch keeps the compact mode stable and exposes revisions only in detailed status", async () => {
+	const h = harness({ mode: "passive" });
 	await h.tools.get("patch_state")!.execute("passive", { global: { working: { passiveCounter: true } } }, undefined, undefined, h.ctx);
-	assert.equal(h.resolveSnapshot().config.enabled, false);
+	assert.equal(h.resolveSnapshot().config.mode, "passive");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
-	assert.equal(h.statuses.at(-1), undefined);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
+	await h.commands.get("state-flow-status").handler("", h.ctx);
+	assert.match(h.notifications.at(-1)!, /Scope revisions: g1c0s0/);
 });
 
 test("distinguishes branch diagnostics and renders only effective memory as JSON", () => {
 	const output = detailedStatus(snapshot, diagnostics());
-	assert.match(output, /^State Flow diagnostics — config\.enabled=true; branch mode=active/);
+	assert.doesNotMatch(output, /session mode=|State Flow diagnostics|Session files:|Memory-bearing scopes:|Memory: owner|Temporal head:|Retained patch tails:|Recent transitions:|Pending artifact invalidations: none/);
 	assert.match(output, /Repository: \/tmp\/knowledge/);
 	assert.match(output, /Scope keys: CWD --tmp-project--hash; session session-hash/);
-	assert.match(output, /Session files: config\.json owns behavior; runtime\.json owns branch recovery; meta\.json owns scope provenance/);
-	assert.match(output, /Runtime metadata: step #7; bootstrap false/);
+	assert.match(output, /^Runtime metadata: step #7$/m);
 	assert.doesNotMatch(output, /Remote publication|Remote queue/);
-	assert.match(output, /Temporal head: "origin"; branch-local position 7/);
-	assert.match(output, /Scope revisions: global #15; CWD #8; session #31; effective G15\/C8\/S31/);
+	assert.match(output, /^Scope revisions: g15c8s31$/m);
 	assert.match(output, /Hot history: offsets 0\.\.0; maximum depth 7/);
-	assert.match(output, /Retained patch tails: global 1; CWD 2; session 0/);
-	assert.match(output, /Artifacts: global 0; CWD 0; session 0; pending invalidations 0/);
-	assert.match(output, /Recent transitions: global 0; CWD 0; session 0; active 0/);
-	const marker = output.match(/Effective memory \(\d+ JSON bytes; global → CWD → session overlay\):\n\n/);
+	assert.doesNotMatch(output, /Artifacts:/);
+	const marker = output.match(/Effective memory:\n\n/);
 	assert.ok(marker?.index !== undefined);
-	const memory = JSON.parse(output.slice(marker.index + marker[0].length));
+	const json = output.slice(marker.index + marker[0].length);
+	const memory = JSON.parse(json);
+	assert.equal(json.split(",\n\n  \"").length, Object.keys(memory).length, "one blank line between every top-level plane");
 	assert.deepEqual(memory, {
 		artifacts: {},
 		contract: { shared: true },
@@ -80,7 +82,17 @@ test("distinguishes branch diagnostics and renders only effective memory as JSON
 	assert.equal(Object.hasOwn(memory, "session"), false);
 });
 
-test("summarizes memory ownership without interpreting promotion-shaped user data", () => {
+test("blank lines separate only top-level planes, leaving nested JSON intact", () => {
+	const output = detailedStatus(snapshot, diagnostics({ effectiveState: {
+		intents: { task: { first: 1, second: 2 } },
+		working: { items: [{ a: 1, b: 2 }] },
+	} }));
+	const json = output.split("Effective memory:\n\n")[1];
+	assert.equal(json, '{\n  "intents": {\n    "task": {\n      "first": 1,\n      "second": 2\n    }\n  },\n\n  "working": {\n    "items": [\n      {\n        "a": 1,\n        "b": 2\n      }\n    ]\n  }\n}');
+	assert.deepEqual(JSON.parse(json), { intents: { task: { first: 1, second: 2 } }, working: { items: [{ a: 1, b: 2 }] } });
+});
+
+test("omits ownership boilerplate without interpreting promotion-shaped user data", () => {
 	const output = detailedStatus(snapshot, diagnostics({
 		scopeStates: {
 			global: { ...emptyState(), working: { memory_promotions: { ordinaryUserData: true } } },
@@ -88,9 +100,8 @@ test("summarizes memory ownership without interpreting promotion-shaped user dat
 			session: sessionState,
 		},
 	}));
-	assert.match(output, /Memory: owner state-flow; global retention enabled; global fallback active/);
-	assert.match(output, /Memory-bearing scopes: global true; CWD false; session false/);
-	assert.doesNotMatch(output, /Promotion status|Memory promotions/);
+	assert.match(output, /"ordinaryUserData": true/);
+	assert.doesNotMatch(output, /Memory: owner|Memory-bearing scopes:|Promotion status|Memory promotions/);
 });
 
 test("reports inspectable stale reasons", () => {
@@ -100,15 +111,15 @@ test("reports inspectable stale reasons", () => {
 			{ scope: "global", path: "/knowledge/gone.md", reason: "source-removed" },
 		],
 	}));
-	assert.match(output, /pending invalidations 2/);
+	assert.match(output, /^Pending artifact invalidations:$/m);
 	assert.match(output, /\[global\] \/knowledge\/new\.md — new/);
 	assert.match(output, /\[global\] \/knowledge\/gone\.md — source-removed/);
 });
 
-test("a Stop write fence is not reported as unavailable accepted memory", () => {
-	const output = detailedStatus({ ...snapshot, config: { enabled: false } }, diagnostics({ publicationError: "Writer advanced\nRetry Start" }));
-	assert.match(output, /branch mode=inactive/);
-	assert.match(output, /^Memory writes paused after Stop: Writer advanced Retry Start$/m);
+test("a mode-change write fence is not reported as unavailable accepted memory", () => {
+	const output = detailedStatus({ ...snapshot, config: { mode: "passive" as const } }, diagnostics({ publicationError: "Writer advanced\nRetry Start" }));
+	assert.doesNotMatch(output, /session mode=/);
+	assert.match(output, /^Memory writes paused after mode change: Writer advanced Retry Start$/m);
 	assert.match(output, /"response": "Done"/);
 	assert.doesNotMatch(output, /materialization unavailable|Effective memory: unavailable/);
 });
@@ -126,7 +137,7 @@ test("status preserves the reason and target of long-path availability and publi
 		const output = detailedStatus(snapshot, diagnostics(unavailable
 			? { temporal: undefined, durableStateError: error }
 			: { publicationError: error }));
-		const line = output.split("\n").find((line) => line.startsWith(unavailable ? "Temporal materialization unavailable:" : "Memory writes paused after Stop:"))!;
+		const line = output.split("\n").find((line) => line.startsWith(unavailable ? "Temporal materialization unavailable:" : "Memory writes paused after mode change:"))!;
 		assert.match(line, /meta\.json/);
 		assert.match(line, /contains invalid JSON$/);
 		assert.ok(line.length <= 260);
@@ -143,34 +154,28 @@ test("unavailable temporal state is not represented as empty materialization or 
 	assert.match(output, /Hot history: unavailable; configured maximum depth 7/);
 	assert.doesNotMatch(output, /cold Git|offsets beyond 7/);
 	assert.match(output, /Effective memory: unavailable/);
-	assert.match(output, /Retained patch tails: unavailable/);
-	assert.match(output, /Artifacts: global unknown; CWD unknown; session unknown; pending invalidations unavailable/);
+	assert.doesNotMatch(output, /Retained patch tails:|Artifacts:|Scope revisions:/);
 	assert.doesNotMatch(output, /"artifacts"|"working"|Hot history: offsets/);
 	assert.equal(execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }), before);
-	assert.equal(h.entries.length, 0);
+	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "off" }]);
 });
 
 test("status distinguishes live shared tails from fresh restored-session depth", async () => {
 	const h = harness();
 	await start(h);
-	const heads: string[] = [];
 	let oldEntries: any[] = [];
 	for (let n = 1; n <= 8; n++) {
 		await h.tools.get("patch_state").execute("global", { global: { working: { n } } }, undefined, undefined, h.ctx);
-		const read = await h.tools.get("read_state").execute("head", { path: "global.patches[0]" }, undefined);
-		heads.push(read.details.transitionId);
 		if (n === 1) oldEntries = structuredClone(h.entries);
 	}
 	await h.commands.get("state-flow-status").handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /Hot history: offsets 0\.\.7; maximum depth 7/);
-	assert.match(h.notifications.at(-1)!, /Retained patch tails: global 7; CWD 0; session 0/);
-	assert.ok(h.notifications.at(-1)!.includes(`Temporal head: "${heads.at(-1)}"`));
-	const next = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, sessionId: "new-origin", autoStart: true });
+	assert.match(h.notifications.at(-1)!, /Scope revisions: g8c0s0/);
+	const next = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, sessionId: "new-origin", mode: "active" });
 	await next.handlers.get("session_start")!({ reason: "new" }, next.ctx);
 	await next.commands.get("state-flow-status").handler("", next.ctx);
 	assert.match(next.notifications.at(-1)!, /Hot history: offsets 0\.\.0; maximum depth 7/);
-	assert.match(next.notifications.at(-1)!, /Retained patch tails: global 7; CWD 0; session 0/);
-	assert.match(next.notifications.at(-1)!, /Recent transitions: global 0; CWD 0; session 0; active 0/);
+	assert.match(next.notifications.at(-1)!, /Scope revisions: g8c0s0/);
 	const files = execFileSync("git", ["-C", h.repositoryRoot, "ls-files"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
 	const bytes = files.map((file) => readFileSync(join(h.repositoryRoot, file)));
 	h.ctx.sessionManager.getBranch = () => oldEntries;
@@ -188,7 +193,7 @@ test("the status command neither discovers unregistered files nor reads source b
 	await start(h);
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	const output = h.notifications.at(-1)!;
-	assert.match(output, /Artifacts: global 0; CWD 0; session 0; pending invalidations 0/);
+	assert.doesNotMatch(output, /^Artifacts:/m);
 	assert.doesNotMatch(output, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	assert.doesNotMatch(output, /SECRET SOURCE BODY/);
 });

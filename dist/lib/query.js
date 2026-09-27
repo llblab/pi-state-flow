@@ -1,7 +1,7 @@
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.js";
 import { isObject, sameJson } from "./json.js";
-import { projectStateForModel } from "./state.js";
-import { readTemporalState } from "./temporal.js";
+import { emptyState, projectSemanticPatch, projectStateForModel } from "./state.js";
+import { readTemporalView } from "./temporal.js";
 const MAX_REFERENCE_SOURCES = 3;
 const MAX_REFERENCE_SCAN_NODES = 10_000;
 const PATH_PATTERN = /^(effective|global|cwd|session)(?:\[(\d+)\])?(?:\.patches(?:\[(\d+)\])?)?$/;
@@ -32,12 +32,12 @@ export function readStatePath(view, path, historyLimit = DEFAULT_HISTORY_LIMIT) 
         const boundary = view.lineage[view.lineage.length - 1 - query.offset];
         if (!boundary)
             throw new Error("Requested history predates the proven temporal origin");
-        return { path, boundary: structuredClone(boundary), state: projectStateForModel(readTemporalState(view, query.offset, query.scope, historyLimit)) };
+        return { path, boundary: structuredClone(boundary), state: projectStateForModel(readTemporalView(view, query.offset, query.scope, historyLimit)) };
     }
     const record = view.scopes[query.scope].patches.at(-1 - query.offset);
     if (!record)
         throw new Error(`Requested ${query.scope} patch predates retained hot history`);
-    return { path, boundary: structuredClone(record.transition), patch: structuredClone(record.patch) };
+    return { path, boundary: structuredClone(record.transition), patch: projectSemanticPatch(record.patch) };
 }
 function parseValuePath(path) {
     const explicitRoot = /^(?:effective|global|cwd|session)(?:\[\d+\])?(?=\.|$)/.exec(path)?.[0];
@@ -151,7 +151,7 @@ export function findStateReferenceSources(view, path, historyLimit = DEFAULT_HIS
         }
     };
     for (const scope of ["global", "cwd", "session"]) {
-        const state = readTemporalState(view, 0, scope, historyLimit);
+        const state = readTemporalView(view, 0, scope, historyLimit);
         for (const plane of ["artifacts", "contract", "working", "intents", "lazy"]) {
             const value = state[plane];
             if (value !== undefined)
@@ -201,13 +201,13 @@ function patchAtPath(view, root, selectors, path, historyLimit) {
         throw new Error("Requested history predates the proven temporal origin");
     let patch = {};
     if (rootQuery.scope) {
-        patch = structuredClone(view.scopes[rootQuery.scope].patches.find((record) => record.transition.id === boundary.id)?.patch ?? {});
+        patch = projectSemanticPatch((view.scopes[rootQuery.scope].patches.find((record) => record.transition.id === boundary.id)?.patch ?? {}));
     }
     else {
         const before = view.lineage.at(-2 - rootQuery.offset);
         if (before) {
-            const current = readTemporalState(view, rootQuery.offset, undefined, historyLimit);
-            const previous = readTemporalState(view, rootQuery.offset + 1, undefined, historyLimit);
+            const current = readTemporalView(view, rootQuery.offset, undefined, historyLimit);
+            const previous = readTemporalView(view, rootQuery.offset + 1, undefined, historyLimit);
             patch = diffObjects(previous, current);
         }
     }
@@ -270,11 +270,11 @@ export function readProjectedState(view, paths, projection = "value", historyLim
             if (query.kind !== "state")
                 throw new Error("Value and keys projections require a state path");
             const readsLazy = selectors[0]?.kind === "key" && selectors[0].key === "lazy";
-            const state = readsLazy
-                ? readTemporalState(view, query.offset, query.scope, historyLimit)
-                : projectStateForModel(readTemporalState(view, query.offset, query.scope, historyLimit));
-            if (readsLazy && !Object.hasOwn(state, "lazy"))
-                state.lazy = {};
+            const raw = readTemporalView(view, query.offset, query.scope, historyLimit);
+            const state = readsLazy ? raw : projectStateForModel(raw);
+            const field = selectors.length === 1 && selectors[0]?.kind === "key" ? selectors[0].key : undefined;
+            if (projection === "value" && field !== undefined && Object.hasOwn(emptyState(), field) && !Object.hasOwn(state, field))
+                return { value: null };
             return projectValue(selectValue(state, selectors, path), projection);
         }
         catch (error) {

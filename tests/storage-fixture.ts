@@ -1,10 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { temporalScopePaths, serializeScopeMetadata, serializeScopeStream } from "../lib/durable.ts";
-import { emptyState, type MaterializedState, type StateScope } from "../lib/state.ts";
+import { emptyState, type SemanticState, type StateScope } from "../lib/state.ts";
 import { createTemporalState } from "../lib/temporal.ts";
 import "./git-environment.ts";
 
-function writeScope(cwd: string, sessionId: string, scope: StateScope, state: MaterializedState, root: string): string {
+function writeScope(cwd: string, sessionId: string, scope: StateScope, state: SemanticState, root: string): string {
 	const states = { global: emptyState(), cwd: emptyState(), session: emptyState(), [scope]: state };
 	const stream = createTemporalState(states, `fixture-${scope}`).scopes[scope];
 	const paths = temporalScopePaths(cwd, sessionId, scope, root);
@@ -16,15 +16,15 @@ function writeScope(cwd: string, sessionId: string, scope: StateScope, state: Ma
 	return paths.checkpoint;
 }
 
-export function writeGlobalState(state: MaterializedState, root: string): string {
+export function writeGlobalState(state: SemanticState, root: string): string {
 	return writeScope("/fixture", "fixture", "global", state, root);
 }
 
-export function writeCwdState(cwd: string, state: MaterializedState, root: string): string {
+export function writeCwdState(cwd: string, state: SemanticState, root: string): string {
 	return writeScope(cwd, "fixture", "cwd", state, root);
 }
 
-export function writeSessionState(cwd: string, sessionId: string, state: MaterializedState, root: string): string {
+export function writeSessionState(cwd: string, sessionId: string, state: SemanticState, root: string): string {
 	return writeScope(cwd, sessionId, "session", state, root);
 }
 

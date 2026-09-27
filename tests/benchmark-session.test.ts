@@ -39,7 +39,7 @@ for (const stateFlow of [false, true]) {
 		const fixture = await realPiFixture(t, { stateFlow });
 		const session = await fixture.createSession();
 		t.after(() => session.dispose());
-		if (stateFlow) await session.prompt("/state-flow-start");
+		if (stateFlow) await session.prompt("/state-flow-active");
 		const source = join(fixture.cwd, "evidence.txt");
 		writeFileSync(source, "BENCH_EVIDENCE\né");
 		const captured: Buffer[] = [];
@@ -70,7 +70,7 @@ for (const stateFlow of [false, true]) {
 		const fixture = await realPiFixture(t, { stateFlow });
 		const session = await fixture.createSession();
 		t.after(() => session.dispose());
-		if (stateFlow) await session.prompt("/state-flow-start");
+		if (stateFlow) await session.prompt("/state-flow-active");
 		const subscribe = session.subscribe.bind(session);
 		let activeObservers = 0;
 		t.mock.method(session, "subscribe", (listener: Parameters<typeof session.subscribe>[0]) => {

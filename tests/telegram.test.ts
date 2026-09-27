@@ -26,7 +26,7 @@ import { harness } from "./harness.ts";
 import { writeGlobalState } from "./storage-fixture.ts";
 
 function snapshot(overrides: Partial<StateFlowTelegramSnapshot> = {}): StateFlowTelegramSnapshot {
-	return { enabled: false, step: 0, revisions: { global: 0, cwd: 0, session: 0 }, bootstrap: false, startPending: false, ...overrides };
+	return { mode: "off", step: 0, revisions: { global: 0, cwd: 0, session: 0 }, bootstrap: false, startPending: false, ...overrides };
 }
 
 function fakePort(initial: StateFlowTelegramSnapshot, options: { canStartNow?: boolean; startResult?: { ok: boolean; message: string } } = {}) {
@@ -37,16 +37,11 @@ function fakePort(initial: StateFlowTelegramSnapshot, options: { canStartNow?: b
 		state: () => ({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "" }),
 		revisions: () => current.revisions!,
 		canStartNow: () => options.canStartNow ?? true,
-		start: () => {
-			calls.push("start");
-			const result = options.startResult ?? { ok: true, message: "State Flow enabled" };
-			if (result.ok) current = { ...current, enabled: true, startPending: false };
+		select: (mode) => {
+			calls.push(mode);
+			const result = mode === "active" && options.startResult ? options.startResult : { ok: true, message: `State Flow ${mode}` };
+			if (result.ok) current = { ...current, mode, startPending: false };
 			return result;
-		},
-		stop: () => {
-			calls.push("stop");
-			current = { ...current, enabled: false };
-			return { ok: true, message: "State Flow disabled" };
 		},
 		deferStart: () => {
 			calls.push("deferStart");
@@ -85,7 +80,7 @@ function sectionContext(action: string, payload = "") {
 	const context = {
 		action,
 		payload,
-		callbackData: (name: string) => `section:0:${name}`,
+		callbackData: (name: string, payload?: string) => `section:0:${name}${payload ? `:${payload}` : ""}`,
 		edit: async (view: StateFlowTelegramView) => {
 			edits.push(view);
 		},
@@ -107,12 +102,12 @@ test("Telegram section discovery covers the package and compiled sibling layouts
 	]);
 });
 
-test("section label exposes the effective revision vector only while active mode is enabled", () => {
-	assert.equal(formatStateFlowSectionLabel(snapshot()), "🌀 State Flow: off");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, revisions: { global: 15, cwd: 8, session: 31 } })), "🌀 State Flow: G15/C8/S31");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, step: 7, revisions: undefined })), "🌀 State Flow: #7");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ enabled: true, revisions: { global: 15, cwd: 8, session: 31 }, bootstrap: true })), "🌀 State Flow: G15/C8/S31");
-	assert.equal(formatStateFlowSectionLabel(snapshot({ revisions: { global: 4, cwd: 3, session: 2 }, startPending: true })), "🌀 State Flow: off");
+test("main-menu section label uses the lowercase mode regardless of revisions or pending work", () => {
+	for (const mode of ["off", "passive", "active"] as const) {
+		for (const revisions of [undefined, { global: 15, cwd: 8, session: 31 }]) {
+			assert.equal(formatStateFlowSectionLabel(snapshot({ mode, revisions, step: 7, bootstrap: true, startPending: true })), `🌀 State Flow: ${mode}`);
+		}
+	}
 });
 
 test("Rich headings distinguish owner revisions from the Effective vector", () => {
@@ -123,49 +118,53 @@ test("Rich headings distinguish owner revisions from the Effective vector", () =
 	assert.doesNotMatch(JSON.stringify(renderStateFlowRichState("global", revisions, state)), /response/);
 	assert.deepEqual(heading("cwd"), { type: "heading", text: ["📂 CWD: ", { type: "code", text: "#8" }], size: 3 });
 	assert.deepEqual(heading("session"), { type: "heading", text: ["💬 Session: ", { type: "code", text: "#31" }], size: 3 });
-	assert.deepEqual(heading("effective"), { type: "heading", text: ["🧬 Effective: ", { type: "code", text: "G15/C8/S31" }], size: 3 });
+	assert.deepEqual(heading("effective"), { type: "heading", text: ["🧬 Effective: ", { type: "code", text: "g15c8s31" }], size: 3 });
 });
 
-test("section view repeats the state line with one lifecycle button and no refresh or cancel", () => {
-	const off = buildStateFlowSectionView(snapshot(), (action) => `cb:${action}`);
-	assert.equal(
-		off.text,
-		"<b>🌀 State Flow: <code>off</code></b>\n\nAccepted memory remains visible in active and passive modes. Start or Stop changes episode behavior, not state access.",
-	);
-	assert.deepEqual(off.replyMarkup?.inline_keyboard, [
-		[{ text: "▶️ Start", callback_data: "cb:start" }],
-		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
-	]);
-	const on = buildStateFlowSectionView(snapshot({ enabled: true, revisions: { global: 15, cwd: 8, session: 31 } }), (action) => `cb:${action}`);
-	assert.match(on.text, /^<b>🌀 State Flow: <code>G15\/C8\/S31<\/code><\/b>/);
-	assert.deepEqual(on.replyMarkup?.inline_keyboard, [
-		[{ text: "⏹ Stop", callback_data: "cb:stop" }],
-		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
-	]);
-	const pending = buildStateFlowSectionView(snapshot({ startPending: true }), (action) => `cb:${action}`);
-	assert.match(pending.text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
-	assert.deepEqual(pending.replyMarkup?.inline_keyboard, [
-		[{ text: "▶️ Start", callback_data: "cb:start" }],
-		[{ text: "👁 Show state", callback_data: "cb:show-state" }],
-	]);
+test("section view has lowercase option values, one selected marker and direct scope actions", () => {
+	const callbackData = (action: string, payload?: string) => `cb:${action}${payload ? `:${payload}` : ""}`;
+	for (const mode of ["off", "passive", "active"] as const) {
+		const view = buildStateFlowSectionView(snapshot({ mode, revisions: { global: 15, cwd: 8, session: 31 } }), callbackData);
+		assert.equal(view.text, [
+			`<b>🌀 State Flow:</b> <code>${mode}</code>`,
+			"",
+			"Choose how this session uses State Flow memory and context. Switching modes never erases stored memory.",
+			"",
+			"<code>-</code> <code>off</code>: no memory tools or state bootstrap.",
+			"<code>-</code> <code>passive</code> (default): memory tools and context with ordinary conversation.",
+			"<code>-</code> <code>active</code>: state-driven episodes.",
+		].join("\n"));
+		assert.deepEqual(view.replyMarkup?.inline_keyboard, [[
+			{ text: `${mode === "off" ? "🟢 " : ""}off`, callback_data: "cb:off" },
+			{ text: `${mode === "passive" ? "🟢 " : ""}passive`, callback_data: "cb:passive" },
+			{ text: `${mode === "active" ? "🟢 " : ""}active`, callback_data: "cb:active" },
+		], [
+			{ text: "🌐 Global", callback_data: "cb:inspect:global" },
+			{ text: "📂 CWD", callback_data: "cb:inspect:cwd" },
+		], [
+			{ text: "💬 Session", callback_data: "cb:inspect:session" },
+			{ text: "🧬 Effective", callback_data: "cb:inspect:effective" },
+		]]);
+		const pending = buildStateFlowSectionView(snapshot({ mode, startPending: true }), callbackData);
+		assert.deepEqual(pending, view, "pending work and revision changes do not change the menu");
+	}
 });
 
-test("scope chooser opens exactly one selected native Rich state tree", async () => {
+test("direct scope actions open one native Rich state tree and legacy Show state refreshes the flat menu", async () => {
 	const state = { artifacts: { "/a": { description: "A" } }, contract: { rule: true }, working: {}, intents: { current: "Validate release" }, response: "Done", lazy: { memory: ["retained"] } };
 	const { modules, sections } = fakeModules();
-	const { port } = fakePort(snapshot({ enabled: true }));
+	const { port } = fakePort(snapshot({ mode: "active" }));
 	port.state = (scope) => ({ ...state, working: { scope } });
 	port.revisions = () => ({ global: 15, cwd: 8, session: 31 });
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	await adapter.ensure();
 	const chooser = sectionContext("show-state");
 	assert.equal(await sections[0].handleCallback!(chooser.context), "handled");
-	assert.equal(chooser.edits[0].text, "<b>👁 Show state:</b>");
-	assert.deepEqual(chooser.edits[0].replyMarkup?.inline_keyboard.map((row) => row.map((button) => button.text)), [
-		["🌐 Global"],
-		["📂 CWD"],
-		["💬 Session"],
-		["🧬 Effective"],
+	const rendered = await sections[0].render(chooser.context);
+	assert.deepEqual(chooser.edits[0], rendered, "old keyboards no longer open a nested chooser");
+	assert.deepEqual(rendered.replyMarkup?.inline_keyboard.slice(1).map((row) => row.map((button) => button.callback_data)), [
+		["section:0:inspect:global", "section:0:inspect:cwd"],
+		["section:0:inspect:session", "section:0:inspect:effective"],
 	]);
 	const inspect = sectionContext("inspect", "effective");
 	assert.equal(await sections[0].handleCallback!(inspect.context), "handled");
@@ -173,7 +172,7 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 	assert.deepEqual(inspect.richMessages[0]?.blocks.map((block) => block.type), ["heading", "details", "details", "details", "details", "details", "details"]);
 	assert.deepEqual(inspect.richMessages[0]?.blocks[0], {
 		type: "heading",
-		text: ["🧬 Effective: ", { type: "code", text: "G15/C8/S31" }],
+		text: ["🧬 Effective: ", { type: "code", text: "g15c8s31" }],
 		size: 3,
 	});
 	assert.deepEqual(inspect.richMessages[0]?.blocks.slice(1).map((block) => "summary" in block ? block.summary : undefined), [
@@ -203,7 +202,7 @@ test("scope chooser opens exactly one selected native Rich state tree", async ()
 test("asynchronous inspection presents the captured revision with its data and revokes obsolete receipts", async () => {
 	for (const outcome of ["accept", "revoked", "reject"] as const) {
 		const { modules, sections } = fakeModules();
-		const { port } = fakePort(snapshot({ enabled: true, revisions: { global: 99, cwd: 99, session: 99 } }));
+		const { port } = fakePort(snapshot({ mode: "active", revisions: { global: 99, cwd: 99, session: 99 } }));
 		const controller = new AbortController();
 		const state = { ...emptyState(), working: { observed: "coherent" } };
 		const revisions = { global: 1, cwd: 2, session: 3 };
@@ -232,20 +231,21 @@ test("asynchronous inspection presents the captured revision with its data and r
 	}
 });
 
-for (const action of ["start", "stop"] as const) test(`awaited ${action} controls acknowledge early, escape failures and discard obsolete views`, async () => {
+for (const action of ["active", "passive", "off"] as const) test(`awaited ${action} controls acknowledge early, escape failures and discard obsolete views`, async () => {
 	for (const outcome of ["accept", "reject", "revoked", "navigation", "dispose"] as const) {
 		const { modules, sections } = fakeModules();
-		const { port } = fakePort(snapshot({ enabled: action === "stop" }));
+		const { port } = fakePort(snapshot({ mode: action === "active" ? "off" : "active" }));
 		const receipt = new AbortController();
 		let release!: () => void;
 		const gate = new Promise<void>((resolve) => { release = resolve; });
 		const control = sectionContext(action);
-		const acknowledgement = action === "stop" ? "Stopping State Flow" : "Starting State Flow";
+		const acknowledgement = `Switching State Flow to ${action}`;
 		const adapter = createStateFlowTelegramAdapter({
 			load: async () => modules,
-			port: { ...port, inspect: () => ({ state: emptyState(), revisions: port.revisions!() }), [action]: async () => {
+			port: { ...port, inspect: () => ({ state: emptyState(), revisions: port.revisions!() }), select: async (mode) => {
+				assert.equal(mode, action);
 				assert.deepEqual(control.notices, [acknowledgement]);
-				const result = port[action]();
+				const result = port.select(mode);
 				await gate;
 				if (outcome === "reject") throw new Error("Control failed at <private&path>");
 				if (outcome === "revoked") queueMicrotask(() => receipt.abort());
@@ -263,7 +263,7 @@ for (const action of ["start", "stop"] as const) test(`awaited ${action} control
 		await pending;
 		assert.deepEqual(control.notices, [acknowledgement], "never answer an expired callback again");
 		assert.equal(control.edits.length, outcome === "accept" || outcome === "reject" ? 1 : 0);
-		if (outcome === "accept") assert.match(control.edits[0]!.text, /\n\nState Flow (enabled|disabled)$/);
+		if (outcome === "accept") assert.equal(control.edits[0]!.replyMarkup?.inline_keyboard[0].filter(({ text }) => text.startsWith("🟢 ")).length, 1);
 		if (outcome === "reject") assert.match(control.edits[0]!.text, /\n\nControl failed at &lt;private&amp;path&gt;$/);
 		adapter.dispose();
 	}
@@ -280,9 +280,46 @@ async function holdInspectionStorage(t: TestContext, root: string) {
 	return async () => { release(); await holder; };
 }
 
+for (const superseded of [false, true]) test(`pre-runtime Telegram Passive reports only its current successful selection (superseded=${superseded})`, async (t) => {
+	const { modules, sections } = fakeModules();
+	const h = harness({ initializeRepository: false, mode: "off", telegram: { load: async () => modules } });
+	writeGlobalState({ ...emptyState(), working: { retained: "SHARED" } }, h.repositoryRoot);
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await new Promise((resolve) => setImmediate(resolve));
+	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+	const before = files();
+	const release = await holdInspectionStorage(t, h.repositoryRoot);
+	const passive = sectionContext("passive");
+	let ended = false;
+	const selecting = Promise.resolve(sections[0]!.handleCallback!(passive.context)).then(() => { ended = true; });
+	await delay(40);
+	assert.equal(ended, false);
+	assert.deepEqual(passive.notices, ["Switching State Flow to passive"]);
+	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.deepEqual(h.entries.at(-1)!.data, { mode: "passive" });
+	assert.deepEqual(files(), before);
+	if (superseded) await h.commands.get("state-flow-off")!.handler("", h.ctx);
+	const entries = structuredClone(h.entries);
+	await release();
+	await selecting;
+	assert.equal(h.activeTools.includes("patch_state"), !superseded);
+	assert.deepEqual(files(), before, "selecting Passive must not initialize semantic storage");
+	assert.deepEqual(h.entries, entries, "loading shared memory must not duplicate the native mode checkpoint");
+	if (superseded) {
+		assert.deepEqual(passive.edits, [], "a withdrawn operation must not present success or overwrite the new menu");
+		assert.equal(h.handlers.get("context")!({ messages: [] }, h.ctx), undefined);
+	} else {
+		assert.equal(h.readState(0, "global").working.retained, "SHARED");
+		assert.equal(passive.edits.length, 1);
+		assert.equal(passive.edits[0]!.replyMarkup?.inline_keyboard[0][1].text, "🟢 passive");
+		assert.doesNotMatch(passive.edits[0]!.text, /\n\nState Flow passive$/);
+		assert.doesNotMatch(passive.edits[0]!.text, /superseded|failed/);
+	}
+});
+
 for (const active of [false, true]) test(`Telegram inspection awaits a current cohort without publication or private leakage (active=${active})`, async (t) => {
 	const { modules, sections } = fakeModules();
-	const h = harness({ initializeRepository: false, autoStart: active, telegram: { load: async () => modules } });
+	const h = harness({ initializeRepository: false, mode: active ? "active" : "off", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await new Promise((resolve) => setImmediate(resolve));
 	if (active) await h.tools.get("patch_state")!.execute("private", { session: { working: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
@@ -308,7 +345,7 @@ for (const active of [false, true]) test(`Telegram inspection awaits a current c
 	assert.equal(inspect.edits.length, 0);
 	assert.equal(inspect.richMessages.length, 1);
 	const rendered = JSON.stringify(inspect.richMessages);
-	for (const value of ["LATEST-G", "LATEST-C", `G1/C1/S${active ? 1 : 0}`]) assert.ok(rendered.includes(value), value);
+	for (const value of ["LATEST-G", "LATEST-C", `g1c1s${active ? 1 : 0}`]) assert.ok(rendered.includes(value), value);
 	assert.equal(rendered.includes("FOREIGN-PRIVATE"), false);
 	assert.equal(rendered.includes("LOCAL"), active);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
@@ -318,7 +355,7 @@ for (const active of [false, true]) test(`Telegram inspection awaits a current c
 for (const boundary of ["stop", "session_tree", "session_shutdown"] as const) test(`Telegram inspection withdraws at ${boundary} without presenting a stale owner`, { timeout: 5_000 }, async (t) => {
 	let selection: Promise<unknown> | undefined;
 	const { modules, sections } = fakeModules();
-	const h = harness({ initializeRepository: false, autoStart: true, passiveTools: true, telegram: { load: async () => modules } });
+	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await new Promise((resolve) => setImmediate(resolve));
 	const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
@@ -330,7 +367,7 @@ for (const boundary of ["stop", "session_tree", "session_shutdown"] as const) te
 	assert.equal(ended, false);
 	if (boundary === "stop") {
 		const cancellation = new AbortController();
-		const stopping = h.commands.get("state-flow-stop")!.handler("", { ...h.ctx, signal: cancellation.signal });
+		const stopping = h.commands.get("state-flow-passive")!.handler("", { ...h.ctx, signal: cancellation.signal });
 		cancellation.abort();
 		await stopping;
 	}
@@ -350,37 +387,37 @@ for (const boundary of ["stop", "session_tree", "session_shutdown"] as const) te
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 	assert.deepEqual(h.entries, entries);
 	if (boundary === "stop") {
-		await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { working: { unsafe: true } } }, undefined, undefined, h.ctx), /Memory writes paused after Stop/);
+		await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { working: { unsafe: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 	}
 });
 
 test("Telegram Stop remains responsive during publication waiting and repeated callbacks share one acceptance", { timeout: 5_000 }, async (t) => {
 	const { modules, sections } = fakeModules();
-	const h = harness({ initializeRepository: false, autoStart: true, telegram: { load: async () => modules } });
+	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await new Promise((resolve) => setImmediate(resolve));
 	const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const release = await holdInspectionStorage(t, h.repositoryRoot);
 	const publication = t.mock.method(TemporalRuntime.prototype, "withLifecycleTransaction");
-	const first = sectionContext("stop");
+	const first = sectionContext("off");
 	const stopping = sections[0].handleCallback!(first.context);
 	await delay(40);
-	assert.deepEqual(first.notices, ["Stopping State Flow"]);
+	assert.deepEqual(first.notices, ["Switching State Flow to off"]);
 	assert.equal(first.edits.length, 0);
 	assert.equal(h.statuses.at(-1), undefined);
 	assert.equal(sections[0].getLabel!(), "🌀 State Flow: off");
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
-	const repeated = sectionContext("stop");
+	const repeated = sectionContext("off");
 	const repeat = sections[0].handleCallback!(repeated.context);
 	await delay(10);
 	await release();
 	await Promise.all([stopping, repeat]);
 	assert.equal(publication.mock.calls.length, 1);
 	assert.equal(first.edits.length, 0, "the newer callback owns the resulting view");
-	assert.deepEqual(repeated.notices, ["Stopping State Flow"]);
+	assert.deepEqual(repeated.notices, ["Switching State Flow to off"]);
 	assert.match(repeated.edits[0]!.text, /<code>off<\/code>/);
-	assert.match(repeated.edits[0]!.text, /\n\nState Flow disabled$/);
-	assert.equal(h.resolveSnapshot().config.enabled, false);
+	assert.doesNotMatch(repeated.edits[0]!.text, /\n\nState Flow off$/);
+	assert.notEqual(h.resolveSnapshot().config.mode, "active");
 });
 
 test("Telegram absent or malformed memory is unavailable, never an invented empty Rich state", async () => {
@@ -402,15 +439,14 @@ test("Telegram absent or malformed memory is unavailable, never an invented empt
 	assert.equal(malformed.richMessages.length, 0);
 	assert.match(malformed.edits[0]!.text, /invalid|Invalid/);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
-	assert.equal(h.entries.length, 0);
+	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "off" }]);
 });
 
 test("Telegram can load shared state for inspection when passive model tools are disabled", async () => {
 	type RegisteredSection = Parameters<NonNullable<StateFlowTelegramModules["sections"]>["registerTelegramSection"]>[0];
 	const sections: RegisteredSection[] = [];
 	const h = harness({
-		passiveBootstrap: false,
-		passiveTools: false,
+		mode: "off",
 		telegram: { load: async () => ({ sections: { registerTelegramSection(section) { sections.push(section); return () => {}; } } }) },
 	});
 	writeGlobalState({ ...emptyState(), working: { transportObservation: "available" } }, h.repositoryRoot);
@@ -427,7 +463,7 @@ test("Telegram can load shared state for inspection when passive model tools are
 
 test("Telegram Stop reports local success after CAS failure and keeps accepted cached memory inspectable", async () => {
 	const { modules, sections } = fakeModules();
-	const h = harness({ initializeRepository: false, autoStart: true, telegram: { load: async () => modules } });
+	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await new Promise((resolve) => setImmediate(resolve));
 	await h.tools.get("patch_state")!.execute("remember", {
@@ -439,10 +475,10 @@ test("Telegram Stop reports local success after CAS failure and keeps accepted c
 	await peer.tools.get("patch_state")!.execute("peer", { session: { working: { other: true } } }, undefined, undefined, peer.ctx);
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const before = files();
-	const stop = sectionContext("stop");
+	const stop = sectionContext("off");
 	assert.equal(await sections[0].handleCallback!(stop.context), "handled");
-	assert.deepEqual(stop.notices, ["Stopping State Flow"]);
-	assert.match(stop.edits[0]!.text, /disabled; memory writes paused/);
+	assert.deepEqual(stop.notices, ["Switching State Flow to off"]);
+	assert.match(stop.edits[0]!.text, /off; memory writes paused/);
 	assert.equal(h.statuses.at(-1), undefined);
 	for (const scope of ["global", "cwd", "session", "effective"]) {
 		const inspect = sectionContext("inspect", scope);
@@ -451,6 +487,17 @@ test("Telegram Stop reports local success after CAS failure and keeps accepted c
 		assert.match(JSON.stringify(inspect.richMessages), /stored/);
 	}
 	assert.deepEqual(files(), before);
+});
+
+test("Rich state inspection omits absent fields and empty responses instead of inventing placeholders", () => {
+	const revisions = { global: 0, cwd: 0, session: 0 };
+	for (const state of [{}, { response: "" }]) {
+		assert.equal(renderStateFlowRichState("session", revisions, state).blocks.length, 1);
+	}
+	const visible = renderStateFlowRichState("effective", revisions, { working: { present: true }, response: "" });
+	assert.equal(visible.blocks.length, 2);
+	assert.match(JSON.stringify(visible), /present/);
+	assert.doesNotMatch(JSON.stringify(visible), /response|artifacts|lazy/);
 });
 
 test("Rich state rendering bounds unbounded semantic fields with explicit truncation", () => {
@@ -483,7 +530,7 @@ test("Rich state rendering bounds unbounded semantic fields with explicit trunca
 
 test("adapter registers the section once and disposes idempotently", async () => {
 	const { modules, sections, disposed } = fakeModules();
-	const { port } = fakePort(snapshot({ enabled: true, revisions: { global: 2, cwd: 3, session: 4 } }));
+	const { port } = fakePort(snapshot({ mode: "active", revisions: { global: 2, cwd: 3, session: 4 } }));
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	assert.equal(await adapter.ensure(), true);
 	assert.equal(sections.length, 1);
@@ -521,24 +568,25 @@ test("start applies immediately when idle and edits the refreshed view", async (
 	const { port, calls } = fakePort(snapshot());
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	await adapter.ensure();
-	const { context, edits, notices } = sectionContext("start");
+	const { context, edits, notices } = sectionContext("active");
 	assert.equal(await sections[0].handleCallback!(context), "handled");
-	assert.deepEqual(calls, ["start"]);
-	assert.deepEqual(notices, ["State Flow enabled"]);
+	assert.deepEqual(calls, ["active"]);
+	assert.deepEqual(notices, [undefined]);
 	assert.equal(edits.length, 1);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>G0\/C0\/S0<\/code><\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow:<\/b>/);
+	assert.equal(edits[0].replyMarkup?.inline_keyboard[0][2].text, "🟢 active");
 });
 
 test("callback diagnostics retain long-path causes within Telegram's 200-character limit", async () => {
 	const path = `/store/${"long directory/".repeat(40)}.state-flow-publication.lock`;
-	for (const action of ["start", "stop", "inspect"]) {
+	for (const action of ["active", "off", "inspect"]) {
 		const { modules, sections } = fakeModules();
 		const { port } = fakePort(snapshot());
 		const cause = new Error(`EEXIST: file already exists, open '${path}'`);
 		const failure = new Error(`State Flow publication lock is unavailable at ${JSON.stringify(path)}`, { cause });
 		if (action === "inspect") port.state = () => { throw failure; };
-		else if (action === "stop") port.stop = () => { throw failure; };
-		else port.start = () => ({ ok: false, message: `State Flow Start failed: ${failure.message}: ${cause.message}` });
+		else if (action === "off") port.select = () => { throw failure; };
+		else port.select = () => ({ ok: false, message: `State Flow activation failed: ${failure.message}: ${cause.message}` });
 		const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 		await adapter.ensure();
 		const { context, notices, edits } = sectionContext(action, "session");
@@ -559,37 +607,40 @@ test("start defers while a run is active and reports a pending intent", async ()
 	const { port, calls } = fakePort(snapshot(), { canStartNow: false });
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	await adapter.ensure();
-	const { context, edits, notices } = sectionContext("start");
+	const { context, edits, notices } = sectionContext("active");
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(calls, ["deferStart"]);
-	assert.deepEqual(notices, ["State Flow will start after the current turn"]);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
-	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard, [
-		[{ text: "▶️ Start", callback_data: "section:0:start" }],
-		[{ text: "👁 Show state", callback_data: "section:0:show-state" }],
+	assert.deepEqual(notices, ["State Flow will become active after the current turn"]);
+	assert.match(edits[0].text, /^<b>🌀 State Flow:<\/b>/);
+	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard[0], [
+		{ text: "🟢 off", callback_data: "section:0:off" }, { text: "passive", callback_data: "section:0:passive" }, { text: "active", callback_data: "section:0:active" },
 	]);
 });
 
-test("stop routes while legacy cancel/refresh actions stay harmless", async () => {
+test("off routes while legacy start/stop/cancel/refresh actions stay harmless", async () => {
 	const { modules, sections } = fakeModules();
-	const { port, calls, read } = fakePort(snapshot({ enabled: true, revisions: { global: 5, cwd: 4, session: 3 } }));
+	const { port, calls, read } = fakePort(snapshot({ mode: "active", revisions: { global: 5, cwd: 4, session: 3 } }));
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	await adapter.ensure();
 
-	const stop = sectionContext("stop");
+	const stop = sectionContext("off");
 	assert.equal(await sections[0].handleCallback!(stop.context), "handled");
-	assert.deepEqual(calls, ["stop"]);
-	assert.deepEqual(stop.notices, ["State Flow disabled"]);
-	assert.equal(read().enabled, false);
+	assert.deepEqual(calls, ["off"]);
+	assert.deepEqual(stop.notices, [undefined]);
+	assert.equal(read().mode, "off");
+	for (const action of ["start", "stop"]) {
+		assert.equal(await sections[0].handleCallback!(sectionContext(action).context), "handled");
+		assert.deepEqual(calls, ["off"], "obsolete callbacks must not silently select another mode");
+	}
 
 	const cancel = sectionContext("cancel");
 	assert.equal(await sections[0].handleCallback!(cancel.context), "handled");
-	assert.deepEqual(calls, ["stop", "cancelStart"]);
+	assert.deepEqual(calls, ["off", "cancelStart"]);
 	assert.equal(cancel.notices[0], "Pending start cancelled");
 
 	const refresh = sectionContext("refresh");
 	assert.equal(await sections[0].handleCallback!(refresh.context), "handled");
-	assert.deepEqual(calls, ["stop", "cancelStart"]);
+	assert.deepEqual(calls, ["off", "cancelStart"]);
 	assert.deepEqual(refresh.notices, [undefined]);
 	assert.equal(refresh.edits.length, 1);
 
@@ -603,10 +654,11 @@ test("start failure surfaces the control message without corrupting the menu", a
 	const { port } = fakePort(snapshot(), { startResult: { ok: false, message: "Selected branch revision is unavailable\n\nRetry after recovery" } });
 	const adapter = createStateFlowTelegramAdapter({ port, load: async () => modules });
 	await adapter.ensure();
-	const { context, edits, notices } = sectionContext("start");
+	const { context, edits, notices } = sectionContext("active");
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(notices, ["Selected branch revision is unavailable Retry after recovery"]);
-	assert.match(edits[0].text, /^<b>🌀 State Flow: <code>off<\/code><\/b>/);
+	assert.match(edits[0].text, /^<b>🌀 State Flow:<\/b>/);
+	assert.equal(edits[0].replyMarkup?.inline_keyboard[0][0].text, "🟢 off");
 });
 
 test("render and dynamic label always read the live snapshot", async () => {
@@ -617,7 +669,7 @@ test("render and dynamic label always read the live snapshot", async () => {
 	const section = sections[0];
 	const renderContext = { callbackData: (action: string) => `cb:${action}` } as StateFlowTelegramSectionContext;
 	assert.equal(section.getLabel!(), "🌀 State Flow: off");
-	assert.match((await section.render(renderContext)).text, /Accepted memory remains visible in active and passive modes/);
+	assert.match((await section.render(renderContext)).text, /<code>-<\/code> <code>off<\/code>:/);
 	await port.deferStart();
 	assert.equal(section.getLabel!(), "🌀 State Flow: off");
 });
@@ -628,18 +680,18 @@ test("Start presentation revokes a completed failure when selection changes duri
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await delay(0);
 	t.mock.method(TemporalRuntime.prototype, "withStartTransaction", async () => { throw new Error("old Start failure"); });
-	const control = sectionContext("start");
+	const control = sectionContext("active");
 	let release!: () => void;
 	const gate = new Promise<void>((resolve) => { release = resolve; });
 	t.after(release);
 	control.context.answerCallback = async (notice) => { control.notices.push(notice); await gate; };
 	const pending = sections[0]!.handleCallback!(control.context);
 	await delay(0);
-	assert.match(h.notifications.at(-1)!, /Start failed: old Start failure/);
+	assert.match(h.notifications.at(-1)!, /activation failed: old Start failure/);
 	await h.handlers.get("session_tree")!({}, h.ctx);
 	release();
 	assert.equal(await pending, "handled");
-	assert.deepEqual(control.notices, ["Starting State Flow"]);
+	assert.deepEqual(control.notices, ["Switching State Flow to active"]);
 	assert.deepEqual(control.edits, [], "a completed failure belongs to its original selection, not the later menu");
 });
 
@@ -648,7 +700,7 @@ test("section controls drive the same branch lifecycle as the commands", async (
 	const sections: RegisteredSection[] = [];
 	const disposed: string[] = [];
 	const h = harness({
-		passiveTools: true,
+		mode: "passive",
 		telegram: {
 			load: async () => ({
 				sections: {
@@ -672,20 +724,22 @@ test("section controls drive the same branch lifecycle as the commands", async (
 		openRich: async (message) => { rich.push(message); },
 		answerCallback: async () => {},
 	});
-	assert.equal(await sections[0].handleCallback!(control("start")), "handled");
-	assert.equal(h.resolveSnapshot().config.enabled, true);
-	assert.equal(await sections[0].handleCallback!(control("stop")), "handled");
-	assert.equal(h.resolveSnapshot().config.enabled, false);
+	assert.equal(await sections[0].handleCallback!(control("active")), "handled");
+	assert.equal(h.resolveSnapshot().config.mode, "active");
+	assert.equal(sections[0].getLabel!(), "🌀 State Flow: active");
+	assert.equal(await sections[0].handleCallback!(control("passive")), "handled");
+	assert.notEqual(h.resolveSnapshot().config.mode, "active");
 	await h.tools.get("patch_state")!.execute("passive-telegram", { global: { working: { visibleWhilePassive: true } } }, undefined, undefined, h.ctx);
-	assert.equal(h.resolveSnapshot().config.enabled, false);
+	assert.notEqual(h.resolveSnapshot().config.mode, "active");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
-	assert.equal(sections[0].getLabel!(), "🌀 State Flow: off");
+	assert.equal(sections[0].getLabel!(), "🌀 State Flow: passive");
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
 	assert.equal(await sections[0].handleCallback!(control("inspect", "global")), "handled");
 	assert.equal(await sections[0].handleCallback!(control("inspect", "effective")), "handled");
 	assert.equal(rich.length, 2);
 	assert.match(JSON.stringify(rich), /visibleWhilePassive/);
 	assert.match(JSON.stringify(rich), /#1/);
-	assert.match(JSON.stringify(rich), /G1\/C0\/S0/);
+	assert.match(JSON.stringify(rich), /g1c0s0/);
 	await h.handlers.get("session_shutdown")!({ reason: "quit" }, h.ctx);
 	assert.deepEqual(disposed, ["@llblab/pi-state-flow"]);
 });
