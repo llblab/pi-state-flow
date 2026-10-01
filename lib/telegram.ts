@@ -135,14 +135,9 @@ export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot)
 	return `🌀 State Flow: ${snapshot.mode}`;
 }
 
-/** Match pi-telegram's settings-card value descriptions. */
-const STATE_FLOW_SECTION_HELP = [
-	"<code>-</code> <code>off</code>: no memory tools or state bootstrap.",
-	"<code>-</code> <code>passive</code> (default): memory tools and context with ordinary conversation.",
-	"<code>-</code> <code>active</code>: state-driven episodes.",
-].join("\n");
-
 export const STATE_FLOW_MODES = ["off", "passive", "active"] as const satisfies readonly StateFlowMode[];
+const STATE_FLOW_MODE_LABELS: Record<StateFlowMode, string> = { off: "Off", passive: "Passive", active: "Active" };
+const STATE_FLOW_SELECTED_MARKERS: Record<StateFlowMode, string> = { off: "🟡", passive: "🟣", active: "🟢" };
 
 function isStateFlowModeAction(value: string): value is StateFlowMode {
 	return (STATE_FLOW_MODES as readonly string[]).includes(value);
@@ -153,22 +148,31 @@ function modeReceiptNotice(mode: StateFlowMode, result: StateFlowTelegramControl
 	return result.message;
 }
 
-/** Compact option values followed directly by read-only scope actions. */
+/** One radio-style mode row followed directly by read-only scope actions. */
 export function buildStateFlowSectionView(
 	snapshot: StateFlowTelegramSnapshot,
 	callbackData: (action: string, payload?: string) => string,
 ): StateFlowTelegramView {
 	const modes: StateFlowTelegramButton[] = STATE_FLOW_MODES.map((mode) => ({
-		text: `${mode === snapshot.mode ? "🟢 " : ""}${mode}`,
+		text: `${mode === snapshot.mode ? STATE_FLOW_SELECTED_MARKERS[mode] : "⚫️"} ${STATE_FLOW_MODE_LABELS[mode]}`,
 		callback_data: callbackData(mode),
 	}));
 	return {
 		text: [
 			`<b>🌀 State Flow:</b> <code>${snapshot.mode}</code>`,
 			"",
-			"Choose how this session uses State Flow memory and context. Switching modes never erases stored memory.",
+			"<b>Mode</b> — choose a workflow (switching modes never erases stored memory):",
 			"",
-			STATE_FLOW_SECTION_HELP,
+			"<code>-</code> <code>off</code> (default): regular chat without State Flow memory tools or context.",
+			"<code>-</code> <code>passive</code>: regular chat with memory tools; available combined memory enters the agent's context.",
+			"<code>-</code> <code>active</code>: same memory access; each completed answer closes a cycle, and the next request starts from saved state, not the full chat.",
+			"",
+			"<b>Inspect memory</b> — view stored state even in Off:",
+			"",
+			"<code>-</code> <code>global</code>: memory shared across projects and sessions.",
+			"<code>-</code> <code>cwd</code>: memory shared by sessions in this directory.",
+			"<code>-</code> <code>session</code>: private memory for this session, kept on resume.",
+			"<code>-</code> <code>effective</code>: merged Global, CWD and Session state; the agent can use it when memory is enabled and available.",
 		].join("\n"),
 		parseMode: "html",
 		replyMarkup: { inline_keyboard: [

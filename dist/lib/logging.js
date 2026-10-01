@@ -77,6 +77,7 @@ export class StateFlowDiagnosticWriter {
                 ...(extras.input === undefined ? {} : { input: extras.input }),
                 ...(extras.tool === undefined ? {} : { tool: extras.tool }),
                 ...(extras.toolCallId === undefined ? {} : { toolCallId: extras.toolCallId }),
+                ...(extras.batchToolNames === undefined ? {} : { batchToolNames: [...extras.batchToolNames] }),
             });
             return true;
         }

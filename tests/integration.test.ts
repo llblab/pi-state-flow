@@ -4356,6 +4356,31 @@ test("real Pi projects resume bootstrap once and then uses step rehydration", as
 	await resumed.prompt("Continue with a later step");
 });
 
+test("real Pi defaults to Off without global config and retains an explicit Passive choice on resume", async (t) => {
+	const fixture = await realPiFixture(t, { mode: "configured", initializeRepository: false });
+	const first = await fixture.createSession("new");
+	t.after(() => first.dispose());
+	assert.equal(first.getActiveToolNames().includes("read_state"), false);
+	assert.equal(first.getActiveToolNames().includes("patch_state"), false);
+	assert.deepEqual(snapshots(first).map(({ data }) => data), [{ mode: "off" }]);
+	assert.equal(existsSync(join(fixture.repositoryRoot, "checkpoint.json")), false);
+	fixture.faux.setResponses([fauxAssistantMessage("Ordinary conversation continues without State Flow.")]);
+	await first.prompt("Work without State Flow memory");
+	await first.prompt("/state-flow-passive");
+	assert.equal(first.getActiveToolNames().includes("patch_state"), true);
+	const sessionFile = first.sessionFile;
+	assert.ok(sessionFile, "Pi persists the session after its first ordinary turn");
+	first.dispose();
+	const resumed = await fixture.createSession("resume", SessionManager.open(sessionFile, fixture.sessionDir));
+	t.after(() => resumed.dispose());
+	assert.equal(resumed.getActiveToolNames().includes("patch_state"), true);
+	const next = await fixture.createSession("new");
+	t.after(() => next.dispose());
+	assert.equal(next.getActiveToolNames().includes("patch_state"), false);
+	assert.deepEqual(snapshots(next).map(({ data }) => data), [{ mode: "off" }]);
+	assert.equal(existsSync(join(fixture.repositoryRoot, "checkpoint.json")), false);
+});
+
 test("real Pi global mode defaults never override a resumed session's selected mode", async (t) => {
 	const fixture = await realPiFixture(t, { mode: "configured", initializeRepository: false });
 	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ mode: "active" }));

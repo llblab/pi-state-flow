@@ -27,8 +27,8 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 	const path = join(directory, "config.json");
 	const defaults: StateFlowConfig = {
 		directory,
-		mode: "passive",
-		inactiveMode: "passive",
+		mode: "off",
+		inactiveMode: "off",
 		logging: false,
 		showSuccessfulPatches: true,
 		historyLimit: DEFAULT_HISTORY_LIMIT,
@@ -53,11 +53,12 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 	if (Object.hasOwn(value, "showSuccessfulPatches") && typeof value.showSuccessfulPatches !== "boolean") throw new Error(`State Flow showSuccessfulPatches must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "historyLimit") && (!Number.isSafeInteger(value.historyLimit) || (value.historyLimit as number) < 0 || (value.historyLimit as number) > MAX_HISTORY_LIMIT)) throw new Error(`State Flow historyLimit must be an integer from 0 to ${MAX_HISTORY_LIMIT}: ${path}`);
 	const legacyInactive: InactiveMode = value.passiveBootstrap !== false || value.passiveTools !== false ? "passive" : "off";
-	const mode = isStateFlowMode(value.mode) ? value.mode : value.autoStart === true ? "active" : legacyInactive;
+	const hasLegacyMode = Object.hasOwn(value, "autoStart") || Object.hasOwn(value, "passiveBootstrap") || Object.hasOwn(value, "passiveTools");
+	const mode = isStateFlowMode(value.mode) ? value.mode : value.autoStart === true ? "active" : hasLegacyMode ? legacyInactive : "off";
 	return {
 		directory,
 		mode,
-		inactiveMode: isStateFlowMode(value.mode) ? inactiveModeFor(value.mode) : legacyInactive,
+		inactiveMode: isStateFlowMode(value.mode) ? inactiveModeFor(value.mode) : hasLegacyMode ? legacyInactive : "off",
 		logging: value.logging === true,
 		showSuccessfulPatches: value.showSuccessfulPatches !== false,
 		historyLimit: typeof value.historyLimit === "number" ? value.historyLimit : DEFAULT_HISTORY_LIMIT,

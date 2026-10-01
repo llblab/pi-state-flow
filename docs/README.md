@@ -7,4 +7,5 @@
 - [Temporal acceptance](temporal-acceptance.md): Required temporal properties and their executable witnesses.
 - [SDK compatibility](compatibility.md): Tested dependency stacks, public lifecycle seams, isolated validation, and host limits.
 - [Physical fork contract](fork-contract.md): Session-stream copying, live shared memory, child ownership/origin, and tested support boundaries.
+- [Agent contract relocation ledger](agent-contract-relocation.md): Source-bound paragraph-to-owner parity map for the compact `AGENTS.md`, with transferred clauses and validation evidence.
 - [Session performance](performance.md): Reproducible native-Pi/stateful workloads, long-session resume measurements, two-process publication probes, and evidence limits.

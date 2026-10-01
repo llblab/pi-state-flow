@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## 0.23.0: Off by Default and Mode Controls
+
+- `Passive footprint clarified`: When selected, Passive always declares both memory tools, but contributes protocol and projected memory only with a validated view; a source-bound empty/nonempty byte probe documents the distinction without claiming provider token costs. Off removes State Flow's model-facing tools and context.
+- `Barrier diagnostics`: With opt-in logging, blocked Active tool calls now record `barrier-block` with the exact reason, call identity and batch tool names, never sibling arguments or reasoning. Passive has no barrier; logging-off blocks remain unrecorded. Blocking and canonical state behavior are unchanged.
+- `Focused onboarding`: README keeps installation, three-mode behavior and state model; status and Telegram rendering details live in usage, including a concrete revision-vector example.
+- `Toolchain ranges`: Declare `typescript` `^7.0.2` and `@types/node` `^26.4.0` in package and lockfile metadata, matching installed/locked versions instead of floating `latest` across major refreshes.
+- `Contract map and compaction`: Reduce `AGENTS.md` from 8,141 to about 1,300 words, with one-line owner links; relocate missing normative detail to architecture/usage and map all 56 former paragraphs to current contracts or tests. Keep storage semantics and `tests/invariants.test.ts` unchanged.
+- `Off by default`: New sessions without a configured mode now adopt Off without initializing semantic storage; explicit global modes and legacy flag mappings still apply, and resumed sessions keep their selected mode. Passive and Active remain opt-in; stored memory is not erased.
+- `Telegram mode radios`: Replace the lowercase mode row and redundant list with `Off | Passive | Active` radio labels (⚫️ inactive; 🟡/🟣/🟢 selected). Matching Mode and Inspect memory headings and blank-line-separated settings-style lists explain the workflow progression and scope buttons, including inspection in Off. Callback routing and four direct scope buttons remain unchanged.
+
 ## 0.22.0: Sparse State and Session Modes
 
 - `Sparse semantic memory`: Checkpoints and retained patches may omit documented planes. Readers and writers select only known top-level fields while preserving nested data, causal identities and history boundaries. Current and historical views omit absent fields and empty responses; explicit reads of absent documented fields return `null`. Reads and activation do not normalize stored bytes; malformed data and unproven authority still fail closed.

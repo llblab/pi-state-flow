@@ -1,4 +1,4 @@
-export type StateFlowDiagnosticCategory = "invalid-patch" | "publication-conflict" | "finalization";
+export type StateFlowDiagnosticCategory = "invalid-patch" | "publication-conflict" | "finalization" | "barrier-block";
 /** Minimal structural block; only ordinary text keeps its exact content. */
 export interface StateFlowDiagnosticBlock {
     type: string;
@@ -15,6 +15,8 @@ export interface StateFlowDiagnosticRecord {
     input?: unknown;
     tool?: string;
     toolCallId?: string;
+    /** Names only, in native assistant-batch order; never sibling arguments. */
+    batchToolNames?: string[];
 }
 /** Preserve exact text blocks and block boundaries; reasoning bodies are never duplicated. */
 export declare function projectDiagnosticContent(content: unknown): StateFlowDiagnosticBlock[];
@@ -26,6 +28,7 @@ export interface DiagnosticExtras {
     input?: unknown;
     tool?: string;
     toolCallId?: string;
+    batchToolNames?: readonly string[];
 }
 /** Own diagnostic path safety, projection, persistence, and one-shot failure reporting. */
 export declare class StateFlowDiagnosticWriter {

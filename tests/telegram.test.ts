@@ -121,23 +121,30 @@ test("Rich headings distinguish owner revisions from the Effective vector", () =
 	assert.deepEqual(heading("effective"), { type: "heading", text: ["🧬 Effective: ", { type: "code", text: "g15c8s31" }], size: 3 });
 });
 
-test("section view has lowercase option values, one selected marker and direct scope actions", () => {
+test("section view uses capitalized radio modes with one semantic selected marker and direct scope actions", () => {
 	const callbackData = (action: string, payload?: string) => `cb:${action}${payload ? `:${payload}` : ""}`;
 	for (const mode of ["off", "passive", "active"] as const) {
 		const view = buildStateFlowSectionView(snapshot({ mode, revisions: { global: 15, cwd: 8, session: 31 } }), callbackData);
 		assert.equal(view.text, [
 			`<b>🌀 State Flow:</b> <code>${mode}</code>`,
 			"",
-			"Choose how this session uses State Flow memory and context. Switching modes never erases stored memory.",
+			"<b>Mode</b> — choose a workflow (switching modes never erases stored memory):",
 			"",
-			"<code>-</code> <code>off</code>: no memory tools or state bootstrap.",
-			"<code>-</code> <code>passive</code> (default): memory tools and context with ordinary conversation.",
-			"<code>-</code> <code>active</code>: state-driven episodes.",
+			"<code>-</code> <code>off</code> (default): regular chat without State Flow memory tools or context.",
+			"<code>-</code> <code>passive</code>: regular chat with memory tools; available combined memory enters the agent's context.",
+			"<code>-</code> <code>active</code>: same memory access; each completed answer closes a cycle, and the next request starts from saved state, not the full chat.",
+			"",
+			"<b>Inspect memory</b> — view stored state even in Off:",
+			"",
+			"<code>-</code> <code>global</code>: memory shared across projects and sessions.",
+			"<code>-</code> <code>cwd</code>: memory shared by sessions in this directory.",
+			"<code>-</code> <code>session</code>: private memory for this session, kept on resume.",
+			"<code>-</code> <code>effective</code>: merged Global, CWD and Session state; the agent can use it when memory is enabled and available.",
 		].join("\n"));
 		assert.deepEqual(view.replyMarkup?.inline_keyboard, [[
-			{ text: `${mode === "off" ? "🟢 " : ""}off`, callback_data: "cb:off" },
-			{ text: `${mode === "passive" ? "🟢 " : ""}passive`, callback_data: "cb:passive" },
-			{ text: `${mode === "active" ? "🟢 " : ""}active`, callback_data: "cb:active" },
+			{ text: `${mode === "off" ? "🟡" : "⚫️"} Off`, callback_data: "cb:off" },
+			{ text: `${mode === "passive" ? "🟣" : "⚫️"} Passive`, callback_data: "cb:passive" },
+			{ text: `${mode === "active" ? "🟢" : "⚫️"} Active`, callback_data: "cb:active" },
 		], [
 			{ text: "🌐 Global", callback_data: "cb:inspect:global" },
 			{ text: "📂 CWD", callback_data: "cb:inspect:cwd" },
@@ -263,7 +270,7 @@ for (const action of ["active", "passive", "off"] as const) test(`awaited ${acti
 		await pending;
 		assert.deepEqual(control.notices, [acknowledgement], "never answer an expired callback again");
 		assert.equal(control.edits.length, outcome === "accept" || outcome === "reject" ? 1 : 0);
-		if (outcome === "accept") assert.equal(control.edits[0]!.replyMarkup?.inline_keyboard[0].filter(({ text }) => text.startsWith("🟢 ")).length, 1);
+		if (outcome === "accept") assert.equal(control.edits[0]!.replyMarkup?.inline_keyboard[0].filter(({ text }) => !text.startsWith("⚫️ ")).length, 1);
 		if (outcome === "reject") assert.match(control.edits[0]!.text, /\n\nControl failed at &lt;private&amp;path&gt;$/);
 		adapter.dispose();
 	}
@@ -311,7 +318,7 @@ for (const superseded of [false, true]) test(`pre-runtime Telegram Passive repor
 	} else {
 		assert.equal(h.readState(0, "global").working.retained, "SHARED");
 		assert.equal(passive.edits.length, 1);
-		assert.equal(passive.edits[0]!.replyMarkup?.inline_keyboard[0][1].text, "🟢 passive");
+		assert.equal(passive.edits[0]!.replyMarkup?.inline_keyboard[0][1].text, "🟣 Passive");
 		assert.doesNotMatch(passive.edits[0]!.text, /\n\nState Flow passive$/);
 		assert.doesNotMatch(passive.edits[0]!.text, /superseded|failed/);
 	}
@@ -574,7 +581,7 @@ test("start applies immediately when idle and edits the refreshed view", async (
 	assert.deepEqual(notices, [undefined]);
 	assert.equal(edits.length, 1);
 	assert.match(edits[0].text, /^<b>🌀 State Flow:<\/b>/);
-	assert.equal(edits[0].replyMarkup?.inline_keyboard[0][2].text, "🟢 active");
+	assert.equal(edits[0].replyMarkup?.inline_keyboard[0][2].text, "🟢 Active");
 });
 
 test("callback diagnostics retain long-path causes within Telegram's 200-character limit", async () => {
@@ -613,7 +620,7 @@ test("start defers while a run is active and reports a pending intent", async ()
 	assert.deepEqual(notices, ["State Flow will become active after the current turn"]);
 	assert.match(edits[0].text, /^<b>🌀 State Flow:<\/b>/);
 	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard[0], [
-		{ text: "🟢 off", callback_data: "section:0:off" }, { text: "passive", callback_data: "section:0:passive" }, { text: "active", callback_data: "section:0:active" },
+		{ text: "🟡 Off", callback_data: "section:0:off" }, { text: "⚫️ Passive", callback_data: "section:0:passive" }, { text: "⚫️ Active", callback_data: "section:0:active" },
 	]);
 });
 
@@ -658,7 +665,7 @@ test("start failure surfaces the control message without corrupting the menu", a
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(notices, ["Selected branch revision is unavailable Retry after recovery"]);
 	assert.match(edits[0].text, /^<b>🌀 State Flow:<\/b>/);
-	assert.equal(edits[0].replyMarkup?.inline_keyboard[0][0].text, "🟢 off");
+	assert.equal(edits[0].replyMarkup?.inline_keyboard[0][0].text, "🟡 Off");
 });
 
 test("render and dynamic label always read the live snapshot", async () => {
@@ -669,7 +676,7 @@ test("render and dynamic label always read the live snapshot", async () => {
 	const section = sections[0];
 	const renderContext = { callbackData: (action: string) => `cb:${action}` } as StateFlowTelegramSectionContext;
 	assert.equal(section.getLabel!(), "🌀 State Flow: off");
-	assert.match((await section.render(renderContext)).text, /<code>-<\/code> <code>off<\/code>:/);
+	assert.equal((await section.render(renderContext)).replyMarkup?.inline_keyboard[0][0].text, "🟡 Off");
 	await port.deferStart();
 	assert.equal(section.getLabel!(), "🌀 State Flow: off");
 });

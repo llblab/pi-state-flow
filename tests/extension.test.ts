@@ -3,7 +3,7 @@ import childProcess, { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 import { withStorageTransaction } from "../lib/storage.ts";
-import { StateFlowDiagnosticWriter } from "../lib/logging.ts";
+import { StateFlowDiagnosticWriter, stateFlowLogPath } from "../lib/logging.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import test, { type TestContext } from "node:test";
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -762,8 +762,13 @@ test("patch_state materializes session state before the next inference and respo
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "Complete.");
 });
 
-test("patch_state is the only tool allowed to execute from its assistant response", async () => {
-	const h = harness();
+test("patch_state is the only tool allowed to execute from its assistant response", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-barrier-integration-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const repositoryRoot = join(root, "state-flow");
+	mkdirSync(repositoryRoot);
+	writeFileSync(join(repositoryRoot, "config.json"), JSON.stringify({ logging: true }));
+	const h = harness({ agentDir: root, repositoryRoot });
 	await start(h, "Barrier task");
 	h.entries.push({
 		type: "message",
@@ -771,14 +776,15 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 			role: "assistant",
 			content: [
 				{ type: "toolCall", id: "history-1", name: "read_state", arguments: { offset: 1 } },
-				{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "echo stale" } },
+				{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "echo private sibling input" } },
 				{ type: "toolCall", id: "patch-1", name: "patch_state", arguments: { session: { working: { next: true } } } },
+				{ type: "thinking", thinking: "private reasoning body" },
 			],
 		},
 	});
 	const gate = h.handlers.get("tool_call")!;
 	assert.match(gate({ toolCallId: "history-1", toolName: "read_state", input: { offset: 1 } }, h.ctx).reason, /barrier/);
-	assert.match(gate({ toolCallId: "bash-1", toolName: "bash", input: { command: "echo stale" } }, h.ctx).reason, /barrier/);
+	assert.match(gate({ toolCallId: "bash-1", toolName: "bash", input: { command: "echo private sibling input" } }, h.ctx).reason, /barrier/);
 	assert.equal(gate({ toolCallId: "patch-1", toolName: "patch_state", input: { session: { working: { next: true } } } }, h.ctx), undefined);
 
 	h.entries.push({
@@ -792,6 +798,34 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 		},
 	});
 	assert.match(gate({ toolCallId: "patch-2", toolName: "patch_state", input: {} }, h.ctx).reason, /exactly one/);
+	assert.match(gate({ toolCallId: "patch-3", toolName: "patch_state", input: {} }, h.ctx).reason, /exactly one/);
+	const path = stateFlowLogPath(root);
+	const jsonl = readFileSync(path, "utf8");
+	assert.doesNotMatch(jsonl, /private sibling input|private reasoning body|"input"|"content"/);
+	const records = jsonl.trimEnd().split("\n").map((line) => JSON.parse(line));
+	const blockedSibling = "Blocked by the patch_state barrier; reconsider this action after State Flow rematerializes context";
+	const multiplePatches = "A State Flow barrier response must contain exactly one patch_state call";
+	assert.deepEqual(records.map(({ category, error, tool, toolCallId, batchToolNames }) => ({ category, error, tool, toolCallId, batchToolNames })), [
+		{ category: "barrier-block", error: blockedSibling, tool: "read_state", toolCallId: "history-1", batchToolNames: ["read_state", "bash", "patch_state"] },
+		{ category: "barrier-block", error: blockedSibling, tool: "bash", toolCallId: "bash-1", batchToolNames: ["read_state", "bash", "patch_state"] },
+		{ category: "barrier-block", error: multiplePatches, tool: "patch_state", toolCallId: "patch-2", batchToolNames: ["patch_state", "patch_state"] },
+		{ category: "barrier-block", error: multiplePatches, tool: "patch_state", toolCallId: "patch-3", batchToolNames: ["patch_state", "patch_state"] },
+	]);
+	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
+	assert.equal(gate({ toolCallId: "patch-3", toolName: "patch_state", input: {} }, h.ctx), undefined, "Passive has no patch barrier");
+	assert.equal(readFileSync(path, "utf8"), jsonl, "Passive does not record barrier diagnostics");
+});
+
+test("patch barrier still blocks calls without opt-in logging", async () => {
+	const h = harness();
+	await start(h, "Barrier without diagnostics");
+	h.entries.push({ type: "message", message: { role: "assistant", content: [
+		{ type: "toolCall", id: "patch-1", name: "patch_state", arguments: {} },
+		{ type: "toolCall", id: "patch-2", name: "patch_state", arguments: {} },
+	] } });
+	const gate = h.handlers.get("tool_call")!;
+	assert.match(gate({ toolCallId: "patch-1", toolName: "patch_state", input: {} }, h.ctx).reason, /exactly one/);
+	assert.equal(existsSync(stateFlowLogPath(h.agentDir)), false);
 });
 
 test("tool preflight walks only the selected native suffix for matching calls, without rebuilding a branch", async (t) => {

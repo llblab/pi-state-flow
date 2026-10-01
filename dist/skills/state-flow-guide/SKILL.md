@@ -15,7 +15,7 @@ State Flow's on-demand operational reference. Resolve the usage question or iden
 
 Passive tools access memory without starting an episode. Missing tools or storage are blockers, not permission to enable an episode or bypass storage; explanation alone remains possible.
 
-Operator commands: `/state-flow-status` inspects; `/state-flow-active` selects state-driven episodes; `/state-flow-passive` selects ordinary conversation with both memory tools and existing-state projection; `/state-flow-off` removes both tools and all State Flow context, including frozen handoffs, without deleting memory. Commands and Telegram change only the current session's `mode`. Global `mode` defaults to Passive for new sessions and never overrides retained choices. Do not change mode without operator authorization.
+Operator commands: `/state-flow-status` inspects; `/state-flow-active` selects state-driven episodes; `/state-flow-passive` selects ordinary conversation with both memory tools and existing-state projection; `/state-flow-off` removes both tools and all State Flow context, including frozen handoffs, without deleting memory. Commands and Telegram change only the current session's `mode`. Global `mode` defaults to Off for new sessions and never overrides retained choices. Do not change mode without operator authorization.
 
 ## Map
 

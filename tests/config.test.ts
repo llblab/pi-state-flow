@@ -21,12 +21,12 @@ function fixture(t: TestContext) {
 test("configuration is optional, read-only, and lives at the global repository root", (t) => {
 	const f = fixture(t);
 	assert.deepEqual(loadStateFlowConfig(f.agentDir), {
-		directory: f.repositoryRoot, mode: "passive", inactiveMode: "passive", logging: false, showSuccessfulPatches: true, historyLimit: 7,
+		directory: f.repositoryRoot, mode: "off", inactiveMode: "off", logging: false, showSuccessfulPatches: true, historyLimit: 7,
 	});
 	assert.equal(existsSync(f.path), false);
 	for (const [value, mode, inactiveMode] of [
 		[{ mode: "active" }, "active", "passive"], [{ mode: "passive" }, "passive", "passive"], [{ mode: "off" }, "off", "off"],
-		[{ logging: true, showSuccessfulPatches: false }, "passive", "passive"], [{ historyLimit: 0 }, "passive", "passive"], [{ historyLimit: 12 }, "passive", "passive"],
+		[{ logging: true, showSuccessfulPatches: false }, "off", "off"], [{ historyLimit: 0 }, "off", "off"], [{ historyLimit: 12 }, "off", "off"],
 	] as const) {
 		f.write(value);
 		const bytes = readFileSync(f.path);
@@ -45,7 +45,7 @@ test("configuration is optional, read-only, and lives at the global repository r
 test("legacy autoStart/passive flags map read-only to the default mode; explicit mode is authoritative", (t) => {
 	const f = fixture(t);
 	for (const [value, mode, inactiveMode] of [
-		[{}, "passive", "passive"],
+		[{}, "off", "off"],
 		[{ autoStart: false }, "passive", "passive"],
 		[{ autoStart: true }, "active", "passive"],
 		[{ autoStart: true, passiveBootstrap: false, passiveTools: false }, "active", "off"],
@@ -121,16 +121,20 @@ test("load-time default mode controls new sessions, not resumed branch mode", as
 	assert.deepEqual(reloaded.entries.map(({ data }) => data), [{ mode: "off" }]);
 });
 
-test("without configuration a new session defaults to passive without manufacturing storage", async (t) => {
+test("without configuration a new session defaults to Off without manufacturing storage", async (t) => {
 	const f = fixture(t);
 	const h = harness({ agentDir: f.agentDir, repositoryRoot: f.repositoryRoot, useConfiguredDirectory: true, mode: "configured",
-		initializeRepository: false, cwd: join(f.root, "project"), sessionId: "default-passive" });
+		initializeRepository: false, cwd: join(f.root, "project"), sessionId: "default-off" });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	assert.deepEqual(["read_state", "patch_state"].map((name) => h.activeTools.includes(name)), [true, true]);
-	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
-	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "passive" }], "the inherited default becomes session-owned without semantic storage");
+	assert.deepEqual(["read_state", "patch_state"].map((name) => h.activeTools.includes(name)), [false, false]);
+	assert.equal(h.statuses.at(-1), undefined);
+	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "off" }], "the inherited default becomes session-owned without semantic storage");
 	assert.equal(existsSync(join(f.repositoryRoot, "checkpoint.json")), false);
 	assert.equal(existsSync(f.path), false);
+	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
+	assert.deepEqual(["read_state", "patch_state"].map((name) => h.activeTools.includes(name)), [true, true]);
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
+	assert.equal(existsSync(join(f.repositoryRoot, "checkpoint.json")), false);
 });
 
 for (const reason of ["new", "resume"] as const) for (const mode of ["off", "passive"] as const) test(`pre-runtime ${mode} is retained independently of later defaults (${reason})`, async (t) => {

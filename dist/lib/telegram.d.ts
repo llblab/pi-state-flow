@@ -112,7 +112,7 @@ export interface StateFlowTelegramAdapter {
 /** Main-menu section label shows only the current session mode. */
 export declare function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string;
 export declare const STATE_FLOW_MODES: readonly ["off", "passive", "active"];
-/** Compact option values followed directly by read-only scope actions. */
+/** One radio-style mode row followed directly by read-only scope actions. */
 export declare function buildStateFlowSectionView(snapshot: StateFlowTelegramSnapshot, callbackData: (action: string, payload?: string) => string): StateFlowTelegramView;
 export declare function renderStateFlowRichState(scope: StateFlowTelegramScope, revisions: ScopeRevisions, state: StateFlowTelegramState): StateFlowTelegramRichMessage;
 /** Default loader; injectable so tests and embedded hosts can control transport presence. */

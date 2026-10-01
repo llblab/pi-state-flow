@@ -1290,16 +1290,14 @@ export default function stateFlowExtension(pi, options = {}) {
         const patchCalls = batch?.filter((name) => name === PATCH_STATE_TOOL_NAME).length ?? 0;
         if (patchCalls > 0) {
             if (patchCalls !== 1) {
-                return {
-                    block: true,
-                    reason: "A State Flow barrier response must contain exactly one patch_state call",
-                };
+                const reason = "A State Flow barrier response must contain exactly one patch_state call";
+                recordDiagnostic(reason, "barrier-block", ctx, { tool: event.toolName, toolCallId: event.toolCallId, batchToolNames: batch });
+                return { block: true, reason };
             }
             if (event.toolName !== PATCH_STATE_TOOL_NAME) {
-                return {
-                    block: true,
-                    reason: "Blocked by the patch_state barrier; reconsider this action after State Flow rematerializes context",
-                };
+                const reason = "Blocked by the patch_state barrier; reconsider this action after State Flow rematerializes context";
+                recordDiagnostic(reason, "barrier-block", ctx, { tool: event.toolName, toolCallId: event.toolCallId, batchToolNames: batch });
+                return { block: true, reason };
             }
         }
         skillReads.recordCall(event.toolCallId, event.toolName, event.input);

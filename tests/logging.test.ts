@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { appendStateFlowDiagnostic, projectDiagnosticContent, stateFlowLogPath } from "../lib/logging.ts";
+import { appendStateFlowDiagnostic, projectDiagnosticContent, StateFlowDiagnosticWriter, stateFlowLogPath } from "../lib/logging.ts";
 import { harness, start } from "./harness.ts";
 
 test("diagnostics preserve text but not reasoning bodies", () => {
@@ -18,6 +18,28 @@ test("diagnostics append local JSONL records", () => {
 	const path = stateFlowLogPath(agentDir);
 	appendStateFlowDiagnostic(path, { at: "2026-01-01T00:00:00.000Z", sessionId: "s", cwd: "/cwd", category: "invalid-patch", error: "invalid" });
 	assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { at: "2026-01-01T00:00:00.000Z", sessionId: "s", cwd: "/cwd", category: "invalid-patch", error: "invalid" });
+});
+
+test("barrier-block diagnostics persist only tool identities and batch names when enabled", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-barrier-log-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const path = stateFlowLogPath(join(root, "agent"));
+	const writer = new StateFlowDiagnosticWriter(true, path, join(root, "repository"), (warning) => assert.fail(warning));
+	const names = ["bash", "patch_state"];
+	writer.record("s", "/cwd", "Blocked by the patch_state barrier", "barrier-block", {
+		tool: "bash", toolCallId: "bash-1", batchToolNames: names,
+	});
+	names.push("read_state");
+	const { at, ...record } = JSON.parse(readFileSync(path, "utf8"));
+	assert.match(at, /^\d{4}-\d\d-\d\dT/);
+	assert.deepEqual(record, {
+		sessionId: "s", cwd: "/cwd", category: "barrier-block", error: "Blocked by the patch_state barrier",
+		tool: "bash", toolCallId: "bash-1", batchToolNames: ["bash", "patch_state"],
+	});
+	const offPath = stateFlowLogPath(join(root, "off"));
+	new StateFlowDiagnosticWriter(false, offPath, join(root, "repository"), (warning) => assert.fail(warning))
+		.record("s", "/cwd", "blocked", "barrier-block", { tool: "bash", toolCallId: "bash-1", batchToolNames: names });
+	assert.equal(existsSync(offPath), false);
 });
 
 test("diagnostics refuse symlinked paths without writing through them", (t) => {
