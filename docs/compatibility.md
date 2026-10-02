@@ -2,9 +2,9 @@
 
 ## Supported Pi stack
 
-State Flow requires matching `pi-coding-agent`, `pi-agent-core`, `pi-ai`, and `pi-tui` packages at `>=0.87.0`. Keep all four on the same release line. The open-ended peer range permits newer SDK releases; it does not certify them.
+State Flow requires matching `pi-coding-agent`, `pi-agent-core`, `pi-ai`, and `pi-tui` packages at `>=1.0.0`. Keep all four on the same release line. The open-ended peer range permits newer SDK releases; it does not certify them.
 
-The repository-local verified stack is Linux/x64, Node 26.8.1, Git 2.55.0 and Pi SDK 0.87.0. Repository validation covers tests, typecheck, build, compiled imports and package dry-run; successful results are bound to the validated source and dependency identities. The release workflow uses Node 24; its result is a separate verification gate.
+The repository-local verified stack is Linux/x64, Node 26.8.1, Git 2.55.0 and matching Pi SDK 1.0.0 packages. Earlier source-bound measurements on Pi 0.87.0 remain historical evidence, not 1.0.0 performance results. Repository validation covers tests, typecheck, build, compiled imports and package dry-run; successful results are bound to the validated source and dependency identities. The release workflow uses Node 24; its result is a separate verification gate.
 
 Tests use isolated stores and scripted providers through the real Pi SDK. They do not certify installed Telegram/TUI reachability, live provider behavior, other operating systems, mixed SDK versions or untested newer SDK releases. Detailed behavioral witnesses live in [temporal acceptance](temporal-acceptance.md); benchmark methodology and source-bound results live in [performance](performance.md).
 

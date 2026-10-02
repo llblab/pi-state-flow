@@ -2,10 +2,48 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	createSessionRuntime, emptySnapshot, parseRetainedPiCheckpoint, parseSessionRuntime,
-	preRuntimeCheckpoint, retainedBoundaryCheckpoint, serializeSessionRuntime,
+	preRuntimeCheckpoint, readCheckpointMode, retainedBoundaryCheckpoint, serializeSessionRuntime,
 } from "../lib/snapshot.ts";
 import { createTemporalState } from "../lib/temporal.ts";
 import { emptyState } from "../lib/state.ts";
+
+test("mode-only policy reads never inspect checkpoint metadata or prove restoration", () => {
+	for (const mode of ["active", "passive", "off"] as const) {
+		const inspected: PropertyKey[] = [];
+		const candidate = new Proxy({ mode }, {
+			get(target, key, receiver) {
+				inspected.push(key);
+				if (key !== "mode") throw new Error(`Memory metadata accessed: ${String(key)}`);
+				return Reflect.get(target, key, receiver);
+			},
+			ownKeys() { throw new Error("Memory metadata enumerated"); },
+		});
+		assert.equal(readCheckpointMode(candidate), mode);
+		assert.ok(inspected.every((key) => key === "mode"));
+		// Policy is usable even when the historical checkpoint is unavailable or malformed.
+		for (const metadata of [{ boundary: "expired", step: 1 }, { boundary: null, step: -1 }, { revision: "retired" }]) {
+			assert.equal(readCheckpointMode({ ...metadata, mode }), mode);
+		}
+	}
+	assert.equal(readCheckpointMode({ mode: "active" }), "active");
+	assert.throws(() => parseRetainedPiCheckpoint({ mode: "active" }), /retained-boundary checkpoint/);
+});
+
+test("mode-only decoding preserves explicit policies and strict legacy compatibility", () => {
+	for (const inactive of ["passive", "off"] as const) {
+		assert.equal(readCheckpointMode({ enabled: true }, inactive), "active");
+		assert.equal(readCheckpointMode({ enabled: false }, inactive), inactive);
+		for (const mode of ["active", "passive", "off"] as const) {
+			assert.equal(readCheckpointMode({ mode }, inactive), mode);
+			for (const enabled of [true, false, undefined]) {
+				assert.equal(readCheckpointMode({ mode, enabled }, inactive), undefined);
+			}
+		}
+		for (const invalid of [undefined, null, [], true, "off", {}, { mode: "on" }, { mode: null }, { enabled: "false" }, { disabled: true }]) {
+			assert.equal(readCheckpointMode(invalid, inactive), undefined);
+		}
+	}
+});
 
 test("session config/runtime codec separates runtime provenance from semantic state", () => {
 	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");

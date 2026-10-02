@@ -26,10 +26,12 @@ export interface SnapshotConfig {
 }
 
 /**
- * Read-only compatibility for session config and native checkpoints written before `mode`:
- * `enabled:true` stays active; `enabled:false` stays the caller's inactive policy.
+ * Read only mode policy, without validating or accessing semantic checkpoint metadata.
+ * Missing/invalid policy stays undecided; callers must not treat this as restoration proof.
+ * Legacy `enabled:false` follows the caller's inactive policy.
  */
-function decodeLegacyMode(value: JsonObject, inactiveMode: InactiveMode): StateFlowMode | undefined {
+export function readCheckpointMode(value: unknown, inactiveMode: InactiveMode = "passive"): StateFlowMode | undefined {
+	if (!isObject(value)) return undefined;
 	if (Object.hasOwn(value, "mode")) return Object.hasOwn(value, "enabled") || !isStateFlowMode(value.mode) ? undefined : value.mode;
 	return typeof value.enabled === "boolean" ? value.enabled ? "active" : inactiveMode : undefined;
 }
@@ -134,7 +136,7 @@ export function parseSessionRuntime(
 	let runtime: unknown;
 	try {
 		const settings: unknown = JSON.parse(config);
-		const mode = isObject(settings) && Object.keys(settings).length === 1 ? decodeLegacyMode(settings, "passive") : undefined;
+		const mode = isObject(settings) && Object.keys(settings).length === 1 ? readCheckpointMode(settings, "passive") : undefined;
 		if (mode === undefined) throw new Error("Invalid State Flow runtime configuration or counters");
 		runtime = { config: { mode }, meta: JSON.parse(runtimeSource) };
 	} catch (error) {
@@ -230,7 +232,7 @@ export function parseRetainedPiCheckpoint(value: unknown, inactiveMode: Inactive
 	if (keys.length === 1 && value.disabled === true) return { mode: inactiveMode };
 	if (keys.length === 1 && (value.mode === "passive" || value.mode === "off")) return { mode: value.mode };
 	const allowed = new Set(["boundary", "mode", "enabled", "step", "bootstrap", "specification"]);
-	const mode = decodeLegacyMode(value, inactiveMode);
+	const mode = readCheckpointMode(value, inactiveMode);
 	if (keys.some((key) => !allowed.has(key))
 		|| typeof value.boundary !== "string" || value.boundary.trim().length === 0
 		|| mode === undefined

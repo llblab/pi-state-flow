@@ -15,10 +15,13 @@ export function isStateFlowMode(value) {
     return value === "active" || value === "passive" || value === "off";
 }
 /**
- * Read-only compatibility for session config and native checkpoints written before `mode`:
- * `enabled:true` stays active; `enabled:false` stays the caller's inactive policy.
+ * Read only mode policy, without validating or accessing semantic checkpoint metadata.
+ * Missing/invalid policy stays undecided; callers must not treat this as restoration proof.
+ * Legacy `enabled:false` follows the caller's inactive policy.
  */
-function decodeLegacyMode(value, inactiveMode) {
+export function readCheckpointMode(value, inactiveMode = "passive") {
+    if (!isObject(value))
+        return undefined;
     if (Object.hasOwn(value, "mode"))
         return Object.hasOwn(value, "enabled") || !isStateFlowMode(value.mode) ? undefined : value.mode;
     return typeof value.enabled === "boolean" ? value.enabled ? "active" : inactiveMode : undefined;
@@ -82,7 +85,7 @@ export function parseSessionRuntime(config, runtimeSource, cwd, sessionId) {
     let runtime;
     try {
         const settings = JSON.parse(config);
-        const mode = isObject(settings) && Object.keys(settings).length === 1 ? decodeLegacyMode(settings, "passive") : undefined;
+        const mode = isObject(settings) && Object.keys(settings).length === 1 ? readCheckpointMode(settings, "passive") : undefined;
         if (mode === undefined)
             throw new Error("Invalid State Flow runtime configuration or counters");
         runtime = { config: { mode }, meta: JSON.parse(runtimeSource) };
@@ -166,7 +169,7 @@ export function parseRetainedPiCheckpoint(value, inactiveMode = "passive") {
     if (keys.length === 1 && (value.mode === "passive" || value.mode === "off"))
         return { mode: value.mode };
     const allowed = new Set(["boundary", "mode", "enabled", "step", "bootstrap", "specification"]);
-    const mode = decodeLegacyMode(value, inactiveMode);
+    const mode = readCheckpointMode(value, inactiveMode);
     if (keys.some((key) => !allowed.has(key))
         || typeof value.boundary !== "string" || value.boundary.trim().length === 0
         || mode === undefined

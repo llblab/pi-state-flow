@@ -20,7 +20,7 @@ import {
 	type StateFlowTelegramSnapshot,
 	type StateFlowTelegramView,
 } from "../lib/telegram.ts";
-import { captureTemporalFileBases } from "../lib/durable.ts";
+import { captureTemporalFileBases, sessionRuntimePaths } from "../lib/durable.ts";
 import { emptyState } from "../lib/state.ts";
 import { harness } from "./harness.ts";
 import { writeGlobalState } from "./storage-fixture.ts";
@@ -349,17 +349,21 @@ for (const active of [false, true]) test(`Telegram inspection awaits a current c
 	assert.deepEqual(h.entries, entries);
 	await release();
 	await pending;
-	assert.equal(inspect.edits.length, 0);
-	assert.equal(inspect.richMessages.length, 1);
-	const rendered = JSON.stringify(inspect.richMessages);
-	for (const value of ["LATEST-G", "LATEST-C", `g1c1s${active ? 1 : 0}`]) assert.ok(rendered.includes(value), value);
-	assert.equal(rendered.includes("FOREIGN-PRIVATE"), false);
-	assert.equal(rendered.includes("LOCAL"), active);
+	if (active) {
+		assert.equal(inspect.edits.length, 0);
+		assert.equal(inspect.richMessages.length, 1);
+		const rendered = JSON.stringify(inspect.richMessages);
+		for (const value of ["LATEST-G", "LATEST-C", "g1c1s1", "LOCAL"]) assert.ok(rendered.includes(value), value);
+		assert.equal(rendered.includes("FOREIGN-PRIVATE"), false);
+	} else {
+		assert.equal(inspect.richMessages.length, 0, "shared data cannot prove an unacquired private layer is empty");
+		assert.match(inspect.edits[0]!.text, /Current State Flow session memory is unavailable/);
+	}
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 	assert.deepEqual(h.entries, entries);
 });
 
-for (const boundary of ["stop", "session_tree", "session_shutdown"] as const) test(`Telegram inspection withdraws at ${boundary} without presenting a stale owner`, { timeout: 5_000 }, async (t) => {
+for (const boundary of ["stop", "off", "session_tree", "session_shutdown"] as const) test(`Telegram inspection withdraws at ${boundary} without presenting a stale owner`, { timeout: 5_000 }, async (t) => {
 	let selection: Promise<unknown> | undefined;
 	const { modules, sections } = fakeModules();
 	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
@@ -378,6 +382,7 @@ for (const boundary of ["stop", "session_tree", "session_shutdown"] as const) te
 		cancellation.abort();
 		await stopping;
 	}
+	else if (boundary === "off") await h.commands.get("state-flow-off")!.handler("", h.ctx);
 	else {
 		if (boundary === "session_tree") h.ctx.sessionManager.getBranch = () => [];
 		selection = Promise.resolve(h.handlers.get(boundary)!({}, h.ctx));
@@ -398,7 +403,7 @@ for (const boundary of ["stop", "session_tree", "session_shutdown"] as const) te
 	}
 });
 
-test("Telegram Stop remains responsive during publication waiting and repeated callbacks share one acceptance", { timeout: 5_000 }, async (t) => {
+test("Telegram Off remains responsive without acquiring publication and repeated callbacks are native-inert", { timeout: 5_000 }, async (t) => {
 	const { modules, sections } = fakeModules();
 	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
@@ -410,7 +415,7 @@ test("Telegram Stop remains responsive during publication waiting and repeated c
 	const stopping = sections[0].handleCallback!(first.context);
 	await delay(40);
 	assert.deepEqual(first.notices, ["Switching State Flow to off"]);
-	assert.equal(first.edits.length, 0);
+	assert.equal(first.edits.length, 1);
 	assert.equal(h.statuses.at(-1), undefined);
 	assert.equal(sections[0].getLabel!(), "🌀 State Flow: off");
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
@@ -419,12 +424,74 @@ test("Telegram Stop remains responsive during publication waiting and repeated c
 	await delay(10);
 	await release();
 	await Promise.all([stopping, repeat]);
-	assert.equal(publication.mock.calls.length, 1);
-	assert.equal(first.edits.length, 0, "the newer callback owns the resulting view");
+	assert.equal(publication.mock.calls.length, 0);
+	assert.equal(first.edits.length, 1, "the first native choice was already accepted before the repeat");
 	assert.deepEqual(repeated.notices, ["Switching State Flow to off"]);
 	assert.match(repeated.edits[0]!.text, /<code>off<\/code>/);
 	assert.doesNotMatch(repeated.edits[0]!.text, /\n\nState Flow off$/);
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
+});
+
+for (const next of ["passive", "active", "expired"] as const) test(`Off inspection reads current private bytes without acquiring policy or replacing selected history (next=${next})`, async () => {
+	const { modules, sections } = fakeModules();
+	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await new Promise((resolve) => setImmediate(resolve));
+	await h.tools.get("patch_state")!.execute("initial", { global: { working: { global: "GLOBAL" } }, cwd: { working: { cwd: "CWD" } }, session: { working: { private: "SELECTED-OLD" } } }, undefined, undefined, h.ctx);
+	const peer = new TemporalRuntime(h.ctx.cwd, "harness-session", h.repositoryRoot);
+	const peerSnapshot = h.resolveSnapshot();
+	await peer.withStartTransaction((current, publish) => { assert.ok(current); publish(current); });
+	await h.commands.get("state-flow-off")!.handler("", h.ctx);
+	const advances = next === "expired" ? 9 : 1;
+	for (let index = 1; index <= advances; index++) await peer.withPatchTransaction((tx) => {
+		const stage = stageAtomicScopePatches(tx.states, { session: { working: { private: `CURRENT-${index}` } } }, [], tx.causalBasis);
+		commitScopedTransition(peerSnapshot, tx.states, stage, (accepted, snapshot) => tx.publish(snapshot, accepted), tx.causalBasis);
+	});
+	const entries = structuredClone(h.entries), files = captureTemporalFileBases(h.ctx.cwd, "harness-session", h.repositoryRoot);
+	for (const scope of ["global", "cwd", "session", "effective"]) {
+		const inspect = sectionContext("inspect", scope);
+		await sections[0].handleCallback!(inspect.context);
+		assert.equal(inspect.richMessages.length, 1, scope);
+		const rendered = JSON.stringify(inspect.richMessages);
+		assert.ok(rendered.includes(scope === "global" ? "GLOBAL" : scope === "cwd" ? "CWD" : `CURRENT-${advances}`));
+		assert.equal(rendered.includes("SELECTED-OLD"), false);
+		if (scope === "effective") assert.ok(rendered.includes(`g1c1s${advances + 1}`));
+		assert.throws(() => h.readState(), /temporal runtime is unavailable/, "operator reads cannot install the model cache");
+	}
+	assert.equal(h.activeTools.includes("read_state"), false);
+	assert.equal(h.handlers.get("context")!({ messages: [] }, h.ctx), undefined);
+	assert.deepEqual(h.entries, entries);
+	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, "harness-session", h.repositoryRoot), files);
+	await h.commands.get(next === "active" ? "state-flow-active" : "state-flow-passive")!.handler("", h.ctx);
+	if (next === "expired") await assert.rejects(h.tools.get("read_state")!.execute("expired", { path: "session.working.private" }), /outside the retained temporal window/);
+	else assert.equal(h.readState(0, "session").working.private, next === "passive" ? "SELECTED-OLD" : "CURRENT-1");
+});
+
+for (const fault of ["missing", "malformed", "pending-fork"] as const) test(`Off private/Effective inspection rejects unproven current memory (fault=${fault})`, async () => {
+	const { modules, sections } = fakeModules();
+	const source = harness({ initializeRepository: false, mode: "active" });
+	await source.handlers.get("session_start")!({ reason: "new" }, source.ctx);
+	await source.tools.get("patch_state")!.execute("parent", { global: { working: { shared: "SHARED" } }, session: { working: { private: "FOREIGN-PRIVATE" } } }, undefined, undefined, source.ctx);
+	const id = fault === "malformed" ? "harness-session" : "unacquired-child";
+	const h = harness({ initializeRepository: false, cwd: source.ctx.cwd, repositoryRoot: source.repositoryRoot, sessionId: id, telegram: { load: async () => modules } });
+	if (fault === "malformed") writeFileSync(sessionRuntimePaths(h.ctx.cwd, id, h.repositoryRoot).runtime, "malformed runtime");
+	if (fault === "pending-fork") h.entries.push({ type: "custom", customType: "state-flow-passive-stop", data: { owner: id, memoryDeferred: true, mode: "off", forkPending: true } });
+	await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
+	await new Promise((resolve) => setImmediate(resolve));
+	const files = captureTemporalFileBases(h.ctx.cwd, id, h.repositoryRoot), entries = structuredClone(h.entries);
+	for (const scope of ["session", "effective"]) {
+		const inspect = sectionContext("inspect", scope);
+		await sections[0].handleCallback!(inspect.context);
+		assert.equal(inspect.richMessages.length, 0);
+		assert.equal(inspect.edits.length, 1);
+		assert.doesNotMatch(JSON.stringify(inspect.edits), /FOREIGN-PRIVATE/);
+	}
+	const shared = sectionContext("inspect", "global");
+	await sections[0].handleCallback!(shared.context);
+	assert.match(JSON.stringify(shared.richMessages), /SHARED/);
+	assert.throws(() => h.readState(), /temporal runtime is unavailable/);
+	assert.deepEqual(h.entries, entries);
+	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, id, h.repositoryRoot), files);
 });
 
 test("Telegram absent or malformed memory is unavailable, never an invented empty Rich state", async () => {
@@ -468,7 +535,7 @@ test("Telegram can load shared state for inspection when passive model tools are
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 });
 
-test("Telegram Stop reports local success after CAS failure and keeps accepted cached memory inspectable", async () => {
+test("Telegram Passive reports local success after CAS failure and keeps accepted cached memory inspectable", async () => {
 	const { modules, sections } = fakeModules();
 	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
@@ -482,11 +549,11 @@ test("Telegram Stop reports local success after CAS failure and keeps accepted c
 	await peer.tools.get("patch_state")!.execute("peer", { session: { working: { other: true } } }, undefined, undefined, peer.ctx);
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const before = files();
-	const stop = sectionContext("off");
+	const stop = sectionContext("passive");
 	assert.equal(await sections[0].handleCallback!(stop.context), "handled");
-	assert.deepEqual(stop.notices, ["Switching State Flow to off"]);
-	assert.match(stop.edits[0]!.text, /off; memory writes paused/);
-	assert.equal(h.statuses.at(-1), undefined);
+	assert.deepEqual(stop.notices, ["Switching State Flow to passive"]);
+	assert.match(stop.edits[0]!.text, /passive; memory writes paused/);
+	assert.match(h.statuses.at(-1)!, /passive/);
 	for (const scope of ["global", "cwd", "session", "effective"]) {
 		const inspect = sectionContext("inspect", scope);
 		assert.equal(await sections[0].handleCallback!(inspect.context), "handled");

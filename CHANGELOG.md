@@ -2,7 +2,13 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
-## Unreleased
+## 0.24.0: Memory-Inert Off and Pi 1.0
+
+- `Memory-inert Off`: Off startup, resume, reload, tree navigation and automatic callbacks perform no semantic-store I/O or recovery reporting, even with logging enabled. Switching to Off cancels owned memory waits and clears model tools/context without altering accepted memory; native mode, continuation, write-fence and pending-fork policy survive.
+- `Safe reacquisition`: Passive restores the selected retained private boundary over live shared memory; Active validates current same-session memory. Pending Active can be cancelled or superseded by Passive without losing deferred history or inventing a write fence. Cold pending forks still require their exact proven source; expired history fails closed and bootstrap handoffs remain intact.
+- `Read-only inspection`: Explicit Off inspections use disposable current-store readers, never install model cache or mutate stored bytes, mode, fences or deferred selection. Session/Effective require validated same-session authority rather than fabricated empty or foreign private state; revisions describe the inspected view.
+- `Owned background work`: Off/shutdown cancel only owned backup captures and Git pushes, drain resources without late warnings and preserve accepted commits. Completed agent operations do not cancel admitted background pushes. Stale State Flow compaction requests cancel without model-summary fallback; old completion cannot clear a newer plan, and native operator/threshold compaction remains unchanged.
+- `Pi 1.0 and packaging`: Requires matching Pi packages at 1.0.0 or newer and pins local verification to 1.0.0. Token estimation uses coding-agent's public export, fixing the removed agent-core API; the transitive brace-expansion patch is locked to 5.0.12. The npm package declares MIT licensing and includes LICENSE. Canonical storage formats and scope ownership remain unchanged.
 
 ## 0.23.0: Off by Default and Mode Controls
 

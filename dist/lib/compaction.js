@@ -1,4 +1,4 @@
-import { estimateTokens } from "@earendil-works/pi-agent-core";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 export const STATE_FLOW_COMPACTION_SUMMARY = "State Flow accepted the completed work before this boundary. Current memory is restored from its retained semantic boundary and projected separately; use the retained native entries for subsequent work.";
 /** A modest margin above Pi's default 20k retained suffix absorbs estimation drift. */
 export const STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS = 24_000;

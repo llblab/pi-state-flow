@@ -36,7 +36,7 @@ test("accepted turns defer canonical-file backup and replication until agent_bef
 	assert.equal(head(), backedUp, "notification-only settlement does not repeat backup work");
 });
 
-test("session shutdown awaits a slow failing push without post-shutdown writes or warnings", async () => {
+for (const boundary of ["off", "shutdown"] as const) test(`inactive lifetime cancels and drains a blocked push without late writes/warnings (boundary=${boundary})`, async (t) => {
 	const h = harness();
 	await start(h);
 	const entered = join(h.repositoryRoot, "push-entered");
@@ -44,6 +44,7 @@ test("session shutdown awaits a slow failing push without post-shutdown writes o
 	const hook = join(h.repositoryRoot, ".git", "hooks", "pre-push");
 	writeFileSync(hook, `#!/bin/sh\nprintf 'entered\\n' > ${JSON.stringify(entered)}\nwhile [ ! -e ${JSON.stringify(release)} ]; do sleep 0.02; done\nexit 1\n`);
 	chmodSync(hook, 0o755);
+	t.after(async () => { writeFileSync(release, "go\n"); await awaitInFlightBackupPushes(h.repositoryRoot); });
 	await commitTerminal(h, {}, { accepted: 1 }, "Accepted answer");
 	await h.handlers.get("agent_before_settle")!({}, h.ctx);
 	await waitFor(() => existsSync(entered));
@@ -51,12 +52,13 @@ test("session shutdown awaits a slow failing push without post-shutdown writes o
 	const remote = execFileSync("git", ["-C", h.repositoryRoot, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
 	const remoteHead = execFileSync("git", ["-C", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
 	const warnings = [...h.notifications];
-	let settled = false;
-	const shutdown = Promise.resolve(h.handlers.get("session_shutdown")!({}, h.ctx)).then(() => { settled = true; });
-	await new Promise((resolve) => setTimeout(resolve, 30));
-	assert.equal(settled, false);
-	writeFileSync(release, "go\n");
-	await shutdown;
+	if (boundary === "off") await h.commands.get("state-flow-off")!.handler("", h.ctx);
+	else await h.handlers.get("session_shutdown")!({}, h.ctx);
+	let closed = false;
+	const drained = awaitInFlightBackupPushes(h.repositoryRoot).then(() => { closed = true; });
+	await waitFor(() => closed, 5_000);
+	await drained;
+	assert.equal(existsSync(release), false, "the blocked push closed without releasing its hook");
 	await new Promise((resolve) => setTimeout(resolve, 50));
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), files);
 	assert.equal(execFileSync("git", ["-C", remote, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim(), remoteHead);

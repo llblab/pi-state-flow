@@ -1,4 +1,4 @@
-import { parseRetainedPiCheckpoint } from "./snapshot.js";
+import { parseRetainedPiCheckpoint, readCheckpointMode } from "./snapshot.js";
 export const SNAPSHOT_ENTRY_TYPE = "state-flow-snapshot";
 /** Enumerate active-branch snapshots newest-first while containing hostile entries. */
 export function discoverSnapshotData(branch) {
@@ -15,6 +15,65 @@ export function discoverSnapshotData(branch) {
         }
     }
     return { candidates, errors };
+}
+/** Read native mode policy only; semantic checkpoint validity remains the recovery owner's concern. */
+export function findBranchPolicy(branch, sessionId, stopEntryType, inactiveMode) {
+    let stopReset = false;
+    for (let index = branch.length - 1; index >= 0; index--) {
+        try {
+            const entry = branch[index];
+            if (entry?.type !== "custom")
+                continue;
+            if (entry.customType === SNAPSHOT_ENTRY_TYPE) {
+                const mode = readCheckpointMode(entry.data, inactiveMode);
+                if (mode !== undefined)
+                    return { mode };
+                const data = entry.data;
+                if (data?.disabled === true && !Object.hasOwn(data, "mode") && !Object.hasOwn(data, "enabled"))
+                    return { mode: inactiveMode };
+            }
+            else if (stopEntryType !== undefined && entry.customType === stopEntryType) {
+                const data = entry.data;
+                if (!data || stopReset || (sessionId === undefined ? typeof data.owner !== "string" || !data.owner.trim() : data.owner !== sessionId))
+                    continue;
+                if (data.reset === true) {
+                    stopReset = true;
+                    continue;
+                }
+                if (Number.isSafeInteger(data.at) && data.at >= 0 && data.memoryDeferred === true && data.mode === "off") {
+                    return { mode: "off", ...(typeof data.persistenceError === "string" && data.persistenceError.trim() ? { persistenceError: data.persistenceError } : {}) };
+                }
+                if (Number.isSafeInteger(data.at) && data.at >= 0 && typeof data.persistenceError === "string" && data.persistenceError.trim()) {
+                    return { mode: data.mode === "off" || data.mode === "passive" ? data.mode : inactiveMode, persistenceError: data.persistenceError };
+                }
+            }
+        }
+        catch {
+            // Malformed native policy cannot prevent another explicit retained choice from being read.
+        }
+    }
+    return undefined;
+}
+/** Native policy bookkeeping retains an unacquired fork across extension reloads. */
+export function hasPendingFork(branch, sessionId, entryType) {
+    for (let index = branch.length - 1; index >= 0; index--) {
+        try {
+            const entry = branch[index];
+            if (entry?.type !== "custom" || entry.customType !== entryType)
+                continue;
+            const data = entry.data;
+            if (data?.owner !== sessionId)
+                continue;
+            if (data.reset === true)
+                return false;
+            if (data.forkPending === true)
+                return true;
+        }
+        catch {
+            // Unrelated native entries grant no fork authority.
+        }
+    }
+    return false;
 }
 export function snapshotDataNewestFirst(branch) {
     return discoverSnapshotData(branch).candidates;

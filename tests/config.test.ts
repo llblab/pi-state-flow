@@ -108,7 +108,7 @@ test("load-time default mode controls new sessions, not resumed branch mode", as
 	resumed.entries.push(...stopped);
 	await resumed.handlers.get("session_start")!({ reason: "resume" }, resumed.ctx);
 	assert.equal(resumed.activeTools.includes("patch_state"), false);
-	assert.equal(resumed.readState().working.retained, true);
+	assert.throws(() => resumed.readState(), /temporal runtime is unavailable/);
 	f.write({ mode: "off" });
 	// An existing registration retains its settings until reload, even for another new session.
 	h.entries.splice(0);

@@ -206,14 +206,15 @@ export function backupCurrentStateFlowFiles(repositoryRoot: string, signal?: Abo
 }
 
 /** Skip overlapping pushes; the next accepted turn can push the latest HEAD. */
-export function startStateFlowBackupPush(repositoryRoot: string, onFailure: (error: unknown) => void, onSuccess?: () => void): boolean {
+export function startStateFlowBackupPush(repositoryRoot: string, onFailure: (error: unknown) => void, onSuccess?: () => void, signal?: AbortSignal): boolean {
 	const root = resolve(repositoryRoot);
-	if (activePushes.has(root)) return false;
-	const push = pushCurrentStateFlowBackup(root).then(
+	if (signal?.aborted || activePushes.has(root)) return false;
+	const push = pushCurrentStateFlowBackup(root, signal).then(
 		(result) => {
-			if (result) { try { onSuccess?.(); } catch { /* Reporting cannot change push acceptance. */ } }
+			if (result && !signal?.aborted) { try { onSuccess?.(); } catch { /* Reporting cannot change push acceptance. */ } }
 		},
 		(error) => {
+			if (signal?.aborted) return;
 			try { onFailure(error); } catch { /* Reporting cannot revive a failed push. */ }
 		},
 	).finally(() => { activePushes.delete(root); });
@@ -228,15 +229,17 @@ export async function awaitInFlightBackupPushes(repositoryRoot: string): Promise
 }
 
 /** Push the current backup commit to its explicitly configured branch remote without blocking settlement. */
-export function pushCurrentStateFlowBackup(repositoryRoot: string): Promise<{ commit: string; remote: string; ref: string } | undefined> {
+export function pushCurrentStateFlowBackup(repositoryRoot: string, signal?: AbortSignal): Promise<{ commit: string; remote: string; ref: string } | undefined> {
 	return new Promise((resolvePush, rejectPush) => {
 		let root: string;
 		let commit: string | undefined;
 		let destination: { remote: string; ref: string } | undefined;
 		try {
+			signal?.throwIfAborted();
 			root = assertRepositoryRoot(repositoryRoot);
 			commit = currentHead(root);
 			destination = configuredPushDestination(root);
+			signal?.throwIfAborted();
 		} catch (error) {
 			rejectPush(new Error(redactGitDiagnostic(error instanceof Error ? error.message : String(error))));
 			return;
@@ -273,6 +276,7 @@ export function pushCurrentStateFlowBackup(repositoryRoot: string): Promise<{ co
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeout);
+			signal?.removeEventListener("abort", cancelled);
 			if (error) rejectPush(error);
 			else resolvePush({ commit: commit!, ...destination! });
 		}
@@ -284,5 +288,10 @@ export function pushCurrentStateFlowBackup(repositoryRoot: string): Promise<{ co
 		child.once("exit", () => { if (failure) child.stderr?.destroy(); });
 		child.once("close", (code, endedBy) => finish(failure ?? (code === 0 ? undefined
 			: new Error(`Git backup push failed (${endedBy ?? code}): ${redactGitDiagnostic(stderr.trim()) || "no diagnostic output"}`))));
+		function cancelled(): void {
+			terminate(signal?.reason instanceof Error ? signal.reason : new Error("Git backup push cancelled"));
+		}
+		signal?.addEventListener("abort", cancelled, { once: true });
+		if (signal?.aborted) cancelled();
 	});
 }

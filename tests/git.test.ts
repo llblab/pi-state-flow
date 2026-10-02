@@ -14,10 +14,25 @@ import { createAcceptedTransition } from "../lib/history.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import "./git-environment.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
+import { withoutStoreIO } from "./store-io-spy.ts";
 
 function git(root: string, ...args: string[]): string {
 	return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
 }
+
+test("pre-aborted push ownership admits no repository probes or callbacks", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-push-aborted-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const controller = new AbortController();
+	controller.abort();
+	const calls: unknown[] = [];
+	await withoutStoreIO(t, root, async () => {
+		assert.equal(startStateFlowBackupPush(root, (error) => calls.push(error), () => calls.push("success"), controller.signal), false);
+		await assert.rejects(pushCurrentStateFlowBackup(root, controller.signal), /aborted/);
+		await awaitInFlightBackupPushes(root);
+	});
+	assert.deepEqual(calls, []);
+});
 
 test("backup requires the exact State Flow root to be a Git repository", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-no-git-"));
@@ -66,7 +81,7 @@ test("backup replication pushes the exact current commit only to the configured 
 	assert.equal(git(remote, "rev-parse", "refs/heads/main"), commit);
 });
 
-test("in-flight backup push settlement closes the process and prevents overlapping pushes", { timeout: 30_000 }, async (t) => {
+for (const cancelled of [false, true]) test(`backup push ownership prevents overlap and drains close (cancelled=${cancelled})`, { timeout: 30_000 }, async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-push-lifecycle-"));
 	const remote = join(root, "remote.git");
 	const repository = join(root, "store");
@@ -96,7 +111,9 @@ test("in-flight backup push settlement closes the process and prevents overlappi
 		rmSync(root, { recursive: true, force: true });
 	});
 	const failures: unknown[] = [];
-	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error)), true);
+	const controller = new AbortController();
+	let successes = 0;
+	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error), () => { successes++; }, controller.signal), true);
 	const deadline = Date.now() + 5_000;
 	while (!existsSync(entered)) {
 		if (Date.now() > deadline) throw new Error("Timed out waiting for the slow push");
@@ -105,20 +122,29 @@ test("in-flight backup push settlement closes the process and prevents overlappi
 	writeFileSync(join(repository, "checkpoint.json"), "{\"next\":true}\n");
 	const second = (await backupCurrentStateFlowFiles(repository))!;
 	assert.notEqual(second, first);
-	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error)), false);
+	const nonOwner = new AbortController();
+	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error), undefined, nonOwner.signal), false);
+	nonOwner.abort();
 	assert.equal(readFileSync(entered, "utf8"), "push\n");
 	let settled = false;
 	const shutdown = awaitInFlightBackupPushes(repository).then(() => { settled = true; });
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	assert.equal(settled, false, "shutdown must wait for the active push process");
-	writeFileSync(release, "go");
+	const ending = Date.now();
+	if (cancelled) controller.abort();
+	else writeFileSync(release, "go");
 	await shutdown;
+	assert.ok(Date.now() - ending < 5_000, "cancellation must close the child, not wait for its 15-second timeout");
 	assert.equal(failures.length, 0);
-	assert.equal(git(remote, "rev-parse", "refs/heads/main"), first);
-	const remoteBefore = readFileSync(join(remote, "refs", "heads", "main"));
+	assert.equal(successes, cancelled ? 0 : 1);
+	const remoteRef = join(remote, "refs", "heads", "main");
+	if (cancelled) assert.equal(existsSync(remoteRef), false, "the aborted transport never reaches the local remote");
+	else assert.equal(git(remote, "rev-parse", "refs/heads/main"), first);
+	const remoteBefore = existsSync(remoteRef) ? readFileSync(remoteRef) : undefined;
 	await new Promise((resolve) => setTimeout(resolve, 50));
-	assert.deepEqual(readFileSync(join(remote, "refs", "heads", "main")), remoteBefore, "no remote writes after shutdown resolves");
+	assert.deepEqual(existsSync(remoteRef) ? readFileSync(remoteRef) : undefined, remoteBefore, "no remote writes after shutdown resolves");
 	assert.equal(readFileSync(entered, "utf8"), "push\n");
+	writeFileSync(release, "go");
 	assert.equal(startStateFlowBackupPush(repository, (error) => failures.push(error)), true);
 	await awaitInFlightBackupPushes(repository);
 	assert.equal(git(remote, "rev-parse", "refs/heads/main"), second, "a later turn retries the latest HEAD");

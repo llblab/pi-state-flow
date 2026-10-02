@@ -204,18 +204,20 @@ export function backupCurrentStateFlowFiles(repositoryRoot, signal, waitForLock 
     return withBackupLock(repositoryRoot, (root) => commitCurrentOwnedFiles(root, currentHead(root), signal, waitForLock), signal, waitForLock);
 }
 /** Skip overlapping pushes; the next accepted turn can push the latest HEAD. */
-export function startStateFlowBackupPush(repositoryRoot, onFailure, onSuccess) {
+export function startStateFlowBackupPush(repositoryRoot, onFailure, onSuccess, signal) {
     const root = resolve(repositoryRoot);
-    if (activePushes.has(root))
+    if (signal?.aborted || activePushes.has(root))
         return false;
-    const push = pushCurrentStateFlowBackup(root).then((result) => {
-        if (result) {
+    const push = pushCurrentStateFlowBackup(root, signal).then((result) => {
+        if (result && !signal?.aborted) {
             try {
                 onSuccess?.();
             }
             catch { /* Reporting cannot change push acceptance. */ }
         }
     }, (error) => {
+        if (signal?.aborted)
+            return;
         try {
             onFailure(error);
         }
@@ -231,15 +233,17 @@ export async function awaitInFlightBackupPushes(repositoryRoot) {
         await push;
 }
 /** Push the current backup commit to its explicitly configured branch remote without blocking settlement. */
-export function pushCurrentStateFlowBackup(repositoryRoot) {
+export function pushCurrentStateFlowBackup(repositoryRoot, signal) {
     return new Promise((resolvePush, rejectPush) => {
         let root;
         let commit;
         let destination;
         try {
+            signal?.throwIfAborted();
             root = assertRepositoryRoot(repositoryRoot);
             commit = currentHead(root);
             destination = configuredPushDestination(root);
+            signal?.throwIfAborted();
         }
         catch (error) {
             rejectPush(new Error(redactGitDiagnostic(error instanceof Error ? error.message : String(error))));
@@ -282,6 +286,7 @@ export function pushCurrentStateFlowBackup(repositoryRoot) {
                 return;
             settled = true;
             clearTimeout(timeout);
+            signal?.removeEventListener("abort", cancelled);
             if (error)
                 rejectPush(error);
             else
@@ -297,5 +302,11 @@ export function pushCurrentStateFlowBackup(repositoryRoot) {
             child.stderr?.destroy(); });
         child.once("close", (code, endedBy) => finish(failure ?? (code === 0 ? undefined
             : new Error(`Git backup push failed (${endedBy ?? code}): ${redactGitDiagnostic(stderr.trim()) || "no diagnostic output"}`))));
+        function cancelled() {
+            terminate(signal?.reason instanceof Error ? signal.reason : new Error("Git backup push cancelled"));
+        }
+        signal?.addEventListener("abort", cancelled, { once: true });
+        if (signal?.aborted)
+            cancelled();
     });
 }

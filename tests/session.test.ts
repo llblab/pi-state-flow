@@ -2,8 +2,39 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadSessionState, writeCwdState, writeGlobalState } from "./temporal-fixture.ts";
 import { emptyState } from "../lib/state.ts";
-import { discoverSnapshotData, findPassiveStopBoundary, hasPriorConversation, hasUncheckpointedConversation, latestSnapshotData, isNewSession, snapshotDataNewestFirst, SNAPSHOT_ENTRY_TYPE } from "../lib/session.ts";
+import { discoverSnapshotData, findBranchPolicy, findPassiveStopBoundary, hasPendingFork, hasPriorConversation, hasUncheckpointedConversation, latestSnapshotData, isNewSession, snapshotDataNewestFirst, SNAPSHOT_ENTRY_TYPE } from "../lib/session.ts";
 import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
+
+test("branch policy reads only mode and owner-local native write fences", () => {
+	const checkpoint = (data: unknown) => ({ type: "custom", customType: SNAPSHOT_ENTRY_TYPE, data });
+	const stop = (data: unknown) => ({ type: "custom", customType: "stop", data });
+	const off = checkpoint({ mode: "off", get boundary() { throw new Error("Memory boundary inspected"); } });
+	const active = checkpoint({ mode: "active", step: -1 });
+	const fence = stop({ owner: "owner", at: 1, mode: "off", persistenceError: "paused" });
+	const read = (branch: any[], entryType: string | undefined = "stop") => findBranchPolicy(branch, "owner", entryType, "passive");
+	assert.deepEqual(read([active, off]), { mode: "off" });
+	assert.deepEqual(read([off, active]), { mode: "active" });
+	assert.deepEqual(read([active, fence]), { mode: "off", persistenceError: "paused" });
+	assert.deepEqual(read([fence, active]), { mode: "active" });
+	assert.deepEqual(findBranchPolicy([active, fence], "owner", undefined, "passive"), { mode: "active" });
+	assert.deepEqual(read([active, stop({ owner: "foreign", at: 1, mode: "off", persistenceError: "paused" })]), { mode: "active" });
+	assert.equal(read([fence, stop({ owner: "owner", reset: true })]), undefined);
+	assert.deepEqual(read([active, fence, stop({ owner: "owner", reset: true })]), { mode: "active" });
+	assert.deepEqual(findBranchPolicy([active, fence], undefined, "stop", "passive"), { mode: "off", persistenceError: "paused" });
+	assert.deepEqual(read([checkpoint({ enabled: false })]), { mode: "passive" });
+	assert.deepEqual(read([checkpoint({ disabled: true })]), { mode: "passive" });
+	assert.equal(read([]), undefined);
+});
+
+test("pending fork bookkeeping belongs to the child and ends only at its accepted reset", () => {
+	const marker = (data: unknown) => ({ type: "custom", customType: "stop", data });
+	const pending = marker({ owner: "child", forkPending: true });
+	assert.equal(hasPendingFork([], "child", "stop"), false);
+	assert.equal(hasPendingFork([pending], "child", "stop"), true);
+	assert.equal(hasPendingFork([pending], "other-child", "stop"), false);
+	assert.equal(hasPendingFork([pending, marker({ owner: "child", reset: true })], "child", "stop"), false);
+	assert.equal(hasPendingFork([pending, marker({ owner: "parent", reset: true })], "child", "stop"), true);
+});
 
 test("selects the latest snapshot from the active branch", () => {
 	const first = { enabled: true, step: 1 };
@@ -151,8 +182,8 @@ test("an Off branch stays Off on resume while the Active default applies to a la
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.equal(h.resolveSnapshot().config.mode, "off");
 	assert.doesNotMatch(h.notifications.at(-1)!, /session mode=/);
-	assert.match(h.notifications.at(-1)!, /Runtime metadata: step #2/);
-	assert.match(h.notifications.at(-1)!, /"branch": "kept"/);
+	assert.match(h.notifications.at(-1)!, /Temporal materialization unavailable/);
+	assert.doesNotMatch(h.notifications.at(-1)!, /Runtime metadata|"branch": "kept"/);
 
 	const next = harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, sessionId: "next-session", mode: "active" });
 	await next.handlers.get("session_start")!({ reason: "new" }, next.ctx);

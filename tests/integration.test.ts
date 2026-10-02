@@ -367,7 +367,7 @@ for (const active of [false, true]) for (const needHistory of [false, true]) tes
 	if (!active) assert.deepEqual(files(), before, "passive hints and reads do not add a response publication either");
 });
 
-for (const control of ["off", "active"] as const) test(`real Pi ${control} keeps local mode off while awaiting a partial foreign publication without private leakage`, { timeout: 20_000 }, async (t) => {
+for (const control of ["off", "active"] as const) test(`real Pi ${control} keeps local mode off under a partial foreign publication without private leakage`, { timeout: 20_000 }, async (t) => {
 	let child: ReturnType<typeof childProcess.spawn> | undefined;
 	let closed: ReturnType<typeof once> | undefined;
 	let stopping: Promise<void> | undefined;
@@ -384,7 +384,6 @@ for (const control of ["off", "active"] as const) test(`real Pi ${control} keeps
 	]);
 	await session.prompt("Retain this private memory");
 	if (control === "active") await session.prompt("/state-flow-off");
-	const cached = f.readState(session);
 	const previous = latestSnapshot(session);
 	const count = snapshots(session).length;
 	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
@@ -433,12 +432,12 @@ for (const control of ["off", "active"] as const) test(`real Pi ${control} keeps
 	let ended = false;
 	stopping = session.prompt(`/state-flow-${control}`).then(() => { ended = true; });
 	await delay(2_200);
-	assert.equal(ended, false);
+	assert.equal(ended, control === "off", "Off does not join a foreign memory writer");
 	assert.equal(f.statuses.at(-1), undefined);
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
 	assert.deepEqual(files(), partial);
-	assert.deepEqual(f.readState(session), cached);
-	assert.equal(snapshots(session).length, count);
+	assert.throws(() => f.readState(session), /unavailable|pending/);
+	assert.equal(snapshots(session).length, count + (control === "off" ? 1 : 0));
 	assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8").trim(), String(child.pid));
 	writeFileSync(release, "continue");
 	assert.equal((await closed)[0], 0);
@@ -448,8 +447,10 @@ for (const control of ["off", "active"] as const) test(`real Pi ${control} keeps
 	assert.equal(latestSnapshot(session).config.mode, control);
 	assert.equal(latestSnapshot(session).meta.step, previous.meta.step);
 	assert.equal(snapshots(session).length, count + 1);
-	assert.deepEqual(f.readState(session).working, { globalPeer: "FOREIGN-G", cwdPeer: "FOREIGN-C", private: "LOCAL-PRIVATE" });
-	assert.deepEqual(f.readState(session, 0, "session").working, { private: "LOCAL-PRIVATE" });
+	if (control === "active") {
+		assert.deepEqual(f.readState(session).working, { globalPeer: "FOREIGN-G", cwdPeer: "FOREIGN-C", private: "LOCAL-PRIVATE" });
+		assert.deepEqual(f.readState(session, 0, "session").working, { private: "LOCAL-PRIVATE" });
+	} else assert.throws(() => f.readState(session), /temporal runtime is unavailable/);
 	assert.equal(f.notifications.some((notice) => /paused|(?:Start|Stop).*failed/.test(notice)), false);
 	let input: Context | undefined;
 	f.faux.setResponses([(context) => { input = context; return fauxAssistantMessage("Accepted mode change is visible"); }]);
@@ -516,7 +517,7 @@ test("real Pi Abort cancels an in-run Start without waiting for the canonical ow
 	assert.match(JSON.stringify(session.sessionManager.getBranch()), /Retain this uncompiled request after Abort/);
 	assert.equal(calls, 1);
 	assert.equal(f.statuses.at(-1), undefined);
-	assert.match(f.notifications.at(-1)!, /activation failed/);
+	assert.equal(f.notifications.some((notice) => /activation failed/.test(notice)), false, "native Abort silently withdraws deferred acquisition");
 	release(); await holder;
 	await delay(40);
 	assert.deepEqual(files(), before, "an aborted activation never revives when the lock becomes free");
@@ -723,7 +724,7 @@ for (const reload of [false, true]) test(`real Pi retains interrupted boundary-c
 	await session.prompt("Original request");
 	assert.equal(latestSnapshot(session).meta.specification, undefined, "boundary continuation does not invent a run specification");
 	if (reload) await session.reload();
-	await session.prompt("/state-flow-off");
+	await session.prompt("/state-flow-passive");
 	f.faux.setResponses([(context) => {
 		const text = JSON.stringify(context.messages);
 		assert.match(text, /State Flow exit handoff/);
@@ -1504,7 +1505,10 @@ test("real Pi restoration preserves current scoped state without requiring Git t
 			for (const [object, count] of reads) assert.equal(count, 1, `${lifecycle} redundantly read ${object}`);
 			assert.equal(latestSnapshot(session).meta.step, 8);
 			assert.equal(session.getActiveToolNames().includes("patch_state"), enabled);
-			for (const [index, scope] of scopes.entries()) assert.deepEqual(fixture.readState(session, 0, scope), expected[0][index]);
+			for (const [index, scope] of scopes.entries()) {
+				if (enabled) assert.deepEqual(fixture.readState(session, 0, scope), expected[0][index]);
+				else assert.throws(() => fixture.readState(session, 0, scope), /temporal runtime is unavailable/);
+			}
 		}
 	}
 });
@@ -1829,27 +1833,29 @@ test("real Pi fork rejects inherited history but explicit Start preserves its cu
 	assert.deepEqual(f.readState(child), selected);
 });
 
-test("real Pi stopped fork copies memory but never inherits the parent's passive projection across reload", { timeout: 30_000 }, async (t) => {
+test("real Pi Off fork defers memory acquisition and never inherits the parent's passive projection across reload", { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { mode: "active" });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
 	const parent = runtime.session;
 	f.faux.setResponses(sessionResponses({ working: { inherited: true } }, "Parent retained"));
 	await parent.prompt("Parent request");
-	await parent.prompt("/state-flow-off");
 	const state = f.readState(parent, 0, "session");
+	await parent.prompt("/state-flow-off");
 	const before = readFileSync(parent.sessionFile!);
 	assert.equal((await runtime.fork(parent.sessionManager.getLeafId()!, { position: "at" })).cancelled, false);
 	const child = runtime.session;
 	assert.equal(child.getActiveToolNames().includes("patch_state"), false);
-	assert.deepEqual(f.readState(child, 0, "session"), state);
-	assert.notEqual(latestSnapshot(child).config.mode, "active");
+	assert.throws(() => f.readState(child, 0, "session"), /temporal runtime is unavailable/);
+	assert.equal(snapshots(child).at(-1)!.data.mode, "off");
 	await child.reload();
 	let input = "";
 	f.faux.setResponses([(context) => { input = JSON.stringify(context.messages); return fauxAssistantMessage("Ordinary child answer"); }]);
 	await child.prompt("Ordinary child request");
 	assert.doesNotMatch(input, /State Flow exit handoff/);
 	assert.match(input, /Parent request/);
+	assert.throws(() => f.readState(child, 0, "session"), /temporal runtime is unavailable/);
+	await child.prompt("/state-flow-passive");
 	assert.deepEqual(f.readState(child, 0, "session"), state);
 	assert.deepEqual(readFileSync(parent.sessionFile!), before);
 });
@@ -2427,7 +2433,11 @@ for (const mode of ["stop", "passive-stop", "start", "boundary-stop"] as const) 
 	assert.deepEqual(getCurrentTools(inputs[1]!.messages).map((tool) => tool.name).sort(), targetMode === "off" ? ["read"] : ["patch_state", "read", "read_state"]);
 	assert.match(JSON.stringify(inputs[1]!.messages), mode === "boundary-stop" ? /CONTINUE-AFTER-BOUNDARY-STOP/ : /MODE-READ-EVIDENCE/);
 	assert.equal(latestSnapshot(session).config.mode, targetMode);
-	assert.equal(f.readState(session).response, mode === "start" ? "After mode change." : mode === "boundary-stop" ? "Before boundary Stop." : "");
+	const response = targetMode === "off"
+		? loadSessionState(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session))?.response ?? ""
+		: f.readState(session).response;
+	assert.equal(response, mode === "start" ? "After mode change." : mode === "boundary-stop" ? "Before boundary Stop." : "");
+	if (targetMode === "off") assert.throws(() => f.readState(session), /temporal runtime is unavailable/);
 	const rawSystems = session.sessionManager.getBranch().filter((entry) => entry.type === "message" && entry.message.role === "system");
 	assert.equal(JSON.stringify(rawSystems).includes("State Flow is enabled"), mode !== "start", "request projection does not rewrite earlier native system frames");
 });
@@ -2495,7 +2505,8 @@ for (const mode of ["enabled", "passive", "disabled", "forced"] as const) test(`
 		assert.equal(stoppedSystem.sections?.state_flow, undefined, "native section diffs remove the old active protocol");
 		assert.doesNotMatch(getSystemMessageText(stoppedSystem), /State Flow is enabled|State Flow passive memory is available/);
 		assert.match(getSystemMessageText(stoppedSystem), /COMPANION-PER-REQUEST/);
-		assert.equal(f.readState(session).response, "System hooks accepted.", "disabled inference does not reconcile semantic response");
+		assert.throws(() => f.readState(session), /temporal runtime is unavailable/);
+		assert.equal(loadSessionState(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session))?.response, "System hooks accepted.", "disabled inference does not reconcile semantic response");
 		await session.prompt("/state-flow-active");
 		f.faux.setResponses([(context) => { lifecycleInput = context; return fauxAssistantMessage("Restarted answer."); }]);
 		await session.prompt("Restart structured protocol");
@@ -4192,6 +4203,8 @@ test("real Pi persists without Git, resumes retained boundaries, and later backs
 	const resumed = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
 	t.after(() => resumed.dispose());
 	assert.equal(resumed.getActiveToolNames().includes("patch_state"), false);
+	assert.throws(() => fixture.readState(resumed), /temporal runtime is unavailable/);
+	await resumed.prompt("/state-flow-passive");
 	assert.deepEqual(fixture.readState(resumed), before[0]);
 	assert.throws(() => fixture.readState(resumed, 1), /predates the proven temporal origin/);
 	assert.equal(fixture.notifications.some((message) => /push.*pending|could not initialize/i.test(message)), false);
@@ -4400,7 +4413,7 @@ test("real Pi global mode defaults never override a resumed session's selected m
 	const stopped = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
 	t.after(() => stopped.dispose());
 	assert.equal(stopped.getActiveToolNames().includes("patch_state"), false);
-	assert.equal(fixture.readState(stopped).response, "Automatically persisted.");
+	assert.throws(() => fixture.readState(stopped), /temporal runtime is unavailable/);
 	const next = await fixture.createSession("new");
 	assert.equal(next.getActiveToolNames().includes("patch_state"), true);
 	assert.equal(fixture.readState(next).response, "");

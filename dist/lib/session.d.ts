@@ -1,4 +1,4 @@
-import { type InactiveMode } from "./snapshot.ts";
+import { type InactiveMode, type StateFlowMode } from "./snapshot.ts";
 export declare const SNAPSHOT_ENTRY_TYPE = "state-flow-snapshot";
 interface BranchEntry {
     type?: unknown;
@@ -26,6 +26,8 @@ export interface PassiveStopBoundary {
     persistenceError?: string;
     /** The inactive mode selected by that failed change; legacy markers omit it. */
     mode?: InactiveMode;
+    /** Native-only Off choice; canonical runtime mode is deliberately not updated. */
+    memoryDeferred?: true;
 }
 export interface SnapshotDiscovery {
     candidates: unknown[];
@@ -33,6 +35,13 @@ export interface SnapshotDiscovery {
 }
 /** Enumerate active-branch snapshots newest-first while containing hostile entries. */
 export declare function discoverSnapshotData(branch: readonly BranchEntry[]): SnapshotDiscovery;
+/** Read native mode policy only; semantic checkpoint validity remains the recovery owner's concern. */
+export declare function findBranchPolicy(branch: readonly BranchEntry[], sessionId: string | undefined, stopEntryType: string | undefined, inactiveMode: InactiveMode): {
+    mode: StateFlowMode;
+    persistenceError?: string;
+} | undefined;
+/** Native policy bookkeeping retains an unacquired fork across extension reloads. */
+export declare function hasPendingFork(branch: readonly BranchEntry[], sessionId: string, entryType: string): boolean;
 export declare function snapshotDataNewestFirst(branch: readonly BranchEntry[]): unknown[];
 export declare function latestSnapshotData(branch: readonly BranchEntry[]): unknown;
 export declare function hasPriorConversation(branch: readonly BranchEntry[]): boolean;

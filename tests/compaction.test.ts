@@ -9,6 +9,8 @@ import {
 	stateFlowCompactionResult,
 } from "../lib/compaction.ts";
 import { harness, start } from "./harness.ts";
+import { captureTemporalFileBases } from "../lib/durable.ts";
+import { withoutStoreIO } from "./store-io-spy.ts";
 
 const runAnchorTimestamp = 10;
 
@@ -238,7 +240,7 @@ test("benign native preparation refusal releases ownership for a later accepted 
 	await h.beginRun("Second");
 	await acceptRun(h, "second");
 	assert.equal(h.compactRequests.length, 2);
-	assert.equal(h.compactRequests[1].customInstructions, h.compactRequests[0].customInstructions);
+	assert.notEqual(h.compactRequests[1].customInstructions, h.compactRequests[0].customInstructions);
 });
 
 test("shutdown fences an admitted compaction before its native hook and later settlement", async () => {
@@ -260,6 +262,51 @@ test("shutdown fences an admitted compaction before its native hook and later se
 	request.onError(new Error("Compaction cancelled"));
 	h.handlers.get("agent_settled")!({}, h.ctx);
 	assert.equal(h.compactRequests.length, 1);
+});
+
+for (const boundary of ["off", "tree-off", "passive"] as const) test(`inactive selection fences owned compaction and stale callbacks (boundary=${boundary})`, async (t) => {
+	const h = harness({ initializeRepository: false });
+	await start(h, "First");
+	makeTranscriptCompactable(h);
+	await acceptRun(h, "first");
+	const old = h.compactRequests[0];
+	assert.ok(old);
+	const event = (customInstructions: string) => ({
+		reason: "manual", customInstructions, branchEntries: h.ctx.sessionManager.buildContextEntries(),
+		preparation: { tokensBefore: 25_000 }, signal: new AbortController().signal,
+	});
+	const before = captureTemporalFileBases(h.ctx.cwd, "harness-session", h.repositoryRoot);
+	const cold = boundary === "passive" ? undefined : harness({ cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot, initializeRepository: false });
+	if (boundary === "passive") await h.commands.get("state-flow-passive")!.handler("", h.ctx);
+	await withoutStoreIO(t, h.repositoryRoot, async () => {
+		if (boundary !== "passive") await h.commands.get("state-flow-off")!.handler("", h.ctx);
+		if (boundary === "tree-off") await h.handlers.get("session_tree")!({}, h.ctx);
+		if (cold) {
+			cold.entries.push(...structuredClone(h.entries));
+			await cold.handlers.get("session_start")!({ reason: "resume" }, cold.ctx);
+			assert.deepEqual(cold.handlers.get("session_before_compact")!(event(old.customInstructions), cold.ctx), { cancel: true }, "a recreated extension cannot send its predecessor\'s owned request to default summary");
+		}
+		assert.deepEqual(h.handlers.get("session_before_compact")!(event(old.customInstructions), h.ctx), { cancel: true });
+		assert.equal(h.handlers.get("session_before_compact")!(event("ordinary operator compaction"), h.ctx), undefined);
+		assert.equal(h.handlers.get("session_before_compact")!({ ...event(old.customInstructions), reason: "threshold" }, h.ctx), undefined);
+		await h.handlers.get("agent_settled")!({}, h.ctx);
+	});
+	if (boundary !== "passive") assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, "harness-session", h.repositoryRoot), before);
+	await h.commands.get("state-flow-active")!.handler("", h.ctx);
+	await h.beginRun("Second");
+	await acceptRun(h, "second");
+	assert.equal(h.compactRequests.length, 1, "reactivation bootstrap does not compact");
+	await h.beginRun("Third");
+	await acceptRun(h, "third");
+	assert.equal(h.compactRequests.length, 2);
+	const current = h.compactRequests[1];
+	assert.notEqual(current.customInstructions, old.customInstructions);
+	assert.deepEqual(h.handlers.get("session_before_compact")!(event(old.customInstructions), h.ctx), { cancel: true }, "old requests cannot acquire a new plan at the current leaf");
+	old.onComplete({});
+	old.onError(new Error("Late cancelled request"));
+	assert.equal(h.handlers.get("session_before_compact")!(event(current.customInstructions), h.ctx).compaction.summary, STATE_FLOW_COMPACTION_SUMMARY, "old completion cannot clear the new request");
+	current.onComplete({});
+	assert.deepEqual(h.handlers.get("session_before_compact")!(event(current.customInstructions), h.ctx), { cancel: true }, "completed owned requests never fall through to model summary");
 });
 
 test("does not request compaction for queued work or a prefix containing foreign custom context", async () => {

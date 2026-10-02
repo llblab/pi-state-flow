@@ -421,15 +421,15 @@ test("failed historical selection keeps publication fenced until explicit Start 
 		}
 		await h.commands.get(`state-flow-${mode}`).handler("", h.ctx);
 		assert.equal(h.statuses.at(-1), passiveBootstrap || passiveTools ? "<accent>state-flow</accent> <dim>passive</dim>" : undefined);
-		assert.ok(h.entries.at(-1)!.data.persistenceError);
+		assert.ok(mode === "off" ? h.entries.at(-1)!.data.memoryDeferred : h.entries.at(-1)!.data.persistenceError);
 		await h.commands.get("state-flow-status").handler("", h.ctx);
-		assert.match(h.notifications.at(-1)!, /Temporal materialization unavailable:.*outside the retained temporal window/);
+		assert.match(h.notifications.at(-1)!, mode === "off" ? /Temporal materialization unavailable/ : /Temporal materialization unavailable:.*outside the retained temporal window/);
 		assert.deepEqual(files(), before, "refused model writes must preserve every canonical file");
 		assert.deepEqual(h.entries.filter((entry) => entry.customType !== "state-flow-passive-stop"), retained, "a native failed-Stop policy never substitutes a semantic checkpoint");
 		const noticesBeforeStart = h.notifications.length;
 		await h.commands.get("state-flow-active").handler("", h.ctx);
 		assert.equal(h.notifications.length, noticesBeforeStart + 1, "explicit activation reports only its final outcome");
-		assert.match(h.notifications.at(-1)!, /active from current session memory/);
+		assert.match(h.notifications.at(-1)!, mode === "off" ? /State Flow active/ : /active from current session memory/);
 		assert.equal(h.resolveSnapshot().config.mode, "active");
 		assert.equal(h.resolveSnapshot().meta.step, 9);
 		assert.equal(h.readState(0, "session").working.private, 9);
@@ -1390,7 +1390,7 @@ test("a rejected first passive patch leaves no empty canonical initialization or
 	assert.equal(h.entries.length, entries.length + 1, "one accepted patch has one checkpoint, not a separately accepted empty origin");
 });
 
-for (const initialMode of ["off", "passive"] as const) for (const mode of ["off", "passive"] as const) test(`${initialMode} → ${mode} applies immediately and coalesces into one metadata-only acceptance`, { timeout: 5_000 }, async (t) => {
+for (const initialMode of ["passive"] as const) for (const mode of ["passive"] as const) test(`${initialMode} → ${mode} applies immediately and coalesces into one metadata-only acceptance`, { timeout: 5_000 }, async (t) => {
 	const h = harness({ initializeRepository: false });
 	await start(h, "Unfinished Stop request");
 	await h.tools.get("patch_state")!.execute("private", { session: { working: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
@@ -1405,16 +1405,13 @@ for (const initialMode of ["off", "passive"] as const) for (const mode of ["off"
 	const stopping = h.commands.get(`state-flow-${initialMode}`)!.handler("", h.ctx).then(() => { ended = true; });
 	assert.equal(h.activeTools.includes("patch_state"), initialMode === "passive");
 	const repeat = h.commands.get(`state-flow-${mode}`)!.handler("", h.ctx);
-	assert.equal(h.statuses.at(-1), mode === "off" ? undefined : "<accent>state-flow</accent> <dim>passive</dim>");
+	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
 	assert.equal(h.activeTools.includes("patch_state"), mode === "passive");
 	const raw = [user("Unfinished Stop request", 1), toolAssistant("late-tool")];
 	const projected = h.handlers.get("context")!({ messages: raw }, h.ctx);
-	if (mode === "off") assert.equal(projected, undefined, "Off withdraws even frozen handoff context immediately");
-	else {
-		assert.match(JSON.stringify(projected), /exit handoff/);
-		assert.match(JSON.stringify(projected), /Unfinished Stop request/);
-		assert.match(JSON.stringify(projected), /late-tool/);
-	}
+	assert.match(JSON.stringify(projected), /exit handoff/);
+	assert.match(JSON.stringify(projected), /Unfinished Stop request/);
+	assert.match(JSON.stringify(projected), /late-tool/);
 	await delay(40);
 	assert.equal(ended, false, "the event loop remains responsive while Stop awaits exclusion");
 	assert.deepEqual(files(), before);
@@ -1435,8 +1432,7 @@ for (const initialMode of ["off", "passive"] as const) for (const mode of ["off"
 	assert.deepEqual(JSON.parse(readFileSync(lifecycle.config, "utf8")), { mode });
 	assert.equal(h.entries.length, entries.length + 2, "one passive marker and one accepted boundary");
 	const acceptedContext = h.handlers.get("context")!({ messages: raw }, h.ctx);
-	if (mode === "off") assert.equal(acceptedContext, undefined);
-	else assert.match(JSON.stringify(acceptedContext), /globalPeer/);
+	assert.match(JSON.stringify(acceptedContext), /globalPeer/);
 	assert.equal(h.notifications.some((notice) => /paused|Stop.*failed/.test(notice)), false);
 });
 
@@ -1509,11 +1505,11 @@ test("failed Start leaves an already pending Stop able to accept", { timeout: 5_
 	const h = harness({ initializeRepository: false });
 	await start(h);
 	const release = await holdResponseStorage(t, h.repositoryRoot);
-	const stopping = h.commands.get("state-flow-off")!.handler("", h.ctx);
+	const stopping = h.commands.get("state-flow-passive")!.handler("", h.ctx);
 	t.mock.method(TemporalRuntime.prototype, "withStartTransaction", async () => { throw new Error("injected Start rejection"); });
 	await h.commands.get("state-flow-active")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /activation failed: injected Start rejection/);
-	assert.equal(h.statuses.at(-1), undefined);
+	assert.match(h.statuses.at(-1)!, /passive/);
 	await release();
 	await stopping;
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
@@ -1524,11 +1520,11 @@ test("Start waits and coalesces repeats before adopting current memory and enabl
 	const h = harness({ initializeRepository: false });
 	await start(h, "Old unfinished request");
 	await h.tools.get("patch_state")!.execute("seed", { session: { working: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
+	const cached = h.readState();
 	await h.commands.get("state-flow-off")!.handler("", h.ctx);
 	const previous = h.resolveSnapshot();
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const before = files();
-	const cached = h.readState();
 	const entries = structuredClone(h.entries);
 	const release = await holdResponseStorage(t, h.repositoryRoot);
 	const publication = t.mock.method(TemporalRuntime.prototype, "withStartTransaction");
@@ -1539,7 +1535,7 @@ test("Start waits and coalesces repeats before adopting current memory and enabl
 	assert.equal(ended, false);
 	assert.equal(h.statuses.at(-1), undefined);
 	assert.equal(h.activeTools.includes("patch_state"), false);
-	assert.deepEqual(h.readState(), cached);
+	assert.throws(() => h.readState(), /unavailable|pending/);
 	assert.deepEqual(files(), before);
 	assert.deepEqual(h.entries, entries);
 	writeGlobalState({ ...emptyState(), working: { globalPeer: "G" } }, h.repositoryRoot);
@@ -1616,7 +1612,7 @@ for (const boundary of ["abort", "stop", "session_start", "session_tree", "sessi
 	assert.deepEqual(files(), before);
 	assert.deepEqual(h.notifications, notices);
 	if (boundary !== "stop") assert.deepEqual(h.entries, entries);
-	if (boundary === "abort") assert.match(h.notifications.at(-1)!, /activation failed:.*Start operation cancelled/);
+	if (boundary === "abort") assert.doesNotMatch(h.notifications.at(-1)!, /activation failed:.*Start operation cancelled/);
 });
 
 test("Start rechecks the physical owner after waiting even without a selection event", async (t) => {
@@ -1699,9 +1695,9 @@ test("post-acceptance Stop checkpoint failure neither rolls back accepted mode n
 	assert.equal(h.readState().working.afterAcceptedStop, true);
 });
 
-test("Stop failures retain configured passive/off mode, context and memory, and fence writes through reload without touching canonical bytes", async () => {
+test("Passive persistence failures retain context and memory and fence writes through reload without touching canonical bytes", async () => {
 	for (const fault of ["concurrent", "locked", "malformed"] as const) {
-		for (const mode of ["off", "passive"] as const) {
+		for (const mode of ["passive"] as const) {
 			const passiveBootstrap = mode === "passive", passiveTools = mode === "passive";
 			const options = { initializeRepository: false, mode };
 			const h = harness(options);
@@ -1733,8 +1729,7 @@ test("Stop failures retain configured passive/off mode, context and memory, and 
 			assert.ok(marker.data.persistenceError);
 			const messages = [user("Available older context", 1), user("Uncompiled request", 10), toolAssistant("late-read")];
 			const immediateContext = h.handlers.get("context")!({ messages }, h.ctx);
-			if (mode === "off") assert.equal(immediateContext, undefined);
-			else assert.deepEqual(immediateContext.messages.slice(1), messages);
+			assert.deepEqual(immediateContext.messages.slice(1), messages);
 			assert.doesNotMatch(h.beforeAgentStart("Ordinary continuation").systemPrompt, /State Flow is enabled/);
 			await assert.rejects(h.tools.get("patch_state")!.execute("refused", { session: { working: { unsafe: true } } }, undefined, undefined, h.ctx), /paused after mode change|tools are off/);
 			if (fault !== "concurrent") {
@@ -1754,7 +1749,6 @@ test("Stop failures retain configured passive/off mode, context and memory, and 
 			assert.deepEqual(files(), canonical, "reload must not restore/publish the older selected boundary over another writer");
 			assert.equal(resumed.entries.length, h.entries.length);
 			const restoredContext = resumed.handlers.get("context")!({ messages }, resumed.ctx);
-			if (mode === "off") assert.equal(restoredContext, undefined);
 			const projected = restoredContext?.messages ?? messages;
 			assert.match(JSON.stringify(projected), /Uncompiled request/);
 			assert.match(JSON.stringify(projected), /late-read/);
@@ -1879,8 +1873,8 @@ test("start uses the passive boundary for one active bootstrap instead of resurr
 	const h = harness();
 	await start(h, "Remember state");
 	await commitTerminal(h, {}, { continuation: "restart" }, "Context compiled.");
+	const beforeOff = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	await h.commands.get("state-flow-off")!.handler("", h.ctx);
-	const frozenResponse = h.readState().response;
 	const oldMessages = Array.from({ length: 200 }, (_, index) => user(`OLD-${index}`, index + 1));
 	const afterStop = Date.now() + 1_000;
 	const postStopAnswer = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Post-stop answer" }], timestamp: afterStop + 1 };
@@ -1891,7 +1885,8 @@ test("start uses the passive boundary for one active bootstrap instead of resurr
 	];
 	assert.equal(h.handlers.get("message_end")!({ message: postStopAnswer }, h.ctx), undefined);
 	await h.handlers.get("turn_end")!({ message: postStopAnswer }, h.ctx);
-	assert.equal(h.readState().response, frozenResponse);
+	assert.throws(() => h.readState(), /temporal runtime is unavailable/);
+	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), beforeOff);
 
 	await h.commands.get("state-flow-active")!.handler("", h.ctx);
 	const protocol = await h.beginRun("Restart State Flow");
@@ -1925,7 +1920,7 @@ const semanticFiles = (cohort: ReturnType<typeof captureTemporalFileBases>) => c
 
 test("Start cancellation withdraws its join without cancelling independently owned restoration", { timeout: 5_000 }, async (t) => {
 	const { h, files } = await restorableBranch();
-	await h.commands.get("state-flow-off")!.handler("", h.ctx);
+	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 	const before = files();
 	const release = await holdResponseStorage(t, h.repositoryRoot);
 	let restored = false;
@@ -2275,7 +2270,7 @@ test("Stop withdraws Start-owned attachment without cancelling retained memory a
 	assert.equal(h.readState(0, "session").working.passive, true);
 });
 
-for (const initialMode of ["off", "passive"] as const) for (const mode of ["off", "passive"] as const) test(`fenced reload preserves ${initialMode} → ${mode} without cancelling read-only recovery`, { timeout: 5_000 }, async (t) => {
+for (const initialMode of ["passive"] as const) for (const mode of ["off", "passive"] as const) test(`fenced reload preserves ${initialMode} → ${mode} with mode-owned recovery cancellation`, { timeout: 5_000 }, async (t) => {
 	const { h, files, lock } = await restorableBranch();
 	const state = h.readState(0, "session");
 	mkdirSync(lock);
@@ -2292,7 +2287,8 @@ for (const initialMode of ["off", "passive"] as const) for (const mode of ["off"
 	assert.equal(loaded, false);
 	assert.throws(() => h.readState(0, "session"), /restoration is pending/);
 	await h.commands.get(`state-flow-${mode}`)!.handler("", h.ctx);
-	assert.equal(loaded, false, "mode selection never cancels the independent memory read");
+	if (mode === "passive") assert.equal(loaded, false, "Passive retains its independent memory read");
+	else await reloading;
 	assert.equal(h.activeTools.includes("patch_state"), mode === "passive");
 	assert.equal(h.entries.length, entryCount + (initialMode === mode ? 0 : 1));
 	assert.equal(h.entries.at(-1)!.data.mode, mode);
@@ -2302,7 +2298,8 @@ for (const initialMode of ["off", "passive"] as const) for (const mode of ["off"
 	await reloading;
 	for (const reload of [false, true]) {
 		if (reload) await h.handlers.get("session_start")!({ reason: "reload" }, h.ctx);
-		assert.deepEqual(h.readState(0, "session"), state);
+		if (mode === "off") assert.throws(() => h.readState(0, "session"), /temporal runtime is unavailable/);
+		else assert.deepEqual(h.readState(0, "session"), state);
 		assert.equal(h.activeTools.includes("patch_state"), mode === "passive");
 		assert.equal(h.statuses.at(-1), mode === "off" ? undefined : "<accent>state-flow</accent> <dim>passive</dim>");
 		const context = h.handlers.get("context")!({ messages: [] }, h.ctx);

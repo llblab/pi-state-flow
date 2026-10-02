@@ -14,6 +14,12 @@ export declare function isStateFlowMode(value: unknown): value is StateFlowMode;
 export interface SnapshotConfig {
     mode: StateFlowMode;
 }
+/**
+ * Read only mode policy, without validating or accessing semantic checkpoint metadata.
+ * Missing/invalid policy stays undecided; callers must not treat this as restoration proof.
+ * Legacy `enabled:false` follows the caller's inactive policy.
+ */
+export declare function readCheckpointMode(value: unknown, inactiveMode?: InactiveMode): StateFlowMode | undefined;
 interface LegacyValidationFeedback {
     attempt: number;
     error: string;
