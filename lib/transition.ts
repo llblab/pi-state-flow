@@ -10,7 +10,7 @@ import {
 import type { SuccessfulArtifactRead } from "./acquisition.ts";
 import { createAcceptedTransition, type AcceptedTransition } from "./history.ts";
 import { applyPatch, containsNull, hashJson, isObject, validatePatch, type JsonObject } from "./json.ts";
-import { cascadeDeletionPatch, computeIntentCascade } from "./ownership.ts";
+import { cascadeDeletionPatch, computeIntentCascade, type OwnedPath } from "./ownership.ts";
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER, type SuccessfulSkillRead } from "./skills.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { emptyState } from "./state.ts";
@@ -29,6 +29,8 @@ import type {
 
 export interface StagedScopedTransition {
 	nextStates: ScopedSemanticStates;
+	/** Scope-local targets removed by the staged intent cascade, not replay input. */
+	cascades: Record<StateScope, OwnedPath[]>;
 	stateHashes: Record<StateScope, string>;
 	/** Fresh runtime-owned provenance for artifacts compiled in this transition. */
 	provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>>;
@@ -186,12 +188,13 @@ function stageScopedSemanticTransition(
 	validateSkillCompilerTargets(patches, skillReads);
 	const nextStates = { ...currentStates };
 	const provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>> = { global: {}, cwd: {}, session: {} };
+	const cascades: Record<StateScope, OwnedPath[]> = { global: [], cwd: [], session: [] };
 	for (const scope of SCOPES) {
 		const authored = patches.get(scope) ?? {};
 		const patch = { ...authored, ...(scope === "session" && acceptedResponse !== undefined ? { response: acceptedResponse } : {}) };
 		let materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch) as StateDocument;
 		// Authored operations first, then the same-scope intent ownership cascade.
-		const cascade = computeIntentCascade(scope, currentStates[scope], materialized);
+		const cascade = cascades[scope] = computeIntentCascade(scope, currentStates[scope], materialized);
 		if (cascade.length > 0) materialized = applyPatch(materialized, cascadeDeletionPatch(cascade)) as StateDocument;
 		compileReadArtifacts(
 			materialized,
@@ -210,6 +213,7 @@ function stageScopedSemanticTransition(
 	}
 	return {
 		nextStates,
+		cascades,
 		provenanceUpdates,
 		stateHashes: {
 			global: hashJson(currentStates.global),

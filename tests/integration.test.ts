@@ -202,8 +202,8 @@ for (const scope of ["global", "cwd", "session"] as const) test(`real Pi deletin
 			: loadSessionState(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session))!;
 		f.faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("patch_state", { [scope]: {
-				intents: { task: { action: "Probe", owns: [{ $ref: `${scope}.working.draft` }, { $ref: `${scope}.lazy.notes` }], uses: `$${scope}.working.shared` } },
-				working: { draft: "DRAFT", shared: "kept" }, lazy: { notes: { body: "LAZY-BODY" }, other: "kept" },
+				intents: { task: { action: "Probe", owns: [{ $ref: `${scope}.working.draft` }, { $ref: `${scope}.lazy.notes` }, { $ref: `${scope}.lazy.plans.x` }], uses: `$${scope}.working.shared` } },
+				working: { draft: "DRAFT", shared: "kept" }, lazy: { notes: { body: "LAZY-BODY" }, plans: { x: "LAZY-BODY-NESTED", y: "kept" }, other: "kept" },
 			} }), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Opened"),
 		]);
@@ -222,6 +222,7 @@ for (const scope of ["global", "cwd", "session"] as const) test(`real Pi deletin
 				assert.ok(result?.role === "toolResult" && !result.isError);
 				const content = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 				receipt = JSON.parse(content.slice(content.indexOf('{"state_updates"'))).state_updates;
+				assert.deepEqual(receipt.cascaded, [`${scope}.lazy.notes`, `${scope}.lazy.plans.x`, `${scope}.working.draft`], mode);
 				assert.doesNotMatch(content, /LAZY-BODY|DRAFT/);
 				return fauxAssistantMessage("Closed");
 			},
@@ -229,16 +230,16 @@ for (const scope of ["global", "cwd", "session"] as const) test(`real Pi deletin
 		await session.prompt("Close the task");
 		assert.ok(receipt, `${mode}: provider observed the receipt`);
 		assert.ok(receipt.effective.some((entry: any) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "draft"], deleted: true })), mode);
-		assert.deepEqual(receipt.lazy_navigation?.keys, { other: "string" }, mode);
+		assert.deepEqual(receipt.lazy_navigation?.keys, { plans: "object", other: "string" }, mode);
 		const state = stored();
 		assert.deepEqual(state.working, { shared: "kept" }, mode);
-		assert.deepEqual(state.lazy, { other: "kept" }, mode);
+		assert.deepEqual(state.lazy, { plans: { y: "kept" }, other: "kept" }, mode);
 		assert.deepEqual(state.intents, {}, mode);
 		const current = await view();
 		// Active Session additionally reconciles the accepted answer as its own response revision.
 		assert.equal(temporalScopeRevisions(current)[scope], revisions[scope] + (scope === "session" && mode === "active" ? 2 : 1), `${mode}: one revision for the cohort`);
 		const patches = current.scopes[scope].patches;
-		assert.deepEqual(patches.findLast((record) => Object.hasOwn(record.patch, "intents"))!.patch, { intents: { task: null }, working: { draft: null }, lazy: { notes: null } }, mode);
+		assert.deepEqual(patches.findLast((record) => Object.hasOwn(record.patch, "intents"))!.patch, { intents: { task: null }, working: { draft: null }, lazy: { notes: null, plans: { x: null } } }, mode);
 	}
 });
 

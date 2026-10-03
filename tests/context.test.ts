@@ -324,26 +324,69 @@ test("intent ownership cascades reach the receipt as deletions without rewriting
 	for (const scope of ["global", "cwd", "session"] as const) {
 		const scopes = { global: emptyState(), cwd: emptyState(), session: emptyState() } as ScopedSemanticStates;
 		scopes[scope] = { ...emptyState(),
-			intents: { task: { owns: [{ $ref: `${scope}.working.step` }, { $ref: `${scope}.lazy.plan` }] } },
-			working: { step: "draft", kept: "shared" }, lazy: { plan: { body: "HIDDEN" }, notes: "kept" } };
+			intents: { task: { owns: [{ $ref: `${scope}.working.step` }, { $ref: `${scope}.lazy.plan` }, { $ref: `${scope}.lazy.plans.x` }] } },
+			working: { step: "draft", kept: "shared" }, lazy: { plan: { body: "HIDDEN" }, plans: { x: "HIDDEN-NESTED", y: "kept" }, notes: "kept" } };
 		const before = overlayStates(scopes.global, scopes.cwd, scopes.session);
 		const projection = new ContextProjection();
 		const native = [user("close", 1)];
 		const first = projection.project(native, contextView(before, {}, []), () => user(JSON.stringify(before.working), 0));
 		const head = JSON.stringify(first[0]);
 		const patch = { [scope]: { intents: { task: null } } };
-		const next = stageAtomicScopePatches(scopes, patch, [], "origin").nextStates;
+		const stage = stageAtomicScopePatches(scopes, patch, [], "origin");
+		const next = stage.nextStates;
 		const after = overlayStates(next.global, next.cwd, next.session);
-		const updates = projection.acceptPatch(before, after, patch, {});
+		const updates = projection.acceptPatch(before, after, patch, {}, stage.cascades);
 		assert.ok(updates, scope);
 		assert.deepEqual(updates.effective.filter(({ path }) => path[0] === "working"), [{ path: ["working", "step"], deleted: true }], scope);
-		assert.deepEqual(updates.lazy_navigation?.keys, { notes: "string" }, scope);
+		assert.deepEqual(updates.lazy_navigation?.keys, { plans: "object", notes: "string" }, scope);
+		assert.deepEqual(updates.cascaded, [`${scope}.lazy.plan`, `${scope}.lazy.plans.x`, `${scope}.working.step`], scope);
+		assert.deepEqual(next[scope].lazy, { plans: { y: "kept" }, notes: "kept" });
 		assert.doesNotMatch(JSON.stringify(updates), /HIDDEN|draft/);
 		const later = projection.project([...native, message("toolResult", JSON.stringify(updates), 2)], contextView(after, {}, []),
 			() => { throw new Error("head rewritten"); });
 		assert.equal(JSON.stringify(later[0]), head, "the frozen head still shows the pre-cascade values");
 		assert.match(JSON.stringify(later[0]), /draft/);
 	}
+});
+
+test("nested lazy cascade-only receipts survive predictable-write omission in deterministic scope order", () => {
+	const scopes = { global: emptyState(), cwd: emptyState(), session: emptyState() } as ScopedSemanticStates;
+	for (const scope of ["global", "cwd", "session"] as const) scopes[scope] = {
+		...emptyState(), intents: { [`task_${scope}`]: { $ref: `${scope}.lazy.plans.x` } }, lazy: { plans: { x: "HIDDEN", y: "kept" } },
+	};
+	const before = overlayStates(scopes.global, scopes.cwd, scopes.session);
+	const projection = new ContextProjection();
+	// Communicated intent is already absent: every effective change is predictable/masked.
+	projection.project([user("close", 1)], contextView({ ...before, intents: {} }, {}, []), () => user("HEAD", 0));
+	const patch = { session: { intents: { task_session: null } }, cwd: { intents: { task_cwd: null } }, global: { intents: { task_global: null } } };
+	const stage = stageAtomicScopePatches(scopes, patch, [], "origin");
+	const after = overlayStates(stage.nextStates.global, stage.nextStates.cwd, stage.nextStates.session);
+	const receipt = projection.acceptPatch(before, after, patch, {}, stage.cascades);
+	assert.ok(receipt);
+	assert.deepEqual(receipt.effective, []);
+	assert.equal(receipt.lazy_navigation, undefined);
+	assert.deepEqual(receipt.cascaded, ["global.lazy.plans.x", "cwd.lazy.plans.x", "session.lazy.plans.x"]);
+	assert.doesNotMatch(JSON.stringify(receipt), /HIDDEN|kept/);
+	assert.equal(projection.acceptPatch(after, after, patch, {}), undefined, "no repeat cascade notice");
+});
+
+test("cascade receipts describe the owner even when effective state reveals a fallback", () => {
+	const scopes: ScopedSemanticStates = {
+		global: { ...emptyState(), working: { draft: "global fallback" } }, cwd: emptyState(),
+		session: { ...emptyState(), intents: { task: { $ref: "session.working.draft" } }, working: { draft: "private" } },
+	};
+	const before = overlayStates(scopes.global, scopes.cwd, scopes.session);
+	const projection = new ContextProjection();
+	projection.project([user("close", 1)], contextView(before, {}, []), () => user("HEAD", 0));
+	const patch = { session: { intents: { task: null } } };
+	const stage = stageAtomicScopePatches(scopes, patch, [], "origin");
+	const after = overlayStates(stage.nextStates.global, stage.nextStates.cwd, stage.nextStates.session);
+	const receipt = projection.acceptPatch(before, after, patch, {}, stage.cascades);
+	assert.deepEqual(receipt?.cascaded, ["session.working.draft"]);
+	assert.ok(receipt?.effective.some((entry) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "draft"], value: "global fallback" })));
+	const noCascade = projection.acceptPatch(after, { ...after, working: { draft: "foreign drift" } }, {}, {});
+	assert.ok(noCascade);
+	assert.equal(Object.hasOwn(noCascade, "cascaded"), false);
 });
 
 test("a frozen Stop handoff receives changes made before its first projection", () => {

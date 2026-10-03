@@ -30,7 +30,7 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.doesNotMatch(protocol, /MUST|compiled knowledge|unresolved work, continuation/);
 	for (const bootstrap of [false, true]) {
 		const candidate = stateFlowProtocol(bootstrap);
-		assert.ok(candidate.length <= (bootstrap ? 4_496 : 4_395), `0.25.0 ownership wording must not grow the ${bootstrap ? "bootstrap" : "ordinary"} protocol (${candidate.length})`);
+		assert.ok(candidate.length <= (bootstrap ? 4_496 : 4_395), `receipt wording must not grow the ${bootstrap ? "bootstrap" : "ordinary"} protocol (${candidate.length})`);
 		assert.ok(candidate.length <= 4_500, `${bootstrap ? "bootstrap" : "ordinary"} model protocol grew to ${candidate.length} characters`);
 	}
 });
@@ -232,6 +232,7 @@ test("bootstrap adds only its reconciliation obligation to the compact active pr
 	for (const protocol of [ordinary, PASSIVE_MEMORY_PROTOCOL]) {
 		assert.match(protocol, /state_updates: effective entries replace values at key\/index-segment path arrays/);
 		assert.match(protocol, /deleted:true means absent/);
+		assert.match(protocol, /cascaded lists owner paths an intent deletion removed/);
 		assert.match(protocol, /Latest entries win over earlier state/);
 		assert.match(protocol, /Head state\/recent transitions are frozen at projection start/);
 		assert.match(protocol, /Only state_updates matching the head's State Flow projection ID apply/);

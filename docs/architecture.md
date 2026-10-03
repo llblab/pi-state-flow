@@ -122,7 +122,7 @@ checkpoint.json + patches.jsonl
 
 ### `state_updates` receipts
 
-A successful native tool result includes a `state_updates` block, separate from the compact acknowledgement used by interactive rendering. The context domain owns this projection, not storage or the lifecycle composition root.
+A successful native tool result may include a `state_updates` block, separate from the compact acknowledgement used by interactive rendering. The context domain owns this projection, not storage or the lifecycle composition root.
 
 **Shape.** `effective` entries contain a `path` array of exact object keys/array indices, plus either a replacing `value` or `deleted: true`.
 
@@ -131,9 +131,10 @@ A successful native tool result includes a `state_updates` block, separate from 
 - Indexed-array patch selectors become numeric update paths only against a communicated in-bounds array basis. Object keys with the same spelling are literal.
 - Artifact cards use the normal metadata filter, and touched cards replace their whole projected entry.
 - Lazy bodies never enter this block; a changed bounded `lazy_navigation` may accompany it.
-- Unrelated unchanged branches are omitted. A result with nothing left to reconcile has only the acknowledgement.
+- An optional `cascaded` array lists owner-scoped paths removed by intent deletion, including nested lazy targets that do not change the top-level navigation. It contains paths only, never values, and is absent when no target cascaded.
+- Unrelated unchanged branches are omitted. A result with nothing left to reconcile and no cascade has only the acknowledgement.
 
-**What is always included.** Entries conservatively cover changed scope fallbacks, masked or overlapping multi-scope touches, and projected changes since the last communicated view, including shared refreshes before or during the transaction.
+**What is always included.** Entries conservatively cover changed scope fallbacks, masked or overlapping multi-scope touches, and projected changes since the last communicated view, including shared refreshes before or during the transaction. `cascaded` lists every target computed during accepted staging, in deterministic per-scope order across Global, CWD and Session. It is never elided as predictable: a receipt with only `cascaded` and an empty `effective` array still reaches the model. The owner path does not imply effective absence; `effective` entries still describe any revealed fallback.
 
 **What may be omitted as predictable:**
 

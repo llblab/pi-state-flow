@@ -136,12 +136,13 @@ function stageScopedSemanticTransition(currentStates, transition, successfulSkil
     validateSkillCompilerTargets(patches, skillReads);
     const nextStates = { ...currentStates };
     const provenanceUpdates = { global: {}, cwd: {}, session: {} };
+    const cascades = { global: [], cwd: [], session: [] };
     for (const scope of SCOPES) {
         const authored = patches.get(scope) ?? {};
         const patch = { ...authored, ...(scope === "session" && acceptedResponse !== undefined ? { response: acceptedResponse } : {}) };
         let materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch);
         // Authored operations first, then the same-scope intent ownership cascade.
-        const cascade = computeIntentCascade(scope, currentStates[scope], materialized);
+        const cascade = cascades[scope] = computeIntentCascade(scope, currentStates[scope], materialized);
         if (cascade.length > 0)
             materialized = applyPatch(materialized, cascadeDeletionPatch(cascade));
         compileReadArtifacts(materialized, { artifacts: authored.artifacts ?? {} }, artifactReads.filter((read) => (read.scope ?? "global") === scope), provenanceUpdates[scope]);
@@ -157,6 +158,7 @@ function stageScopedSemanticTransition(currentStates, transition, successfulSkil
     }
     return {
         nextStates,
+        cascades,
         provenanceUpdates,
         stateHashes: {
             global: hashJson(currentStates.global),

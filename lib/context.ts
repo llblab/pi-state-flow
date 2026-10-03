@@ -4,6 +4,7 @@ import { projectArtifactForModel, type ArtifactInvalidationNotice, type Artifact
 import type { RecentTransitionWindow } from "./history.ts";
 import { applyPatch, isObject, presentationJson, sameJson, type JsonObject, type JsonValue } from "./json.ts";
 import type { Snapshot } from "./snapshot.ts";
+import { formatOwnedPath, type OwnedPath } from "./ownership.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
 import { projectSemanticPatch, projectStateForModel, type AtomicScopePatches, type SemanticState, type StateScope } from "./state.ts";
 
@@ -138,7 +139,8 @@ export class ContextProjection {
 	}
 
 	/** Called only after successful publication and ancillary acceptance, immediately before returning the native result. */
-	acceptPatch(before: SemanticState, after: SemanticState, patches: AtomicScopePatches, hints: ArtifactModelHints) {
+	acceptPatch(before: SemanticState, after: SemanticState, patches: AtomicScopePatches, hints: ArtifactModelHints,
+		cascades: Partial<Record<StateScope, readonly OwnedPath[]>> = {}) {
 		const state = projectStateForModel(after, hints);
 		const navigation = lazyNavigationHint(after);
 		const beforeNavigation = this.view?.lazy_navigation ?? lazyNavigationHint(before);
@@ -228,7 +230,12 @@ export class ContextProjection {
 			if (predictable && seen.size > 0 && sameJson(Object.fromEntries(expected), navigation.keys)) delete updates.lazy_navigation;
 		}
 		if (this.view) this.view = { ...this.view, state, lazy_navigation: navigation };
-		return updates.effective.length || updates.lazy_navigation ? { projection: this.identity, ...updates } : undefined;
+		// Owner paths remain informative even when effective state/navigation is masked
+		// or the model could predict every direct write. Never expose target values.
+		const cascaded = (["global", "cwd", "session"] as const).flatMap((scope) =>
+			(cascades[scope] ?? []).map((path) => formatOwnedPath(scope, path)));
+		return updates.effective.length || updates.lazy_navigation || cascaded.length
+			? { projection: this.identity, ...updates, ...(cascaded.length ? { cascaded } : {}) } : undefined;
 	}
 
 	project(messages: AgentMessage[], current: ContextView, makeHead: () => AgentMessage, initial?: ContextView): AgentMessage[] {

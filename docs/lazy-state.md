@@ -134,9 +134,11 @@ Intents can own the memory they create:
 - missing targets;
 - keys outside the `read_state` key grammar `[A-Za-z_$][A-Za-z0-9_$-]*`, for example keys with spaces, dots or non-Latin letters.
 
+**Receipt.** `state_updates.cascaded` lists all owner-scoped targets removed by intent deletion, for example `["session.lazy.plans.x", "session.working.draft"]`. Paths only, never lazy bodies or deleted values. The list is deterministic (Global, CWD, Session, then each scope's cascade order), absent when no target cascaded, and never omitted as a predictable write. Nested lazy deletions are reported even when the top-level `lazy_navigation` catalog is unchanged.
+
 **Edge cases:**
 
-- Deletion is scope-local, so an effective read may afterwards show a same-path value inherited from a broader scope. The receipt then reports that value rather than `deleted: true`.
+- Deletion is scope-local, so an effective read may afterwards show a same-path value inherited from a broader scope. The receipt's `effective` entry then reports that value rather than `deleted: true`; `cascaded` still identifies the deleted owner path.
 - Concurrent shared writers keep last-accepted-wins behaviour: a later write into an intent another session already deleted simply recreates a partial intent.
 
 **History and limits.** The accepted patch record stores cascaded keys as explicit deletions, so replay never re-derives them, and nothing is archived beyond ordinary retained history. Ownership adds no validation, unresolved-reference warning, cross-scope cascade, age-based cleanup, size budget, growth notice, archive of deleted entries or automatic hydration.

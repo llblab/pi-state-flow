@@ -151,6 +151,10 @@ test("deleting an intent cascades its same-scope owned working/lazy keys after a
 		const before = structuredClone(state);
 		const stage = stageAtomicScopePatches(state, { [scope]: { intents: { task: null }, working: { step: "rewritten" } } }, [], "origin");
 		const next = stage.nextStates;
+		assert.deepEqual(stage.cascades[scope], [
+			{ plane: "lazy", keys: ["plan"] }, { plane: "working", keys: ["notes", "a"] }, { plane: "working", keys: ["step"] },
+		]);
+		for (const other of ["global", "cwd", "session"] as const) if (other !== scope) assert.deepEqual(stage.cascades[other], []);
 		assert.deepEqual(next[scope].working, { notes: { b: 2 }, kept: true }, scope);
 		assert.deepEqual(next[scope].lazy, { log: { day: 1 } }, scope);
 		assert.deepEqual(next[scope].contract, { rule: "keep" });
@@ -209,9 +213,25 @@ test("ownership cascade keeps shared targets, supports one-patch supersession an
 	// Repeating a deletion of an absent intent is an ordinary no-op.
 	const repeat = stageAtomicScopePatches(state, { cwd: { intents: { old: null } } }, [], "origin");
 	assert.deepEqual(repeat.nextStates.cwd, state.cwd);
+	assert.deepEqual(repeat.cascades, { global: [], cwd: [], session: [] });
 	let published = 0;
 	commitScopedTransition(snapshot(), state, repeat, (cohort) => { if (cohort) published += 1; }, "origin", { finalizeRun: false });
 	assert.equal(published, 0);
+});
+
+test("staging exposes no cascade for shared targets or one-patch supersession", () => {
+	const state = states();
+	state.cwd = { ...emptyState(), intents: {
+		old: { $ref: "cwd.lazy.plan" }, shared: { $ref: "cwd.lazy.plan.step" },
+	}, lazy: { plan: { step: "keep" } } };
+	const shared = stageAtomicScopePatches(state, { cwd: { intents: { old: null } } }, [], "origin");
+	assert.deepEqual(shared.cascades, { global: [], cwd: [], session: [] });
+	assert.deepEqual(shared.nextStates.cwd.lazy, state.cwd.lazy);
+	const replacement = stageAtomicScopePatches(state, { cwd: { intents: {
+		old: null, shared: null, next: { $ref: "cwd.lazy.plan" },
+	} } }, [], "origin");
+	assert.deepEqual(replacement.cascades, { global: [], cwd: [], session: [] });
+	assert.deepEqual(replacement.nextStates.cwd.lazy, state.cwd.lazy);
 });
 
 test("unknown patch keys report the exact quoted key and intent-first allowed fields", () => {

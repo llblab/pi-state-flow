@@ -807,7 +807,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					}
 					clearAcceptedAcquisitions(new Set(acquiredArtifacts.map(({ path }) => path)));
 					updateUi(ctx);
-					const updates = contextProjection.acceptPatch(previousEffective, effectiveState, patches, acquisition.hints);
+					const updates = contextProjection.acceptPatch(previousEffective, effectiveState, patches, acquisition.hints, stage.cascades);
 					const acknowledgement = changed
 						? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
 						: "\nState already current.";

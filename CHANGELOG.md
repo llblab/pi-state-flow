@@ -2,9 +2,14 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.25.1: Cascade Receipts
+
+- `Composition ceiling`: One invariant now counts mutable closure bindings plus `OwnedOperationSlot` and `RenewableLifetime` instances in `lib/extension.ts`, including const-bound holders, against the current total of 24 (17 + 5 + 2). Existing named owner assertions remain. Mutation checks reject an added binding, operation slot or lifetime; lifecycle source and behavior are unchanged.
+- `Cascade receipts`: `state_updates.cascaded` lists every owner-scoped target removed by intent deletion, including nested lazy keys invisible to effective updates and top-level navigation. Paths only, never bodies; deterministic across scopes and never elided as predictable. Staging passes its existing cascade to the context projection without recomputing ownership or changing stored records. Native Active/Passive tests verify each scope, and the always-injected protocol did not grow.
+
 ## 0.25.0: Intent-Owned Memory
 
-- `Intent-owned memory`: Deleting an intent key now deletes the same-scope `working`/`lazy` object keys its structured `{"$ref"}` values own, after authored operations in the same atomic cohort and revision, unless a remaining intent of that scope references the target, an ancestor or a descendant. Other targets and textual `$path` mentions are skipped silently; nothing is rejected, warned about or archived. Records store the cascade as explicit deletions and receipts report it.
+- `Intent-owned memory`: Deleting an intent deletes same-scope `working`/`lazy` keys its structured `{"$ref"}` values own, after authored operations in one atomic cohort/revision, unless a surviving intent references the target, an ancestor or descendant. Other targets and textual `$path` mentions are skipped silently; no rejection, warning or archive. Records store explicit deletions; receipts report effective changes and top-level lazy navigation, but omit nested lazy targets (fixed in 0.25.1).
 - `Work from intents`: Protocol, `patch_state` description, both Skills, README and docs present `intents` as the queue of chosen actions and `working` as their temporary context. Structured refs inside intents own; textual `$path` mentions only use. Before closing an intent, save survivors to unowned paths, with abandonment reasons in `contract`. Unowned entries stay legal. The always-injected protocol did not grow; duplicated read-path and barrier wording now lives only in the tool definitions.
 - `Ownership status`: `/state-flow-status` adds a per-scope `Scope memory:` block with UTF-8 sizes of present planes and the share of top-level `working`/`lazy` entries owned by an open intent. Operator-only; no notices, thresholds or model-facing effects.
 - `Composition root step one`: Completed-history compaction request state moves into `StateFlowCompactionRequests` and settled-turn backup/push state into `SettledTurnBackup`, cutting `lib/extension.ts` mutable closure bindings from 34 to 26 and adding an invariant ceiling. No behaviour change.

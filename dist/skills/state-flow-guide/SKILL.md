@@ -32,7 +32,7 @@ Scopes overlay `global → cwd → session`: cross-project, project, branch/run.
 
 ## Read
 
-Reuse sufficient visible state. The memory head and its recent transitions are frozen at projection start. Apply later `state_updates` only when their `projection` matches the head's `State Flow projection:` ID; older native results remain historical. Effective update paths are key/index arrays whose values replace that path, while `deleted: true` means absence. Current notices can replace invalidation lists or rehydration phase, including clearing them with `[]` or `null`; lazy bodies still require explicit reads.
+Reuse sufficient visible state. The memory head and its recent transitions are frozen at projection start. Apply later `state_updates` only when their `projection` matches the head's `State Flow projection:` ID; older native results remain historical. Effective update paths are key/index arrays whose values replace that path, while `deleted: true` means absence. The optional `cascaded` array lists owner-scoped paths removed by intent deletion, including nested lazy keys; it contains no values, is never elided, and does not mean the effective path is absent if a broader-scope value remains. Current notices can replace invalidation lists or rehydration phase, including clearing them with `[]` or `null`; lazy bodies still require explicit reads.
 
 `read_state` accepts `path` or `paths`, never both. Multi-path reads succeed or fail together. Projections: `value` (default), `keys` (structure), `patch` (intersecting change at the selected boundary).
 

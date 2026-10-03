@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { projectArtifactForModel } from "./artifact.js";
 import { applyPatch, isObject, presentationJson, sameJson } from "./json.js";
+import { formatOwnedPath } from "./ownership.js";
 import { projectSemanticPatch, projectStateForModel } from "./state.js";
 /** Refresh only our section; Pi owns system frames, tools and forced-prompt precedence. */
 export function projectSystemProtocol(messages, protocol) {
@@ -144,7 +145,7 @@ export class ContextProjection {
         this.notices = [];
     }
     /** Called only after successful publication and ancillary acceptance, immediately before returning the native result. */
-    acceptPatch(before, after, patches, hints) {
+    acceptPatch(before, after, patches, hints, cascades = {}) {
         const state = projectStateForModel(after, hints);
         const navigation = lazyNavigationHint(after);
         const beforeNavigation = this.view?.lazy_navigation ?? lazyNavigationHint(before);
@@ -252,7 +253,11 @@ export class ContextProjection {
         }
         if (this.view)
             this.view = { ...this.view, state, lazy_navigation: navigation };
-        return updates.effective.length || updates.lazy_navigation ? { projection: this.identity, ...updates } : undefined;
+        // Owner paths remain informative even when effective state/navigation is masked
+        // or the model could predict every direct write. Never expose target values.
+        const cascaded = ["global", "cwd", "session"].flatMap((scope) => (cascades[scope] ?? []).map((path) => formatOwnedPath(scope, path)));
+        return updates.effective.length || updates.lazy_navigation || cascaded.length
+            ? { projection: this.identity, ...updates, ...(cascaded.length ? { cascaded } : {}) } : undefined;
     }
     project(messages, current, makeHead, initial) {
         const identities = messages.map((message) => JSON.stringify([message.role, message.timestamp,

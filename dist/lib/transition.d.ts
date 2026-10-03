@@ -1,11 +1,14 @@
 import { type ArtifactProvenance } from "./artifact.ts";
 import type { SuccessfulArtifactRead } from "./acquisition.ts";
 import { type AcceptedTransition } from "./history.ts";
+import { type OwnedPath } from "./ownership.ts";
 import { type SuccessfulSkillRead } from "./skills.ts";
 import type { Snapshot } from "./snapshot.ts";
 import type { AtomicScopePatches, ScopedSemanticStates, StateScope, TerminalTransition } from "./state.ts";
 export interface StagedScopedTransition {
     nextStates: ScopedSemanticStates;
+    /** Scope-local targets removed by the staged intent cascade, not replay input. */
+    cascades: Record<StateScope, OwnedPath[]>;
     stateHashes: Record<StateScope, string>;
     /** Fresh runtime-owned provenance for artifacts compiled in this transition. */
     provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>>;

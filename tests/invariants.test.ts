@@ -30,11 +30,14 @@ test("extension composition delegates imperative mechanics to owning domains", a
 	assert.doesNotMatch(source, /function formatPatchStateArguments|function normalizePatchStateArguments/);
 });
 
-test("extension composition keeps a ceiling on mutable closure bindings", async () => {
+test("extension composition keeps one ceiling on mutable closure bindings and lifecycle holders", async () => {
 	const source = await readFile(new URL("lib/extension.ts", root), "utf8");
 	const bindings = source.match(/^\tlet /gm)?.length ?? 0;
-	// Raise only with a reason; compaction, settled-turn backup, artifact acquisition and owned lifecycle operations live in their owning domains.
-	assert.ok(bindings <= 17, `lib/extension.ts has ${bindings} mutable closure bindings; move state into its owning domain`);
+	const holders = source.match(/new\s+(?:OwnedOperationSlot|RenewableLifetime)\b/g)?.length ?? 0;
+	// Count mutable holders even when bound with const; raise only with an ownership reason.
+	// Baseline: 17 bindings + 5 operation slots + 2 renewable lifetimes, not a reduction in state.
+	assert.ok(bindings + holders <= 24,
+		`lib/extension.ts has ${bindings + holders} closure state sites (${bindings} mutable bindings + ${holders} lifecycle holders); move state into its owning domain`);
 	assert.doesNotMatch(source, /let (?:compactionPlan|compactionInFlight|compactionStopped|compactionMarker|turnAcceptedForBackup|backupPending|backupLifetime|pushFailureNotified)\b/);
 	assert.match(source, /new StateFlowCompactionRequests\(\)/);
 	assert.match(source, /new SettledTurnBackup\(\)/);

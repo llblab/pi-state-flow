@@ -3,8 +3,9 @@ import { type ArtifactInvalidationNotice, type ArtifactModelHints } from "./arti
 import type { RecentTransitionWindow } from "./history.ts";
 import { type JsonValue } from "./json.ts";
 import type { Snapshot } from "./snapshot.ts";
+import { type OwnedPath } from "./ownership.ts";
 import type { RehydrationPhase } from "./rehydration.ts";
-import { type AtomicScopePatches, type SemanticState } from "./state.ts";
+import { type AtomicScopePatches, type SemanticState, type StateScope } from "./state.ts";
 /** Refresh only our section; Pi owns system frames, tools and forced-prompt precedence. */
 export declare function projectSystemProtocol(messages: AgentMessage[], protocol: string | undefined): AgentMessage[];
 type LazyValueKind = "array" | "boolean" | "null" | "number" | "object" | "string";
@@ -48,7 +49,7 @@ export declare class ContextProjection {
     private notices;
     reset(): void;
     /** Called only after successful publication and ancillary acceptance, immediately before returning the native result. */
-    acceptPatch(before: SemanticState, after: SemanticState, patches: AtomicScopePatches, hints: ArtifactModelHints): {
+    acceptPatch(before: SemanticState, after: SemanticState, patches: AtomicScopePatches, hints: ArtifactModelHints, cascades?: Partial<Record<StateScope, readonly OwnedPath[]>>): {
         effective: ModelStateUpdate[];
         lazy_navigation?: {
             available: boolean;
@@ -56,6 +57,7 @@ export declare class ContextProjection {
             keys?: Record<string, LazyValueKind>;
         } | undefined;
         projection: `${string}-${string}-${string}-${string}-${string}`;
+        cascaded?: string[] | undefined;
     } | undefined;
     project(messages: AgentMessage[], current: ContextView, makeHead: () => AgentMessage, initial?: ContextView): AgentMessage[];
 }
