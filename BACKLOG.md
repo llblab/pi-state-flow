@@ -1,6 +1,6 @@
 # Backlog
 
-The **0.25.1: Cascade Receipts** scope is implemented; outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains release and installed-client gates and deferred decisions. Cascade semantics, canonical storage, stored patch records and lifecycle behaviour remain unchanged.
+The **0.25.1: Cascade Receipts** release is published (exact-tag workflow, GitHub Release and npm commit verified); outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains installed-client gates and deferred decisions. Cascade semantics, canonical storage, stored patch records and lifecycle behaviour remain unchanged.
 
 ## Out of scope
 
@@ -20,5 +20,4 @@ The **0.25.1: Cascade Receipts** scope is implemented; outcomes belong in [CHANG
 
 ## Release boundary
 
-- **Publication (approval-gated).** After explicit authorization, commit the prepared 0.25.1 package, lockfile, changelog and rebuilt `dist/`, tag the exact commit `v0.25.1`, and push. Verify the exact-tag release workflow, non-draft GitHub Release and matching npm version/commit before closing this gate. Local readiness requires `npm run validate` and the context validator; it does not certify installed clients.
-- **Installation/reload (operator-owned).** Requires separate authorization and disposable storage. Grow Loop preparation does not cross publication or live-client gates.
+Installation/reload requires separate authorization and disposable storage. Local validation and publication do not certify installed clients.
