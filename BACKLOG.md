@@ -1,10 +1,9 @@
 # Backlog
 
-The **0.25.0: Intent-Owned Memory** scope is implemented and locally validated; outcomes are recorded in [CHANGELOG.md](CHANGELOG.md), with package, lockfile and changelog aligned at 0.25.0. This backlog keeps publication, installed-client evidence and later decisions open. Current contracts live in [architecture](docs/architecture.md), [usage](docs/usage.md) and [intent ownership](docs/lazy-state.md#intent-ownership).
+The **0.25.0: Intent-Owned Memory** release is published (tag, GitHub Release and npm verified); outcomes are recorded in [CHANGELOG.md](CHANGELOG.md). This backlog keeps installed-client evidence and later decisions open. Current contracts live in [architecture](docs/architecture.md), [usage](docs/usage.md) and [intent ownership](docs/lazy-state.md#intent-ownership).
 
 ## Carried gates
 
-- **0.25.0 publication (approval-gated):** Commit the prepared tree and push the exact `v0.25.0` tag; then verify the tag's successful release workflow, published GitHub Release and matching npm package before reporting release completion.
 - **Installed 0.25.0 smoke (operator-owned):** After separately authorized installation/reload, use a disposable store. In `session` and in `cwd`: open an intent with owned `working` and `lazy` entries plus one textual mention, close it, and confirm the owned entries are gone, the mentioned one remains, the receipt lists the deletions and `/state-flow-status` shares update. Then supersede an intent in one patch and confirm its targets survive.
 - **Installed 0.22.0 smoke (operator-owned):** Perform the carried check if it is not yet recorded, only against the exact released 0.22.0 installation; a reload of a later candidate cannot certify the old release. After an operator-authorized reload, confirm:
   - terminal autocomplete exposes Active/Passive/Off and status;
