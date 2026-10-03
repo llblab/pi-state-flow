@@ -10,6 +10,7 @@ import {
 import type { SuccessfulArtifactRead } from "./acquisition.ts";
 import { createAcceptedTransition, type AcceptedTransition } from "./history.ts";
 import { applyPatch, containsNull, hashJson, isObject, validatePatch, type JsonObject } from "./json.ts";
+import { cascadeDeletionPatch, computeIntentCascade } from "./ownership.ts";
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER, type SuccessfulSkillRead } from "./skills.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { emptyState } from "./state.ts";
@@ -188,7 +189,10 @@ function stageScopedSemanticTransition(
 	for (const scope of SCOPES) {
 		const authored = patches.get(scope) ?? {};
 		const patch = { ...authored, ...(scope === "session" && acceptedResponse !== undefined ? { response: acceptedResponse } : {}) };
-		const materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch) as StateDocument;
+		let materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch) as StateDocument;
+		// Authored operations first, then the same-scope intent ownership cascade.
+		const cascade = computeIntentCascade(scope, currentStates[scope], materialized);
+		if (cascade.length > 0) materialized = applyPatch(materialized, cascadeDeletionPatch(cascade)) as StateDocument;
 		compileReadArtifacts(
 			materialized,
 			{ artifacts: authored.artifacts ?? {} },

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens, type CompactionResult } from "@earendil-works/pi-coding-agent";
 
@@ -96,4 +97,50 @@ export function stateFlowCompactionResult(
 		tokensBefore: event.preparation.tokensBefore,
 		details: structuredClone(plan.details),
 	};
+}
+
+const STATE_FLOW_COMPACTION_MARKER_PREFIX = "state-flow-boundary:";
+
+type CompactionEvent = Parameters<typeof stateFlowCompactionResult>[2];
+
+/** Completed-history compaction request state owned by one extension instance. */
+export class StateFlowCompactionRequests {
+	#plan: StateFlowCompactionPlan | undefined;
+	#marker: string | undefined;
+	#inFlight = false;
+	#stopped = false;
+	readonly #prefix = `${STATE_FLOW_COMPACTION_MARKER_PREFIX}${randomUUID()}:`;
+
+	get inFlight(): boolean { return this.#inFlight; }
+	get stopped(): boolean { return this.#stopped; }
+
+	/** Permanently refuse owned requests (shutdown). */
+	stop(): void { this.#stopped = true; }
+
+	/** Drop the run-local plan; a stale callback can no longer clear a newer one. */
+	clear(): void {
+		this.#plan = undefined;
+		this.#inFlight = false;
+	}
+
+	/** Install a plan and return its unique per-request marker. */
+	begin(plan: StateFlowCompactionPlan): string {
+		this.#plan = plan;
+		const marker = this.#marker = `${this.#prefix}${randomUUID()}`;
+		this.#inFlight = true;
+		return marker;
+	}
+
+	/** Native completion clears only its own request. */
+	finish(marker: string): void {
+		if (this.#marker === marker) this.clear();
+	}
+
+	/** Answer session_before_compact: foreign requests pass, stale or unpermitted owned ones cancel. */
+	resolve(event: CompactionEvent, permitted: boolean): ReturnType<typeof stateFlowCompactionResult> {
+		if (event.reason !== "manual" || !event.customInstructions?.startsWith(STATE_FLOW_COMPACTION_MARKER_PREFIX)) return undefined;
+		const marker = this.#marker;
+		if (!permitted || this.#stopped || !this.#plan || !marker || event.customInstructions !== marker) return { cancel: true };
+		return stateFlowCompactionResult(this.#plan, marker, event);
+	}
 }

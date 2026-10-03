@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
-import { emptyState, overlayStates, type ScopedStates, type StateScope } from "../lib/state.ts";
+import { emptyState, overlayStates, type AtomicScopePatches, type ScopedSemanticStates, type ScopedStates, type StateScope } from "../lib/state.ts";
+import { stageAtomicScopePatches } from "../lib/transition.ts";
+import { createAcceptedTransition } from "../lib/history.ts";
 import {
 	advanceTemporalState,
 	adoptTemporalStreams,
 	constrainTemporalState,
 	createTemporalState,
 	readTemporalState,
+	readTemporalView,
 	selectScopeStreamAtBoundary,
 	selectTemporalStateBoundary,
 	temporalScopeRevisions,
@@ -307,4 +310,37 @@ test("invalid semantic tails fail closed rather than being truncated or mutating
 	const lost = structuredClone(next);
 	lost.scopes.cwd.patches = [];
 	assert.throws(() => validateTemporalState(lost), /no semantic patch/);
+});
+
+test("intent ownership cascades replay from stored explicit deletions through hot history and folding", () => {
+	for (const historyLimit of [0, 2]) {
+		const base: ScopedStates = initial();
+		base.cwd = { ...emptyState(), working: { step: 1, keep: 2 }, lazy: { plan: { a: 1 } } };
+		let view = createTemporalState(base, "origin", historyLimit);
+		let states = base as ScopedSemanticStates;
+		const snapshots: ScopedSemanticStates[] = [structuredClone(states)];
+		const accept = (patches: AtomicScopePatches, id: string) => {
+			const stage = stageAtomicScopePatches(states, patches, [], id);
+			const accepted = createAcceptedTransition(states, stage.nextStates, id)!;
+			view = advanceTemporalState(view, accepted.transitions, id, historyLimit);
+			states = stage.nextStates;
+			snapshots.push(structuredClone(states));
+			return accepted;
+		};
+		accept({ cwd: { intents: { task: { owns: [{ $ref: "cwd.working.step" }, { $ref: "cwd.lazy.plan" }] } } } }, "T1");
+		const closed = accept({ cwd: { intents: { task: null } } }, "T2");
+		assert.deepEqual(closed.transitions, [{ scope: "cwd", patch: { intents: { task: null }, working: { step: null }, lazy: { plan: null } } }]);
+		assert.deepEqual(readTemporalState(view, 0, "cwd", historyLimit), overlayStates(snapshots.at(-1)!.cwd));
+		assert.deepEqual(readTemporalView(view, 0, "cwd", historyLimit).working, { keep: 2 });
+		if (historyLimit > 0) {
+			assert.deepEqual(readTemporalState(view, 1, "cwd", historyLimit), overlayStates(snapshots.at(-2)!.cwd));
+			assert.deepEqual(view.scopes.cwd.patches.at(-1)!.patch, closed.transitions[0]!.patch);
+		}
+		// Replay applies stored deletions verbatim; it never re-derives ownership from references.
+		const stored = closed.transitions[0]!.patch as JsonObject;
+		const unrelated = { intents: { other: { $ref: "cwd.working.step" } }, working: { step: "foreign" }, lazy: { plan: "foreign" } };
+		assert.deepEqual(applyPatch(unrelated, stored), { intents: { other: { $ref: "cwd.working.step" } }, working: {}, lazy: {} });
+		const reloaded = createTemporalState(snapshots.at(-1)! as ScopedStates, "reload", historyLimit);
+		assert.deepEqual(readTemporalView(reloaded, 0, "cwd", historyLimit), readTemporalView(view, 0, "cwd", historyLimit));
+	}
 });

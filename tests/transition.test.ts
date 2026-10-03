@@ -125,7 +125,93 @@ test("model-facing intent behavior distinguishes possibilities, commitments, han
 	}, [], "origin").nextStates;
 	assert.equal(Object.hasOwn(state.cwd.intents!, "release"), false);
 	assert.equal(state.cwd.working!.release, "published");
-	assert.deepEqual(state.cwd.lazy, { plan: { steps: ["validate", "publish"] } });
+	// Fulfilling the intent deletes the lazy plan it owned by structured reference.
+	assert.deepEqual(state.cwd.lazy, {});
+});
+
+test("deleting an intent cascades its same-scope owned working/lazy keys after authored operations", () => {
+	for (const scope of ["global", "cwd", "session"] as const) {
+		let state: ScopedSemanticStates = states();
+		for (const other of ["global", "cwd", "session"] as const) state[other] = {
+			working: { step: other, notes: { a: 1, b: 2 }, kept: true },
+			lazy: { plan: ["x"], log: { day: 1 } },
+			contract: { rule: "keep" },
+		};
+		state = stageAtomicScopePatches(state, { [scope]: { intents: { task: {
+			steps: [{ $ref: `${scope}.working.step` }, { $ref: `${scope}.working.notes.a` }],
+			plan: { $ref: `${scope}.lazy.plan` },
+			mention: `see $${scope}.working.kept`,
+			skipped: [
+				{ $ref: `${scope}.contract.rule` }, { $ref: `${scope}.working` }, { $ref: `${scope}.lazy.plan[0]` },
+				{ $ref: "working.kept" }, { $ref: "effective.working.kept" }, { $ref: `${scope}[1].working.kept` },
+				{ $ref: `${scope}.working.missing` }, { $ref: `${scope}.intents.task` },
+				{ $ref: `${scope === "cwd" ? "session" : "cwd"}.working.step` },
+			],
+		} } } }, [], "origin").nextStates;
+		const before = structuredClone(state);
+		const stage = stageAtomicScopePatches(state, { [scope]: { intents: { task: null }, working: { step: "rewritten" } } }, [], "origin");
+		const next = stage.nextStates;
+		assert.deepEqual(next[scope].working, { notes: { b: 2 }, kept: true }, scope);
+		assert.deepEqual(next[scope].lazy, { log: { day: 1 } }, scope);
+		assert.deepEqual(next[scope].contract, { rule: "keep" });
+		for (const other of ["global", "cwd", "session"] as const) if (other !== scope) assert.deepEqual(next[other], before[other]);
+		let accepted: AcceptedTransition | undefined;
+		const current = snapshot();
+		commitScopedTransition(current, state, stage, (cohort) => { accepted = cohort; }, "origin", { finalizeRun: false });
+		assert.equal(current.meta.step, 1);
+		// The cascade is stored as explicit deletions in the one accepted record.
+		assert.deepEqual(accepted!.transitions, [{ scope, patch: {
+			intents: { task: null }, working: { step: null, notes: { a: null } }, lazy: { plan: null },
+		} }]);
+		assert.deepEqual(applyPatch(before[scope], accepted!.transitions[0]!.patch as JsonObject), state[scope]);
+	}
+});
+
+test("writes into owned targets in the same patch that deletes their intent are deleted silently", () => {
+	let state: ScopedSemanticStates = states();
+	state.session = { working: { draft: { part: 1 } }, lazy: { plan: ["a"] } };
+	state = stageAtomicScopePatches(state, { session: { intents: {
+		task: { owns: [{ $ref: "session.working.draft" }, { $ref: "session.lazy.plan" }, { $ref: "session.working.created" }] },
+	} } }, [], "origin").nextStates;
+	const before = structuredClone(state);
+	const stage = stageAtomicScopePatches(state, { session: {
+		intents: { task: null },
+		working: { draft: { part: 2, result: "saved too late" }, created: "new in this patch", kept: "unowned" },
+		lazy: { plan: ["b"] },
+	} }, [], "origin");
+	assert.deepEqual(stage.nextStates.session.working, { kept: "unowned" }, "updates, nested additions and newly created owned keys are all removed");
+	assert.deepEqual(stage.nextStates.session.lazy, {});
+	let accepted: AcceptedTransition | undefined;
+	commitScopedTransition(snapshot(), state, stage, (cohort) => { accepted = cohort; }, "origin", { finalizeRun: false });
+	assert.deepEqual(accepted!.transitions, [{ scope: "session", patch: {
+		intents: { task: null }, working: { draft: null, kept: "unowned" }, lazy: { plan: null },
+	} }], "the record stores the net result, not the discarded writes");
+	assert.deepEqual(applyPatch(before.session, accepted!.transitions[0]!.patch as JsonObject), state.session);
+});
+
+test("ownership cascade keeps shared targets, supports one-patch supersession and ignores intent edits", () => {
+	let state: ScopedSemanticStates = states();
+	state.cwd = { working: { shared: { deep: 1, other: 2 }, solo: 1, edited: 1 }, lazy: { plan: { a: 1 } } };
+	state = stageAtomicScopePatches(state, { cwd: { intents: {
+		old: { refs: [{ $ref: "cwd.working.shared" }, { $ref: "cwd.working.solo" }, { $ref: "cwd.lazy.plan" }] },
+		descendant: { $ref: "cwd.working.shared.deep" },
+		edited: { $ref: "cwd.working.edited" },
+	} } }, [], "origin").nextStates;
+	// Editing an intent to drop a reference leaves the target unowned, not deleted.
+	state = stageAtomicScopePatches(state, { cwd: { intents: { edited: "no refs" } } }, [], "origin").nextStates;
+	assert.equal(state.cwd.working!.edited, 1);
+	// Supersede in one patch: the replacement keeps lazy.plan; a descendant owner keeps shared.
+	state = stageAtomicScopePatches(state, { cwd: { intents: {
+		old: null, next: { plan: { $ref: "cwd.lazy.plan.a" } },
+	} } }, [], "origin").nextStates;
+	assert.deepEqual(state.cwd.working, { shared: { deep: 1, other: 2 }, edited: 1 });
+	assert.deepEqual(state.cwd.lazy, { plan: { a: 1 } });
+	// Repeating a deletion of an absent intent is an ordinary no-op.
+	const repeat = stageAtomicScopePatches(state, { cwd: { intents: { old: null } } }, [], "origin");
+	assert.deepEqual(repeat.nextStates.cwd, state.cwd);
+	let published = 0;
+	commitScopedTransition(snapshot(), state, repeat, (cohort) => { if (cohort) published += 1; }, "origin", { finalizeRun: false });
+	assert.equal(published, 0);
 });
 
 test("unknown patch keys report the exact quoted key and intent-first allowed fields", () => {

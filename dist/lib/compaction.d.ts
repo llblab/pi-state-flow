@@ -47,4 +47,21 @@ export declare function stateFlowCompactionResult(plan: StateFlowCompactionPlan,
 }): CompactionResult<StateFlowCompactionDetails> | {
     cancel: true;
 } | undefined;
+type CompactionEvent = Parameters<typeof stateFlowCompactionResult>[2];
+/** Completed-history compaction request state owned by one extension instance. */
+export declare class StateFlowCompactionRequests {
+    #private;
+    get inFlight(): boolean;
+    get stopped(): boolean;
+    /** Permanently refuse owned requests (shutdown). */
+    stop(): void;
+    /** Drop the run-local plan; a stale callback can no longer clear a newer one. */
+    clear(): void;
+    /** Install a plan and return its unique per-request marker. */
+    begin(plan: StateFlowCompactionPlan): string;
+    /** Native completion clears only its own request. */
+    finish(marker: string): void;
+    /** Answer session_before_compact: foreign requests pass, stale or unpermitted owned ones cancel. */
+    resolve(event: CompactionEvent, permitted: boolean): ReturnType<typeof stateFlowCompactionResult>;
+}
 export {};

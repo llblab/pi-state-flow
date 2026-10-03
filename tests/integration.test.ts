@@ -15,7 +15,7 @@ import { TemporalRuntime } from "../lib/runtime.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
 import { temporalScopeRevisions } from "../lib/temporal.ts";
 import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
-import { emptyState, projectStateForModel, type MaterializedState } from "../lib/state.ts";
+import { emptyState, type MaterializedState } from "../lib/state.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
@@ -191,6 +191,55 @@ for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi
 	const terminal = session.messages.at(-1);
 	assert.ok(terminal?.role === "assistant");
 	assert.deepEqual(terminal.content, [{ type: "text", text: "Fresh tail observed" }]);
+});
+
+for (const scope of ["global", "cwd", "session"] as const) test(`real Pi deleting a ${scope} intent cascades its owned memory in one accepted cohort`, { timeout: 30_000 }, async (t) => {
+	for (const mode of ["active", "passive"] as const) {
+		const f = await realPiFixture(t, { initializeRepository: false, mode });
+		const session = await f.createSession("new");
+		const stored = () => scope === "global" ? loadGlobalState(f.repositoryRoot)!
+			: scope === "cwd" ? loadCwdState(f.cwd, f.repositoryRoot)!
+			: loadSessionState(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session))!;
+		f.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("patch_state", { [scope]: {
+				intents: { task: { action: "Probe", owns: [{ $ref: `${scope}.working.draft` }, { $ref: `${scope}.lazy.notes` }], uses: `$${scope}.working.shared` } },
+				working: { draft: "DRAFT", shared: "kept" }, lazy: { notes: { body: "LAZY-BODY" }, other: "kept" },
+			} }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Opened"),
+		]);
+		await session.prompt("Open the task");
+		const view = async () => {
+			const reader = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+			await reader.refreshCurrentMemory();
+			return reader.view!;
+		};
+		const revisions = temporalScopeRevisions(await view());
+		let receipt: any;
+		f.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("patch_state", { [scope]: { intents: { task: null } } }), { stopReason: "toolUse" }),
+			(context) => {
+				const result = context.messages.findLast((message) => message.role === "toolResult" && message.toolName === "patch_state");
+				assert.ok(result?.role === "toolResult" && !result.isError);
+				const content = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+				receipt = JSON.parse(content.slice(content.indexOf('{"state_updates"'))).state_updates;
+				assert.doesNotMatch(content, /LAZY-BODY|DRAFT/);
+				return fauxAssistantMessage("Closed");
+			},
+		]);
+		await session.prompt("Close the task");
+		assert.ok(receipt, `${mode}: provider observed the receipt`);
+		assert.ok(receipt.effective.some((entry: any) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "draft"], deleted: true })), mode);
+		assert.deepEqual(receipt.lazy_navigation?.keys, { other: "string" }, mode);
+		const state = stored();
+		assert.deepEqual(state.working, { shared: "kept" }, mode);
+		assert.deepEqual(state.lazy, { other: "kept" }, mode);
+		assert.deepEqual(state.intents, {}, mode);
+		const current = await view();
+		// Active Session additionally reconciles the accepted answer as its own response revision.
+		assert.equal(temporalScopeRevisions(current)[scope], revisions[scope] + (scope === "session" && mode === "active" ? 2 : 1), `${mode}: one revision for the cohort`);
+		const patches = current.scopes[scope].patches;
+		assert.deepEqual(patches.findLast((record) => Object.hasOwn(record.patch, "intents"))!.patch, { intents: { task: null }, working: { draft: null }, lazy: { notes: null } }, mode);
+	}
 });
 
 for (const mode of ["active", "passive", "stop-handoff"] as const) test(`real Pi ${mode} acknowledges a published artifact patch when effective-array prediction fails`, async (t) => {

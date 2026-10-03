@@ -30,6 +30,20 @@ test("extension composition delegates imperative mechanics to owning domains", a
 	assert.doesNotMatch(source, /function formatPatchStateArguments|function normalizePatchStateArguments/);
 });
 
+test("extension composition keeps a ceiling on mutable closure bindings", async () => {
+	const source = await readFile(new URL("lib/extension.ts", root), "utf8");
+	const bindings = source.match(/^\tlet /gm)?.length ?? 0;
+	// Raise only with a reason; compaction, settled-turn backup, artifact acquisition and owned lifecycle operations live in their owning domains.
+	assert.ok(bindings <= 17, `lib/extension.ts has ${bindings} mutable closure bindings; move state into its owning domain`);
+	assert.doesNotMatch(source, /let (?:compactionPlan|compactionInFlight|compactionStopped|compactionMarker|turnAcceptedForBackup|backupPending|backupLifetime|pushFailureNotified)\b/);
+	assert.match(source, /new StateFlowCompactionRequests\(\)/);
+	assert.match(source, /new SettledTurnBackup\(\)/);
+	assert.match(source, /new ArtifactAcquisitionState\(\)/);
+	assert.doesNotMatch(source, /let (?:artifactInvalidations|artifactHints)\b/);
+	assert.doesNotMatch(source, /let (?:startActivation|inactivePersistence|branchRestoration|inferencePreparation|responseReconciliation)\b/);
+	assert.equal(source.match(/new OwnedOperationSlot</g)?.length, 5, "Start, inactive persistence, restoration, preparation and response reconciliation");
+});
+
 test("release verification requires the compiled package surfaces", async () => {
 	const workflow = await readFile(new URL(".github/workflows/release.yml", root), "utf8");
 	assert.match(workflow, /- name: Build exact local package\n\s+run: npm run build\n\s+- name: Capture exact local package inventory/);
@@ -50,7 +64,7 @@ test("every lib domain has a mirrored test file", async () => {
 });
 
 test("semantic core has no Git, backup, transport, or Pi lifecycle dependencies", async () => {
-	const semanticCore = ["json.ts", "state.ts", "history.ts", "temporal.ts", "query.ts", "transition.ts"];
+	const semanticCore = ["json.ts", "state.ts", "history.ts", "temporal.ts", "query.ts", "ownership.ts", "transition.ts"];
 	const forbidden = ["git", "publication", "telegram", "extension", "runtime", "storage"];
 	for (const name of semanticCore) {
 		const source = await readFile(new URL(`lib/${name}`, root), "utf8");

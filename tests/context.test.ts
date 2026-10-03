@@ -10,7 +10,8 @@ import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import { acceptedStateUpdates, ContextProjection, contextView, createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, projectSystemProtocol, runtimeContextMessage } from "../lib/context.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { completeRun, startEpisode } from "../lib/episode.ts";
-import { emptyState, overlayStates, type MaterializedState } from "../lib/state.ts";
+import { emptyState, overlayStates, type MaterializedState, type ScopedSemanticStates } from "../lib/state.ts";
+import { stageAtomicScopePatches } from "../lib/transition.ts";
 import { applyPatch } from "../lib/json.ts";
 import { commitScopedTerminal, commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
@@ -317,6 +318,32 @@ test("deletion receipts omit only unchanged effective values, not unknown fallba
 	const removed = emptyState();
 	assert.deepEqual(projection.acceptPatch(visible, removed, { session: { working: { owned: null } } }, {})?.effective,
 		[{ path: ["working", "owned"], deleted: true }], "effective-only head cannot prove the deleted key's scope owner");
+});
+
+test("intent ownership cascades reach the receipt as deletions without rewriting the frozen head", () => {
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const scopes = { global: emptyState(), cwd: emptyState(), session: emptyState() } as ScopedSemanticStates;
+		scopes[scope] = { ...emptyState(),
+			intents: { task: { owns: [{ $ref: `${scope}.working.step` }, { $ref: `${scope}.lazy.plan` }] } },
+			working: { step: "draft", kept: "shared" }, lazy: { plan: { body: "HIDDEN" }, notes: "kept" } };
+		const before = overlayStates(scopes.global, scopes.cwd, scopes.session);
+		const projection = new ContextProjection();
+		const native = [user("close", 1)];
+		const first = projection.project(native, contextView(before, {}, []), () => user(JSON.stringify(before.working), 0));
+		const head = JSON.stringify(first[0]);
+		const patch = { [scope]: { intents: { task: null } } };
+		const next = stageAtomicScopePatches(scopes, patch, [], "origin").nextStates;
+		const after = overlayStates(next.global, next.cwd, next.session);
+		const updates = projection.acceptPatch(before, after, patch, {});
+		assert.ok(updates, scope);
+		assert.deepEqual(updates.effective.filter(({ path }) => path[0] === "working"), [{ path: ["working", "step"], deleted: true }], scope);
+		assert.deepEqual(updates.lazy_navigation?.keys, { notes: "string" }, scope);
+		assert.doesNotMatch(JSON.stringify(updates), /HIDDEN|draft/);
+		const later = projection.project([...native, message("toolResult", JSON.stringify(updates), 2)], contextView(after, {}, []),
+			() => { throw new Error("head rewritten"); });
+		assert.equal(JSON.stringify(later[0]), head, "the frozen head still shows the pre-cascade values");
+		assert.match(JSON.stringify(later[0]), /draft/);
+	}
 });
 
 test("a frozen Stop handoff receives changes made before its first projection", () => {

@@ -7,6 +7,7 @@ import {
 	planStateFlowCompaction,
 	shouldRequestStateFlowCompaction,
 	stateFlowCompactionResult,
+	StateFlowCompactionRequests,
 } from "../lib/compaction.ts";
 import { harness, start } from "./harness.ts";
 import { captureTemporalFileBases } from "../lib/durable.ts";
@@ -327,4 +328,32 @@ test("does not request compaction for queued work or a prefix containing foreign
 		h.handlers.get("agent_settled")!({}, h.ctx);
 		assert.equal(h.compactRequests.length, 0, blocked);
 	}
+});
+
+test("compaction request owner scopes markers, clears only its own request and refuses after stop", () => {
+	const requests = new StateFlowCompactionRequests();
+	const plan = { leafId: "leaf", firstKeptEntryId: "kept", details: { version: 1 as const, owner: "state-flow" as const, boundary: "b", step: 1 } };
+	const event = (customInstructions: string | undefined, reason: "manual" | "threshold" = "manual") => ({
+		reason, customInstructions, branchEntries: [{ id: "leaf" }], preparation: { tokensBefore: 10 }, signal: new AbortController().signal,
+	});
+	assert.equal(requests.resolve(event("foreign"), true), undefined, "foreign manual requests pass through");
+	assert.equal(requests.resolve(event("state-flow-boundary:x", "threshold"), true), undefined);
+	assert.deepEqual(requests.resolve(event("state-flow-boundary:stale"), true), { cancel: true });
+	const first = requests.begin(plan);
+	assert.match(first, /^state-flow-boundary:[0-9a-f-]+:[0-9a-f-]+$/);
+	assert.equal(requests.inFlight, true);
+	assert.equal(requests.resolve(event(first), true)?.hasOwnProperty("summary"), true);
+	assert.deepEqual(requests.resolve(event(first), false), { cancel: true }, "inactive or shutting down cancels");
+	const second = requests.begin(plan);
+	assert.notEqual(second, first);
+	assert.ok(second.startsWith(first.slice(0, first.lastIndexOf(":") + 1)), "one instance prefix");
+	requests.finish(first);
+	assert.equal(requests.inFlight, true, "stale completion cannot clear a newer request");
+	requests.finish(second);
+	assert.equal(requests.inFlight, false);
+	assert.deepEqual(requests.resolve(event(second), true), { cancel: true });
+	const third = requests.begin(plan);
+	requests.stop();
+	assert.equal(requests.stopped, true);
+	assert.deepEqual(requests.resolve(event(third), true), { cancel: true });
 });

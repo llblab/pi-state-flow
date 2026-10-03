@@ -6,8 +6,11 @@ import {
   type ArtifactInvalidationRequest,
   type ArtifactSourceFingerprint,
   type ArtifactSourceIdentity,
+  ORDINARY_ARTIFACT_COMPILER,
+  type ArtifactProvenanceRegistry,
 } from "./artifact.ts";
-import { isObject } from "./json.ts";
+import { isObject, type JsonObject } from "./json.ts";
+import type { AtomicScopePatches, ScopedSemanticStates, ScopedStates, StateScope } from "./state.ts";
 
 /** Why the caller is considering source-body acquisition. */
 export type ArtifactAcquisitionIntent =
@@ -153,4 +156,85 @@ export function decideArtifactAcquisition(
 		case "maintenance":
 			return { kind: "read-source", reason: "maintenance" };
 	}
+}
+
+export const SOURCE_CHANGED_HINT = "Source changed since this artifact was compiled. Read and recompile it before relying on it.";
+
+const SCOPES = ["global", "cwd", "session"] as const;
+
+/**
+ * One selected branch's ordinary-artifact acquisition plan: runtime-observed
+ * invalidations, their model hints and the read tracker correlated to them.
+ * The tracker's candidates always equal the current invalidation plan.
+ */
+export class ArtifactAcquisitionState {
+	readonly reads = new ArtifactReadTracker();
+	#invalidations: ArtifactInvalidationRequest[] = [];
+	#hints: Record<string, string> = {};
+
+	get invalidations(): readonly ArtifactInvalidationRequest[] { return this.#invalidations; }
+	get hints(): Record<string, string> { return this.#hints; }
+
+	/** Drop the invalidation plan; hints remain until the next refresh. */
+	clearInvalidations(): void { this.#setInvalidations([]); }
+
+	/** Forget plan and hints when no memory view is selected. */
+	reset(): void {
+		this.#hints = {};
+		this.#setInvalidations([]);
+	}
+
+	/** Re-observe exact registered sources for the selected scope artifacts. */
+	refresh(states: ScopedStates, provenance: (scope: StateScope) => ArtifactProvenanceRegistry): void {
+		const paths = new Set<string>();
+		for (const scope of SCOPES) for (const path of Object.keys(states[scope].artifacts)) paths.add(path);
+		const observations = new Map(inspectRegisteredArtifactPaths(paths).map((observation) => [observation.path, observation]));
+		const hints: Record<string, string> = {};
+		const invalidations = new Map<string, ArtifactInvalidationRequest>();
+		for (const scope of SCOPES) {
+			const registry = provenance(scope);
+			for (const [path, metadata] of Object.entries(states[scope].artifacts)) {
+				// A narrower owner replaces broader evidence for the same path.
+				delete hints[path];
+				invalidations.delete(path);
+				if (metadata.kind === "skill") continue;
+				const observed = observations.get(path);
+				if (observed?.kind !== "present") continue;
+				const need = classifyArtifactCompilationNeed({ path, scope, sourceFingerprint: observed.fingerprint }, metadata, ORDINARY_ARTIFACT_COMPILER, false, registry[path]);
+				if (need.kind !== "requires-compilation") continue;
+				if (need.reason === "source-changed") hints[path] = SOURCE_CHANGED_HINT;
+				invalidations.set(path, { path, scope, reason: need.reason });
+			}
+		}
+		this.#hints = hints;
+		this.#setInvalidations([...invalidations.values()].sort((left, right) => left.path.localeCompare(right.path)));
+	}
+
+	/** Accepted compilations leave the plan; correlated read evidence is single-use. */
+	acceptAcquired(paths: ReadonlySet<string> = new Set(this.reads.successful.keys())): void {
+		this.#setInvalidations(this.#invalidations.filter(({ path }) => !paths.has(path)));
+		this.reads.clear();
+	}
+
+	#setInvalidations(invalidations: ArtifactInvalidationRequest[]): void {
+		this.#invalidations = invalidations;
+		this.reads.setCandidates(invalidations);
+	}
+}
+
+/** Deletion patches for registered artifacts whose exact source is observed missing, in every owning scope. */
+export function missingArtifactRemovals(states: ScopedSemanticStates): AtomicScopePatches {
+	const owners = new Map<string, StateScope[]>();
+	for (const scope of SCOPES) for (const path of Object.keys(states[scope].artifacts ?? {})) {
+		owners.set(path, [...owners.get(path) ?? [], scope]);
+	}
+	const removals: AtomicScopePatches = {};
+	for (const observation of inspectRegisteredArtifactPaths(owners.keys())) {
+		if (observation.kind !== "missing") continue;
+		for (const scope of owners.get(observation.path) ?? []) {
+			const artifacts = (removals[scope]?.artifacts ?? {}) as JsonObject;
+			removals[scope] = { ...(removals[scope] ?? {}), artifacts: { ...artifacts, [observation.path]: null } };
+		}
+	}
+	return removals;
 }

@@ -197,3 +197,28 @@ test("the status command neither discovers unregistered files nor reads source b
 	assert.doesNotMatch(output, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	assert.doesNotMatch(output, /SECRET SOURCE BODY/);
 });
+
+test("detailed status reports per-scope plane sizes and intent-owned working/lazy shares without model-facing state", () => {
+	const output = detailedStatus(snapshot, diagnostics({
+		scopeStates: {
+			global: { ...emptyState(), contract: { shared: true } },
+			cwd: { ...emptyState(),
+				intents: { task: { owns: [{ $ref: "cwd.working.draft.part" }, { $ref: "cwd.lazy.plan" }, { $ref: "session.working.free" }], uses: "$cwd.working.free" } },
+				working: { draft: { part: 1 }, free: "é" }, lazy: { plan: [1], other: 2 } },
+			session: { ...emptyState(), working: { free: true }, response: "Done" },
+		},
+	}));
+	const lines = output.split("\n");
+	assert.equal('{"draft":{"part":1},"free":"é"}'.length, 31, "sizes count UTF-8 bytes, not UTF-16 units");
+	const start = lines.indexOf("Scope memory:");
+	assert.ok(start > 0 && start < lines.indexOf("Effective memory:"));
+	const cwdState = '{"task":{"owns":[{"$ref":"cwd.working.draft.part"},{"$ref":"cwd.lazy.plan"},{"$ref":"session.working.free"}],"uses":"$cwd.working.free"}}';
+	assert.deepEqual(lines.slice(start + 1, start + 4), [
+		"- global: contract 15 B",
+		`- cwd: intents ${cwdState.length} B, working 32 B, lazy 22 B; intent-owned working 1/2, lazy 1/2`,
+		"- session: working 13 B, response 6 B; intent-owned working 0/1",
+	]);
+	assert.doesNotMatch(detailedStatus(snapshot, diagnostics({ temporal: undefined, durableStateError: "unavailable" })), /Scope memory:/);
+	const empty = { ...emptyState() };
+	assert.doesNotMatch(detailedStatus(snapshot, diagnostics({ scopeStates: { global: empty, cwd: empty, session: empty } })), /Scope memory:/);
+});

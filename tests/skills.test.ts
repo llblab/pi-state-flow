@@ -69,7 +69,14 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 	assert.match(memory.description, /Not for routine turns, automatic phase-boundary audits, usage help, or background maintenance/);
 	const memoryBody = readFileSync(memory.filePath, "utf8");
 	assert.match(memoryBody, /Never give an assistant conclusion user authority/);
-	assert.match(memoryBody, /Remove fulfilled, abandoned, superseded, or impossible intents/);
+	assert.match(memoryBody, /Deleting a fulfilled, abandoned, superseded, or impossible intent deletes owned keys no remaining same-scope intent references/);
+	for (const body of [guideBody, memoryBody]) {
+		assert.match(body, /Work from intents/);
+		assert.match(body, /a textual `\$path` mention only uses it/);
+		assert.match(body, /reasons for abandoned work to `contract` as rejected approaches/);
+		assert.match(body, /[Uu]nowned entries remain legal/);
+		assert.match(body, /only intent ownership.* has a deletion consequence/);
+	}
 	assert.match(memoryBody, /Keep `lazy` shallow and priority-ordered/);
 	assert.match(memoryBody, /`\$`-prefixed `read_state` paths inside ordinary strings/);
 	assert.match(memoryBody, /Never scan or resolve references merely to find broken ones/);

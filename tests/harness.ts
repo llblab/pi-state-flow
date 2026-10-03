@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stateFlowExtension from "../index.ts";
-import type { StateFlowTelegramLoader, StateFlowTelegramModules } from "../lib/telegram.ts";
+import type { StateFlowTelegramLoader } from "../lib/telegram.ts";
 import { loadStateFlowConfig } from "../lib/config.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
 import type { ModelState, StateScope } from "../lib/state.ts";

@@ -1,9 +1,8 @@
 import { resolve } from "node:path";
 import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
-import { applyPatch, canonicalJson, containsNull, isJsonValue, isObject, type JsonObject } from "./json.ts";
+import { canonicalJson, isJsonValue, isObject, type JsonObject } from "./json.ts";
 import { validateTemporalLineage, type TransitionBoundary } from "./temporal.ts";
-import { isMaterializedState, type MaterializedState } from "./state.ts";
 const MAX_RESTORED_STEP = Number.MAX_SAFE_INTEGER - 1;
 const MAX_LEGACY_VALIDATION_ATTEMPT = 7;
 

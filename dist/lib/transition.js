@@ -1,6 +1,7 @@
 import { compileArtifact, ORDINARY_ARTIFACT_COMPILER, validateArtifactMetadata, validateArtifactRegistry, validateModelArtifactPatch, } from "./artifact.js";
 import { createAcceptedTransition } from "./history.js";
 import { applyPatch, containsNull, hashJson, isObject, validatePatch } from "./json.js";
+import { cascadeDeletionPatch, computeIntentCascade } from "./ownership.js";
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER } from "./skills.js";
 import { emptyState } from "./state.js";
 const SCOPES = new Set(["global", "cwd", "session"]);
@@ -138,7 +139,11 @@ function stageScopedSemanticTransition(currentStates, transition, successfulSkil
     for (const scope of SCOPES) {
         const authored = patches.get(scope) ?? {};
         const patch = { ...authored, ...(scope === "session" && acceptedResponse !== undefined ? { response: acceptedResponse } : {}) };
-        const materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch);
+        let materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch);
+        // Authored operations first, then the same-scope intent ownership cascade.
+        const cascade = computeIntentCascade(scope, currentStates[scope], materialized);
+        if (cascade.length > 0)
+            materialized = applyPatch(materialized, cascadeDeletionPatch(cascade));
         compileReadArtifacts(materialized, { artifacts: authored.artifacts ?? {} }, artifactReads.filter((read) => (read.scope ?? "global") === scope), provenanceUpdates[scope]);
         compileReadSkills(scope, materialized, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
         validateMaterializedTransition(materialized, scope);

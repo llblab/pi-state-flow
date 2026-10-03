@@ -32,4 +32,6 @@ export interface StatusDiagnostics {
 }
 export declare function formatScopeRevisionVector(revisions: ScopeRevisions): string;
 export declare function compactStatus(snapshot: Snapshot, _revisions: ScopeRevisions, colorize: Colorize): string | undefined;
+/** Operator-only footprint: serialized plane sizes and intent-owned share of top-level working/lazy entries. */
+export declare function scopeMemoryLines(states: ScopedStates): string[];
 export declare function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostics): string;

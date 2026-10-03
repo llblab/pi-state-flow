@@ -2,6 +2,15 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.25.0: Intent-Owned Memory
+
+- `Intent-owned memory`: Deleting an intent key now deletes the same-scope `working`/`lazy` object keys its structured `{"$ref"}` values own, after authored operations in the same atomic cohort and revision, unless a remaining intent of that scope references the target, an ancestor or a descendant. Other targets and textual `$path` mentions are skipped silently; nothing is rejected, warned about or archived. Records store the cascade as explicit deletions and receipts report it.
+- `Work from intents`: Protocol, `patch_state` description, both Skills, README and docs present `intents` as the queue of chosen actions and `working` as their temporary context. Structured refs inside intents own; textual `$path` mentions only use. Before closing an intent, save survivors to unowned paths, with abandonment reasons in `contract`. Unowned entries stay legal. The always-injected protocol did not grow; duplicated read-path and barrier wording now lives only in the tool definitions.
+- `Ownership status`: `/state-flow-status` adds a per-scope `Scope memory:` block with UTF-8 sizes of present planes and the share of top-level `working`/`lazy` entries owned by an open intent. Operator-only; no notices, thresholds or model-facing effects.
+- `Composition root step one`: Completed-history compaction request state moves into `StateFlowCompactionRequests` and settled-turn backup/push state into `SettledTurnBackup`, cutting `lib/extension.ts` mutable closure bindings from 34 to 26 and adding an invariant ceiling. No behaviour change.
+- `Lifecycle review`: `lib/extension.ts` mutable closure bindings drop from 26 to 17 under the invariant ceiling. Artifact invalidations/hints move into `ArtifactAcquisitionState`, five lifecycle operations share one `OwnedOperationSlot`, renewable lifetimes and the session-identity guard have one owner each, and `noUnusedLocals`/`noUnusedParameters` guard dead code. No behaviour change.
+- `Readable documentation`: Human-facing guides use short sections, explicit operation steps and resource-specific recovery rules. They describe current behavior rather than release chronology; performance documentation retains reproducible workloads and metric limits, not obsolete measurements. The acceptance map includes intent ownership and lifecycle owners, and a test checks relative documentation links and anchors.
+
 ## 0.24.0: Memory-Inert Off and Pi 1.0
 
 - `Memory-inert Off`: Off startup, resume, reload, tree navigation and automatic callbacks perform no semantic-store I/O or recovery reporting, even with logging enabled. Switching to Off cancels owned memory waits and clears model tools/context without altering accepted memory; native mode, continuation, write-fence and pending-fork policy survive.

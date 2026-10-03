@@ -1,4 +1,5 @@
-import { type ArtifactInvalidationReason, type ArtifactInvalidationRequest, type ArtifactSourceIdentity } from "./artifact.ts";
+import { type ArtifactInvalidationReason, type ArtifactInvalidationRequest, type ArtifactSourceIdentity, type ArtifactProvenanceRegistry } from "./artifact.ts";
+import type { AtomicScopePatches, ScopedSemanticStates, ScopedStates, StateScope } from "./state.ts";
 /** Why the caller is considering source-body acquisition. */
 export type ArtifactAcquisitionIntent = "routine" | "new-session" | "relevant-gap" | "exact-source" | "exact-edit" | "contradiction-or-failure" | "explicit-request" | "maintenance";
 export type ArtifactAcquisitionReason = ArtifactInvalidationReason | "materialized-gap" | "exact-source" | "exact-edit" | "contradiction-or-failure" | "explicit-request" | "maintenance";
@@ -37,3 +38,25 @@ export declare class ArtifactReadTracker {
  * stay on materialized state; only a concrete source need permits rereading.
  */
 export declare function decideArtifactAcquisition(source: ArtifactSourceIdentity, metadata: unknown, compiler: string, options: ArtifactAcquisitionOptions): ArtifactAcquisitionDecision;
+export declare const SOURCE_CHANGED_HINT = "Source changed since this artifact was compiled. Read and recompile it before relying on it.";
+/**
+ * One selected branch's ordinary-artifact acquisition plan: runtime-observed
+ * invalidations, their model hints and the read tracker correlated to them.
+ * The tracker's candidates always equal the current invalidation plan.
+ */
+export declare class ArtifactAcquisitionState {
+    #private;
+    readonly reads: ArtifactReadTracker;
+    get invalidations(): readonly ArtifactInvalidationRequest[];
+    get hints(): Record<string, string>;
+    /** Drop the invalidation plan; hints remain until the next refresh. */
+    clearInvalidations(): void;
+    /** Forget plan and hints when no memory view is selected. */
+    reset(): void;
+    /** Re-observe exact registered sources for the selected scope artifacts. */
+    refresh(states: ScopedStates, provenance: (scope: StateScope) => ArtifactProvenanceRegistry): void;
+    /** Accepted compilations leave the plan; correlated read evidence is single-use. */
+    acceptAcquired(paths?: ReadonlySet<string>): void;
+}
+/** Deletion patches for registered artifacts whose exact source is observed missing, in every owning scope. */
+export declare function missingArtifactRemovals(states: ScopedSemanticStates): AtomicScopePatches;

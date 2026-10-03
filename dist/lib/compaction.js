@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 export const STATE_FLOW_COMPACTION_SUMMARY = "State Flow accepted the completed work before this boundary. Current memory is restored from its retained semantic boundary and projected separately; use the retained native entries for subsequent work.";
 /** A modest margin above Pi's default 20k retained suffix absorbs estimation drift. */
@@ -64,4 +65,43 @@ export function stateFlowCompactionResult(plan, marker, event) {
         tokensBefore: event.preparation.tokensBefore,
         details: structuredClone(plan.details),
     };
+}
+const STATE_FLOW_COMPACTION_MARKER_PREFIX = "state-flow-boundary:";
+/** Completed-history compaction request state owned by one extension instance. */
+export class StateFlowCompactionRequests {
+    #plan;
+    #marker;
+    #inFlight = false;
+    #stopped = false;
+    #prefix = `${STATE_FLOW_COMPACTION_MARKER_PREFIX}${randomUUID()}:`;
+    get inFlight() { return this.#inFlight; }
+    get stopped() { return this.#stopped; }
+    /** Permanently refuse owned requests (shutdown). */
+    stop() { this.#stopped = true; }
+    /** Drop the run-local plan; a stale callback can no longer clear a newer one. */
+    clear() {
+        this.#plan = undefined;
+        this.#inFlight = false;
+    }
+    /** Install a plan and return its unique per-request marker. */
+    begin(plan) {
+        this.#plan = plan;
+        const marker = this.#marker = `${this.#prefix}${randomUUID()}`;
+        this.#inFlight = true;
+        return marker;
+    }
+    /** Native completion clears only its own request. */
+    finish(marker) {
+        if (this.#marker === marker)
+            this.clear();
+    }
+    /** Answer session_before_compact: foreign requests pass, stale or unpermitted owned ones cancel. */
+    resolve(event, permitted) {
+        if (event.reason !== "manual" || !event.customInstructions?.startsWith(STATE_FLOW_COMPACTION_MARKER_PREFIX))
+            return undefined;
+        const marker = this.#marker;
+        if (!permitted || this.#stopped || !this.#plan || !marker || event.customInstructions !== marker)
+            return { cancel: true };
+        return stateFlowCompactionResult(this.#plan, marker, event);
+    }
 }

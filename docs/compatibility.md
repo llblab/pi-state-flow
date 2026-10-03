@@ -2,11 +2,15 @@
 
 ## Supported Pi stack
 
-State Flow requires matching `pi-coding-agent`, `pi-agent-core`, `pi-ai`, and `pi-tui` packages at `>=1.0.0`. Keep all four on the same release line. The open-ended peer range permits newer SDK releases; it does not certify them.
+State Flow requires matching `pi-coding-agent`, `pi-agent-core`, `pi-ai` and `pi-tui` packages at `>=1.0.0`. Keep all four on the same release line. The open-ended peer range permits newer SDK releases; it does not certify them.
 
-The repository-local verified stack is Linux/x64, Node 26.8.1, Git 2.55.0 and matching Pi SDK 1.0.0 packages. Earlier source-bound measurements on Pi 0.87.0 remain historical evidence, not 1.0.0 performance results. Repository validation covers tests, typecheck, build, compiled imports and package dry-run; successful results are bound to the validated source and dependency identities. The release workflow uses Node 24; its result is a separate verification gate.
+**Verified environment:** Linux/x64, Node 26.8.1, Git 2.55.0 and matching Pi SDK 1.0.0 packages.
 
-Tests use isolated stores and scripted providers through the real Pi SDK. They do not certify installed Telegram/TUI reachability, live provider behavior, other operating systems, mixed SDK versions or untested newer SDK releases. Detailed behavioral witnesses live in [temporal acceptance](temporal-acceptance.md); benchmark methodology and source-bound results live in [performance](performance.md).
+- Repository validation covers tests, typecheck, build, compiled imports and package dry-run. Results apply to the exact source and dependency identities validated.
+- The release workflow uses Node 24; its result is a separate verification gate.
+- Tests use isolated stores and scripted providers through the real Pi SDK. They do not certify installed Telegram/TUI reachability, live provider behavior, other operating systems, mixed SDK versions or untested newer SDK releases.
+
+Detailed behavioral witnesses live in [temporal acceptance](temporal-acceptance.md); benchmark methodology and source-bound results live in [performance](performance.md).
 
 ## Public host seams
 
@@ -24,79 +28,149 @@ An embedding must deliver the native lifecycle, not merely construct or dispose 
 
 ## Context, tools and provider input
 
-State Flow contributes its protocol through `systemPromptOptions.sections.state_flow` and refreshes only that section at `context_with_system`. Companion sections, native system deltas, tool declarations and non-system message identities remain intact; an explicit foreign forced prompt retains Pi's precedence. Mode changes update the next provider request without requiring another `before_agent_start`.
+**System prompt.** State Flow contributes protocol through `systemPromptOptions.sections.state_flow` and refreshes only that section at `context_with_system`.
 
-Native context edits, omitted messages and replaced tool results reach the provider through Pi's canonical context. Raw native trace remains inspectable. Branch selection applies branch-relative edits without rewriting separately owned memory. Retry, length and overflow recovery omit failed attempts from subsequent provider input without accepting them as State Flow responses or advancing semantic history. Edited-context usage accounting must not trigger phantom compaction.
+- Companion sections, native system deltas, tool declarations and non-system message identities remain intact.
+- An explicit foreign forced prompt retains Pi's precedence.
+- Mode changes update the next provider request without requiring another `before_agent_start`.
 
-Image resizing, encoding and provider limits remain SDK-owned. Tests exercise prompt images, built-in reads and generic tool results across model-specific resize profiles while preserving historical payloads. State Flow supplies no image pipeline or provider-limit enforcement. Provider strict schemas, cache behavior, diagnostics and other SDK capabilities are not independently certified by State Flow's tests.
+**Conversation and recovery:**
 
-Active boundary continuation receives accepted memory even when no new `before_agent_start` occurs. A completed specification is not resurrected. State Flow does not become the owner of the host's continuation scheduler.
+- Native context edits, omitted messages and replaced tool results reach the provider through Pi's canonical context. Raw native trace remains inspectable.
+- Branch selection applies branch-relative edits without rewriting separately owned memory.
+- Retry, length and overflow recovery omit failed attempts from subsequent provider input, without accepting them as State Flow responses or advancing semantic history.
+- Edited-context usage accounting must not trigger phantom compaction.
+
+**Images and provider limits.** Image resizing, encoding and provider limits remain SDK-owned. Tests exercise prompt images, built-in reads and generic tool results across model-specific resize profiles while preserving historical payloads. State Flow supplies no image pipeline or provider-limit enforcement. Its tests do not independently certify provider strict schemas, cache behavior, diagnostics or other SDK capabilities.
+
+**Continuation.** Active boundary continuation receives accepted memory even without a new `before_agent_start`. A completed specification is not resurrected, and State Flow does not own the host's continuation scheduler.
 
 ## Pre-inference cancellation
 
-On the tested SDK, `before_agent_start` precedes the low-level agent's `prompt`; `ExtensionContext.signal` is undefined there. State Flow captures the specification at that hook without canonical publication. The active `context` hook supplies the operation signal and awaits preparation/maintenance before provider inference.
+On the tested SDK, `before_agent_start` precedes the low-level agent's `prompt`; `ExtensionContext.signal` is undefined there.
 
-Pi catches context-hook errors and may otherwise continue inference. State Flow therefore calls public `ctx.abort()` on preparation failure rather than relying on a thrown error as a fence. Native tests prove no provider call before coherent acceptance, cancellation while an independent writer remains held, rollback without draft installation and preservation of uncompiled native input.
+1. State Flow captures the specification at that hook without canonical publication.
+2. The active `context` hook supplies the operation signal and awaits preparation/maintenance before provider inference.
+3. If preparation fails, State Flow calls public `ctx.abort()`. Pi catches context-hook errors and may otherwise continue inference, so a thrown error alone is not a fence.
 
-Operation signals are not universal. Idle commands and session events can lack them. Do not infer native Abort cancellation from an extension-owned shutdown signal or generalize active-run tests to idle waits.
+Native tests prove no provider call before coherent acceptance, cancellation while an independent writer remains held, rollback without draft installation and preservation of uncompiled native input.
+
+**Signals are not universal.** Idle commands and session events can lack them. Do not infer native Abort cancellation from an extension-owned shutdown signal or generalize active-run tests to idle waits.
 
 ## Mode configuration compatibility
 
-Global `config.json` accepts `mode: "active" | "passive" | "off"`, defaulting to Off when no mode policy is configured, solely as the initial policy for new sessions. Session `config.json` uses the same key for the concrete retained choice; commands and Telegram never edit the global default. Before semantic initialization, an inactive choice is retained in a native `{mode}` checkpoint instead.
+**Preferred representation:**
 
-Legacy decoding is read-only. Without explicit global mode, the absence of all legacy mode flags means Off; `autoStart: true` means Active, while any present legacy mode flag retains its former mapping: `passiveBootstrap: false` together with `passiveTools: false` means Off, and otherwise the fallback is Passive. An operator who previously relied on an absent configuration for implicit Passive must now select Passive in that session or set global `mode: "passive"` for new sessions. Explicit global mode overrides valid legacy flags; invalid values still fail validation. Session `enabled:true` remains Active, and `enabled:false` is non-active. Native legacy inactive checkpoints use the configured inactive fallback, never an Active default. Session config and native checkpoints reject mixed `mode`/`enabled` representations, even when apparently consistent, rather than choosing between two stored policies. Ordinary writers emit only mode; no eager migration or semantic normalization runs.
+- Global `config.json` accepts `mode: "active" | "passive" | "off"`. It defaults to Off when no mode policy is configured and supplies only the initial policy for new sessions.
+- Session `config.json` uses the same key for the concrete retained choice. Commands and Telegram never edit the global default.
+- Before semantic initialization, an inactive choice is retained in a native `{mode}` checkpoint instead.
 
-The extension SDK uses an optional `mode` default override, and both Telegram port variants use `snapshot.mode` plus `select(mode)`. Old callback keyboards may refresh the view without selecting a mode. Synchronous enum-based ports remain supported; this does not promise the removed Start/Stop port signatures.
+**Other readable representations.** Decoding is read-only; ordinary writers emit only mode, with no eager migration or semantic normalization.
+
+- Without explicit global mode, absence of all flag-based mode settings means Off.
+- `autoStart: true` means Active. With any flag-based mode setting present, `passiveBootstrap: false` together with `passiveTools: false` means Off; otherwise the fallback is Passive.
+- Explicit global mode overrides valid flags; invalid values still fail validation.
+- Session `enabled:true` means Active, and `enabled:false` means non-active.
+- Native inactive checkpoints without an explicit mode use the configured inactive fallback, never an Active default.
+- Session config and native checkpoints reject mixed `mode`/`enabled` representations, even when apparently consistent, rather than choosing between two stored policies.
+
+To use Passive, select it in the current session or set global `mode: "passive"` for new sessions.
+
+**SDK and Telegram controls.** The extension SDK accepts an optional `mode` default override. Both Telegram port variants use `snapshot.mode` plus `select(mode)`. A stale callback keyboard may refresh the view without selecting a mode. Synchronous enum-based ports are supported; Start/Stop port signatures are not.
 
 ## Mode selection and memory restoration
 
-Start activates current same-session authority under awaited exclusion. It rechecks physical identity and initialization permission after waiting, accepts once, then installs policy, memory and checkpoint. Explicit Start does not claim to restore an expired historical boundary. Native tests prove current shared plus local-private memory at the next provider and actual Abort withdrawal for in-run Start with an operation signal.
+**Start:**
 
-Passive/Off selects local tools/context policy before waiting for persistence; Off injects no State Flow context, including a frozen handoff. For accepted memory it publishes lifecycle metadata without rewriting semantic/provenance files. Pending inactive choices share one acceptance of the latest mode. Selection, shutdown and accepted Start cancel obsolete Stop work; rejected Start does not. Genuine persistence failure retains readable memory and native context while fencing writes until accepted Start.
+- Activates current same-session authority under awaited exclusion.
+- Rechecks physical identity and initialization permission after waiting, accepts once, then installs policy, memory and checkpoint.
+- Does not claim to restore an expired historical boundary.
+- Native tests prove current shared plus local-private memory at the next provider, and actual Abort withdrawal for in-run Start with an operation signal.
 
-Mode choices select workflow policy, not whether canonical memory exists. Passive/Off never cancels retained restoration, Active-default initialization or fork copying: the latest inactive policy is applied at acceptance. Read-only recovery likewise preserves an intervening mode choice and its write fence. Cancelling a Start waiter does not cancel independently owned restoration. Selection changes, shutdown and an available native operation signal can revoke obsolete restoration; post-acceptance ancillary failure cannot undo memory.
+**Passive:**
 
-Native startup and tree handlers await restoration. Tests cover held-store tree/fork selection, exact private state over live shared streams, unchanged parent-private files, cold reopening, failed-Stop recovery and next-provider input without later-branch private values. A public SDK host can observe the child factory result before awaiting extension binding and send Stop or Stop→Start through the child's public `prompt` method while copying waits. This proves that embedding route, not that the installed CLI or Telegram exposes the child before runtime replacement finishes.
+- Selects local tools/context policy before waiting for persistence.
+- For accepted memory, publishes lifecycle metadata without rewriting semantic/provenance files. Pending inactive choices share one acceptance of the latest mode.
+- Keeps independently owned retained restoration, Active-default initialization and fork copying; the latest inactive policy is applied at acceptance.
+- Read-only recovery preserves an intervening Passive choice and its write fence.
+- Selection, shutdown and accepted Start cancel obsolete Stop persistence; rejected Start does not.
+- Genuine persistence failure retains readable memory and native context while fencing writes until accepted Start.
 
-Read-only recovery validates current private memory without initializing absent storage or granting patch/lifecycle publication authority. Invalid or expired historical evidence never authorizes newer, empty or unrelated private memory as fallback.
+**Off:**
+
+- Selects local tools/context policy immediately and injects no State Flow context, including a frozen handoff.
+- Cancels owned restoration/fork and persistence waits, clears semantic caches and records native policy only, without canonical publication.
+- Keeps the deferred boundary/source bookkeeping for later explicit Passive/Active acquisition.
+
+Modes select workflow policy, not whether canonical memory exists. Cancelling a Start waiter does not cancel independently owned restoration. Selection changes, shutdown and an available native operation signal can revoke obsolete restoration; failure after acceptance cannot undo memory.
+
+**Native restoration evidence.** Startup and tree handlers await restoration. Tests cover held-store tree/fork selection, exact private state over live shared streams, unchanged parent-private files, cold reopening, failed-Stop recovery and next-provider input without later-branch private values.
+
+A public SDK host can observe the child factory result before awaiting extension binding and send Stop or Stop→Start through the child's public `prompt` method while copying waits. This proves that embedding route, not that the installed CLI or Telegram exposes the child before runtime replacement finishes.
+
+**Read-only recovery** validates current private memory without initializing absent storage or granting patch/lifecycle publication authority. Invalid or expired historical evidence never authorizes newer, empty or unrelated private memory as fallback.
 
 ## Settlement cancellation
 
-On Pi SDK 0.87.0, the agent clears its active run before `agent_before_settle`, so that event has no operation signal. Native `AgentSession.abort()` cannot withdraw an extension's lock wait at this boundary.
+Native `AgentSession.abort()` can withdraw a settlement lock wait only when the host supplies a suitable operation signal. An extension-owned cancellation lifetime is not a substitute for that signal.
 
-Optional Git backup remains at `agent_before_settle`. It waits for exclusion only when the host supplies a suitable signal; otherwise contention produces an explicit diagnostic-only deferral to a later eligible turn. Malformed/interrupted ownership remains a failure, not permission to steal a lock. Git commands run outside canonical exclusion. Shutdown drains owned attempts and pending pushes. Backup failure does not roll back memory, suppress an answer or request repair inference.
+**Optional Git backup** remains at `agent_before_settle`:
+
+- It waits for exclusion only when the host supplies a suitable signal. Otherwise contention produces an explicit diagnostic-only deferral to a later eligible turn.
+- Malformed or interrupted ownership remains a failure, not permission to steal a lock.
+- Git commands run outside canonical exclusion. Shutdown drains owned attempts and pending pushes.
+- Backup failure neither rolls back memory, suppresses an answer nor requests repair inference.
 
 This optional-backup policy does not apply to required semantic publication or restoration. The persistence model is [optimistic canonical storage](filesystem-recovery.md#power-loss-durability), not power-loss-safe acknowledgement or crash-atomic multi-file publication. No journal, replacement Abort handler or background publication worker supplies a stronger guarantee.
 
-State Flow-owned compaction requires known sufficient context usage and a proven retained run anchor. It preserves the complete accepted run, skips protected foreign context and never requests retain-none shortening. Native manual/threshold/overflow compaction remains Pi-owned. The settled handler awaits native compaction completion or refusal so deferred companion prompts do not race it. Unknown or insufficient usage skips compaction; a benign refusal permits a later attempt.
+**State Flow-owned compaction:**
+
+- Requires known sufficient context usage and a proven retained run anchor.
+- Preserves the complete accepted run, skips protected foreign context and never requests retain-none shortening.
+- Leaves native manual/threshold/overflow compaction to Pi.
+- Awaits native compaction completion or refusal in the settled handler, so deferred companion prompts do not race it.
+- Skips compaction when usage is unknown or insufficient; a benign refusal permits a later attempt.
 
 ## Telegram adapter
 
-The optional adapter presents one Off | Passive | Active row and uses the same mode-selection and inspection owners as native commands. Inspection returns coherent state plus matching revisions without publication. Controls and inspections acknowledge callbacks before waiting, suppress revoked results and escape late failures in the current menu. Synchronous mode-selection ports remain supported. A first Passive selection may install a read-only shared cache without invalidating its own success receipt; later controls, branch changes and cancellation still revoke obsolete presentation.
+The optional adapter presents one Off | Passive | Active row and uses the same mode-selection and inspection owners as native commands.
 
-Adapter tests establish those contracts with isolated transport fixtures. They are not a live Telegram smoke test. Missing or unready transport remains fail-open and cannot change core memory behavior.
+- Inspection returns coherent state plus matching revisions, without publication.
+- Controls and inspections acknowledge callbacks before waiting, suppress revoked results and escape late failures in the current menu.
+- Synchronous mode-selection ports are supported.
+- A first Passive selection may install a read-only shared cache without invalidating its own success receipt. Later controls, branch changes and cancellation still revoke obsolete presentation.
+
+Adapter tests establish these contracts with isolated transport fixtures; they are not a live Telegram smoke test. Missing or unready transport remains fail-open and cannot change core memory behavior.
 
 ## State Flow library API compatibility
 
 The package root exports `TemporalRuntime`. The Pi registration shim is a separate default-only entrypoint, not the named library API.
 
-Use these awaited runtime operations:
+**Awaited runtime operations:**
 
-| Operation | API | Authority boundary |
-| --- | --- | --- |
-| Shared inspection | `refreshShared` | Read-only; no initialization or revision advance |
-| Current private recovery | `refreshCurrentMemory` | Read-only; no publication authority |
-| Authored semantic patch | `withPatchTransaction` | Current shared basis and selected private authority; one atomic acceptance |
-| Accepted-runtime lifecycle | `withLifecycleTransaction` | Config/runtime only; cannot initialize or repair semantic storage |
-| Current-head activation | `withStartTransaction` | Origin creation defaults off and requires explicit authorization |
-| Retained restoration | `withRestoreTransaction` | Exact retained private boundary beside current shared streams |
-| Child creation | `withForkTransaction` | Exact parent authority and an unoccupied independent child |
+- **Shared inspection — `refreshShared`:** read-only; no initialization or revision advance.
+- **Current private recovery — `refreshCurrentMemory`:** read-only; no publication authority.
+- **Authored semantic patch — `withPatchTransaction`:** current shared basis and selected private authority; one atomic acceptance.
+- **Accepted-runtime lifecycle — `withLifecycleTransaction`:** config/runtime only; cannot initialize or repair semantic storage.
+- **Current-head activation — `withStartTransaction`:** origin creation defaults off and requires explicit authorization.
+- **Retained restoration — `withRestoreTransaction`:** exact retained private boundary beside current shared streams.
+- **Child creation — `withForkTransaction`:** exact parent authority and an unoccupied independent child.
 
-Await completion before consuming results. Transaction callbacks stage and publish synchronously, recheck caller selection/policy after waiting and use their publication capability once within its lifetime. Install host state only after acceptance. Keep inference, source acquisition and Git outside canonical exclusion. Raw precomputed replay retains its selected-basis guards.
+Await completion before consuming results. Transaction callbacks:
 
-Continuation inspection/candidate building and Git backup also return Promises. Callers must await them rather than treating a Promise as a boolean or accessing a result before completion. Continuation inspection is advisory: it cannot initialize, restore or select a session on the host's behalf.
+1. Recheck caller selection/policy after waiting.
+2. Stage and publish synchronously, using their publication capability once within its lifetime.
+3. Install host state only after acceptance.
 
-The supported synchronous runtime methods are `loadPassive`, `prepareBoundaryRestore`, `restoreBoundary`, `acceptRestoredOrigin`, `prepareBoundaryFork` and `initialize`. They remain available to library consumers and local tests/benchmarks, but production lifecycle wiring uses the awaited APIs. They are not signature-compatible substitutes and do not acquire the awaited APIs' cancellation behavior. Their presence is not permission to bypass ownership, retained-history or raw-replay checks.
+Keep inference, source acquisition and Git outside canonical exclusion. Raw precomputed replay retains its selected-basis guards.
+
+Continuation inspection/candidate building and Git backup also return Promises. Await them rather than treating a Promise as a boolean or accessing a result before completion. Continuation inspection is advisory: it cannot initialize, restore or select a session on the host's behalf.
+
+**Synchronous runtime methods:** `loadPassive`, `prepareBoundaryRestore`, `restoreBoundary`, `acceptRestoredOrigin`, `prepareBoundaryFork` and `initialize`.
+
+- They are supported for library consumers and local tests/benchmarks; production lifecycle wiring uses the awaited APIs.
+- They are not signature-compatible substitutes and do not acquire the awaited APIs' cancellation behavior.
+- Their presence is not permission to bypass ownership, retained-history or raw-replay checks.
 
 ## Validation procedure
 
@@ -109,4 +183,9 @@ Validate another SDK line in an isolated copy so the installed extension, sessio
 5. Inspect the compiled public API through `dist/index.js` and the Pi default registration through `dist/pi-state-flow/index.js`.
 6. Compare generated `dist` and packaged Skills with source, and verify package inventory after final documentation edits.
 
-Focused tests do not replace the full integration suite. Tree-bound evidence can be reused only when its relevant inputs are unchanged. Ref-, environment- and external-publication-sensitive checks require their own verification. A successful tag push is not release completion: verify the owning workflow, published GitHub Release and exact npm package identity.
+**Evidence limits:**
+
+- Focused tests do not replace the full integration suite.
+- Tree-bound evidence can be reused only when its relevant inputs are unchanged.
+- Ref-, environment- and external-publication-sensitive checks require their own verification.
+- A successful tag push is not release completion: verify the owning workflow, published GitHub Release and exact npm package identity.

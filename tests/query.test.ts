@@ -97,6 +97,7 @@ test("projected reads return pure values, strict ranges, and minimal structural 
 	assert.throws(() => readProjectedState(view, ["cwd.working.memory[0:4]"]), /Range \[0:4\].*length 3/);
 	assert.throws(() => readProjectedState(view, ["cwd.working.memory[2:1]"]), /Range \[2:1\].*length 3/);
 	assert.throws(() => readProjectedState(view, ["cwd.working.memory[0.2]"]), /Invalid State Flow read path selector/);
+	assert.throws(() => readProjectedState(view, ["cwd.working.план"]), /object keys must match \[A-Za-z_\$\]\[A-Za-z0-9_\$-\]\* \(ASCII\)/);
 	assert.throws(() => readProjectedState(view, ["cwd.working.missing"]), /does not exist/);
 });
 

@@ -1,5 +1,6 @@
 import type { ArtifactInvalidationReason } from "./artifact.ts";
 import type { RecentTransitionWindow } from "./history.ts";
+import { ownedTopLevelKeys } from "./ownership.ts";
 import { conciseDiagnostic } from "./protocol.ts";
 import type { Snapshot } from "./snapshot.ts";
 import { overlayStates, projectSemanticState, type SemanticState, type ScopedStates, type StateScope } from "./state.ts";
@@ -46,6 +47,33 @@ function countArtifacts(states: ScopedStates, scope: StateScope): number {
 	return Object.keys(states[scope].artifacts).length;
 }
 
+const STATUS_PLANES = ["intents", "contract", "working", "artifacts", "response", "lazy"] as const;
+const encoder = new TextEncoder();
+
+function isPresentPlane(value: unknown): boolean {
+	if (value === undefined || value === "") return false;
+	return typeof value !== "object" || value === null || Object.keys(value).length > 0;
+}
+
+/** Operator-only footprint: serialized plane sizes and intent-owned share of top-level working/lazy entries. */
+export function scopeMemoryLines(states: ScopedStates): string[] {
+	const lines: string[] = [];
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const state = states[scope] as SemanticState;
+		const sizes = STATUS_PLANES.filter((plane) => isPresentPlane(state[plane]))
+			.map((plane) => `${plane} ${encoder.encode(JSON.stringify(state[plane])).length} B`);
+		if (sizes.length === 0) continue;
+		const owned = ownedTopLevelKeys(scope, state);
+		const shares = (["working", "lazy"] as const).flatMap((plane) => {
+			const value = state[plane];
+			const keys = value !== null && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
+			return keys.length === 0 ? [] : [`${plane} ${keys.filter((key) => owned[plane].has(key)).length}/${keys.length}`];
+		});
+		lines.push(`- ${scope}: ${sizes.join(", ")}${shares.length ? `; intent-owned ${shares.join(", ")}` : ""}`);
+	}
+	return lines.length ? ["Scope memory:", ...lines] : [];
+}
+
 export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostics): string {
 	const available = diagnostics.temporal !== undefined && diagnostics.durableStateError === undefined;
 	const materialized = !available ? undefined : diagnostics.effectiveState ?? projectSemanticState(overlayStates(
@@ -79,6 +107,7 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 		...(diagnostics.publicationError === undefined ? [] : [`Memory writes paused after mode change: ${conciseDiagnostic(diagnostics.publicationError)}`]),
 		...(hasArtifacts ? [`Artifacts: global ${artifacts("global")}; CWD ${artifacts("cwd")}; session ${artifacts("session")}; pending invalidations ${invalidated}`] : []),
 		...invalidationLines,
+		...(available ? scopeMemoryLines(diagnostics.scopeStates) : []),
 		...(stateJson === undefined
 			? ["Effective memory: unavailable"]
 			: ["Effective memory:", "", stateJson]),

@@ -3,7 +3,7 @@ import test from "node:test";
 import { loadSessionState, writeCwdState, writeGlobalState } from "./temporal-fixture.ts";
 import { emptyState } from "../lib/state.ts";
 import { discoverSnapshotData, findBranchPolicy, findPassiveStopBoundary, hasPendingFork, hasPriorConversation, hasUncheckpointedConversation, latestSnapshotData, isNewSession, snapshotDataNewestFirst, SNAPSHOT_ENTRY_TYPE } from "../lib/session.ts";
-import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
+import { commitTerminal, harness, start, user } from "./harness.ts";
 
 test("branch policy reads only mode and owner-local native write fences", () => {
 	const checkpoint = (data: unknown) => ({ type: "custom", customType: SNAPSHOT_ENTRY_TYPE, data });

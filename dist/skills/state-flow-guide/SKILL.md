@@ -21,9 +21,9 @@ Operator commands: `/state-flow-status` inspects; `/state-flow-active` selects s
 
 | Field | Purpose |
 | --- | --- |
-| `intents` | Chosen future actions, not possibilities |
-| `contract` | Requirements, decisions, constraints, interfaces |
-| `working` | Observations, results, open questions, continuation |
+| `intents` | Queue of chosen actions, not possibilities; may own `working`/`lazy` keys |
+| `contract` | Requirements, decisions, rejections, constraints, interfaces |
+| `working` | Temporary context of intents: observations, results, open questions |
 | `artifacts` | Exact source paths, descriptions, compilations |
 | `response` | Previous completed answer; runtime-owned |
 | `lazy` | Durable detail omitted from ordinary context |
@@ -46,7 +46,7 @@ Example arguments:
 {"paths":["cwd.working","session.working"]}
 ```
 
-Unscoped paths use effective state. `cwd[1].working` reads the preceding causal boundary. Materialized-history and scope patch-history paths such as `cwd.patches[1]` share the configured `historyLimit` bound (default 7) and require actually retained history. Lowering the limit folds excess tails without erasing current state; increasing it does not reconstruct discarded history. Array ranges such as `cwd.lazy.checks[0..3]` exclude the endpoint and require existing elements. Missing paths are unavailable; inspect parent keys only when needed for the task. Missing history is not empty history. Read `lazy` explicitly. Treat structured `$ref` values and `$`-prefixed `read_state` paths inside ordinary strings, such as `$effective.lazy.memory[7]`, as semantic-state references. Other resources retain their native locators. Resolve any reference through the appropriate read/tool only when needed. Neither form proves authority or existence, hydrates, or executes anything. Never scan or resolve references merely to test them. A missing single value path with exact durable sources returns `{value:null, hint:[{type:"dangling-reference", message, paths}]}`. Treat `hint` as top-level diagnostic metadata, never as the requested state: its message is descriptive and conditional; its paths are runtime-verified current reference owners, not verified new locations of the target. The hint proves provenance rather than staleness and is absent when no current durable source matches; keys, patch, and batch reads keep all-or-error behavior. Only then inspect ownership as needed and patch a proven stale owning value while preserving its surrounding meaning. Effective absence, inaccessible external resources, and transient failures are not proof.
+Unscoped paths use effective state. `cwd[1].working` reads the preceding causal boundary. Materialized-history and scope patch-history paths such as `cwd.patches[1]` share the configured `historyLimit` bound (default 7) and require actually retained history. Lowering the limit folds excess tails without erasing current state; increasing it does not reconstruct discarded history. Array ranges such as `cwd.lazy.checks[0..3]` exclude the endpoint and require existing elements. Missing paths are unavailable; inspect parent keys only when needed for the task. Missing history is not empty history. Read `lazy` explicitly. Treat structured `$ref` values and `$`-prefixed `read_state` paths inside ordinary strings, such as `$effective.lazy.memory[7]`, as semantic-state references. Other resources retain their native locators. Resolve any reference through the appropriate read/tool only when needed. Neither form proves authority or existence, hydrates, or executes anything; only intent ownership (see Write) has a deletion consequence. Never scan or resolve references merely to test them. A missing single value path with exact durable sources returns `{value:null, hint:[{type:"dangling-reference", message, paths}]}`. Treat `hint` as top-level diagnostic metadata, never as the requested state: its message is descriptive and conditional; its paths are runtime-verified current reference owners, not verified new locations of the target. The hint proves provenance rather than staleness and is absent when no current durable source matches; keys, patch, and batch reads keep all-or-error behavior. Only then inspect ownership as needed and patch a proven stale owning value while preserving its surrounding meaning. Effective absence, inaccessible external resources, and transient failures are not proof.
 
 Missing paths or runtime hints alone do not require historical search. The agent may choose a targeted historical read when a previous value is useful to the current task, without separate user permission. Otherwise continue without searching. Use found values as historical evidence, not automatically as current state; never automatically restore deleted memory. Do not scan all offsets, hydrate automatically or request repair inference. A hint does not prove prior existence, retained history or relocation. A proven stale reference may be repaired within touched work without resurrecting its target. Automatic state and recent-transition projections omit lazy bodies; bounded `lazy_navigation` preserves structure, and explicit current/historical reads still return requested lazy values or patches.
 
@@ -58,11 +58,19 @@ The runtime waits cancelably for publication ownership, then applies authored Gl
 
 When present, semantic planes `intents`, `contract`, `working`, `artifacts`, and `lazy` are objects; nested lazy values may contain ordinary JSON without stored nulls. Stored checkpoints and patches may omit any documented plane. Current and historical views assemble only known fields present in the selected scopes. Absent fields and empty responses are omitted from views. Checkpoint/tail readers ignore unknown top-level fields, and writers emit only known fields. Nested data within known planes remains intact. Explicit value reads of an absent documented top-level field return `null`. Authored `patch_state` keeps its documented field grammar. Objects merge, arrays/scalars replace, omitted fields persist. Nested `null` removes an owned object key; inherited content may reappear. Canonical `"[N]"` keys patch array elements; indexed deletion is forbidden.
 
-Illustrative deletion, only for an actually completed intent and after satisfying pending acquisitions:
+Work from intents. A structured `{"$ref"}` anywhere inside an intent owns ("delete with me") an existing object key under `working` or `lazy` in the same scope; a textual `$path` mention only uses it. Opening a task:
 
 ```json
-{"session":{"intents":{"check_api":null}}}
+{"session":{"intents":{"check_api":{"action":"Verify the API","notes":{"$ref":"session.working.api"},"plan":{"$ref":"session.lazy.api_plan"}}},"working":{"api":"draft findings"},"lazy":{"api_plan":["probe","compare"]}}}
 ```
+
+Deleting the intent deletes the owned keys after the authored operations, in the same atomic patch, unless another remaining same-scope intent references the target, an ancestor or a descendant. Before closing, move what must survive to an unowned path: results to `working`, `contract` or a broader scope; reasons for abandoned work to `contract` as rejected approaches. Supersede in one patch by deleting the old intent and referencing the same targets from its replacement. Writing to an owned target in the same patch that deletes its intent does not save it: the write is deleted too. Only keys matching `[A-Za-z_$][A-Za-z0-9_$-]*` can be owned. Cross-scope, plane-root, array-element and non-`working`/`lazy` targets are never deleted, nothing is rejected or warned about, and unowned entries remain legal. Illustrative closing, only for an actually completed intent and after satisfying pending acquisitions:
+
+```json
+{"session":{"intents":{"check_api":null},"contract":{"api":"verified: v2 only"}}}
+```
+
+Name object keys in ASCII matching `[A-Za-z_$][A-Za-z0-9_$-]*` (for example `api_plan`, not a Cyrillic or spaced key): other keys cannot be addressed by `read_state` paths or `$` references, and cannot be owned by intents. Values may use any language.
 
 Never edit backing files, `response`, configuration, provenance, or runtime metadata. Verify changed owner paths when needed; check effective state after override deletion.
 

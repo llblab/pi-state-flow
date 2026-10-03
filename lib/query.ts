@@ -96,7 +96,7 @@ function parseValuePath(path: string): { root: string; selectors: ValueSelector[
 			rest = rest.slice(index[0].length);
 			continue;
 		}
-		throw new Error("Invalid State Flow read path selector");
+		throw new Error("Invalid State Flow read path selector; object keys must match [A-Za-z_$][A-Za-z0-9_$-]* (ASCII), array selectors use [N] or [start..end]");
 	}
 	return { root, selectors };
 }

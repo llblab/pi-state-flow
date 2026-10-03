@@ -6,10 +6,9 @@ import { conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPa
 test("protocol names patch_state as the sole semantic mutation mechanism", () => {
 	const protocol = stateFlowProtocol(false);
 	assert.match(protocol, /sole model-authored semantic mutation mechanism/);
-	assert.match(protocol, /Ordinary assistant completion needs no finalization patch/);
+	assert.doesNotMatch(protocol, /finalization patch|Call alone/, "patch_state guidelines own completion and barrier wording");
 	assert.doesNotMatch(protocol, /final:true|terminal-ineligible|fallback turn/);
 	assert.match(protocol, /all supplied scopes are validated and durably accepted as one atomic transition/);
-	assert.match(protocol, /Call alone in an assistant response; await acceptance/);
 	assert.match(protocol, /Global\/CWD use current canonical values after cancelable lock waiting/);
 	assert.match(protocol, /Correct repeats succeed without new revisions/);
 	assert.match(protocol, /session=branch\/run continuation by default/);
@@ -20,14 +19,18 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.match(protocol, /cleanup and scope reviews require an explicit user request/);
 	assert.doesNotMatch(protocol, /At feature\/release\/campaign or project\/version completion/);
 	assert.match(protocol, /one atomic multi-scope patch/);
-	assert.match(protocol, /intents: chosen active commitments; detail may stay lazy/);
+	assert.match(protocol, /intents: queue of chosen actions; work from them/);
 	assert.match(protocol, /remove when fulfilled, abandoned, superseded, or impossible/);
 	assert.match(protocol, /State refs use .*\$ref.* or `\$cwd\.lazy\.plan` in text/);
 	assert.match(protocol, /Resolve only when needed/);
 	assert.match(protocol, /Hint paths are current reference owners, not relocated targets or proof of staleness/);
 	assert.match(protocol, /Fix proven stale refs only as needed; never scan refs or history offsets/);
+	assert.match(protocol, /In an intent, \$ref owns a same-scope working\/lazy key; deleting the intent deletes keys no other intent refs \(supersede in one patch\)\. Text refs only use\./);
+	assert.match(protocol, /Before deleting, save survivors unowned: results to working\/contract\/broader scope, abandonment reasons to contract\. Unowned entries are fine\./);
+	assert.doesNotMatch(protocol, /MUST|compiled knowledge|unresolved work, continuation/);
 	for (const bootstrap of [false, true]) {
 		const candidate = stateFlowProtocol(bootstrap);
+		assert.ok(candidate.length <= (bootstrap ? 4_496 : 4_395), `0.25.0 ownership wording must not grow the ${bootstrap ? "bootstrap" : "ordinary"} protocol (${candidate.length})`);
 		assert.ok(candidate.length <= 4_500, `${bootstrap ? "bootstrap" : "ordinary"} model protocol grew to ${candidate.length} characters`);
 	}
 });
@@ -65,7 +68,7 @@ test("protocol presents semantic planes once in intentional intent-first order",
 			["intents", "contract", "working", "artifacts", "response", "lazy"]);
 		assert.doesNotMatch(protocol, /STATE: \{/, "the field list already defines the state shape");
 		for (const rule of [/branch\/run continuation/g, /reusable project truth/g, /cross-project\/user\/environment knowledge/g,
-			/user→global, project→cwd, temporary→session/g, /provenance/g, /turn_end/g, /no finalization patch/g]) {
+			/user→global, project→cwd, temporary→session/g, /provenance/g, /turn_end/g]) {
 			assert.equal([...protocol.matchAll(rule)].length, 1, `one owner for ${rule}`);
 		}
 	}
@@ -75,15 +78,13 @@ test("compact protocol retains read, patch, stewardship and acquisition obligati
 	const obligations = [
 		/owns durable memory/,
 		/Use the narrowest scope/,
-		/contract: durable requirements, decisions, rejections, interfaces, compiled knowledge/,
-		/working: facts, validation, failures, domain state, unresolved work, continuation/,
+		/contract: durable requirements, decisions, rejections, interfaces\./,
+		/working: temporary context of intents: facts, validation, failures, domain state\./,
 		/artifacts: source-path routing metadata; descriptions do not imply body acquisition/,
 		/response: previous answer; runtime stores the exact accepted answer at turn_end \(empty=""\)/,
 		/lazy: retrieve explicitly/,
 		/read_state for concrete scope\/retained-history gaps/,
 		/lazy_navigation lists bounded effective lazy keys, not bodies/,
-		/Unscoped=effective; effective\/global\/cwd\/session select overlay or owner/,
-		/Arrays use indices or \[start\.\.end\]; keys gives structure, patch the intersected change/,
 		/global\/cwd\/session object patches for material updates, not acknowledgments/,
 		/Omit empty scopes/,
 		/artifacts\/contract\/working\/intents are objects; lazy is ordinary JSON/,

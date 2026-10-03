@@ -84,24 +84,24 @@ export function stateFlowProtocol(bootstrap) {
     return `State Flow is enabled. It owns durable memory.
 
 ${bootstrapProtocol}STATE:
-- intents: chosen active commitments; detail may stay lazy; remove when fulfilled, abandoned, superseded, or impossible.
-- contract: durable requirements, decisions, rejections, interfaces, compiled knowledge.
-- working: facts, validation, failures, domain state, unresolved work, continuation.
+- intents: queue of chosen actions; work from them; remove when fulfilled, abandoned, superseded, or impossible.
+- contract: durable requirements, decisions, rejections, interfaces.
+- working: temporary context of intents: facts, validation, failures, domain state.
 - artifacts: source-path routing metadata; descriptions do not imply body acquisition.
-- response: previous answer; runtime stores the exact accepted answer at turn_end (empty=""). Ordinary assistant completion needs no finalization patch.
+- response: previous answer; runtime stores the exact accepted answer at turn_end (empty="").
 - lazy: retrieve explicitly.
 
 SCOPES: Use the narrowest scope: session=branch/run continuation by default; cwd=reusable project truth; global=established cross-project/user/environment knowledge.
 
-READ: Use read_state for concrete scope/retained-history gaps. lazy_navigation lists bounded effective lazy keys, not bodies. Unscoped=effective; effective/global/cwd/session select overlay or owner. Arrays use indices or [start..end]; keys gives structure, patch the intersected change. ${TASK_DRIVEN_HISTORY}
+READ: Use read_state for concrete scope/retained-history gaps. lazy_navigation lists bounded effective lazy keys, not bodies. ${TASK_DRIVEN_HISTORY}
 
-WRITE: patch_state is the sole model-authored semantic mutation mechanism; all supplied scopes are validated and durably accepted as one atomic transition. Call alone in an assistant response; await acceptance. Global/CWD use current canonical values after cancelable lock waiting. Correct repeats succeed without new revisions. ${PATCH_RESULT_PROTOCOL}
+WRITE: patch_state is the sole model-authored semantic mutation mechanism; all supplied scopes are validated and durably accepted as one atomic transition. Global/CWD use current canonical values after cancelable lock waiting. Correct repeats succeed without new revisions. ${PATCH_RESULT_PROTOCOL}
 
 PATCH: Use global/cwd/session object patches for material updates, not acknowledgments. Omit empty scopes. artifacts/contract/working/intents are objects; lazy is ordinary JSON. Omitted fields persist. Never patch runtime config/meta/response. Objects merge recursively; arrays/primitives replace. An object containing only canonical "[N]" keys recursively patches array elements. Indexed deletion is forbidden; nested object null deletes; materialized null is forbidden.
 
 MEMORY: Treat every patch as reconciliation rather than append-only notes: merge superseded fragments, remove obsolete progress. Preserve commitments, open questions, consequential results and exact continuation; distinguish requirements, decisions, observations, conclusions and hypotheses. Exclude secrets, raw history, transient progress, speculation and unsupported claims; retain decision-relevant uncertainty. Curate touched state; cleanup and scope reviews require an explicit user request. Proven moves use targeted read_state and one atomic multi-scope patch, then verify both owners. External transfers need verified acceptance before deletion. Never invent memory changes.
 
-REFS: State refs use {"$ref":"cwd.lazy.plan"} or \`$cwd.lazy.plan\` in text. Resolve only when needed; infer no authority, hydration, execution, or completion. Hint paths are current reference owners, not relocated targets or proof of staleness. Fix proven stale refs only as needed; never scan refs or history offsets.
+REFS: State refs use {"$ref":"cwd.lazy.plan"} or \`$cwd.lazy.plan\` in text. In an intent, $ref owns a same-scope working/lazy key; deleting the intent deletes keys no other intent refs (supersede in one patch). Text refs only use. Before deleting, save survivors unowned: results to working/contract/broader scope, abandonment reasons to contract. Unowned entries are fine. Resolve only when needed; infer no authority, hydration, execution, or completion. Hint paths are current reference owners, not relocated targets or proof of staleness. Fix proven stale refs only as needed; never scan refs or history offsets.
 
 ACQUISITION: Read only for a concrete gap, exact source/edit, invalidation, contradiction/failure, or explicit request; changed source fingerprints require rereading.
 ARTIFACTS: Compile acquired invalidated artifacts at artifacts[exact path] in the reported scope (global/cwd/session), with a description; never relocate or invent global copies. Runtime owns all artifact/Skill provenance.

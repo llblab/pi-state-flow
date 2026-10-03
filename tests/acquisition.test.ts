@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ArtifactReadTracker, decideArtifactAcquisition } from "../lib/acquisition.ts";
+import { ArtifactAcquisitionState, ArtifactReadTracker, decideArtifactAcquisition, missingArtifactRemovals, SOURCE_CHANGED_HINT } from "../lib/acquisition.ts";
+import { compileArtifact, hashArtifactSource, inspectRegisteredArtifactPaths, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
+import { emptyState } from "../lib/state.ts";
 
 const hash = `sha256:${"a".repeat(64)}`;
 const source = { path: "/knowledge/guide.md", hash };
@@ -129,4 +131,49 @@ test("required compilation overrides otherwise sufficient materialized state", (
 			explicitRefresh,
 		}), { kind: "read-source", reason });
 	}
+});
+
+test("acquisition state owns invalidations, hints and read candidates for the selected scopes", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "state-flow-acquisition-state-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const changed = join(root, "changed.md");
+	const fresh = join(root, "fresh.md");
+	const skill = join(root, "SKILL.md");
+	const missing = join(root, "missing.md");
+	for (const path of [changed, fresh, skill]) writeFileSync(path, "v1");
+	const observed = inspectRegisteredArtifactPaths([changed])[0]!;
+	assert.equal(observed.kind, "present");
+	const compiled = compileArtifact({
+		source: { path: changed, scope: "cwd", hash: hashArtifactSource("v1"), sourceFingerprint: observed.kind === "present" ? observed.fingerprint : undefined },
+		compiler: ORDINARY_ARTIFACT_COMPILER,
+		output: { description: "Changed" },
+	});
+	writeFileSync(changed, "v2 longer");
+	const states = { global: emptyState(), cwd: emptyState(), session: emptyState() };
+	states.global.artifacts = { [fresh]: { description: "Shadowed" } };
+	states.cwd.artifacts = { [changed]: compiled.semantic, [missing]: { description: "Gone" } };
+	states.session.artifacts = { [fresh]: { description: "Fresh" }, [skill]: { description: "Skill", kind: "skill" } };
+	const provenance = { global: {}, cwd: { [changed]: compiled.provenance }, session: {} };
+	const acquisition = new ArtifactAcquisitionState();
+	acquisition.refresh(states, (scope) => provenance[scope]);
+	assert.deepEqual(acquisition.hints, { [changed]: SOURCE_CHANGED_HINT });
+	assert.deepEqual(acquisition.invalidations.map(({ path, scope, reason }) => [path, scope, reason]), [
+		[changed, "cwd", "source-changed"],
+		[fresh, "session", acquisition.invalidations.find(({ path }) => path === fresh)!.reason],
+	], "skills and missing sources are not ordinary invalidations; the narrowest owner wins");
+	acquisition.reads.recordStart("read-1", "read", { path: changed });
+	acquisition.reads.recordEnd("read-1", "read", false);
+	assert.deepEqual([...acquisition.reads.successful.keys()], [changed], "candidates follow the plan");
+	acquisition.acceptAcquired();
+	assert.deepEqual(acquisition.invalidations.map(({ path }) => path), [fresh]);
+	assert.equal(acquisition.reads.successful.size, 0);
+	acquisition.reads.recordStart("read-2", "read", { path: changed });
+	acquisition.reads.recordEnd("read-2", "read", false);
+	assert.equal(acquisition.reads.successful.size, 0, "accepted paths are no longer candidates");
+	acquisition.clearInvalidations();
+	assert.deepEqual(acquisition.invalidations, []);
+	assert.deepEqual(acquisition.hints, { [changed]: SOURCE_CHANGED_HINT }, "hints survive until refresh or reset");
+	acquisition.reset();
+	assert.deepEqual(acquisition.hints, {});
+	assert.deepEqual(missingArtifactRemovals(states), { cwd: { artifacts: { [missing]: null } } });
 });

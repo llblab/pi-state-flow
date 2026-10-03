@@ -4,7 +4,10 @@ This document describes the implemented lazy-state contract. [BACKLOG.md](../BAC
 
 ## Thesis
 
-State Flow provides `lazy` as an object-root semantic plane in every scope's runtime view. It may be absent from stored state; reads then use `{}` or values inherited through the effective overlay without rewriting storage. Nested lazy values are ordinary JSON: durable and versioned with the same causal lineage as hot state, but excluded from ordinary baseline hydration.
+State Flow provides `lazy` as an object-root semantic plane in every scope's runtime view.
+
+- It may be absent from stored state. Reads then use `{}` or values inherited through the effective overlay, without rewriting storage.
+- Nested lazy values are ordinary JSON. They are durable and versioned with the same causal lineage as hot state, but excluded from ordinary baseline hydration.
 
 The model-facing surface remains small:
 
@@ -46,7 +49,13 @@ global | CWD | session
 └── lazy
 ```
 
-`intents`, `contract`, `working`, and `artifacts` remain hot in every scope. Session-owned `response` is also hot; New Global and CWD states use an empty structural slot; stored scopes may omit it. Effective uses the highest-priority present response, and each newly accepted answer is written only in Session. `intents` may keep compact active direction while referring to large supporting detail in `lazy`. `lazy` differs only in projection policy:
+Hot planes:
+
+- `intents`, `contract`, `working` and `artifacts` stay hot in every scope.
+- Session-owned `response` is also hot. New Global and CWD states use an empty structural slot, and stored scopes may omit it. Effective uses the highest-priority present response, and each newly accepted answer is written only in Session.
+- `intents` may keep compact active direction while referring to large supporting detail in `lazy`.
+
+`lazy` differs only in projection policy:
 
 - It is canonical semantic JSON, validated and versioned with its owning scope.
 - Its bodies are excluded from automatic state and recent-transition projections, including lazy writes, replacements and deletions. Empty visible patches/transitions disappear without renumbering history; hot changes remain visible.
@@ -55,13 +64,34 @@ global | CWD | session
 
 ### Semantic references
 
-A reference is semantic content, not a runtime type. The optional `{"$ref":"cwd.lazy.plan"}` object provides the structured state-reference form. Inside any ordinary string or paragraph, a semantic-state reference uses `$` immediately followed by one valid `read_state` path, for example `$effective.lazy.memory[7]`. The prefix separates a deliberate reference from incidental path-like text and provides a deterministic seam if code-based parsing is ever justified. File paths, document sections, URIs, artifact locators, Skill identities, and agent identities retain their native syntax.
+A reference is semantic content, not a runtime type. There are two forms:
 
-State Flow preserves all forms exactly as ordinary JSON. It does not scan prose, index targets, validate existence, rewrite relative locators, or infer authority, dependency, hydration, execution, or completion. When a reference matters, the agent resolves it explicitly with `read_state` for semantic paths or the appropriate external read/tool for other resources. A locator supports retrieval but does not replace content required for the current decision.
+- **Structured:** the optional `{"$ref":"cwd.lazy.plan"}` object.
+- **Textual:** inside any ordinary string or paragraph, `$` immediately followed by one valid `read_state` path, for example `$effective.lazy.memory[7]`. The prefix separates a deliberate reference from incidental path-like text, and leaves a deterministic seam if code-based parsing is ever justified.
 
-Reference repair is reactive, not a maintenance scan. The agent does not enumerate, audit, or resolve references merely to test them. Only after one requested `read_state` value path is missing does State Flow perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` and `$path` matches. If found, the tool returns `{value:null, hint:[{type:"dangling-reference", message, paths}]}`. `hint` is explicit top-level metadata rather than state data; its conditional message describes unavailability, and its path array contains at most three runtime-verified current reference owners, not verified new locations of the target. The hint contains no lazy bodies and proves neither prior existence, retention nor relocation. The null sentinel is never returned alone for this case. Keys, patch, and multi-path reads keep ordinary all-or-error semantics; no durable match retains the missing-path error and does not prove the agent invented the path. The agent may then reconcile a proven stale owning value while preserving surrounding meaning. This applies equally to `$ref` objects and contextual references in prose. Effective-state absence alone does not identify the owner, and unavailable history, inaccessible external resources, or transient read failure do not prove that a durable reference is broken.
+File paths, document sections, URIs, artifact locators, Skill identities and agent identities keep their native syntax.
 
-Missing paths or runtime hints alone do not require historical search. The agent may choose a targeted historical read when a previous value is useful to the current task, without separate user permission; otherwise continue without searching. Found values are historical evidence, not automatically current memory. Never automatically restore deleted data, scan all offsets, hydrate bodies or trigger repair inference. The reverse lookup searches current reference owners only, never history. A proven stale reference can be repaired within touched work without resurrecting its target.
+**What State Flow does with references.** It preserves all forms exactly as ordinary JSON. It does not scan prose, index targets, validate existence, rewrite relative locators, or infer authority, dependency, hydration, execution or completion. The single exception is [intent ownership](#intent-ownership).
+
+When a reference matters, the agent resolves it explicitly: with `read_state` for semantic paths, or with the appropriate external read/tool for other resources. A locator helps retrieval but does not replace content required for the current decision.
+
+**Reference repair is reactive, not a maintenance scan.** The agent does not enumerate, audit or resolve references merely to test them. Only after one requested `read_state` value path is missing does State Flow perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` and `$path` matches. The reverse lookup searches current reference owners only, never history. If it finds matches, the tool returns `{value:null, hint:[{type:"dangling-reference", message, paths}]}`:
+
+- `hint` is explicit top-level metadata, not state data. Its conditional message describes unavailability.
+- Its path array contains at most three runtime-verified current reference owners, not verified new locations of the target.
+- The hint contains no lazy bodies and proves neither prior existence, retention nor relocation.
+- The null sentinel is never returned alone for this case.
+
+Without a durable match, the ordinary missing-path error remains, and it does not prove the agent invented the path. Keys, patch and multi-path reads keep ordinary all-or-error semantics.
+
+After a hint, the agent may reconcile a proven stale owning value while preserving its surrounding meaning; this applies equally to `$ref` objects and contextual references in prose. None of these prove a durable reference is broken:
+
+- effective-state absence alone (it does not identify the owner);
+- unavailable history;
+- inaccessible external resources;
+- a transient read failure.
+
+**Historical search is task-driven.** Missing paths or runtime hints alone do not require historical search. The agent may choose a targeted historical read when a previous value is useful to the current task, without separate user permission; otherwise it continues without searching. Found values are historical evidence, not automatically current memory. Never automatically restore deleted data, scan all offsets, hydrate bodies or trigger repair inference. A proven stale reference can be repaired within touched work without resurrecting its target.
 
 When present, the `lazy` root must be an object. Its nested values may include arrays, objects, and scalars, for example:
 
@@ -81,6 +111,35 @@ When present, the `lazy` root must be an object. Its nested values may include a
 ```
 
 State Flow does not inject IDs, provenance, revisions, range descriptors, or truncation fields into those values.
+
+### Intent ownership
+
+Intents can own the memory they create:
+
+- A structured `{"$ref"}` anywhere inside an `intents` entry means "delete with me" for an existing object key under `working` or `lazy` of the same scope, such as `{"$ref":"cwd.lazy.plan"}` inside `cwd.intents.release`.
+- A textual `$cwd.lazy.plan` mention means "I use this" and never owns.
+
+**What happens when a patch deletes an intent key.** State Flow first applies the authored operations, then deletes each owned target that no remaining intent of that scope references, directly, through an ancestor or through a descendant. Everything happens in one atomic cohort, with one revision per changed scope.
+
+- **Supersession works in one patch:** delete the old intent and reference the same targets from its replacement.
+- **Writes in the deleting patch do not save a target.** Updates, nested additions and keys created by that same patch are deleted silently along with it, and the accepted record stores only the net deletion. Save survivors to an unowned path instead.
+- **Editing is not deleting.** Editing an intent to drop a reference leaves the target as ordinary unowned state. Unowned entries remain legal.
+
+**What is never deleted.** The cascade reads only the `intents` plane of the intent's own scope. These targets are skipped silently, and no patch is rejected, warned about or delayed:
+
+- other scopes;
+- plane roots and array elements;
+- `contract`/`artifacts`/`response`/`intents` targets;
+- unscoped or `effective` paths;
+- missing targets;
+- keys outside the `read_state` key grammar `[A-Za-z_$][A-Za-z0-9_$-]*`, for example keys with spaces, dots or non-Latin letters.
+
+**Edge cases:**
+
+- Deletion is scope-local, so an effective read may afterwards show a same-path value inherited from a broader scope. The receipt then reports that value rather than `deleted: true`.
+- Concurrent shared writers keep last-accepted-wins behaviour: a later write into an intent another session already deleted simply recreates a partial intent.
+
+**History and limits.** The accepted patch record stores cascaded keys as explicit deletions, so replay never re-derives them, and nothing is archived beyond ordinary retained history. Ownership adds no validation, unresolved-reference warning, cross-scope cascade, age-based cleanup, size budget, growth notice, archive of deleted entries or automatic hydration.
 
 ### Effective lazy overlay
 
@@ -114,9 +173,14 @@ Active obligations, current constraints, unresolved next actions, and facts requ
 }
 ```
 
-`projection` defaults to `value`. A batch uses one projection for every path, evaluates every path against one captured state view, and returns results in request order. Duplicate paths remain duplicate results. An absent documented top-level field has value `null`, including an empty or absent `response`; the root view simply omits it. If any other path is invalid, the whole read fails; there is no mixed partial result.
+Rules:
 
-The single `path` form is first-class. The retired top-level `offset` and `scope` inputs are rejected; history and ownership belong in the semantic path itself, such as `cwd[1].lazy.memory`.
+- `projection` defaults to `value`.
+- A batch uses one projection for every path, evaluates every path against one captured state view, and returns results in request order. Duplicate paths stay duplicate results.
+- An absent documented top-level field has value `null`, including an empty or absent `response`; the root view simply omits it.
+- If any other path is invalid, the whole read fails; there is no mixed partial result.
+
+The single `path` form is first-class. Top-level `offset` and `scope` inputs are rejected; history and ownership belong in the semantic path itself, such as `cwd[1].lazy.memory`.
 
 ### Response shape
 
@@ -128,13 +192,23 @@ There are three projections:
 | `keys` | `{ "meta": ..., "keys": ... }` | Minimal structural facts followed by immediate keys |
 | `patch` | `{ "patch": ... }` | Historical semantic patch at the selected boundary |
 
-A single-path request returns one payload. A multi-path request returns positionally aligned arrays under the same projection fields. One missing value path with exact current durable references instead returns `{ "value": null, "hint": [{ "type": "dangling-reference", "message": "The requested value is unavailable in the selected state. These current values reference that path, not a verified new location. Use this evidence if relevant to the task.", "paths": ["cwd.working.note"] }] }`; this explicit sentinel is diagnostic metadata, not semantic state.
+A single-path request returns one payload. A multi-path request returns positionally aligned arrays under the same projection fields.
 
-`value` otherwise deliberately mirrors the effective-state snapshot injected at iteration start: it is semantic state without revision, provenance, range, transport, or storage fields. `patch` likewise contains only the selected semantic patch. Only structural discovery earns `meta`, and `keys` remains the final and most valuable field in that response.
+One missing value path with exact current durable references returns this sentinel instead; it is diagnostic metadata, not semantic state:
 
-The response does not repeat the requested path or projection and does not return an internal revision. Runtime owns revision selection, locking, CAS, and publication; the model cannot improve correctness by echoing that machinery.
+```json
+{ "value": null, "hint": [{ "type": "dangling-reference", "message": "The requested value is unavailable in the selected state. These current values reference that path, not a verified new location. Use this evidence if relevant to the task.", "paths": ["cwd.working.note"] }] }
+```
 
-Errors use the normal tool-error channel rather than successful JSON containing an `error` field. The explicit dangling-reference sentinel above is the sole missing-path exception; keys, patch, multi-path, and unmatched value reads still fail.
+What each projection contains:
+
+- `value` deliberately mirrors the effective-state snapshot injected at iteration start: semantic state without revision, provenance, range, transport or storage fields.
+- `patch` likewise contains only the selected semantic patch.
+- Only structural discovery earns `meta`, and `keys` stays the final and most valuable field in that response.
+
+The response repeats neither the requested path nor the projection, and returns no internal revision. Runtime owns revision selection, locking, CAS and publication; echoing that machinery would not help the model be correct.
+
+Errors use the normal tool-error channel, never successful JSON with an `error` field. The dangling-reference sentinel above is the only missing-path exception; keys, patch, multi-path and unmatched value reads still fail.
 
 ### Path and range model
 
@@ -443,7 +517,7 @@ Lazy mutations inherit existing guarantees:
 - Exact retained-boundary selection on restore and branch navigation.
 - Read-only discovery with no commit, timestamp update, or transition.
 
-Lazy trees are co-located in canonical scope checkpoints/tails and use the same bounded lineage as hot state. Git-era publication and cold-restoration measurements do not describe this implementation. The [performance guide](performance.md) owns current synthetic workloads and measurement limits. No separate lazy index or sharded authority exists; any future layout change requires measured need and must preserve canonical semantics, ownership, and one causal lineage.
+Lazy trees are co-located in canonical scope checkpoints/tails and use the same bounded lineage as hot state. The [performance guide](performance.md) owns current synthetic workloads and measurement limits. No separate lazy index or sharded authority exists; any future layout change requires measured need and must preserve canonical semantics, ownership, and one causal lineage.
 
 ## Failure semantics
 
@@ -488,7 +562,7 @@ Before release, implementation evidence must prove:
 - Whole-array replacement and indexed scalar, array, object, nested, multi-index, and stale-basis patches remain atomic.
 - Restore and fork select lazy state from the same retained canonical boundary as the rest of the owning session scope.
 - Malformed canonical lazy data fails closed without rewriting the store; rejected queries and patches preserve accepted hot state.
-- Unsupported predecessor stores and retired `read_state` inputs fail actionably without rewriting retained bytes.
+- Unsupported store formats and `read_state` inputs fail actionably without rewriting retained bytes.
 
 ## Limits and change authority
 

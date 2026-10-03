@@ -295,3 +295,66 @@ export function pushCurrentStateFlowBackup(repositoryRoot: string, signal?: Abor
 		if (signal?.aborted) cancelled();
 	});
 }
+
+/**
+ * Settled-turn backup obligation owned by one extension instance: an accepted
+ * publication makes a backup due, an accepted turn permits it at settlement,
+ * and one lifetime cancels owned captures/pushes without touching accepted state.
+ */
+export class SettledTurnBackup {
+	#turnAccepted = false;
+	#pending = false;
+	#lifetime = new AbortController();
+	#pushFailureNotified = false;
+	readonly #operations = new Set<Promise<unknown>>();
+
+	/** An accepted canonical publication makes the next settled-turn backup due. */
+	markPublished(): void { this.#pending = true; }
+
+	/** An accepted turn permits the due backup at its settlement. */
+	markTurnAccepted(): void { this.#turnAccepted = true; }
+
+	/** Forget the current turn's permission without dropping a due backup. */
+	clearTurn(): void { this.#turnAccepted = false; }
+
+	/** Consume the accepted-turn permission; true only when a backup is also due. */
+	takeSettledTurn(): boolean {
+		if (!this.#turnAccepted) return false;
+		this.#turnAccepted = false;
+		if (!this.#pending) return false;
+		this.#pending = false;
+		return true;
+	}
+
+	/** Lifetime signal for owned captures and pushes. */
+	get lifetime(): AbortSignal { return this.#lifetime.signal; }
+
+	/** Cancel owned work and the due backup, then open a fresh lifetime. */
+	cancel(): void {
+		this.#lifetime.abort();
+		this.#lifetime = new AbortController();
+		this.#pending = false;
+	}
+
+	/** Cancel owned work for shutdown without opening a new lifetime. */
+	abort(): void { this.#lifetime.abort(); }
+
+	/** Track one owned capture until it settles. */
+	async track<T>(operation: Promise<T>): Promise<T> {
+		this.#operations.add(operation);
+		try { return await operation; }
+		finally { this.#operations.delete(operation); }
+	}
+
+	/** Owned captures still in flight. */
+	get operations(): Promise<unknown>[] { return [...this.#operations]; }
+
+	/** True once per failure streak; a successful push resets it. */
+	claimPushFailureNotice(): boolean {
+		if (this.#pushFailureNotified) return false;
+		this.#pushFailureNotified = true;
+		return true;
+	}
+
+	resetPushFailureNotice(): void { this.#pushFailureNotified = false; }
+}
