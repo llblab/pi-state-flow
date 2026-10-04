@@ -1,6 +1,6 @@
 # Backlog
 
-The **0.25.4: Empty-Object Cleanup and Deletion Hints** hotfix outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains publication, installed-client gates and deferred decisions.
+The **0.25.4: Empty-Object Cleanup and Deletion Hints** hotfix is published (exact-tag workflow, GitHub Release and npm commit verified) and bundled in published Pi Kit 0.27.5; outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains installed-client gates and deferred decisions.
 
 ## Out of scope
 
@@ -10,7 +10,6 @@ The **0.25.4: Empty-Object Cleanup and Deletion Hints** hotfix outcomes belong i
 
 ## Carried gates
 
-- **0.25.4 publication and kit synchronization.** Verify the exact-tag workflow, GitHub Release and npm commit, then bundle and publish Pi Kit 0.27.5.
 - **Installed 0.25.4 cleanup smoke (operator-owned).** After separately authorized installation/reload, use disposable storage to confirm missing-deletion hints, recursive empty-object cleanup, inherited fallback and preserved array slots. Local validation and publication do not certify installed clients.
 - **Installed 0.25.3 inspection smoke (operator-owned).** After separately authorized installation/reload, inspect a large nested field: real layout newlines/quotes, separate omitted-character notice and intact genuine JSON string escapes. Use disposable storage; local adapter tests do not certify installed Telegram clients.
 - **Installed 0.25.2 smoke (operator-owned).** Disposable store: confirm one patch argument block followed by changed/no-op acknowledgements, compact rows with `showSuccessfulPatches: false`, and visible rejected arguments/errors.
