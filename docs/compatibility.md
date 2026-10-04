@@ -53,7 +53,7 @@ On the tested SDK, `before_agent_start` precedes the low-level agent's `prompt`;
 2. The active `context` hook supplies the operation signal and awaits preparation/maintenance before provider inference.
 3. If preparation fails, State Flow calls public `ctx.abort()`. Pi catches context-hook errors and may otherwise continue inference, so a thrown error alone is not a fence.
 
-Native tests prove no provider call before coherent acceptance, cancellation while an independent writer remains held, rollback without draft installation and preservation of uncompiled native input. Failed retained Active restoration also aborts live inference before the provider; native witnesses cover expired tree selection/reload and contradictory private lineage without changing canonical bytes. Explicit inactive policy releases that inference fence, not the write fence.
+Native tests prove no provider call before coherent acceptance, cancellation while an independent writer remains held, rollback without draft installation and preservation of uncompiled native input. Unreadable current Active memory also aborts live inference before the provider; native witnesses cover contradictory private lineage and malformed runtime files without changing canonical bytes, while old-step tree selection/reload is not a failure. Failed attachment retains Active policy and exposes `active (blocked)` in terminal/Telegram; the fence is derived from selected mode plus unavailable-memory validation. Active controls retry current-memory acceptance rather than claiming it is already active. Explicit Passive accepts validated current memory and releases both fences; explicit Off releases only the inference fence.
 
 **Signals are not universal.** Idle commands and session events can lack them. Do not infer native Abort cancellation from an extension-owned shutdown signal or generalize active-run tests to idle waits.
 
@@ -76,7 +76,7 @@ Native tests prove no provider call before coherent acceptance, cancellation whi
 
 To use Passive, select it in the current session or set global `mode: "passive"` for new sessions.
 
-**SDK and Telegram controls.** The extension SDK accepts an optional `mode` default override. Both Telegram port variants use `snapshot.mode` plus `select(mode)`. A stale callback keyboard may refresh the view without selecting a mode. Synchronous enum-based ports are supported; Start/Stop port signatures are not.
+**SDK and Telegram controls.** The extension SDK accepts an optional `mode` default override. Both Telegram port variants use `snapshot.mode` plus `select(mode)`. The optional additive `snapshot.inferenceBlocked` diagnostic marks failed Active restoration; legacy ports may omit it. A stale callback keyboard may refresh the view without selecting a mode. Synchronous enum-based ports are supported; Start/Stop port signatures are not.
 
 ## Mode selection and memory restoration
 
@@ -84,17 +84,17 @@ To use Passive, select it in the current session or set global `mode: "passive"`
 
 - Activates current same-session authority under awaited exclusion.
 - Rechecks physical identity and initialization permission after waiting, accepts once, then installs policy, memory and checkpoint.
-- Does not claim to restore an expired historical boundary.
+- Uses current memory; branch checkpoints never select a past revision.
 - Native tests prove current shared plus local-private memory at the next provider, and actual Abort withdrawal for in-run Start with an operation signal.
 
 **Passive:**
 
 - Selects local tools/context policy before waiting for persistence.
 - For accepted memory, publishes lifecycle metadata without rewriting semantic/provenance files. Pending inactive choices share one acceptance of the latest mode.
-- Keeps independently owned retained restoration, Active-default initialization and fork copying; the latest inactive policy is applied at acceptance.
+- Keeps independently owned current-memory attachment, Active-default initialization and fork copying; the latest inactive policy is applied at acceptance.
 - Read-only recovery preserves an intervening Passive choice and its write fence.
 - Selection, shutdown and accepted Start cancel obsolete Stop persistence; rejected Start does not.
-- Genuine persistence failure retains readable memory and native context while fencing writes until accepted Start.
+- Genuine persistence failure retains readable memory and native context while fencing writes until accepted Start or a later explicit Passive that successfully accepts current memory. A Passive retry that still fails adds no duplicate fence marker.
 
 **Off:**
 
@@ -104,7 +104,7 @@ To use Passive, select it in the current session or set global `mode: "passive"`
 
 Modes select workflow policy, not whether canonical memory exists. Cancelling a Start waiter does not cancel independently owned restoration. Selection changes, shutdown and an available native operation signal can revoke obsolete restoration; failure after acceptance cannot undo memory.
 
-**Native restoration evidence.** Startup and tree handlers await restoration. Tests cover held-store tree/fork selection, exact private state over live shared streams, unchanged parent-private files, cold reopening, failed-Stop recovery and next-provider input without later-branch private values.
+**Native attachment evidence.** Startup and tree handlers await attachment. Tests cover held-store tree/fork selection, current private state over live shared streams after old-step navigation, fork copies of the parent's current memory, unchanged parent-private files, cold reopening, failed-Stop recovery and next-provider input with current private values.
 
 A public SDK host can observe the child factory result before awaiting extension binding and send Stop or Stop→Start through the child's public `prompt` method while copying waits. This proves that embedding route, not that the installed CLI or Telegram exposes the child before runtime replacement finishes.
 
@@ -153,8 +153,7 @@ The package root exports `TemporalRuntime`. The Pi registration shim is a separa
 - **Authored semantic patch — `withPatchTransaction`:** current shared basis and selected private authority; one atomic acceptance.
 - **Accepted-runtime lifecycle — `withLifecycleTransaction`:** config/runtime only; cannot initialize or repair semantic storage.
 - **Current-head activation — `withStartTransaction`:** origin creation defaults off and requires explicit authorization.
-- **Retained restoration — `withRestoreTransaction`:** exact retained private boundary beside current shared streams.
-- **Child creation — `withForkTransaction`:** exact parent authority and an unoccupied independent child.
+- **Child creation — `withForkTransaction(source, lifecycle, …)`:** the parent's current memory copied into an unoccupied independent child; `lifecycle` supplies only mode/bootstrap.
 
 Await completion before consuming results. Transaction callbacks:
 
@@ -166,7 +165,7 @@ Keep inference, source acquisition and Git outside canonical exclusion. Raw prec
 
 Continuation inspection/candidate building and Git backup also return Promises. Await them rather than treating a Promise as a boolean or accessing a result before completion. Continuation inspection is advisory: it cannot initialize, restore or select a session on the host's behalf.
 
-**Synchronous runtime methods:** `loadPassive`, `prepareBoundaryRestore`, `restoreBoundary`, `acceptRestoredOrigin`, `prepareBoundaryFork` and `initialize`.
+**Synchronous runtime methods:** `loadPassive` and `initialize`. Version 0.26.0 removed the boundary-restoration APIs (`withRestoreTransaction`, `prepareBoundaryRestore`, `restoreBoundary`, `acceptRestoredOrigin`, `prepareBoundaryFork`) and `HistoryBoundaryExpiredError`; memory never rewinds to an older boundary.
 
 - They are supported for library consumers and local tests/benchmarks; production lifecycle wiring uses the awaited APIs.
 - They are not signature-compatible substitutes and do not acquire the awaited APIs' cancellation behavior.

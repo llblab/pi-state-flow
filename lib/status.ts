@@ -2,7 +2,7 @@ import type { ArtifactInvalidationReason } from "./artifact.ts";
 import type { RecentTransitionWindow } from "./history.ts";
 import { ownedTopLevelKeys } from "./ownership.ts";
 import { conciseDiagnostic } from "./protocol.ts";
-import type { Snapshot } from "./snapshot.ts";
+import { isActiveRestorationBlocked, type Snapshot } from "./snapshot.ts";
 import { overlayStates, projectSemanticState, type SemanticState, type ScopedStates, type StateScope } from "./state.ts";
 import type { ScopeRevisions, TransitionBoundary } from "./temporal.ts";
 
@@ -40,7 +40,7 @@ export function formatScopeRevisionVector(revisions: ScopeRevisions): string {
 export function compactStatus(snapshot: Snapshot, _revisions: ScopeRevisions, colorize: Colorize): string | undefined {
 	const { mode } = snapshot.config;
 	if (mode === "off") return undefined;
-	return `${colorize("accent", "state-flow")} ${colorize("dim", mode)}`;
+	return `${colorize("accent", "state-flow")} ${colorize("dim", isActiveRestorationBlocked(snapshot) ? "active (blocked)" : mode)}`;
 }
 
 function countArtifacts(states: ScopedStates, scope: StateScope): number {
@@ -101,6 +101,8 @@ export function detailedStatus(snapshot: Snapshot, diagnostics: StatusDiagnostic
 	const hasArtifacts = available && (["global", "cwd", "session"] as const).some((scope) => artifacts(scope) > 0);
 
 	return [
+		`Mode: ${snapshot.config.mode}`,
+		...(isActiveRestorationBlocked(snapshot) ? ["Inference blocked: Active memory restoration failed. Use /state-flow-active for current memory or select Passive/Off for native context."] : []),
 		`Repository: ${diagnostics.repositoryRoot}`,
 		`Scope keys: CWD ${diagnostics.cwdScopeKey}; session ${diagnostics.sessionScopeKey}`,
 		...temporalLines,

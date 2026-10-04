@@ -75,19 +75,19 @@ This is a maintained property-to-test map for the current canonical-file contrac
 - `tests/temporal.test.ts` verifies hot-range and unavailable pre-origin boundaries; the real-Pi history-reader test rejects offset eight at the default limit seven without a transition.
 - `tests/config.test.ts` exercises materialized and scope patch-history paths at limits 0, 1, 7, and 12, including single-path/one-item batch reads above seven and distinct configured versus actually retained boundaries.
 
-### 17. Historical restoration is distinct from activation
+### 17. Memory never depends on the Pi step
 
-- `tests/recovery.test.ts` rejects unavailable selections without older-pointer or disabled-marker fallback.
-- Extension/native tests fence passive publication until explicit current-memory activation, with unchanged canonical bytes in both inactive modes.
-- Native “real Pi activates current … memory after expired tree selection and reload” cases cover passive, active and interrupted work plus the next provider's private-memory input.
+- `tests/recovery.test.ts` rejects unsupported checkpoint envelopes without older-pointer or disabled-marker fallback.
+- Extension/native tests prove old-step tree navigation, reload and resume keep current memory writable in Active and Passive; unreadable current files block Active visibly, Passive retries acceptance and Off releases inference only, with unchanged canonical bytes.
+- Native “real Pi keeps current … memory after old-step tree selection and reload” cases cover passive, active and interrupted work plus the next provider's private-memory input.
 - Runtime current-head tests preserve semantics, provenance, revisions, step and available history across old modes, distinguish absent from incomplete private authority, adopt validated foreign shared streams without private leakage or invented history, and reject a concurrent private writer.
 - Native pre-runtime and inherited-fork-selection witnesses preserve current owned session memory instead of resetting it or recopying a parent.
 - Repeated active Start leaves response reconciliation intact.
-- Ordinary conversation with only a pre-runtime mode checkpoint still bootstraps; unaccepted fork identity/CWD repair retries the exact source.
+- Ordinary conversation with only a pre-runtime mode checkpoint still bootstraps; unaccepted fork identity/CWD repair retries copying the parent's current memory.
 
-### 18. Tree/resume select the correct lineage
+### 18. Tree/resume restore branch mode over current memory
 
-- `tests/integration.test.ts` — “real Pi preserves branch-local state through compaction and rejects an expired sibling after fresh-origin navigation” and “real Pi old tree branch stop and resume preserve selected semantics without rewinding shared files”.
+- `tests/integration.test.ts` — “real Pi branch navigation through compaction restores branch modes over current memory” and “real Pi old tree branch stop and resume keep current semantics without rewinding any files”.
 
 ### 19. Stop changes policy, not semantic history
 
@@ -99,7 +99,7 @@ This is a maintained property-to-test map for the current canonical-file contrac
 - Pure passive-selector tests cover missing, colliding and nonfinite recorded active anchors and explicit preservation of unfinished compilation.
 - The native “real Pi repeated Start/Stop preserves uncompiled conversation and its prior boundary” cases cover initial/restarted bootstrap, repeated idle toggles, reload, unchanged native trace, and release after accepted compilation; extension tests cover interrupted idle Stop with and without a captured anchor.
 - Completed idle and marker-based cutoffs remain bounded.
-- The extension's failed-Stop matrix covers concurrent private writers, invalid lock ownership and malformed runtime files in both inactive modes: the selected mode remains applied, canonical bytes stay unchanged, accepted memory and native conversation survive, and only Passive projects the handoff; reload is read-only, and writes remain fenced until accepted Start.
+- The extension's failed-Stop matrix covers concurrent private writers, invalid lock ownership and malformed runtime files in both inactive modes: the selected mode remains applied, canonical bytes stay unchanged, accepted memory and native conversation survive, and only Passive projects the handoff; reload is read-only, and writes remain fenced until accepted Start or a successful explicit Passive retry; failed retries add no duplicate fence.
 - Native “real Pi failed Stop stays passive through late tools, tree, reload and resume” cases verify provider inputs, rejected tool calls, untouched trace prefixes, private memory, current foreign writes, and recovery through explicit Start.
 - A native fork witness retains disabled policy without inheriting the parent's fence.
 - Session tests bind fence lifetime to owner/reset/accepted-checkpoint evidence; runtime current-head tests prove read-only loading changes no canonical bytes.
@@ -193,20 +193,18 @@ This is a maintained property-to-test map for the current canonical-file contrac
 - Native “real Pi Abort cancels an in-run Start without waiting for the canonical owner or another provider call” uses the actual command and active operation signal: cancellation returns while the store remains held, without changed files/checkpoints, another provider call or late activation.
 - Idle/no-signal waits and the separate initial-attachment/fork recovery paths are not certified by that Abort witness.
 
-### 31. Awaited retained restoration selects and accepts one coherent cohort
+### 31. Branch attachment accepts one coherent current cohort
 
-- Runtime restore matrices cover limits 0/1/12, historical/head artifact provenance and contradictory lineage.
-- An independent partial publisher holds exclusion for over two seconds: cancellation preserves cache/files, successful restoration retains historical local Session over current shared values, and all five foreign-private files remain unchanged.
-- Pointer mutation after admission cannot retarget selection; lifecycle policy is checked after waiting.
-- Further witnesses cover expiry during the wait, missing/malformed/foreign authority, private checkpoint/runtime CAS races, rollback/retry, expired/single-use capabilities and post-acceptance failure.
-- No current-head/empty fallback, invented history or unaccepted cache installation is permitted.
+- Attachment uses the current-head Start transaction, whose witnesses cover foreign shared adoption, incomplete private storage, noncooperating private replacement, single-use acceptance and preserved cohorts on publication failure.
+- Runtime attach/fork cases reject contradictory session lineage without installing a cache or changing files.
+- No empty fallback, invented history or unaccepted cache installation is permitted; there is no boundary-restoration API.
 - Native caller cutover evidence is item 35.
 
-### 32. Awaited exact-source fork preserves parent and child authority
+### 32. Awaited fork copies current parent memory and preserves parent and child authority
 
-- Runtime restore/fork matrices cover limits 0/1/12, provenance and contradictory lineage.
-- An independent partial writer held over two seconds proves responsive cancellation, pinned source identity/checkpoint, current shared adoption and historical private copying without parent/foreign-private changes.
-- Source expiry during waiting and competing child acceptances prove post-wait checks.
+- Runtime fork cases cover limits 0/1/12 from an old step, current artifact provenance and contradictory lineage.
+- An independent partial writer held over two seconds proves responsive cancellation, pinned source identity/checkpoint, current shared adoption and private copying without parent/foreign-private changes. The extension pins the parent's current head, so native fork copies never depend on the fork step.
+- Competing child acceptances prove post-wait checks.
 - Every occupied child file, unsupported storage evidence, invalid/missing parent authority and parent/child byte races refuse publication.
 - Fault injection proves rollback/retry; expired/single-use capabilities and post-acceptance checkpoint failure cannot replace accepted child memory.
 - Child lifecycle resets step and unfinished specification while retaining selected mode/bootstrap; later child writes leave the parent unchanged.
@@ -304,7 +302,7 @@ This is a maintained property-to-test map for the current canonical-file contrac
 - `tests/config.test.ts` and `tests/snapshot.test.ts` cover enum round trips, read-only compatibility decoding, invalid/mixed session policies and pre-runtime mode retention without semantic initialization.
 - Native global-default tests prove later defaults affect only new sessions.
 - Extension inactive-choice matrices prove coalescing, no semantic revision and last-choice wins.
-- Held-store “fenced reload preserves …” cases cover all four inactive pairs, unchanged canonical bytes, retained write fences, immediate/final tools/context/status and a subsequent reload.
+- Held-store “fenced reload preserves …” cases cover Off with unchanged canonical bytes and retained fence, and Passive joining read-only recovery before accepting current memory and staying writable across reload.
 - Telegram “pre-runtime Telegram Passive reports only its current successful selection” proves truthful success after cache installation and suppression of superseded receipts through the real composition port.
 
 
@@ -401,9 +399,9 @@ This is a maintained property-to-test map for the current canonical-file contrac
   - Current-head Start and accepted-runtime Stop are covered above; optional settlement backup uses the selected no-signal deferral rather than an upstream release gate.
   - `tests/runtime.test.ts` and native Pi lifecycle tests cover retained-boundary restart, immediate barriers, finalized response, config-only stop, and unavailable-reference provenance.
   - Canonical files supply current state and bounded hot history; arbitrary cold revision recovery is unsupported.
-- `tests/runtime.test.ts` and native integration cover retained-boundary restoration and fork after lowering `historyLimit` to 0/1: current shared values/provenance and selected private state survive folding, parent-private fork files remain unchanged, out-of-window selections fail closed, and later increases do not reconstruct discarded history.
+- `tests/runtime.test.ts` covers fork after lowering `historyLimit` to 0/1; native integration proves reload keeps current state and exactly the retained window, parent-private fork files remain unchanged, and later increases do not reconstruct discarded history.
   - `tests/config.test.ts` covers optional agent configuration, path precedence/expansion, invalid input, load-time caching and read-only behavior.
-  - Session tests and native Pi distinguish configured new-session auto-start from branch-local resume/tree/stop.
+  - Session tests and native Pi distinguish configured new-session auto-start from branch-mode resume/tree/stop over current memory.
   - `tests/extension.test.ts` proves registered artifacts are reconciled only at enabled inference boundaries.
   - The global default is Off without a configured mode; CWD materialization alone never grants Active mode.
 

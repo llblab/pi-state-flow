@@ -22,7 +22,7 @@ import { selectedBoundaryFailure, selectRetainedCheckpoint, waitForRecovery } fr
 import { TemporalRuntime } from "./runtime.js";
 import { discoverSnapshotData, findAssistantToolBatch, findBranchPolicy, findPassiveStopBoundary, hasPendingFork, hasPriorConversation, hasUncheckpointedConversation, isNewSession, retainsPhysicalSessionProjection, SNAPSHOT_ENTRY_TYPE } from "./session.js";
 import { hasCompiledSkillArtifact, hashSkillSource, registeredSkillResolver, SkillReadTracker } from "./skills.js";
-import { HistoryBoundaryExpiredError, emptySnapshot, migrationFailure, preRuntimeCheckpoint } from "./snapshot.js";
+import { emptySnapshot, isActiveRestorationBlocked, migrationFailure, preRuntimeCheckpoint } from "./snapshot.js";
 import { emptyState, projectStateForModel } from "./state.js";
 import { compactStatus, detailedStatus, STATUS_KEY } from "./status.js";
 import { PublicationBusyError } from "./storage.js";
@@ -42,7 +42,6 @@ export default function stateFlowExtension(pi, options = {}) {
     let scopeStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
     let effectiveState = {};
     let branchStartsWithoutRuntime = false;
-    let selectedBoundaryError;
     let modePersistenceError;
     /** One pending inactive-mode persistence; later inactive choices coalesce until it publishes. */
     const inactivePersistence = new OwnedOperationSlot();
@@ -121,10 +120,11 @@ export default function stateFlowExtension(pi, options = {}) {
         if (modePersistenceError)
             throw new Error(`Memory writes paused after mode change: ${modePersistenceError}; use /state-flow-active`);
     }
+    /** Active lifecycle work requires validated memory, not merely a selected Active policy. */
     function isActive() {
-        return snapshot.config.mode === "active";
+        return snapshot.config.mode === "active" && !isActiveRestorationBlocked(snapshot);
     }
-    /** An unavailable or pending active selection keeps the configured inactive policy, never an invented one. */
+    /** Pending acquisition has no accepted Active memory yet. */
     function inactiveSelection(mode) {
         return mode === "active" ? config.inactiveMode : mode;
     }
@@ -390,7 +390,6 @@ export default function stateFlowExtension(pi, options = {}) {
                 runtime = undefined;
                 snapshot = emptySnapshot("off");
                 branchStartsWithoutRuntime = withoutRuntime;
-                selectedBoundaryError = undefined;
                 modePersistenceError = persistenceError;
                 forkInitialization = reason === "fork";
                 installScopeStates();
@@ -408,7 +407,6 @@ export default function stateFlowExtension(pi, options = {}) {
         runtime = createRuntime(ctx);
         installScopeStates();
         branchStartsWithoutRuntime = false;
-        selectedBoundaryError = undefined;
         forkInitialization = sessionStartReason === "fork";
         let selection = { kind: "settled" };
         let skipped = 0;
@@ -439,13 +437,11 @@ export default function stateFlowExtension(pi, options = {}) {
                                 ? { ...selected.checkpoint, mode: sourceFence.mode ?? config.inactiveMode } : selected.checkpoint };
                     }
                     catch (error) {
-                        selectedBoundaryError = { expired: error instanceof HistoryBoundaryExpiredError,
-                            blockInference: selected.checkpoint.mode === "active" && requestedMode === undefined };
-                        snapshot = selectedBoundaryFailure(diagnosticText(error), inactiveSelection(selected.checkpoint.mode));
+                        snapshot = selectedBoundaryFailure(diagnosticText(error), requestedMode ?? selected.checkpoint.mode);
                     }
                 }
                 else if (selected.kind === "boundary") {
-                    selection = { kind: "restore", checkpoint: selected.checkpoint };
+                    selection = { kind: "attach", checkpoint: selected.checkpoint };
                 }
                 else if (selected.kind === "pre-runtime") {
                     snapshot = emptySnapshot(selected.mode);
@@ -503,10 +499,9 @@ export default function stateFlowExtension(pi, options = {}) {
         };
         let accepted = false;
         const failSelection = (error) => {
-            selectedBoundaryError = { expired: error instanceof HistoryBoundaryExpiredError,
-                blockInference: pending.requestedMode === undefined && (selection.kind === "auto-start"
-                    || ((selection.kind === "restore" || selection.kind === "fork") && selection.checkpoint.mode === "active")) };
-            snapshot = selectedBoundaryFailure(diagnosticText(error), inactiveSelection(snapshot.config.mode));
+            const mode = pending.requestedMode ?? (selection.kind === "auto-start" ? "active"
+                : selection.kind === "attach" || selection.kind === "fork" ? selection.checkpoint.mode : snapshot.config.mode);
+            snapshot = selectedBoundaryFailure(diagnosticText(error), mode);
             installScopeStates();
         };
         // Install accepted memory before native writes; later ancillary failures cannot revert or replay it.
@@ -544,9 +539,18 @@ export default function stateFlowExtension(pi, options = {}) {
                             : migrationFailure({}, "Current State Flow session memory is unavailable", pending.requestedMode ?? selection.mode);
                         installScopeStates();
                     }
-                    else if (selection.kind === "restore") {
-                        await candidate.withRestoreTransaction(selection.checkpoint, (restored, publish) => {
+                    else if (selection.kind === "attach") {
+                        // Memory is the current same-session files; the Pi checkpoint supplies only mode and run lifecycle.
+                        await candidate.withStartTransaction((current, publish) => {
                             assertCurrent();
+                            if (!current)
+                                throw new Error("Current State Flow session memory is unavailable");
+                            const { checkpoint } = selection;
+                            const restored = { config: { mode: checkpoint.mode }, meta: {
+                                    step: current.meta.step,
+                                    ...(checkpoint.bootstrap ? { bootstrap: true } : {}),
+                                    ...(checkpoint.specification === undefined ? {} : { specification: checkpoint.specification }),
+                                } };
                             // Canceled preparation or boundary continuation may have no specification. Retain uncompiled native context.
                             if (restored.config.mode === "active" && restored.meta.specification === undefined
                                 && retainsPhysicalSessionProjection(reason) && hasUncheckpointedConversation(ctx.sessionManager.getBranch()))
@@ -557,6 +561,7 @@ export default function stateFlowExtension(pi, options = {}) {
                         }, signal);
                     }
                     else if (selection.kind === "fork") {
+                        // The runtime copies the parent's current memory; the checkpoint supplies only child mode/bootstrap.
                         await candidate.withForkTransaction(selection.source, selection.checkpoint, (child, publish) => {
                             assertCurrent();
                             // Mode is selected independently of creating the child's private memory.
@@ -601,8 +606,9 @@ export default function stateFlowExtension(pi, options = {}) {
                     return;
             }
             settleSelection(ctx, reason, notifyRecovery, skipped, selected !== placeholder);
-            if (snapshot.config.mode !== "passive" || runtime?.view)
+            if (snapshot.config.mode === "off" || isActive() || runtime?.view)
                 return;
+            // Unavailable Active memory may expose shared reads, never substitute private memory or model context.
             const passive = await loadPassiveView(ctx, signal, isCurrent, notifyRecovery);
             if (passive === undefined)
                 return;
@@ -647,10 +653,7 @@ export default function stateFlowExtension(pi, options = {}) {
     function settleSelection(ctx, reason, notifyRecovery, skipped, selectedMemory) {
         const failure = !isActive() && snapshot.meta.validation?.attempt === 0 ? snapshot.meta.validation.error : undefined;
         if (failure !== undefined && notifyRecovery && !modePersistenceError) {
-            if (selectedBoundaryError?.expired)
-                notifyProblem(ctx, "State Flow history is outside the retained temporal window; /state-flow-active can use current session memory.", "warning");
-            else
-                notifyProblem(ctx, `State Flow restore failed: ${failure}`, "error");
+            notifyProblem(ctx, `State Flow restore failed: ${failure}`, "error");
         }
         const continuation = selectedMemory ? selectedContinuation(ctx, reason) : undefined;
         if (continuation !== undefined) {
@@ -891,19 +894,23 @@ export default function stateFlowExtension(pi, options = {}) {
             return { ok: false, message, signal: AbortSignal.any([pending.signal, sharedInspectionLifetime.signal]) };
         }
     }
-    async function activateCurrentState(ctx, pending) {
+    /** Explicit Active or Passive accepts validated current same-session memory without claiming unavailable history. */
+    async function activateCurrentState(ctx, pending, mode = "active", owns = () => startActivation.current?.controller === pending) {
         let selected = runtime;
         const owner = ctx.sessionManager.getSessionId();
         const sameSession = sessionIdentity(ctx);
-        const initiallyActive = isActive();
+        const policy = () => `${snapshot.config.mode}:${isActive()}`;
+        const initialPolicy = policy();
+        const acceptedPolicy = `${mode}:${mode === "active"}`;
+        const active = mode === "active";
         let accepted = false;
         let receipt = AbortSignal.any([pending.signal, sharedInspectionLifetime.signal]);
         const signal = ctx.signal ? AbortSignal.any([pending.signal, ctx.signal]) : pending.signal;
-        const isCurrent = () => startActivation.current?.controller === pending && !signal.aborted && runtime === selected && !shuttingDown
-            && sameSession() && isActive() === (accepted || initiallyActive);
+        const isCurrent = () => owns() && !signal.aborted && runtime === selected && !shuttingDown
+            && sameSession() && policy() === (accepted ? acceptedPolicy : initialPolicy);
         const superseded = () => {
             pending.abort();
-            return { ok: false, message: "State Flow activation was superseded", signal: pending.signal };
+            return { ok: false, message: active ? "State Flow activation was superseded" : "State Flow mode change was superseded", signal: pending.signal };
         };
         try {
             const activation = createRuntime(ctx);
@@ -918,29 +925,32 @@ export default function stateFlowExtension(pi, options = {}) {
                 signal.throwIfAborted();
                 if (!isCurrent())
                     throw new Error("State Flow activation selection changed while awaiting publication");
-                if (!current && !branchStartsWithoutRuntime)
+                if (!current && (!active || !branchStartsWithoutRuntime))
                     throw new Error(snapshot.meta.validation?.error ?? "Current State Flow session memory is unavailable");
                 const boundary = deferred && retainsPhysicalSessionProjection(deferred.reason)
                     ? findPassiveStopBoundary(ctx.sessionManager.getBranch(), owner, PASSIVE_STOP_ENTRY_TYPE) : undefined;
                 const bootstrap = hasPriorConversation(ctx.sessionManager.getBranch()) || passiveContinuation !== undefined || boundary !== undefined;
-                const activated = current ? resumeEpisode(current, bootstrap) : startEpisode(bootstrap);
-                const recoveredCurrent = selectedBoundaryError?.expired;
+                const activated = !active ? deactivateEpisode(current, "passive")
+                    : current ? resumeEpisode(current, bootstrap) : startEpisode(bootstrap);
+                const resumedWrites = modePersistenceError !== undefined;
                 publish(activated);
                 accepted = true;
-                inactivePersistence.cancel();
+                // Passive acceptance runs inside its own inactive-persistence owner.
+                if (active)
+                    inactivePersistence.cancel();
                 runtime = selected = activation;
                 snapshot = activated;
                 activeContext = ctx;
-                selectedBoundaryError = undefined;
                 modePersistenceError = undefined;
                 installScopeStates();
                 const continuation = passiveContinuation ?? bootstrapContinuation ?? (deferred ? selectedContinuation(ctx, deferred.reason) : undefined);
                 deferredBranch = undefined;
                 clearRunTransient();
                 contextProjection.reset();
-                passiveContinuation = undefined;
-                bootstrapContinuation = snapshot.meta.bootstrap ? continuation : undefined;
-                deferInferencePreparation();
+                passiveContinuation = active ? undefined : continuation;
+                bootstrapContinuation = active && snapshot.meta.bootstrap ? continuation : undefined;
+                if (active)
+                    deferInferencePreparation();
                 receipt = AbortSignal.any([pending.signal, sharedInspectionLifetime.signal]);
                 recordPublication();
                 syncStateFlowTools();
@@ -950,20 +960,25 @@ export default function stateFlowExtension(pi, options = {}) {
                     pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, { reset: true, owner });
                 }
                 appendCheckpoint();
-                ctx.ui.notify(recoveredCurrent
-                    ? "State Flow active from current session memory; unavailable historical state was not restored."
-                    : snapshot.meta.bootstrap
-                        ? "State Flow active. The next complete agent run will migrate active context into state."
-                        : "State Flow active. The next prompt starts a stateful agent run.", "info");
+                if (!active) {
+                    if (resumedWrites)
+                        ctx.ui.notify("State Flow passive; memory writes resumed from current session memory.", "info");
+                    return { ok: true, message: "State Flow passive", signal: receipt };
+                }
+                ctx.ui.notify(snapshot.meta.bootstrap
+                    ? "State Flow active. The next complete agent run will migrate active context into state."
+                    : "State Flow active. The next prompt starts a stateful agent run.", "info");
                 return { ok: true, message: "State Flow active", signal: receipt };
-            }, signal, branchStartsWithoutRuntime);
+            }, signal, active && branchStartsWithoutRuntime);
             return isCurrent() ? result : superseded();
         }
         catch (error) {
             if (!isCurrent())
                 return superseded();
-            const message = conciseDiagnostic(`${accepted ? "State Flow active; lifecycle update failed" : "State Flow activation failed"}: ${diagnosticText(error)}`);
-            notifyProblem(ctx, message, accepted ? "warning" : "error");
+            const message = conciseDiagnostic(`${accepted ? `State Flow ${mode}; lifecycle update failed` : active ? "State Flow activation failed" : "State Flow passive acceptance failed"}: ${diagnosticText(error)}`);
+            // Failed Passive acceptance falls back to its caller's write-fence report.
+            if (active || accepted)
+                notifyProblem(ctx, message, accepted ? "warning" : "error");
             return { ok: accepted, message, signal: receipt };
         }
     }
@@ -990,11 +1005,13 @@ export default function stateFlowExtension(pi, options = {}) {
             ctx.ui.notify(detailedStatus(snapshot, statusDiagnostics(ctx)), "info");
         },
     });
+    /** Unavailable selection or failed persistence needs current-memory acceptance, not a sticky Passive write fence. */
+    function passiveRecoveryNeeded(mode) {
+        return mode === "passive" && (modePersistenceError !== undefined || snapshot.meta.validation?.attempt === 0);
+    }
     /** Local policy, tools and UI change before any canonical wait. */
     function applyInactiveMode(ctx, mode) {
         snapshot = deactivateEpisode(snapshot, mode);
-        if (selectedBoundaryError)
-            selectedBoundaryError.blockInference = false;
         clearRunTransient();
         syncStateFlowTools();
         updateUi(ctx);
@@ -1027,7 +1044,7 @@ export default function stateFlowExtension(pi, options = {}) {
         if (snapshot.config.mode === mode) {
             const retained = selectRetainedCheckpoint(discoverSnapshotData(ctx.sessionManager.getBranch()).candidates, config.inactiveMode);
             const recordedMode = retained.kind === "pre-runtime" ? retained.mode : retained.kind === "boundary" ? retained.checkpoint.mode : undefined;
-            if (modePersistenceError || recordedMode === mode)
+            if (!passiveRecoveryNeeded(mode) && (modePersistenceError || recordedMode === mode))
                 return Promise.resolve({ ok: true, message: `State Flow is already ${mode}` });
         }
         inactivePersistence.cancel();
@@ -1081,7 +1098,6 @@ export default function stateFlowExtension(pi, options = {}) {
         acquisition.reset();
         runtime = undefined;
         snapshot = emptySnapshot("off");
-        selectedBoundaryError = undefined;
         branchStartsWithoutRuntime = preRuntime;
         forkInitialization = pendingFork;
         deferredBranch = { owner: address.key, cwd: ctx.cwd, reason: pendingFork ? "fork" : undefined };
@@ -1124,8 +1140,38 @@ export default function stateFlowExtension(pi, options = {}) {
         const wasActive = current.config.mode === "active";
         let unfinished = current.meta.specification !== undefined
             || (inferencePreparation.current?.prompt !== undefined && !inferencePreparation.current.accepted);
+        const recoverPassive = passiveRecoveryNeeded(mode);
         applyInactiveMode(ctx, mode);
         const stoppedAt = Date.now();
+        if (recoverPassive) {
+            const superseded = () => ({ ok: false, message: "State Flow mode change was superseded" });
+            const owns = () => inactivePersistence.owns(pending) && !pending.controller.signal.aborted && !shuttingDown;
+            try {
+                // Join pending read-only recovery so its installation cannot supersede this acceptance.
+                const restoring = branchRestoration.current?.operation;
+                if (restoring)
+                    await waitForRecovery(restoring, pending.controller.signal);
+            }
+            catch {
+                return superseded();
+            }
+            if (!owns())
+                return superseded();
+            // Passive is a stable mode: explicit selection accepts validated current memory instead of keeping a write fence.
+            const recovered = await activateCurrentState(ctx, pending.controller, "passive", () => inactivePersistence.owns(pending));
+            if (recovered.ok)
+                pending.published = true;
+            if (recovered.ok || !owns())
+                return recovered;
+            if (current.config.mode === mode && modePersistenceError) {
+                // The existing native fence already records this policy; report why acceptance still failed.
+                pending.published = true;
+                const message = conciseDiagnostic(`State Flow passive; memory writes remain paused: ${recovered.message}`);
+                notifyProblem(ctx, message, "warning");
+                return { ok: true, message };
+            }
+            selected = runtime;
+        }
         if (modePersistenceError) {
             // Writes stay paused; the native marker records only the newly selected inactive policy.
             pending.published = true;
@@ -1227,6 +1273,7 @@ export default function stateFlowExtension(pi, options = {}) {
         port: {
             snapshot: () => ({
                 mode: snapshot.config.mode,
+                inferenceBlocked: isActiveRestorationBlocked(snapshot),
                 step: snapshot.meta.step,
                 revisions: scopeRevisions(),
                 bootstrap: snapshot.meta.bootstrap === true,
@@ -1315,7 +1362,7 @@ export default function stateFlowExtension(pi, options = {}) {
     }
     function prepareContext(messages, ctx) {
         // Pi continues after hook errors; public Abort fences inference instead of exposing the native history fallback.
-        if (selectedBoundaryError?.blockInference && ctx.signal && !shuttingDown) {
+        if (isActiveRestorationBlocked(snapshot) && ctx.signal && !shuttingDown) {
             ctx.abort();
             notifyProblem(ctx, "State Flow inference blocked: Active memory restoration failed. Select a valid branch or use /state-flow-active for current memory; /state-flow-passive or /state-flow-off explicitly permits native context.", "error");
             return;

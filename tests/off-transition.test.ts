@@ -127,7 +127,7 @@ for (const kind of ["restoration", "passive", "activation", "patch", "response",
 	assert.throws(() => h.readState(), /temporal runtime is unavailable/);
 });
 
-for (const next of ["passive", "abort-passive", "abort-active"] as const) for (const history of ["retained", "expired"] as const) test(`unaccepted Active from Off preserves ${history} history for ${next}`, { timeout: 5_000 }, async (t) => {
+for (const next of ["passive", "abort-passive", "abort-active"] as const) for (const history of ["retained", "expired"] as const) test(`unaccepted Active from Off leaves current memory for ${next} (${history} checkpoint)`, { timeout: 5_000 }, async (t) => {
 	const h = harness({ initializeRepository: false });
 	await start(h);
 	await commitTerminal(h, {}, { retained: "SELECTED-OLD" });
@@ -164,11 +164,9 @@ for (const next of ["passive", "abort-passive", "abort-active"] as const) for (c
 	if (next === "abort-active") {
 		assert.equal(h.readState(0, "session").working.retained, `CURRENT-${advances}`);
 		assert.equal(policy(h)?.mode, "active");
-	} else if (history === "expired") {
-		assert.throws(() => h.readState(0, "session"), /outside the retained temporal window/);
-		assert.deepEqual(files(), before, "expired selection must not publish current or empty memory");
 	} else {
-		assert.equal(h.readState(0, "session").working.retained, "SELECTED-OLD");
+		// Memory is the current JSON state regardless of the deferred Pi step.
+		assert.equal(h.readState(0, "session").working.retained, `CURRENT-${advances}`);
 		assert.deepEqual(policy(h), { mode: "passive" });
 		await h.tools.get("patch_state")!.execute("after-recovery", { session: { working: { writable: true } } }, undefined, undefined, h.ctx);
 		assert.equal(h.readState(0, "session").working.writable, true);
@@ -328,7 +326,8 @@ test("Off cancels pending fork copying and a cold Passive selection later acquir
 		await source.tools.get("patch_state")!.execute(`expire-${index}`, { session: { working: { index } } }, undefined, undefined, source.ctx);
 	}
 	await fenced.commands.get("state-flow-passive")!.handler("", fenced.ctx);
-	assert.ok(fenced.entries.at(-1)!.data.persistenceError);
+	// The fork copies the parent's current memory; an old fork step cannot fence the child.
+	assert.equal(fenced.readState(0, "session").working.index, 8);
 	await fenced.commands.get("state-flow-off")!.handler("", fenced.ctx);
 	const fencedEntries = structuredClone(fenced.entries);
 	fenced = harness(fencedOptions);
@@ -339,5 +338,5 @@ test("Off cancels pending fork copying and a cold Passive selection later acquir
 		assert.deepEqual(fenced.notifications, []);
 		await fenced.commands.get("state-flow-status")!.handler("", fenced.ctx);
 	});
-	assert.match(fenced.notifications.at(-1)!, /Memory writes paused after mode change/);
+	assert.doesNotMatch(fenced.notifications.at(-1)!, /Memory writes paused after mode change/);
 });

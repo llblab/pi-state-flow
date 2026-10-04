@@ -6,9 +6,9 @@ import { pruneArtifactProvenance, type ArtifactProvenance, type ArtifactProvenan
 import { assertTemporalFileBase, captureTemporalFileBase, initializeFileStore, publishTemporalStateToFiles, withStorageTransaction, type StorageTransaction, type TemporalFileBase } from "./storage.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT, type AcceptedTransition, type RecentTransitionWindow } from "./history.ts";
 import { hashJson, sameJson } from "./json.ts";
-import { HistoryBoundaryExpiredError, RevisionUnavailableError, createSessionRuntime, parseSessionRuntime, preRuntimeCheckpoint, retainedBoundaryCheckpoint, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot } from "./snapshot.ts";
+import { RevisionUnavailableError, createSessionRuntime, parseSessionRuntime, preRuntimeCheckpoint, retainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot, type StateFlowMode } from "./snapshot.ts";
 import { type MaterializedState, type SemanticState, type ScopedSemanticStates, type ScopedStates, type StateScope } from "./state.ts";
-import { adoptTemporalStreams, advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalScopes, readTemporalState, readTemporalView, selectScopeStreamAtBoundary, validateScopeLineage, type ScopeStream, type TemporalState } from "./temporal.ts";
+import { adoptTemporalStreams, advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalScopes, readTemporalState, readTemporalView, validateScopeLineage, type ScopeStream, type TemporalState } from "./temporal.ts";
 
 const SCOPES = ["global", "cwd", "session"] as const;
 const SHARED_SCOPES = ["global", "cwd"] as const;
@@ -24,8 +24,13 @@ export interface RuntimePatchTransaction {
 type PublicationSelection =
 	| { kind: "patch" | "lifecycle" }
 	| { kind: "start"; allowCreateOrigin: boolean }
-	| { kind: "restore"; checkpoint: RetainedBoundaryCheckpoint }
-	| { kind: "fork"; source: SessionAddress; checkpoint: RetainedBoundaryCheckpoint };
+	| { kind: "fork"; source: SessionAddress; lifecycle: ForkLifecycle };
+
+/** Child policy recorded by the native fork; memory always comes from the parent's current files. */
+export interface ForkLifecycle {
+	mode: StateFlowMode;
+	bootstrap?: true;
+}
 
 interface SessionCopy {
 	stream: ScopeStream;
@@ -78,7 +83,6 @@ export class TemporalRuntime {
 	private semanticRevision: string | undefined;
 	private savedRuntime: string | undefined;
 	private transaction: StorageTransaction | undefined;
-	private restoredOriginPending = false;
 	private provenanceByScope: Record<StateScope, ArtifactProvenanceRegistry> = emptyProvenance();
 	/** Shared scopes whose wholly absent live basis was accepted after one stale-target refusal. */
 	private readonly absentSharedScopes = new Set<StateScope>();
@@ -130,7 +134,6 @@ export class TemporalRuntime {
 		this.provenanceByScope = provenance;
 		this.semanticRevision = undefined;
 		this.savedRuntime = undefined;
-		this.restoredOriginPending = false;
 		this.absentSharedScopes.clear();
 		return true;
 	}
@@ -187,80 +190,6 @@ export class TemporalRuntime {
 		return result;
 	}
 
-	/** Prepare a retained session boundary from current canonical files; shared scopes remain live. */
-	prepareBoundaryRestore(checkpoint: RetainedBoundaryCheckpoint): { snapshot: Snapshot; restore: () => Snapshot } {
-		if (!lstatSync(this.root, { throwIfNoEntry: false })) throw new RevisionUnavailableError("Selected State Flow boundary storage is unavailable");
-		return this.prepareBoundaryRestoreBase(checkpoint, captureTemporalFileBase(this.cwd, this.sessionId, this.root, this.sessionKey));
-	}
-
-	private prepareBoundaryRestoreBase(checkpoint: RetainedBoundaryCheckpoint, base: TemporalFileBase): { snapshot: Snapshot; restore: () => Snapshot } {
-		const files = new Map(base.files.map((file) => [file.path, file.content]));
-		const scopes = Object.fromEntries(SCOPES.map((scope) => {
-			const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
-			const stream = parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope,
-				scope === "cwd" ? this.cwd : undefined, files.get(paths.meta));
-			if (!stream) throw new RevisionUnavailableError(`State Flow ${scopeLabel(scope)} scope is unavailable for retained-boundary restoration`);
-			return [scope, stream];
-		})) as Record<StateScope, ScopeStream>;
-		const runtimePaths = sessionRuntimePaths(this.cwd, this.sessionId, this.root, this.sessionKey);
-		const document = parseSessionRuntime(files.get(runtimePaths.config), files.get(runtimePaths.runtime), this.cwd, this.sessionId);
-		if (!document) throw new RevisionUnavailableError("State Flow session runtime is unavailable for retained-boundary restoration");
-		// The codecs validate persisted retention against the format maximum, not the new operator limit.
-		validateScopeLineage(scopes.session, "session", document.meta.lineage, MAX_HISTORY_LIMIT);
-		const boundary = document.meta.lineage.slice(-(this.historyLimit + 1)).find(({ id }) => id === checkpoint.boundary);
-		if (!boundary) throw new HistoryBoundaryExpiredError("Selected State Flow history boundary is outside the retained temporal window");
-		const selectedSession = selectScopeStreamAtBoundary(scopes.session, "session", boundary, MAX_HISTORY_LIMIT);
-		const view = adoptTemporalStreams({
-			global: scopes.global,
-			cwd: scopes.cwd,
-			session: selectedSession,
-		}, `restore:${checkpoint.boundary}:${randomUUID()}`, this.historyLimit);
-		const snapshot: Snapshot = {
-			config: { mode: checkpoint.mode },
-			meta: {
-				step: checkpoint.step,
-				...(checkpoint.bootstrap === true ? { bootstrap: true } : {}),
-				...(checkpoint.specification === undefined ? {} : { specification: checkpoint.specification }),
-			},
-		};
-		const provenance = Object.fromEntries(SCOPES.map((scope) => {
-			const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
-			const parsed = parseScopeProvenance(files.get(paths.meta), paths.meta);
-			const retained = pruneArtifactProvenance(parsed, readTemporalState(view, 0, scope, this.historyLimit).artifacts);
-			if (scope === "session") {
-				// Live evidence cannot prove an earlier artifact version, even after a change-away-and-back.
-				for (const record of scopes.session.patches) {
-					if (record.transition.position <= boundary.position) continue;
-					for (const path of Object.keys(record.patch.artifacts === null ? retained : record.patch.artifacts ?? {})) delete retained[path];
-				}
-			}
-			return [scope, retained];
-		})) as Record<StateScope, ArtifactProvenanceRegistry>;
-		let consumed = false;
-		return {
-			snapshot: structuredClone(snapshot),
-			restore: () => {
-				if (consumed) throw new Error("Prepared State Flow restore was already consumed");
-				consumed = true;
-				this.view = view;
-				this.base = base;
-				this.provenanceByScope = provenance;
-				this.semanticRevision = undefined;
-				this.savedRuntime = hashJson(createSessionRuntime(snapshot, this.cwd, this.sessionId, view.lineage, provenance.session));
-				this.restoredOriginPending = true;
-				this.absentSharedScopes.clear();
-				return structuredClone(snapshot);
-			},
-		};
-	}
-
-	/** Restore and canonically accept one retained boundary as a single lifecycle operation. */
-	restoreBoundary(checkpoint: RetainedBoundaryCheckpoint): { snapshot: Snapshot; publication: RuntimePublication } {
-		const prepared = this.prepareBoundaryRestore(checkpoint);
-		const snapshot = prepared.restore();
-		return { snapshot, publication: this.acceptRestoredOrigin(snapshot) };
-	}
-
 	/** Await a coherent read-only recovery view; this neither activates policy nor accepts publication authority. */
 	async refreshCurrentMemory(signal?: AbortSignal): Promise<Snapshot | undefined> {
 		signal?.throwIfAborted();
@@ -309,40 +238,8 @@ export class TemporalRuntime {
 		this.provenanceByScope = provenance;
 		this.semanticRevision = undefined;
 		this.savedRuntime = undefined;
-		this.restoredOriginPending = false;
 		this.absentSharedScopes.clear();
 		return snapshot;
-	}
-
-	/** Copy one retained source-session boundary over the child's current shared scopes. */
-	prepareBoundaryFork(source: SessionAddress, checkpoint: RetainedBoundaryCheckpoint): { snapshot: Snapshot; fork: () => { snapshot: Snapshot; publication: RuntimePublication } } {
-		const parent = Object.freeze({ ...source });
-		if (parent.id === this.sessionId || parent.key === this.sessionKey) throw new Error("State Flow fork requires a distinct session identity and key");
-		const sourceRuntime = new TemporalRuntime(this.cwd, parent, this.root, undefined, this.historyLimit);
-		const prepared = sourceRuntime.prepareBoundaryRestore(checkpoint);
-		prepared.restore();
-		const snapshot: Snapshot = {
-			config: structuredClone(prepared.snapshot.config),
-			meta: {
-				step: 0,
-				...(prepared.snapshot.meta.bootstrap === undefined ? {} : { bootstrap: prepared.snapshot.meta.bootstrap }),
-			},
-		};
-		let consumed = false;
-		return {
-			snapshot: structuredClone(snapshot),
-			fork: () => {
-				if (consumed) throw new Error("Prepared State Flow fork was already consumed");
-				consumed = true;
-				if (this.view) throw new Error("State Flow fork target already has session storage");
-				const publication = this.initializeOrigin(snapshot, { allowCreateCwd: false, copy: {
-					stream: sourceRuntime.view!.scopes.session,
-					provenance: sourceRuntime.artifactProvenance("session"),
-				} });
-				if (!publication?.revision) throw new Error("State Flow fork requires existing shared scope storage");
-				return { snapshot: structuredClone(snapshot), publication };
-			},
-		};
 	}
 
 	initialize(snapshot: Snapshot, allowCreateCwd: boolean, expectedShared?: Pick<ScopedStates, "global" | "cwd">, newSessionOrigin = false): RuntimePublication | undefined {
@@ -518,7 +415,6 @@ export class TemporalRuntime {
 
 	/** Prepare current shared state while retaining the exact accepted private publication basis. */
 	private publicationCandidate(storage: StorageTransaction, current?: TemporalFileBase): TemporalRuntime {
-		if (this.restoredOriginPending) throw new RevisionUnavailableError("State Flow restored origin must be accepted before patching memory");
 		current ??= storage.capture(this.cwd, this.sessionId, this.root, this.sessionKey);
 		const candidate = new TemporalRuntime(this.cwd, this.session, this.root, undefined, this.historyLimit);
 		candidate.transaction = storage;
@@ -573,26 +469,19 @@ export class TemporalRuntime {
 		return this.withPublicationTransaction((_candidate, publish, current) => action(current, (snapshot) => publish(snapshot)), { kind: "start", allowCreateOrigin }, signal);
 	}
 
-	/** Select one retained private boundary beside current shared streams, then accept only after caller policy is rechecked. */
-	async withRestoreTransaction<T>(checkpoint: RetainedBoundaryCheckpoint, action: (selected: Snapshot, publish: (snapshot: Snapshot) => RuntimePublication) => T, signal?: AbortSignal): Promise<T> {
+	/** Copy the parent's current session memory into an unoccupied child; the caller rechecks native selection after waiting. */
+	async withForkTransaction<T>(source: SessionAddress, lifecycle: ForkLifecycle, action: (selected: Snapshot, publish: (snapshot: Snapshot) => RuntimePublication) => T, signal?: AbortSignal): Promise<T> {
 		signal?.throwIfAborted();
 		return this.withPublicationTransaction((_candidate, publish, selected) => action(selected!, (snapshot) => publish(snapshot)),
-			{ kind: "restore", checkpoint: structuredClone(checkpoint) }, signal);
+			{ kind: "fork", source: { ...source }, lifecycle: { mode: lifecycle.mode, ...(lifecycle.bootstrap ? { bootstrap: true as const } : {}) } }, signal);
 	}
 
-	/** Copy exact retained parent authority into an unoccupied child; the caller rechecks native selection after waiting. */
-	async withForkTransaction<T>(source: SessionAddress, checkpoint: RetainedBoundaryCheckpoint, action: (selected: Snapshot, publish: (snapshot: Snapshot) => RuntimePublication) => T, signal?: AbortSignal): Promise<T> {
-		signal?.throwIfAborted();
-		return this.withPublicationTransaction((_candidate, publish, selected) => action(selected!, (snapshot) => publish(snapshot)),
-			{ kind: "fork", source: { ...source }, checkpoint: structuredClone(checkpoint) }, signal);
-	}
-
-	private prepareForkCandidate(storage: StorageTransaction, source: SessionAddress, checkpoint: RetainedBoundaryCheckpoint): {
+	private prepareForkCandidate(storage: StorageTransaction, source: SessionAddress, lifecycle: ForkLifecycle): {
 		candidate: TemporalRuntime; current: Snapshot; assertSource: () => void;
 	} {
 		const sourceBase = storage.capture(this.cwd, source.id, this.root, source.key);
 		const parent = new TemporalRuntime(this.cwd, source, this.root, undefined, this.historyLimit);
-		const selected = parent.prepareBoundaryRestoreBase(checkpoint, sourceBase).restore();
+		if (!parent.loadCurrentMemoryBase(sourceBase)) throw new RevisionUnavailableError("State Flow fork parent memory is unavailable");
 		const base = storage.capture(this.cwd, this.sessionId, this.root, this.sessionKey);
 		const files = new Map(base.files.map((file) => [file.path, file.content]));
 		const paths = temporalScopePaths(this.cwd, this.sessionId, "session", this.root, this.sessionKey);
@@ -613,7 +502,7 @@ export class TemporalRuntime {
 		}
 		return {
 			candidate,
-			current: { config: selected.config, meta: { step: 0, ...(selected.meta.bootstrap === undefined ? {} : { bootstrap: selected.meta.bootstrap }) } },
+			current: { config: { mode: lifecycle.mode }, meta: { step: 0, ...(lifecycle.bootstrap ? { bootstrap: true } : {}) } },
 			assertSource: () => assertTemporalFileBase(sourceBase, storage.capture(this.cwd, source.id, this.root, source.key)),
 		};
 	}
@@ -635,15 +524,15 @@ export class TemporalRuntime {
 				if (selection.source.id === this.sessionId || selection.source.key === this.sessionKey) throw new Error("State Flow fork requires a distinct session identity and key");
 				if (this.view) throw new Error("State Flow fork target already has session storage");
 			}
-			if (!semantic && (!this.semanticRevision || !this.view || !this.base || this.restoredOriginPending)) {
+			if (!semantic && (!this.semanticRevision || !this.view || !this.base)) {
 				throw new Error("State Flow lifecycle transaction requires an accepted runtime");
 			}
 		};
 		signal?.throwIfAborted();
 		assertAuthority();
 		if (kind === "patch" || allowCreateOrigin) initializeFileStore(this.root);
-		if ((kind === "start" || kind === "restore" || kind === "fork") && !lstatSync(this.root, { throwIfNoEntry: false })) {
-			throw new RevisionUnavailableError(kind !== "start" ? "Selected State Flow boundary storage is unavailable" : "Current State Flow session storage is unavailable");
+		if ((kind === "start" || kind === "fork") && !lstatSync(this.root, { throwIfNoEntry: false })) {
+			throw new RevisionUnavailableError(kind === "fork" ? "State Flow fork parent storage is unavailable" : "Current State Flow session storage is unavailable");
 		}
 		return withStorageTransaction(this.root, (storage) => {
 			assertAuthority();
@@ -651,14 +540,12 @@ export class TemporalRuntime {
 			let candidate: TemporalRuntime;
 			let assertSource: (() => void) | undefined;
 			if (selection.kind === "fork") {
-				({ candidate, current, assertSource } = this.prepareForkCandidate(storage, selection.source, selection.checkpoint));
-			} else if (selection.kind === "restore" || selection.kind === "start") {
+				({ candidate, current, assertSource } = this.prepareForkCandidate(storage, selection.source, selection.lifecycle));
+			} else if (selection.kind === "start") {
 				candidate = new TemporalRuntime(this.cwd, this.session, this.root, undefined, this.historyLimit);
 				candidate.transaction = storage;
 				const base = storage.capture(this.cwd, this.sessionId, this.root, this.sessionKey);
-				current = selection.kind === "restore"
-					? candidate.prepareBoundaryRestoreBase(selection.checkpoint, base).restore()
-					: candidate.loadCurrentMemoryBase(base);
+				current = candidate.loadCurrentMemoryBase(base);
 				if (!current) {
 					if (!allowCreateOrigin) throw new RevisionUnavailableError("Current State Flow session memory is unavailable");
 					if (SCOPES.some((scope) => lstatSync(join(temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey).directory, "state.json"), { throwIfNoEntry: false }))) {
@@ -676,7 +563,7 @@ export class TemporalRuntime {
 				assertSource?.();
 				// Patch preparation without semantic work preserves complete accepted cohorts; selection accepts origins with configured folding.
 				// New authority or wholly absent shared pairs still need normal atomic initialization; partial evidence already failed.
-				const writeSemantic = semantic && (kind === "start" || kind === "restore" || kind === "fork" || accepted !== undefined || !this.semanticRevision
+				const writeSemantic = semantic && (kind === "start" || kind === "fork" || accepted !== undefined || !this.semanticRevision
 					|| SCOPES.some((scope) => Object.keys(provenance?.[scope] ?? {}).length > 0)
 					|| candidate.base!.files.some((file) => file.content === undefined));
 				// Every capability acceptance validates its captured cohort, including semantic no-ops.
@@ -687,7 +574,6 @@ export class TemporalRuntime {
 				this.provenanceByScope = candidate.provenanceByScope;
 				this.semanticRevision = candidate.semanticRevision;
 				this.savedRuntime = candidate.savedRuntime;
-				this.restoredOriginPending = false;
 				this.absentSharedScopes.clear();
 				published = true;
 				return publication;
@@ -697,15 +583,6 @@ export class TemporalRuntime {
 		}, signal);
 	}
 
-	/** Canonically accept a prepared retained-boundary origin before lifecycle-only persistence. */
-	acceptRestoredOrigin(snapshot: Snapshot): RuntimePublication {
-		if (!this.restoredOriginPending) throw new Error("State Flow has no prepared restored origin to accept");
-		const publication = this.publish(snapshot, true);
-		if (!publication) throw new Error("State Flow restored origin produced no canonical publication");
-		this.restoredOriginPending = false;
-		return publication;
-	}
-
 	publish(
 		snapshot: Snapshot,
 		semantic = false,
@@ -713,7 +590,6 @@ export class TemporalRuntime {
 		options: { provenance?: Partial<Record<StateScope, Record<string, ArtifactProvenance>>> } = {},
 	): RuntimePublication | undefined {
 		if (!this.view || !this.base) throw new Error("State Flow temporal publication is unavailable; restore or initialize before accepting a transition");
-		if (this.restoredOriginPending && !semantic) throw new Error("State Flow restored origin must be accepted before runtime-only persistence");
 		// Explicit evidence updates still own a scope CAS, even if they equal the stale cache.
 		const provenanceScopes = SCOPES.filter((scope) => Object.keys(options.provenance?.[scope] ?? {}).length > 0);
 		const runtimeOnly = !semantic && accepted === undefined && provenanceScopes.length === 0;

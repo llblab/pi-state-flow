@@ -2,6 +2,13 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.26.0: Stable Modes
+
+- `Step-independent memory`: Memory no longer depends on the Pi step. Startup, reload, resume and `/tree` attach the current same-session JSON state; native checkpoints supply only mode and run lifecycle. Old or expired branch points never block or rewind memory. Forks copy the parent's current memory. Past values remain readable through `read_state` offsets within retained history.
+- `Removed boundary restoration (library API)`: With nothing left to rewind, `withRestoreTransaction`, `prepareBoundaryRestore`, `restoreBoundary`, `acceptRestoredOrigin`, `prepareBoundaryFork`, `HistoryBoundaryExpiredError` and the temporal boundary selectors are removed. `withForkTransaction(source, lifecycle, …)` now copies the parent's current memory inside its transaction; `lifecycle` carries only mode/bootstrap. Library consumers attach current memory through `withStartTransaction`.
+- `Stable Passive`: Explicit Passive accepts validated current memory like Active and stays writable across reload, including after a failed mode write. Writes stay paused only while current memory is missing, corrupt, contradictory or unpublishable; failed retries add no duplicate fence.
+- `Truthful blocked status`: Unreadable current memory under Active retains Active policy and shows `active (blocked)` in terminal/Telegram, instead of a hidden fence behind an Off indicator. Active or Passive accepts repaired memory; Off releases inference only. Status explains the block and recovery.
+
 ## 0.25.5: Active Restoration Fence and Codemode Compaction
 
 - `Active restoration fence`: Failed retained Active restoration aborts live inference instead of silently exposing native history under an inactive fallback. Expired tree/reload and contradictory-lineage native tests prove zero provider calls and unchanged memory. Valid selection, accepted Start or explicit Passive/Off releases the fence; historical authority is never substituted.

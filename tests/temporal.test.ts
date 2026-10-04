@@ -11,8 +11,6 @@ import {
 	createTemporalState,
 	readTemporalState,
 	readTemporalView,
-	selectScopeStreamAtBoundary,
-	selectTemporalStateBoundary,
 	temporalScopeRevisions,
 	validateTemporalState,
 	validateScopeLineage,
@@ -89,25 +87,6 @@ test("one patch shifts current to history and reads return detached materializat
 	const returned = readTemporalState(next);
 	returned.working.value = 99;
 	assert.equal(readTemporalState(next).working.value, 1);
-});
-
-test("selects only retained causal boundaries without external history", () => {
-	let view = createTemporalState(initial(), "base", 3);
-	view = advanceTemporalState(view, [patch("session", 1)], "T1", 3);
-	view = advanceTemporalState(view, [patch("cwd", 2)], "T2", 3);
-	view = advanceTemporalState(view, [patch("global", 3)], "T3", 3);
-	const selected = selectTemporalStateBoundary(view, "T1", 3);
-	assert.deepEqual(selected.lineage.map(({ id }) => id), ["base", "T1"]);
-	assert.equal(readTemporalState(selected, 0, "session", 3).working.value, 1);
-	assert.equal(readTemporalState(selected, 0, "cwd", 3).working.value, undefined);
-	assert.equal(readTemporalState(selected, 0, "global", 3).working.value, undefined);
-	assert.deepEqual(temporalScopeRevisions(selected), { global: 0, cwd: 0, session: 1 });
-	const selectedSession = selectScopeStreamAtBoundary(view.scopes.session, "session", view.lineage[1]!, 3);
-	assert.deepEqual(selectedSession.patches.map(({ transition }) => transition.id), ["T1"]);
-	assert.equal(selectedSession.revision, 1);
-	assert.throws(() => selectScopeStreamAtBoundary(view.scopes.session, "session", { id: "expired", position: -1, parent: null }, 3), /temporal boundary|predates/);
-	assert.throws(() => selectTemporalStateBoundary(view, "expired", 3), /outside the retained temporal window/);
-	assert.throws(() => selectTemporalStateBoundary(view, "", 3), /identity must be non-empty/);
 });
 
 test("a caller-supplied history limit controls folding, validation, and reads", () => {
@@ -267,8 +246,6 @@ test("scope lineage permits sparse shared-only boundaries and inherited session 
 	const before = structuredClone(view);
 	validateScopeLineage(view.scopes.session, "session", view.lineage);
 	assert.deepEqual(view, before);
-	const selected = selectScopeStreamAtBoundary(view.scopes.session, "session", view.lineage[1]!);
-	assert.deepEqual(selected.patches, [], "a shared-only boundary can select unchanged session state");
 	const folded = constrainTemporalState(view, 0);
 	validateScopeLineage(folded.scopes.session, "session", folded.lineage, 0);
 	const inherited = adoptTemporalStreams(view.scopes, "inherited-origin", 1);

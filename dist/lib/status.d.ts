@@ -1,6 +1,6 @@
 import type { ArtifactInvalidationReason } from "./artifact.ts";
 import type { RecentTransitionWindow } from "./history.ts";
-import type { Snapshot } from "./snapshot.ts";
+import { type Snapshot } from "./snapshot.ts";
 import { type SemanticState, type ScopedStates, type StateScope } from "./state.ts";
 import type { ScopeRevisions, TransitionBoundary } from "./temporal.ts";
 export declare const STATUS_KEY = "state-flow";

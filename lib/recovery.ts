@@ -1,4 +1,4 @@
-import { parseRetainedPiCheckpoint, migrationFailure, type InactiveMode, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot } from "./snapshot.ts";
+import { parseRetainedPiCheckpoint, migrationFailure, type InactiveMode, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot, type StateFlowMode } from "./snapshot.ts";
 
 export type RetainedCheckpointSelection =
 	| { kind: "boundary"; checkpoint: RetainedBoundaryCheckpoint; skipped: string[] }
@@ -45,6 +45,6 @@ export function waitForRecovery<T>(operation: Promise<T>, signal: AbortSignal): 
 }
 
 /** A selected boundary that cannot be resolved stays unavailable; callers never fall through to older evidence. */
-export function selectedBoundaryFailure(cause: string, mode: InactiveMode = "passive"): Snapshot {
+export function selectedBoundaryFailure(cause: string, mode: StateFlowMode = "passive"): Snapshot {
 	return migrationFailure({}, `Snapshot restoration failed: ${cause}`, mode);
 }

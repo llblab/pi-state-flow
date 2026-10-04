@@ -1,12 +1,16 @@
 # Backlog
 
-The **0.25.5: Active Restoration Fence and Codemode Compaction** hotfix is published (exact-tag workflow, GitHub Release and npm commit verified) and bundled in published Pi Kit 0.27.6; outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains installed-client gates and deferred decisions.
+The **0.25.5: Active Restoration Fence and Codemode Compaction** hotfix is published (exact-tag workflow, GitHub Release and npm commit verified) and bundled in published Pi Kit 0.27.6. **0.26.0: Stable Modes** is prepared and validated locally but not committed, tagged or published; Pi Kit sync follows its release. Outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains installed-client gates and deferred decisions.
 
 ## Out of scope
 
 - Changing what a cascade deletes, including writes into an owned target made by the closing patch. That stays deleted by design and already appears in the receipt.
 - Nested `lazy_navigation` and intent-ownership warnings, validation or rejection. Authored missing-deletion hints do not change cascade behavior.
 - Any reduction of lifecycle state; the tagged-union question stays deferred.
+
+## 0.26.0 acceptance
+
+- **Installed stable-mode smoke (operator-owned).** After separately authorized reload, use disposable storage to confirm `/tree` to an old step and reload keep current memory writable in Active and Passive; a fork copies the parent's current memory; unreadable current files show `active (blocked)` in terminal/Telegram, Passive retries and Off releases inference only. Local/native validation does not certify the installed client.
 
 ## 0.25.5 acceptance
 

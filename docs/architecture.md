@@ -236,7 +236,7 @@ Explicit Start independently prepares the validated current same-session canonic
 
 - Incompatible but independently valid live shared streams require a fresh origin, not invented cross-writer history.
 - An empty session origin is allowed only with wholly absent private authority and initialization-safe branch provenance; incomplete or contradictory evidence stays closed.
-- Initial physical fork copying still requires its exact-source contract; an already accepted child can activate its own current memory without recopying its parent.
+- Initial physical fork copying copies the parent's current memory; an already accepted child activates its own current memory without recopying its parent.
 - Repeated Start while already active changes neither the current run nor pending response reconciliation.
 
 ### Passive persistence
@@ -259,7 +259,7 @@ Off, session/tree selection, shutdown or an accepted Start revoke obsolete Passi
 
 **If persistence fails.** Accepted cached memory and all available native context are kept. The existing native passive-stop marker records `owner`, the selected inactive `mode`, `persistenceError` and `preserveContext: true`.
 
-- This is a same-session policy override and write fence, not semantic authority or a substitute checkpoint. No canonical failure is repaired by resetting memory.
+- This is a same-session policy override and write fence, not semantic authority or a substitute checkpoint. No canonical failure is repaired by resetting memory. A later explicit Passive joins pending read-only recovery, then retries the shared current-memory acceptance used by Start; only accepted publication and its newer checkpoint clear the fence.
 - Memory-enabled tree/reload/resume with that pending marker use `TemporalRuntime.refreshCurrentMemory()` to validate and read current memory, without historical restoration or publication; unavailable evidence stays unavailable.
 - A later accepted checkpoint supersedes the fence while keeping the context boundary for bootstrap.
 - Repeating the same degraded choice is inert; another inactive choice updates only native policy and keeps the fence.
@@ -433,22 +433,16 @@ meta.json
 - Start uses ordinary origin acceptance, including configured retention folding, not lifecycle-only semantic-byte preservation.
 - The synchronous prepared Start API keeps its selected-cohort CAS contract but has no production caller.
 
-**`TemporalRuntime.withRestoreTransaction(checkpoint, action, signal?)`** detaches the retained pointer before waiting, then captures and validates its exact private boundary beside current shared streams under one exclusion.
+Native startup, reload, resume and tree attachment use `withStartTransaction` over current same-session memory, applying the branch checkpoint's mode and run lifecycle. There is no API that rewinds memory to an older boundary.
 
-- `action(selectedSnapshot, publish)` rechecks caller selection/policy after waiting and accepts synchronously, once.
-- The candidate stays detached until publication. Expiry, incomplete evidence, cancellation and CAS failure never substitute current-head or empty memory.
-- Origin acceptance applies configured retention and causal provenance pruning, as the synchronous restore does.
-- Accepted memory is installed before control returns to caller checkpointing; a later failure cannot roll it back.
-- Native startup/tree restoration uses it through the extension's owned restoration lifetime.
+**`TemporalRuntime.withForkTransaction(source, lifecycle, action, signal?)`** pins the parent identity before waiting; `lifecycle` supplies only the child's mode and bootstrap.
 
-**`TemporalRuntime.withForkTransaction(source, checkpoint, action, signal?)`** pins the parent identity and boundary before waiting.
-
-- Under one exclusion it selects exact retained parent authority and captures an unoccupied child target.
+- Under one exclusion it loads the parent's current memory and captures an unoccupied child target, so the copy never depends on the native fork step.
 - The callback receives the child lifecycle (step zero, selected mode/bootstrap, no unfinished specification), rechecks native selection/policy, then publishes synchronously once.
 - Parent evidence is revalidated immediately before child publication, and the child's exact file cohort is CAS-protected. Only acceptance installs child memory.
 - Parent-private files stay untouched, shared provenance stays live, and configured folding still applies.
-- Expired, malformed or occupied selections never become an empty or newer-parent copy.
-- Native fork adoption and Start's exact-source retry use it.
+- Missing, malformed or occupied evidence never becomes an empty or foreign copy.
+- Native fork adoption and Start's fork retry use it.
 
 ### Run preparation and answer reconciliation
 
@@ -499,18 +493,17 @@ Without removals on a complete accepted cohort, publication preserves semantic/p
 
 - Off attaches without constructing a temporal runtime, resolving semantic boundaries, reading memory or emitting recovery warnings; native mode/write-fence bookkeeping stays available.
 - Deferred fork ownership is recorded in a child-owned `forkPending` native marker that survives extension recreation; accepted child initialization resets it.
-- Explicit Passive restores the deferred selected boundary (or fenced read-only current authority), while explicit Active keeps the documented current-memory activation after attachment.
-- Policy decoding is never proof that a historical boundary is valid.
+- Explicit Passive or Active accepts validated current same-session memory (a pending fork copies the parent's current memory first); a write fence clears only after that acceptance.
 - Automatic callbacks stay memory-inert in Off; installed-client acceptance gates are tracked separately in [BACKLOG](../BACKLOG.md).
 
 **Memory-enabled restoration.** Memory-enabled native `session_start` and `session_tree`, and explicit acquisition after an Off attachment, await one extension-owned branch restoration.
 
-1. **Synchronous prelude.** It revokes older selection work and pins the session id, file, header timestamp and CWD. It selects active-branch evidence through the recovery domain's pure `selectRetainedCheckpoint`: newer malformed envelopes are skipped, while revision pointers and every failure resolving the selected boundary fail closed.
+1. **Synchronous prelude.** It revokes older selection work and pins the session id, file, header timestamp and CWD. It reads the branch's newest supported checkpoint through the recovery domain's pure `selectRetainedCheckpoint` only for mode and run lifecycle (unfinished specification, bootstrap); its boundary is never a memory revision to rewind to. Revision pointers and unsupported envelopes fail closed.
 2. **While waiting,** the mode is the selected inactive policy, and private reads/publication report the pending selection.
-3. **Acceptance.** The selected boundary, the exact-source fork, a truly new auto-start origin (`withStartTransaction` with creation authority, rechecking branch evidence after waiting) or failed-Stop read-only recovery then use the awaited runtime API. Bootstrap and policy are derived after waiting and published in that single acceptance.
+3. **Acceptance.** Same-session attachment accepts current memory through `withStartTransaction` under the checkpoint's mode; a fork copies the parent's current memory; a truly new auto-start origin uses `withStartTransaction` with creation authority (rechecking branch evidence after waiting); failed-Stop reload uses read-only recovery. Bootstrap and policy are derived after waiting and published in that single acceptance.
 4. **Installation.** Only the current lifetime installs memory, checkpoint, continuation, tools and UI before yielding; a later native-write failure only warns.
 
-**Failed Active selection.** An unaccepted Active restoration/fork or automatic Start failure carries an inference fence independently of the inactive fallback mode. The live `context` hook calls public `ctx.abort()` before returning; merely throwing would let Pi continue with native history. Re-selecting/reloading the failed Active boundary reconstructs the fence. Accepted Start or a valid branch releases it; explicit Passive/Off permits native context but grants no missing historical/publication authority. Signal-less inspection does not cancel or clear the fence.
+**Failed Active selection.** Unreadable current memory (missing, corrupt, partial or contradictory files), a failed fork copy or automatic Start failure retains the selected Active mode with unavailable-memory validation. The inference fence is derived from that mode and validation, not an independent flag under an inactive fallback. No Active lifecycle work or fabricated projection runs before validated acceptance; shared reads may remain available. Terminal and Telegram show `active (blocked)` with explicit recovery guidance. The live `context` hook calls public `ctx.abort()` before returning; merely throwing would let Pi continue with native history. Reloading while current memory stays unreadable reconstructs the fence. Accepted Start or accepted explicit Passive releases it; explicit Off permits native context but grants no memory authority. Signal-less inspection does not cancel or clear the fence.
 
 **Interaction with mode choices:**
 
@@ -518,25 +511,21 @@ Without removals on a complete accepted cohort, publication preserves semantic/p
 - Passive keeps independently owned restoration, new-session initialization and fork copying, including attachment requested by a now-cancelled Active waiter. Off cancels those owned waits and keeps only native policy/source bookkeeping for later explicit acquisition.
 - The pending publisher applies the latest inactive policy inside its single acceptance. Passive can then patch memory without an artificial error fence, while Off exposes no model access. Repeated selections are inert with respect to that acceptance.
 - Start joins retained Passive acquisition. After Off, non-fork Active goes directly through one cancellable current-head Start transaction, keeping the deferred native selection and local Off policy until publication.
-- A superseding Passive cancels that activation and acquires its original retained private boundary, not the current-memory candidate. Native Abort silently withdraws Active, without inventing a write fence or losing later acquisition choices.
-- Accepted activation reconstructs any native continuation from its proven current memory. Exact-source fork acquisition keeps its independent restoration owner.
+- A superseding Passive cancels that activation and acquires current memory itself. Native Abort silently withdraws Active, without inventing a write fence or losing later acquisition choices.
+- Accepted activation reconstructs any native continuation from its proven current memory. Fork acquisition keeps its independent restoration owner.
 - Selection changes, shutdown and native operation cancellation still revoke obsolete work. Real validation/publication failures stay unavailable rather than becoming empty memory.
 - Start joins pending restoration, owns initial attachment and fork retry without cancelling itself, and is inert when the result is already active. A cancelled Start withdraws its join without cancelling independently owned restoration or Stop persistence.
 - Read-only recovery uses detached candidates and rechecks cancellation and physical identity before host installation. Passive attachment cannot overwrite a newer cache established by an intervening patch or inspection.
 
-Six synchronous runtime methods remain supported for library consumers and local tests/benchmarks; production lifecycle wiring uses the awaited APIs. Their contracts and cancellation boundaries are documented in [library API compatibility](compatibility.md#state-flow-library-api-compatibility).
+Two synchronous runtime methods (`loadPassive`, `initialize`) remain supported for library consumers and local tests/benchmarks; production lifecycle wiring uses the awaited APIs. Their contracts and cancellation boundaries are documented in [library API compatibility](compatibility.md#state-flow-library-api-compatibility).
 
 **What stays outside critical sections.** The advisory [continuation-candidate reader](#session-continuation) also awaits coherent capture, and current-head activation on an attached branch uses the awaited Start transaction. Raw precomputed replay keeps its selected-target guard, unlike current-head authored patch staging. Model inference, source acquisition and Git commands do not belong inside a canonical critical section; artifact freshness validation stays part of publication validation.
 
 ## Optional Git backup
 
-Canonical files always own semantic persistence, current materialization and retained hot history. Installing Git beside the store does not change authority or enable cold semantic restoration. Retained-boundary restoration selects private session history from the current canonical lineage while global/CWD scopes stay live; expired boundaries fail closed.
+Canonical files always own semantic persistence, current materialization and retained hot history. Installing Git beside the store does not change authority or enable cold semantic restoration. Branch navigation attaches current memory, so artifacts keep their current semantics and current evidence together.
 
-**Artifact provenance across restore/fork.** Scope artifact provenance records only current evidence.
-
-- Restore/fork drops session provenance for paths touched by any retained session patch after the selected boundary, including a change-away-and-back or a whole-artifacts-plane deletion. Path existence or equal final values cannot substitute for that causal check.
-- Selected artifact semantics stay intact with unavailable evidence until a stable explicit read and compilation.
-- Untouched paths, provenance-only refreshes of unchanged semantics, and live shared provenance stay usable.
+**Artifact provenance across attachment and fork.** Scope artifact provenance records only current evidence. Attachment keeps current semantics with their current evidence, and a fork copies the parent's current session provenance, so no historical pruning is needed.
 
 ### Local backup commit
 
@@ -812,9 +801,9 @@ See the [fork contract](fork-contract.md) and [operating limits](usage.md#fork-s
 
 Status is a projection of the selected runtime and semantic view, not a second store.
 
-- Compact terminal status uses accent `state-flow` with dim `active` or `passive`, and is hidden in Off.
-- Telegram main-menu status uses `State Flow: active`, `State Flow: passive` or `State Flow: off`.
-- `/state-flow-status` keeps the `g#c#s#` vector beside concise diagnostics and blank-line-separated top-level semantic JSON.
+- Compact terminal status uses accent `state-flow` with dim `active` or `passive`, and is hidden in Off. Failed Active restoration stays visible as `active (blocked)`.
+- Telegram main-menu status uses `State Flow: active`, `State Flow: passive` or `State Flow: off`, with the same blocked qualifier for failed Active restoration and an actionable submenu notice.
+- `/state-flow-status` reports selected mode and any inference fence explicitly, then keeps the `g#c#s#` vector beside concise diagnostics and blank-line-separated top-level semantic JSON.
 - Mode is read directly from the session's selected enum, never derived from a pending patch or separate passive flags.
 - Requested Global, CWD and Session Rich snapshots show their independent `#revision`, while Effective shows the vector. Global/CWD Rich views omit the empty structural response placeholder; Session and Effective expose the Session-owned response.
 - Missing evidence stays unavailable instead of appearing empty.
@@ -832,7 +821,7 @@ Status is a projection of the selected runtime and semantic view, not a second s
 - Memory-enabled inspection keeps its accepted-private/shared-refresh and failed-Passive cache rules.
 - Off inspection uses a fresh disposable `TemporalRuntime`. Global/CWD use coherent shared reads; Session/Effective use `refreshCurrentMemory` and reject absent, incomplete or malformed same-session private evidence, rather than manufacturing an empty layer/revision or borrowing foreign private data.
 - No reader installs the extension runtime/cache, changes native policy or canonical bytes, clears a carried write fence, acquires an unaccepted fork parent or replaces the selected historical target.
-- Expired selected history may coexist with inspectable current stored memory. A later Passive still restores the selected past fail-closed, while Active validates current memory.
+- Branch steps never select a past memory revision; inspection and acquisition always use current stored memory.
 - The awaited `StateFlowTelegramInspectionPort` returns a `StateFlowTelegramInspection` containing state and matching revisions, plus an optional revocation signal. A result checks its revocation lifetime and physical owner immediately before presentation.
 - Stop, selection changes and shutdown cancel obsolete reads without altering newer memory or clearing write fences.
 

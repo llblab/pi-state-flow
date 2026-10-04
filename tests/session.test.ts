@@ -221,7 +221,7 @@ test("contains hostile branch entries and continues snapshot discovery", () => {
 	assert.doesNotThrow(() => hasPriorConversation([hostile]));
 });
 
-test("restores State Flow from a canonical active branch pointer after tree navigation", async () => {
+test("tree navigation restores the branch mode but keeps current memory", async () => {
 	const h = harness();
 	await start(h);
 	await commitTerminal(h, { branch: "active" }, { next: "new" }, "Branch response");
@@ -231,6 +231,5 @@ test("restores State Flow from a canonical active branch pointer after tree navi
 	await h.handlers.get("session_tree")!({}, h.ctx);
 	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
-	assert.match(h.notifications.at(-1)!, /"branch": "active"/);
-	assert.doesNotMatch(h.notifications.at(-1)!, /"branch": "abandoned"/);
+	assert.match(h.notifications.at(-1)!, /"branch": "abandoned"/, "memory is the current JSON state, not the branch step's revision");
 });

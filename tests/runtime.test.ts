@@ -10,14 +10,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TemporalRuntime } from "../lib/runtime.ts";
-import type { ArtifactProvenanceRegistry } from "../lib/artifact.ts";
 import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { writeGlobalState } from "./storage-fixture.ts";
-import { createSessionRuntime, emptySnapshot, type RetainedBoundaryCheckpoint, type Snapshot, type StateFlowMode } from "../lib/snapshot.ts";
+import { emptySnapshot, type RetainedBoundaryCheckpoint, type Snapshot, type StateFlowMode } from "../lib/snapshot.ts";
 import { emptyState, type AtomicScopePatches, type StateScope } from "../lib/state.ts";
 import type { JsonObject } from "../lib/json.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
-import { advanceTemporalState, temporalScopeRevisions, validateTemporalState } from "../lib/temporal.ts";
+import { temporalScopeRevisions, validateTemporalState } from "../lib/temporal.ts";
 import { commitScopedTransition, stageAtomicScopePatches } from "../lib/transition.ts";
 import { commitScopedTerminal, harness, start } from "./harness.ts";
 import { loadScopeProvenance } from "./temporal-fixture.ts";
@@ -37,8 +36,13 @@ function forkAwaited(runtime: TemporalRuntime, source: { id: string; key: string
 	return runtime.withForkTransaction(source, checkpoint, (snapshot, publish) => ({ snapshot, publication: publish(snapshot) }), signal);
 }
 
-function restoreAwaited(runtime: TemporalRuntime, checkpoint: RetainedBoundaryCheckpoint, signal?: AbortSignal) {
-	return runtime.withRestoreTransaction(checkpoint, (snapshot, publish) => ({ snapshot, publication: publish(snapshot) }), signal);
+/** Accept the current same-session memory, as branch attachment does. */
+function attachCurrent(runtime: TemporalRuntime, signal?: AbortSignal) {
+	return runtime.withStartTransaction((current, publish) => {
+		assert.ok(current);
+		publish(current);
+		return current;
+	}, signal);
 }
 
 test("sparse disk scopes survive passive reads, Start, patches and empty-response acceptance without implicit defaults", async (t) => {
@@ -199,7 +203,7 @@ test("patch transactions cancel live waiting without changing memory and retain 
 	const selected = runtime.retainedCheckpoint(snapshot);
 	assert.ok("boundary" in selected);
 	const competing = new TemporalRuntime(cwd, "owner", root);
-	const other = competing.restoreBoundary(selected).snapshot;
+	const other = await attachCurrent(competing);
 	await patchCurrent(competing, other, { session: { working: { peer: true } } });
 	const winner = files();
 	await assert.rejects(patchCurrent(runtime, snapshot, { global: { working: { unsafe: true } }, session: { working: { stale: true } } }), /base or scope identity changed concurrently/);
@@ -459,8 +463,8 @@ test("passive memory admits global state before a CWD has materialized", (t) => 
 	assert.deepEqual(runtime.read(0, "cwd"), emptyState());
 });
 
-for (const operation of ["restore", "awaited-restore", "fork", "awaited-fork"] as const) for (const [limit, offset] of [[0, 0], [1, 0], [1, 1], [12, 0]] as const) {
-	test(`${operation} applies historyLimit ${limit} to stored tails at selected offset ${offset}`, async (t) => {
+for (const limit of [0, 1, 12] as const) {
+	test(`fork copies current parent memory from an old step and applies historyLimit ${limit} to stored tails`, async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "state-flow-retention-change-"));
 		t.after(() => rmSync(root, { recursive: true, force: true }));
 		const cwd = join(root, "project");
@@ -483,41 +487,27 @@ for (const operation of ["restore", "awaited-restore", "fork", "awaited-fork"] a
 			checkpoints.push(parent.retainedCheckpoint(snapshot));
 		}
 		const beforeFiles = captureTemporalFileBases(cwd, parent.sessionId, root);
-		const selected = new TemporalRuntime(cwd, operation.endsWith("fork") ? "child" : parent.sessionId, root, undefined, limit);
-		if (limit < 6) {
-			const outside = checkpoints.at(-limit - 2)!;
-			assert.ok("boundary" in outside);
-			if (operation === "awaited-fork") await assert.rejects(forkAwaited(selected, { id: parent.sessionId, key: parent.sessionKey }, outside), /outside the retained temporal window/);
-			else if (operation === "awaited-restore") await assert.rejects(restoreAwaited(selected, outside), /outside the retained temporal window/);
-			else assert.throws(() => operation === "fork"
-				? selected.prepareBoundaryFork({ id: parent.sessionId, key: parent.sessionKey }, outside)
-				: selected.prepareBoundaryRestore(outside), /outside the retained temporal window/);
-			assert.deepEqual(captureTemporalFileBases(cwd, parent.sessionId, root), beforeFiles);
-		}
-		const checkpoint = checkpoints.at(-offset - 1)!;
-		assert.ok("boundary" in checkpoint);
-		const accepted = operation === "awaited-fork" ? await forkAwaited(selected, { id: parent.sessionId, key: parent.sessionKey }, checkpoint)
-			: operation === "awaited-restore" ? await restoreAwaited(selected, checkpoint) : operation === "fork"
-			? selected.prepareBoundaryFork({ id: parent.sessionId, key: parent.sessionKey }, checkpoint).fork()
-			: selected.restoreBoundary(checkpoint);
-		assert.equal(accepted.snapshot.meta.step, operation.endsWith("fork") ? 0 : checkpoint.step);
+		const selected = new TemporalRuntime(cwd, "child", root, undefined, limit);
+		const oldest = checkpoints[0]!;
+		assert.ok("boundary" in oldest);
+		// The fork's native step does not select memory; the child receives the parent's current state.
+		const accepted = await forkAwaited(selected, { id: parent.sessionId, key: parent.sessionKey }, oldest);
+		assert.equal(accepted.snapshot.meta.step, 0);
 		for (const scope of ["global", "cwd", "session"] as const) {
-			assert.equal(selected.read(0, scope).working.index, scope === "session" ? 6 - offset : 6);
+			assert.equal(selected.read(0, scope).working.index, 6);
 			assert.deepEqual(selected.artifactProvenance(scope), { "/unchanged.txt": evidence });
 			assert.ok(selected.view!.scopes[scope].patches.length <= limit);
 			const paths = temporalScopePaths(cwd, selected.sessionId, scope, root);
 			assert.ok(readFileSync(paths.patches, "utf8").split("\n").filter(Boolean).length <= limit);
 		}
-		if (operation.endsWith("fork")) {
+		{
 			const directory = temporalScopePaths(cwd, parent.sessionId, "session", root).directory;
 			const privateFiles = (files: ReturnType<typeof captureTemporalFileBases>) => files.filter(({ path }) => dirname(path) === directory);
 			assert.deepEqual(privateFiles(captureTemporalFileBases(cwd, parent.sessionId, root)), privateFiles(beforeFiles));
 		}
 		const smallerTails = structuredClone(selected.view!.scopes);
-		const ownCheckpoint = selected.retainedCheckpoint(accepted.snapshot);
-		assert.ok("boundary" in ownCheckpoint);
 		const increased = new TemporalRuntime(cwd, selected.sessionId, root, undefined, 12);
-		const resumed = (operation === "awaited-restore" ? await restoreAwaited(increased, ownCheckpoint) : increased.restoreBoundary(ownCheckpoint)).snapshot;
+		const resumed = await attachCurrent(increased);
 		assert.deepEqual(increased.view!.scopes, smallerTails, "raising retention cannot reconstruct folded tails");
 		assert.throws(() => increased.read(1), /predates the proven temporal origin/);
 		const before = increased.states();
@@ -529,31 +519,8 @@ for (const operation of ["restore", "awaited-restore", "fork", "awaited-fork"] a
 	});
 }
 
-test("restoring across a retained whole-artifacts deletion drops future compilation evidence", async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-sparse-artifacts-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const parent = new TemporalRuntime(root, "parent", root);
-	const snapshot = emptySnapshot("active");
-	parent.initialize(snapshot, true);
-	const card = { description: "Retained source" };
-	const evidence = { sourceFingerprint: { size: 1, mtimeNs: "1" }, compilerRevision: "artifact-v1" };
-	const publish = (id: string, patch: JsonObject, provenance?: ArtifactProvenanceRegistry) => {
-		snapshot.meta.step++;
-		parent.publish(snapshot, true, { id, transitions: [{ scope: "session", patch }] }, { provenance: { session: provenance ?? {} } });
-	};
-	publish("register", { artifacts: { "/source": card } }, { "/source": evidence });
-	const checkpoint = parent.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
-	publish("remove-plane", { artifacts: null });
-	publish("register-again", { artifacts: { "/source": card } }, { "/source": evidence });
-	const restored = new TemporalRuntime(root, "parent", root);
-	await restoreAwaited(restored, checkpoint);
-	assert.deepEqual(restored.read(0, "session").artifacts, { "/source": card });
-	assert.deepEqual(restored.artifactProvenance("session"), {});
-});
-
-for (const operation of ["restore", "awaited-restore", "fork", "awaited-fork"] as const) for (const selection of ["historical", "head"] as const) {
-	test(`${operation} keeps only matching artifact provenance at the ${selection} boundary`, async (t) => {
+{
+	test("fork from an old step copies current artifacts with their current provenance", async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "state-flow-provenance-selection-"));
 		t.after(() => rmSync(root, { recursive: true, force: true }));
 		const cwd = join(root, "project");
@@ -594,18 +561,13 @@ for (const operation of ["restore", "awaited-restore", "fork", "awaited-fork"] a
 		parent.publish(snapshot, true, createAcceptedTransition(changed, returned), { provenance: { session: { "/returned.txt": evidence(3) } } });
 		// Unchanged accepted semantics can acquire newer evidence without a semantic transition.
 		parent.publish(snapshot, false, undefined, { provenance: { session: { "/untouched.txt": evidence(3) } } });
-		const checkpoint = selection === "head" ? parent.retainedCheckpoint(snapshot) : historical;
+		const checkpoint = historical;
 		assert.ok("boundary" in checkpoint);
 		const parentFiles = captureTemporalFileBases(cwd, parent.sessionId, root);
-		const selected = new TemporalRuntime(cwd, operation.endsWith("fork") ? "child" : parent.sessionId, root);
-		const accepted = operation === "awaited-fork" ? await forkAwaited(selected, { id: parent.sessionId, key: parent.sessionKey }, checkpoint)
-			: operation === "awaited-restore" ? await restoreAwaited(selected, checkpoint) : operation === "fork"
-			? selected.prepareBoundaryFork({ id: parent.sessionId, key: parent.sessionKey }, checkpoint).fork()
-			: selected.restoreBoundary(checkpoint);
-		const expected: ArtifactProvenanceRegistry = selection === "head"
-			? parent.artifactProvenance("session")
-			: { "/untouched.txt": evidence(3) };
-		assert.deepEqual(selected.read(0, "session").artifacts, (selection === "head" ? returned : initial).session.artifacts);
+		const selected = new TemporalRuntime(cwd, "child", root);
+		await forkAwaited(selected, { id: parent.sessionId, key: parent.sessionKey }, checkpoint);
+		const expected = parent.artifactProvenance("session");
+		assert.deepEqual(selected.read(0, "session").artifacts, returned.session.artifacts);
 		assert.deepEqual(selected.artifactProvenance("session"), expected);
 		assert.deepEqual(loadScopeProvenance(cwd, selected.sessionId, "session", root, selected.sessionKey), expected);
 		for (const scope of ["global", "cwd"] as const) {
@@ -613,19 +575,17 @@ for (const operation of ["restore", "awaited-restore", "fork", "awaited-fork"] a
 			assert.deepEqual(selected.artifactProvenance(scope), { "/shared.txt": evidence(2) });
 			assert.deepEqual(loadScopeProvenance(cwd, selected.sessionId, scope, root, selected.sessionKey), { "/shared.txt": evidence(2) });
 		}
-		if (operation.endsWith("fork")) assert.deepEqual(captureTemporalFileBases(cwd, parent.sessionId, root), parentFiles);
+		assert.deepEqual(captureTemporalFileBases(cwd, parent.sessionId, root), parentFiles);
 		const meta = temporalScopePaths(cwd, selected.sessionId, "session", root).meta;
 		assert.deepEqual(JSON.parse(readFileSync(meta, "utf8")).artifacts, expected);
-		const ownCheckpoint = selected.retainedCheckpoint(accepted.snapshot);
-		assert.ok("boundary" in ownCheckpoint);
 		const reloaded = new TemporalRuntime(cwd, selected.sessionId, root);
-		reloaded.restoreBoundary(ownCheckpoint);
+		await attachCurrent(reloaded);
 		assert.deepEqual(reloaded.artifactProvenance("session"), expected);
 		assert.deepEqual(loadScopeProvenance(cwd, reloaded.sessionId, "session", root, reloaded.sessionKey), expected);
 	});
 }
 
-for (const operation of ["restore", "awaited-restore", "fork", "awaited-fork"] as const) {
+for (const operation of ["attach", "fork"] as const) {
 	test(`${operation} rejects contradictory session lineage before accepting a new origin`, async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "state-flow-session-lineage-"));
 		t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -649,194 +609,12 @@ for (const operation of ["restore", "awaited-restore", "fork", "awaited-fork"] a
 		for (const key of ["checkpoint", "patches", "meta"] as const) writeFileSync(a[key], readFileSync(b[key]));
 		const selected = new TemporalRuntime(cwd, operation.endsWith("fork") ? "child" : "a", root);
 		const before = ["a", "b", "child"].map((id) => captureTemporalFileBases(cwd, id, root));
-		if (operation === "awaited-fork") await assert.rejects(forkAwaited(selected, { id: "a", key: "a" }, checkpoint), /Conflicting State Flow temporal lineage/);
-		else if (operation === "awaited-restore") await assert.rejects(restoreAwaited(selected, checkpoint), /Conflicting State Flow temporal lineage/);
-		else assert.throws(() => operation === "restore"
-			? selected.restoreBoundary(checkpoint)
-			: selected.prepareBoundaryFork({ id: "a", key: "a" }, checkpoint).fork(), /Conflicting State Flow temporal lineage/);
+		if (operation === "fork") await assert.rejects(forkAwaited(selected, { id: "a", key: "a" }, checkpoint), /Conflicting State Flow temporal lineage/);
+		else await assert.rejects(attachCurrent(selected), /Conflicting State Flow temporal lineage/);
 		assert.equal(selected.view, undefined, "contradictory state must not become an accepted cache");
 		assert.deepEqual(["a", "b", "child"].map((id) => captureTemporalFileBases(cwd, id, root)), before);
 	});
 }
-
-test("awaited restoration never initializes missing evidence or substitutes foreign private authority", async (t) => {
-	for (const fault of ["root", "global-absent", "cwd-partial", "session-meta", "runtime-malformed", "foreign-boundary"] as const) {
-		const parent = mkdtempSync(join(tmpdir(), "state-flow-restore-authority-"));
-		t.after(() => rmSync(parent, { recursive: true, force: true }));
-		const root = join(parent, "store");
-		const runtime = new TemporalRuntime(parent, "owner", root);
-		const snapshot = emptySnapshot("active");
-		await patchCurrent(runtime, snapshot, { session: { working: { private: "OWNER" } } });
-		let checkpoint = runtime.retainedCheckpoint(snapshot);
-		if (fault === "root") rmSync(root, { recursive: true });
-		else if (fault === "global-absent") { rmSync(join(root, "checkpoint.json")); rmSync(join(root, "patches.jsonl")); }
-		else if (fault === "cwd-partial") rmSync(temporalScopePaths(parent, "owner", "cwd", root).patches);
-		else if (fault === "session-meta") rmSync(temporalScopePaths(parent, "owner", "session", root).meta);
-		else if (fault === "runtime-malformed") writeFileSync(sessionRuntimePaths(parent, "owner", root).runtime, "not JSON");
-		else {
-			const peer = new TemporalRuntime(parent, "peer", root);
-			const other = emptySnapshot("active");
-			await patchCurrent(peer, other, { session: { working: { private: "FOREIGN" } } });
-			checkpoint = peer.retainedCheckpoint(other);
-		}
-		assert.ok("boundary" in checkpoint);
-		const files = ["owner", "peer"].map((id) => captureTemporalFileBases(parent, id, root));
-		const cached = structuredClone(runtime.view);
-		await assert.rejects(runtime.withRestoreTransaction(checkpoint, () => assert.fail("invalid restoration reached acceptance")), /unavailable|incomplete|unsupported|invalid JSON|outside the retained temporal window/i, fault);
-		assert.deepEqual(["owner", "peer"].map((id) => captureTemporalFileBases(parent, id, root)), files, fault);
-		assert.deepEqual(runtime.view, cached, fault);
-		if (fault === "root") assert.equal(existsSync(root), false);
-	}
-});
-
-for (const operation of ["restore", "fork"] as const) test(`awaited ${operation} checks retention after waiting instead of accepting an expired prepared view`, { timeout: 5_000 }, async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-restore-expiry-"));
-	const runtime = new TemporalRuntime(root, "owner", root, undefined, 1);
-	const snapshot = emptySnapshot("active");
-	await patchCurrent(runtime, snapshot, { session: { working: { value: "SELECTED" } } });
-	const checkpoint = runtime.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
-	const cached = structuredClone(runtime.view);
-	let enter!: () => void;
-	let release!: () => void;
-	const entered = new Promise<void>((resolve) => { enter = resolve; });
-	const gate = new Promise<void>((resolve) => { release = resolve; });
-	const cancellation = new AbortController();
-	let restoring: Promise<unknown> | undefined;
-	const holder = withStorageTransaction(root, async (storage) => {
-		enter(); await gate;
-		let view = structuredClone(runtime.view!);
-		let states = runtime.states();
-		const latest = structuredClone(snapshot);
-		for (let step = 0; step < 2; step++) {
-			const next = structuredClone(states);
-			next.session.working.value = `LATER-${step}`;
-			const transition = createAcceptedTransition(states, next);
-			assert.ok(transition);
-			view = advanceTemporalState(view, transition.transitions, transition.id, 1);
-			states = next;
-			latest.meta.step++;
-		}
-		storage.publish(root, "owner", view, ["global", "cwd", "session"], storage.capture(root, "owner", root), root,
-			createSessionRuntime(latest, root, "owner", view.lineage), "owner");
-	});
-	t.after(async () => {
-		cancellation.abort(); release();
-		await Promise.allSettled([holder, restoring]);
-		rmSync(root, { recursive: true, force: true });
-	});
-	await entered;
-	const child = new TemporalRuntime(root, "child", root, undefined, 1);
-	restoring = operation === "fork"
-		? child.withForkTransaction({ id: "owner", key: "owner" }, checkpoint, () => assert.fail("expired source reached acceptance"), cancellation.signal)
-		: runtime.withRestoreTransaction(checkpoint, () => assert.fail("expired selection reached acceptance"), cancellation.signal);
-	const refused = assert.rejects(restoring, /outside the retained temporal window/);
-	await delay(40);
-	assert.deepEqual(runtime.view, cached);
-	release(); await holder;
-	const winner = captureTemporalFileBases(root, "owner", root);
-	await refused;
-	assert.deepEqual(captureTemporalFileBases(root, "owner", root), winner);
-	assert.deepEqual(runtime.view, cached, "failed selection does not install the later canonical head as a substitute");
-	assert.equal(child.view, undefined);
-	assert.equal(existsSync(temporalScopePaths(root, "child", "session", root).directory), false);
-	const current = new TemporalRuntime(root, "owner", root);
-	assert.ok(await current.refreshCurrentMemory());
-	assert.equal(current.read(0, "session").working.value, "LATER-1");
-});
-
-for (const target of ["checkpoint", "runtime"] as const) test(`awaited restoration fences a private ${target} race without replacing concurrent bytes`, async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-restore-cas-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const runtime = new TemporalRuntime(root, "owner", root);
-	const snapshot = emptySnapshot("active");
-	await patchCurrent(runtime, snapshot, { session: { working: { value: "SELECTED" } } });
-	const checkpoint = runtime.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
-	await patchCurrent(runtime, snapshot, { session: { working: { value: "LATER" } } });
-	const cached = structuredClone(runtime.view);
-	let winner: ReturnType<typeof captureTemporalFileBases> | undefined;
-	await assert.rejects(runtime.withRestoreTransaction(checkpoint, (selected, publish) => {
-		const path = target === "checkpoint" ? temporalScopePaths(root, "owner", "session", root).checkpoint : sessionRuntimePaths(root, "owner", root).runtime;
-		writeFileSync(path, Buffer.concat([readFileSync(path), Buffer.from("\n")]));
-		winner = captureTemporalFileBases(root, "owner", root);
-		return publish(selected);
-	}), /base or scope identity changed concurrently/);
-	assert.deepEqual(captureTemporalFileBases(root, "owner", root), winner);
-	assert.deepEqual(runtime.view, cached);
-	await restoreAwaited(runtime, checkpoint);
-	assert.equal(runtime.read(0, "session").working.value, "SELECTED");
-});
-
-test("awaited restoration rolls back a failed cohort without installing selected history or shared adoption", async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-restore-rollback-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const runtime = new TemporalRuntime(root, "owner", root);
-	const snapshot = emptySnapshot("active");
-	await patchCurrent(runtime, snapshot, { session: { working: { value: "SELECTED" } } });
-	const checkpoint = runtime.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
-	await patchCurrent(runtime, snapshot, { session: { working: { value: "LATER" } } });
-	await patchCurrent(new TemporalRuntime(root, "peer", root), emptySnapshot(), { global: { working: { peer: true } } });
-	const before = captureTemporalFileBases(root, "owner", root);
-	const cached = structuredClone(runtime.view);
-	const rename = fs.renameSync;
-	let failed = false;
-	fs.renameSync = (from, to) => {
-		if (to === sessionRuntimePaths(root, "owner", root).runtime) { failed = true; throw new Error("injected restore publication failure"); }
-		rename(from, to);
-	};
-	syncBuiltinESMExports();
-	try { await assert.rejects(restoreAwaited(runtime, checkpoint), /injected restore publication failure/); }
-	finally { fs.renameSync = rename; syncBuiltinESMExports(); }
-	assert.equal(failed, true);
-	assert.deepEqual(captureTemporalFileBases(root, "owner", root), before);
-	assert.deepEqual(runtime.view, cached);
-	await restoreAwaited(runtime, checkpoint);
-	assert.deepEqual(runtime.read().working, { peer: true, value: "SELECTED" });
-});
-
-test("restore capabilities expire, reject obsolete policy and install accepted memory before returning to the caller", async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-restore-capability-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const runtime = new TemporalRuntime(root, "owner", root);
-	const snapshot = emptySnapshot("active");
-	await patchCurrent(runtime, snapshot, { session: { working: { value: "SELECTED" } } });
-	const checkpoint = runtime.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
-	await patchCurrent(runtime, snapshot, { session: { working: { value: "LATER" } } });
-	const before = captureTemporalFileBases(root, "owner", root);
-	const cached = structuredClone(runtime.view);
-	await assert.rejects(runtime.withRestoreTransaction(checkpoint, () => assert.fail("pre-aborted selection ran"), AbortSignal.abort()), { name: "AbortError" });
-	await assert.rejects(runtime.withRestoreTransaction(checkpoint, () => { throw new Error("caller selection superseded"); }), /caller selection superseded/);
-	let borrowed!: (snapshot: Snapshot) => unknown;
-	await assert.rejects(runtime.withRestoreTransaction(checkpoint, (_selected, publish) => { borrowed = publish; }), /requires one synchronous publication/);
-	assert.throws(() => borrowed(snapshot), /transaction has ended/);
-	await assert.rejects(withStorageTransaction(root, () => restoreAwaited(runtime, checkpoint)), /Recursive/);
-	const canceled = new AbortController();
-	await assert.rejects(runtime.withRestoreTransaction(checkpoint, (selected, publish) => {
-		canceled.abort(); return publish(selected);
-	}, canceled.signal), { name: "AbortError" });
-	assert.deepEqual(captureTemporalFileBases(root, "owner", root), before);
-	assert.deepEqual(runtime.view, cached);
-	const late = new AbortController();
-	await assert.rejects(runtime.withRestoreTransaction(checkpoint, (selected, publish) => {
-		assert.equal(runtime.read(0, "session").working.value, "LATER", "staging cannot install the historical view");
-		const result = publish(selected);
-		assert.equal(result.changed, true);
-		assert.equal(runtime.read(0, "session").working.value, "SELECTED", "caller checkpointing sees accepted memory before yielding");
-		assert.throws(() => publish(selected), /already consumed/);
-		late.abort();
-		throw new Error("post-acceptance checkpoint failure");
-	}, late.signal), /post-acceptance checkpoint failure/);
-	const accepted = captureTemporalFileBases(root, "owner", root);
-	assert.notDeepEqual(accepted, before);
-	assert.equal(runtime.read(0, "session").working.value, "SELECTED");
-	assert.equal(runtime.view!.lineage.length, 1);
-	assert.throws(() => runtime.read(1), /predates the proven temporal origin/);
-	await runtime.withLifecycleTransaction((publish) => publish({ config: { mode: "passive" as const }, meta: { step: checkpoint.step } }));
-	assert.equal(JSON.parse(readFileSync(sessionRuntimePaths(root, "owner", root).config, "utf8")).mode, "passive");
-});
 
 async function forkFixture(t: TestContext) {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-awaited-fork-"));
@@ -866,14 +644,13 @@ test("awaited fork refuses every occupied child file and unsupported legacy evid
 	}
 });
 
-test("awaited fork rejects invalid source identity, missing authority and expired history without initializing a child", async (t) => {
-	for (const fault of ["same-id", "same-key", "wrong-id", "missing", "expired", "malformed"] as const) {
+test("awaited fork rejects invalid source identity and missing authority without initializing a child", async (t) => {
+	for (const fault of ["same-id", "same-key", "wrong-id", "missing", "malformed"] as const) {
 		const { root, child, source, checkpoint } = await forkFixture(t);
 		if (fault === "same-id") source.id = "child";
 		if (fault === "same-key") source.key = "child";
 		if (fault === "wrong-id") source.id = "another";
 		if (fault === "missing") rmSync(sessionRuntimePaths(root, "parent", root).runtime);
-		if (fault === "expired") checkpoint.boundary = "unretained";
 		if (fault === "malformed") writeFileSync(temporalScopePaths(root, "parent", "session", root).patches, "broken");
 		const before = ["parent", "child"].map((id) => captureTemporalFileBases(root, id, root));
 		await assert.rejects(child.withForkTransaction(source, checkpoint, () => assert.fail("invalid parent reached acceptance")));
@@ -914,7 +691,7 @@ test("awaited fork rolls back rejected child publication and retries without cha
 	assert.deepEqual(["parent", "child"].map((id) => captureTemporalFileBases(root, id, root)), before);
 	const accepted = await forkAwaited(child, source, checkpoint);
 	assert.deepEqual(accepted.snapshot, { config: { mode: "passive" as const }, meta: { step: 0, bootstrap: true } });
-	assert.equal(child.read(0, "session").working.value, "SELECTED");
+	assert.equal(child.read(0, "session").working.value, "LATER", "the child copies the parent's current memory");
 	assert.deepEqual(captureTemporalFileBases(root, "parent", root), before[0]);
 	await patchCurrent(child, accepted.snapshot, { session: { working: { child: true } } });
 	assert.deepEqual(captureTemporalFileBases(root, "parent", root), before[0]);
@@ -972,7 +749,7 @@ test("awaited fork capabilities expire and post-acceptance faults cannot copy ag
 	await assert.rejects(child.withForkTransaction(source, checkpoint, (selected, publish) => {
 		assert.equal(child.view, undefined);
 		publish(selected);
-		assert.equal(child.read(0, "session").working.value, "SELECTED");
+		assert.equal(child.read(0, "session").working.value, "LATER");
 		assert.throws(() => publish(selected), /already consumed/);
 		controller.abort();
 		throw new Error("post-acceptance child checkpoint failure");
@@ -1127,7 +904,7 @@ function publishScopedPatch(
 }
 
 for (const scope of ["global", "cwd"] as const) for (const write of ["session", "provenance", "target"] as const) {
-	test(`first passive ${write} publication reconciles or fences foreign ${scope} drift`, (t) => {
+	test(`first passive ${write} publication reconciles or fences foreign ${scope} drift`, async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "state-flow-passive-drift-"));
 		t.after(() => rmSync(root, { recursive: true, force: true }));
 		const cwd = join(root, "extensions");
@@ -1181,10 +958,8 @@ for (const scope of ["global", "cwd"] as const) for (const write of ["session", 
 		const protectedFiles = (files: typeof winnerFiles) => files.filter(({ path }) =>
 			path.startsWith(`${dirname(privatePaths.runtime)}/`) || Object.values(protectedPaths).includes(path));
 		assert.deepEqual(protectedFiles(captureTemporalFileBases(cwd, a.sessionId, root)), protectedFiles(winnerFiles));
-		const checkpoint = b.retainedCheckpoint(snapshot);
-		assert.ok("boundary" in checkpoint);
 		const restored = new TemporalRuntime(cwd, b.sessionId, root);
-		restored.prepareBoundaryRestore(checkpoint).restore();
+		await restored.refreshCurrentMemory();
 		assert.deepEqual(restored.states(), b.states());
 		assert.deepEqual(restored.artifactProvenance(otherScope), b.artifactProvenance(otherScope));
 	});
@@ -1238,11 +1013,7 @@ test("lifecycle transactions require accepted authority and never initialize fro
 	assert.equal(passive.loadPassive(), true);
 	const readOnly = new TemporalRuntime(parent, "owner", root);
 	assert.ok(await readOnly.refreshCurrentMemory());
-	const checkpoint = owner.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
-	const prepared = new TemporalRuntime(parent, "owner", root);
-	prepared.prepareBoundaryRestore(checkpoint).restore();
-	for (const runtime of [unselected, passive, readOnly, prepared]) {
+	for (const runtime of [unselected, passive, readOnly]) {
 		const cached = structuredClone(runtime.view);
 		await refused(runtime);
 		assert.deepEqual(runtime.view, cached);
@@ -1369,37 +1140,6 @@ test("no-transition patch acceptance distinguishes missing shared initialization
 	assert.deepEqual(captureTemporalFileBases(root, "owner", root), accepted);
 });
 
-test("lifecycle authority is checked again after waiting without overwriting a newer selected view", async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "state-flow-lifecycle-selection-"));
-	const runtime = new TemporalRuntime(root, "owner", root);
-	const snapshot = emptySnapshot("active");
-	runtime.initialize(snapshot, true);
-	const checkpoint = runtime.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
-	const prepared = runtime.prepareBoundaryRestore(checkpoint);
-	const files = captureTemporalFileBases(root, "owner", root);
-	let release!: () => void;
-	const gate = new Promise<void>((resolve) => { release = resolve; });
-	const lifetime = new AbortController();
-	const holder = withStorageTransaction(root, () => gate);
-	const pending = runtime.withLifecycleTransaction(() => assert.fail("obsolete lifecycle action ran"), lifetime.signal);
-	const refused = assert.rejects(pending, /requires an accepted runtime/);
-	t.after(async () => {
-		lifetime.abort();
-		release();
-		await holder;
-		await pending.catch(() => undefined);
-		rmSync(root, { recursive: true, force: true });
-	});
-	prepared.restore();
-	const selected = structuredClone(runtime.view);
-	release();
-	await holder;
-	await refused;
-	assert.deepEqual(runtime.view, selected);
-	assert.deepEqual(captureTemporalFileBases(root, "owner", root), files);
-});
-
 for (const mode of ["raw", "awaited", "preparation"] as const) for (const scope of ["global", "cwd"] as const) for (const historyLimit of [0, 7]) for (const drift of ["state", "provenance"] as const) {
 	test(`${mode} lifecycle-only publication adopts ${scope} ${drift} drift at limit ${historyLimit} without touching semantic files`, async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "state-flow-lifecycle-drift-"));
@@ -1482,10 +1222,8 @@ for (const conflict of ["private-state", "runtime-metadata"] as const) test(`lif
 	const a = new TemporalRuntime(cwd, "session-a", root);
 	const snapshot = emptySnapshot("active");
 	a.initialize(snapshot, true);
-	const checkpoint = a.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
 	const other = new TemporalRuntime(cwd, a.sessionId, root);
-	const current = other.restoreBoundary(checkpoint).snapshot;
+	const current = await attachCurrent(other);
 	if (conflict === "private-state") publishScopedPatch(other, current, "session", { other: "accepted" }, "competing-private-write");
 	else {
 		current.meta.specification = "Competing request";
@@ -1501,17 +1239,17 @@ for (const conflict of ["private-state", "runtime-metadata"] as const) test(`lif
 	assert.deepEqual(a.view, cached);
 });
 
-for (const operation of ["inspection", "lifecycle", "restore", "fork", "recovery"] as const) test(`awaited ${operation} sees one completed foreign cohort, stays cancelable and preserves private memory`, { timeout: 15_000 }, async (t) => {
+for (const operation of ["inspection", "lifecycle", "fork", "recovery"] as const) test(`awaited ${operation} sees one completed foreign cohort, stays cancelable and preserves private memory`, { timeout: 15_000 }, async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-shared-inspect-"));
 	const cwd = join(root, "project");
 	const runtime = new TemporalRuntime(cwd, "owner", root);
 	const snapshot = emptySnapshot("active");
-	if (operation === "restore" || operation === "fork") snapshot.meta.specification = "Selected checkpoint request";
+	if (operation === "fork") snapshot.meta.specification = "Selected checkpoint request";
 	await patchCurrent(runtime, snapshot, { session: { working: { private: "LOCAL" } } });
 	const checkpoint = runtime.retainedCheckpoint(snapshot);
 	assert.ok("boundary" in checkpoint);
 	const originalCheckpoint = structuredClone(checkpoint);
-	if (operation === "restore" || operation === "fork") await patchCurrent(runtime, snapshot, { session: { working: { private: "NEWER-CACHED" } } });
+	if (operation === "fork") await patchCurrent(runtime, snapshot, { session: { working: { private: "NEWER-CACHED" } } });
 	const childRuntime = new TemporalRuntime(cwd, "child", root);
 	const source = { id: "owner", key: "owner" };
 	let restoreMode: StateFlowMode = "active";
@@ -1531,12 +1269,6 @@ for (const operation of ["inspection", "lifecycle", "restore", "fork", "recovery
 		: operation === "fork" ? childRuntime.withForkTransaction(source, checkpoint, (selected, publish) => {
 			assert.equal(selected.meta.step, 0);
 			assert.equal(selected.meta.specification, undefined);
-			assert.equal(selected.config.mode, originalCheckpoint.mode);
-			return publish({ ...selected, config: { mode: restoreMode } });
-		}, signal).then(({ changed }) => changed)
-		: operation === "restore" ? runtime.withRestoreTransaction(checkpoint, (selected, publish) => {
-			assert.equal(selected.meta.specification, originalCheckpoint.specification);
-			assert.equal(selected.meta.step, originalCheckpoint.step);
 			assert.equal(selected.config.mode, originalCheckpoint.mode);
 			return publish({ ...selected, config: { mode: restoreMode } });
 		}, signal).then(({ changed }) => changed)
@@ -1609,9 +1341,10 @@ for (const operation of ["inspection", "lifecycle", "restore", "fork", "recovery
 	assert.equal((await closed)[0], 0);
 	assert.equal(await pending, true);
 	if (operation === "fork") {
-		assert.deepEqual(runtime.view, cached, "fork cannot install a historical view into its parent");
-		assert.deepEqual(childRuntime.read().working, { global: "COMPLETE", cwd: "COMPLETE", private: "LOCAL" });
-		assert.deepEqual(temporalScopeRevisions(childRuntime.view!), { global: 1, cwd: 1, session: 1 });
+		assert.deepEqual(runtime.view, cached, "fork cannot install a view into its parent");
+		// The child copies the parent's current private memory, not the revision at the native fork step.
+		assert.deepEqual(childRuntime.read().working, { global: "COMPLETE", cwd: "COMPLETE", private: "NEWER-CACHED" });
+		assert.deepEqual(temporalScopeRevisions(childRuntime.view!), { global: 1, cwd: 1, session: 2 });
 		assert.deepEqual(childRuntime.artifactProvenance("global")["/compiled"]!.sourceFingerprint, { size: 7, mtimeNs: "10" });
 		const received = JSON.parse(readFileSync(receipt, "utf8"));
 		for (const id of ["owner", "foreign"]) assert.deepEqual(captureTemporalFileBases(cwd, id, root).map(({ path, identity }) => ({ path, identity })), received[id]);
@@ -1620,9 +1353,8 @@ for (const operation of ["inspection", "lifecycle", "restore", "fork", "recovery
 		return;
 	}
 	const runtimePaths = sessionRuntimePaths(cwd, "owner", root);
-	const privateDirectory = temporalScopePaths(cwd, "owner", "session", root).directory + "/";
 	const protectedFiles = (files: Array<{ path: string; identity: string }>) => files.filter(({ path }) => operation === "inspection" || operation === "recovery"
-		|| (operation === "restore" ? !path.startsWith(privateDirectory) : path !== runtimePaths.config && path !== runtimePaths.runtime)).map(({ path, identity }) => ({ path, identity }));
+		|| (path !== runtimePaths.config && path !== runtimePaths.runtime)).map(({ path, identity }) => ({ path, identity }));
 	const canonical = captureTemporalFileBases(cwd, "owner", root);
 	const received = JSON.parse(readFileSync(receipt, "utf8"));
 	assert.deepEqual(protectedFiles(canonical), protectedFiles(received.owner));
@@ -1633,8 +1365,8 @@ for (const operation of ["inspection", "lifecycle", "restore", "fork", "recovery
 	if (operation === "recovery") await assert.rejects(runtime.withLifecycleTransaction((publish) => publish(snapshot)), /requires an accepted runtime/);
 	if (operation !== "inspection" && operation !== "recovery") {
 		assert.equal(JSON.parse(readFileSync(runtimePaths.config, "utf8")).mode, "passive");
-		assert.equal(JSON.parse(readFileSync(runtimePaths.runtime, "utf8")).specification, operation === "restore" ? originalCheckpoint.specification : snapshot.meta.specification);
-		assert.equal(JSON.parse(readFileSync(runtimePaths.runtime, "utf8")).step, operation === "restore" ? originalCheckpoint.step : snapshot.meta.step);
+		assert.equal(JSON.parse(readFileSync(runtimePaths.runtime, "utf8")).specification, snapshot.meta.specification);
+		assert.equal(JSON.parse(readFileSync(runtimePaths.runtime, "utf8")).step, snapshot.meta.step);
 	}
 	assert.deepEqual(runtime.read().working, { global: "COMPLETE", cwd: "COMPLETE", private: "LOCAL" });
 	assert.deepEqual(runtime.artifactProvenance("global")["/compiled"]!.sourceFingerprint, { size: 7, mtimeNs: "10" });
@@ -1687,10 +1419,8 @@ test("shared inspection cannot adopt an independently changed private cohort", a
 	const snapshot = emptySnapshot("active");
 	await patchCurrent(runtime, snapshot, { session: { working: { private: "accepted" } } });
 	const cached = structuredClone(runtime.view);
-	const checkpoint = runtime.retainedCheckpoint(snapshot);
-	assert.ok("boundary" in checkpoint);
 	const competing = new TemporalRuntime(cwd, "owner", root);
-	const restored = competing.restoreBoundary(checkpoint).snapshot;
+	const restored = await attachCurrent(competing);
 	await patchCurrent(competing, restored, { global: { working: { current: true } }, session: { working: { private: "different" } } });
 	const canonical = captureTemporalFileBases(cwd, "owner", root);
 	await assert.rejects(runtime.refreshShared(), /base or scope identity changed concurrently/);

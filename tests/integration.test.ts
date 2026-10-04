@@ -1470,12 +1470,13 @@ for (const limit of [0, 1]) test(`real Pi reload applies historyLimit ${limit} w
 	await session.reload();
 	assert.deepEqual(tails(), constrained);
 	assert.deepEqual(scopes.map((scope) => fixture.readState(session, 0, scope)), before);
-	assert.throws(() => fixture.readState(session, 1), /predates the proven temporal origin/);
+	// Reload keeps exactly the retained window; it never invents or discards a fresh origin.
+	assert.throws(() => fixture.readState(session, limit + 1), /predates the proven temporal origin/);
 	fixture.faux.setResponses(sessionResponses({ working: { continued: true } }, "Accepted after retention change"));
 	await session.prompt("Continue after changing retention");
 	assert.equal(latestSnapshot(session).meta.step, step + 2);
 	assert.deepEqual(fixture.readState(session, 2, "session"), before[2]);
-	assert.throws(() => fixture.readState(session, 3), /predates the proven temporal origin/);
+	assert.throws(() => fixture.readState(session, limit + 3), /predates the proven temporal origin/);
 });
 
 test("real Pi retains large state and accepted answers across reload, resume and a large specification", { timeout: 40_000 }, async (t) => {
@@ -1590,7 +1591,7 @@ function durableSession(fixture: RealPiFixture, session: any) {
 	)!;
 }
 
-test("real Pi forks selected private memory over current shared scopes and reloads the child origin", { timeout: 40_000 }, async (t) => {
+test("real Pi forks the parent's current private memory over current shared scopes and reloads the child origin", { timeout: 40_000 }, async (t) => {
 	const f = await realPiFixture(t, { mode: "active" });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
@@ -1603,18 +1604,18 @@ test("real Pi forks selected private memory over current shared scopes and reloa
 	await parent.prompt("Selected parent request");
 	const point = parent.sessionManager.getLeafId()!;
 	const prefix = SessionManager.open(parent.sessionFile!).getBranch(point);
-	const selectedSession = f.readState(parent, 0, "session");
 	const sourcePaths = temporalScopePaths(f.cwd, parent.sessionId, "session", f.repositoryRoot, nativeSessionKey(parent));
+	f.faux.setResponses(scopedResponses([
+		{ scope: "global", patch: { working: { sharedGlobal: "current" } } },
+		{ scope: "cwd", patch: { working: { sharedCwd: "current" } } },
+		{ scope: "session", patch: { working: { private: "parent current" } } },
+	], "Later parent answer"));
+	await parent.prompt("Parent current memory is copied, independent of the fork step");
+	const selectedSession = f.readState(parent, 0, "session");
 	const selectedStream = {
 		checkpoint: readFileSync(sourcePaths.checkpoint, "utf8"),
 		patches: readFileSync(sourcePaths.patches, "utf8"),
 	};
-	f.faux.setResponses(scopedResponses([
-		{ scope: "global", patch: { working: { sharedGlobal: "current" } } },
-		{ scope: "cwd", patch: { working: { sharedCwd: "current" } } },
-		{ scope: "session", patch: { working: { private: "parent future" } } },
-	], "Later parent answer"));
-	await parent.prompt("Parent future must not be copied");
 	const files = [parent.sessionFile!, sessionRuntimePaths(f.cwd, parent.sessionId, f.repositoryRoot, nativeSessionKey(parent)).config,
 		...(["global", "cwd", "session"] as const).flatMap((scope) => {
 			const paths = temporalScopePaths(f.cwd, parent.sessionId, scope, f.repositoryRoot, nativeSessionKey(parent));
@@ -1643,7 +1644,7 @@ test("real Pi forks selected private memory over current shared scopes and reloa
 	assert.deepEqual(bytes(), protectedBytes);
 });
 
-for (const operation of ["tree", "fork"] as const) test(`real Pi ${operation} selection awaits a held publisher and the next provider sees only the selected private memory`, { timeout: 30_000 }, async (t) => {
+for (const operation of ["tree", "fork"] as const) test(`real Pi ${operation} selection awaits a held publisher and the next provider sees current private memory`, { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
@@ -1676,7 +1677,8 @@ for (const operation of ["tree", "fork"] as const) test(`real Pi ${operation} se
 	await selecting;
 	const session = runtime.session;
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
-	assert.equal(f.readState(session, 0, "session").working.private, "SELECTED-PRIVATE");
+	// Memory follows the current JSON state, not the selected native step.
+	assert.equal(f.readState(session, 0, "session").working.private, "LATER-PRIVATE");
 	if (operation === "fork") {
 		assert.notEqual(session.sessionId, parent.sessionId);
 		assert.equal(latestSnapshot(session).meta.step, 0);
@@ -1686,9 +1688,8 @@ for (const operation of ["tree", "fork"] as const) test(`real Pi ${operation} se
 	let input = "";
 	f.faux.setResponses([(context) => { input = JSON.stringify(context.messages); return fauxAssistantMessage("Next answer"); }]);
 	await session.prompt("Next request");
-	assert.match(input, /SELECTED-PRIVATE/);
-	assert.doesNotMatch(input, /LATER-PRIVATE/);
-	assert.equal(f.readState(session, 0, "session").working.private, "SELECTED-PRIVATE");
+	assert.match(input, /LATER-PRIVATE/);
+	assert.equal(f.readState(session, 0, "session").working.private, "LATER-PRIVATE");
 });
 
 for (const restart of [false, true]) test(`public Pi child control during pending fork preserves independent memory (restart=${restart})`, { timeout: 30_000 }, async (t) => {
@@ -1732,7 +1733,8 @@ for (const restart of [false, true]) test(`public Pi child control during pendin
 	const child = runtime.session;
 	assert.notEqual(child.sessionId, parent.sessionId);
 	assert.equal(latestSnapshot(child).config.mode === "active", restart);
-	assert.equal(f.readState(child, 0, "session").working.private, "SELECTED-FORK-PRIVATE");
+	// The child copies the parent's current memory, not the revision at the fork step.
+	assert.equal(f.readState(child, 0, "session").working.private, "LATER-PARENT-PRIVATE");
 	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
 	let input = "";
 	f.faux.setResponses([(context) => {
@@ -1740,8 +1742,7 @@ for (const restart of [false, true]) test(`public Pi child control during pendin
 		return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { childOnly: true } } }), { stopReason: "toolUse" });
 	}, fauxAssistantMessage("Independent child answer")]);
 	await child.prompt("Continue in the child");
-	assert.match(input, /SELECTED-FORK-PRIVATE/);
-	assert.doesNotMatch(input, /LATER-PARENT-PRIVATE/);
+	assert.match(input, /LATER-PARENT-PRIVATE/);
 	assert.equal(f.readState(child, 0, "session").working.childOnly, true);
 	assert.equal(latestSnapshot(child).config.mode === "active", restart);
 	assert.deepEqual(parentFiles(), before);
@@ -1773,7 +1774,7 @@ test("real Pi Stop during tree restoration preserves passive memory and next-pro
 	} finally { release(); await holder; }
 	await navigating;
 	assert.notEqual(latestSnapshot(session).config.mode, "active");
-	assert.equal(f.readState(session, 0, "session").working.private, "SELECTED-PASSIVE-PRIVATE");
+	assert.equal(f.readState(session, 0, "session").working.private, "LATER-PRIVATE", "tree navigation keeps current memory");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
 	let input = "";
 	f.faux.setResponses([(context) => {
@@ -1781,15 +1782,14 @@ test("real Pi Stop during tree restoration preserves passive memory and next-pro
 		return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { passivePatch: true } } }), { stopReason: "toolUse" });
 	}, fauxAssistantMessage("Passive answer")]);
 	await session.prompt("Continue passively");
-	assert.match(input, /SELECTED-PASSIVE-PRIVATE/);
+	assert.match(input, /LATER-PRIVATE/);
 	assert.match(input, /Selected request/);
-	assert.doesNotMatch(input, /LATER-PRIVATE/);
 	assert.equal(f.readState(session, 0, "session").working.passivePatch, true);
 	assert.notEqual(latestSnapshot(session).config.mode, "active");
 	assert.equal(f.notifications.some((notice) => /writes paused|cancelled by Stop/.test(notice)), false);
 });
 
-for (const operation of ["restore", "fork"] as const) test(`real Pi ${operation} reacquires evidence for an older private artifact without changing its semantics early`, { timeout: 30_000 }, async (t) => {
+for (const operation of ["restore", "fork"] as const) test(`real Pi ${operation} keeps the current private artifact and its evidence`, { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
@@ -1825,25 +1825,12 @@ for (const operation of ["restore", "fork"] as const) test(`real Pi ${operation}
 	} else {
 		await session.navigateTree(selected.id, { summarize: false });
 	}
-	assert.equal(f.readState(session, 0, "session").artifacts[source]?.description, "Version one");
-	assert.equal(provenance()[source], undefined, "newer evidence must not certify the older artifact value");
-	await session.reload();
-	assert.equal(provenance()[source], undefined);
-	f.faux.setResponses([
-		(context) => {
-			const projected = projection(context);
-			assert.deepEqual(projected.state.artifacts[source], { description: "Version one" });
-			assert.deepEqual(projected.artifact_invalidations, [{ path: source, scope: "session", reason: "invalid-metadata" }]);
-			return read();
-		},
-		compile("Version two"),
-		fauxAssistantMessage("Recompiled against the current source."),
-	]);
-	await session.prompt("Reconcile missing compilation evidence");
-	assert.deepEqual(provenance()[source], currentEvidence);
+	// Navigation and fork keep the current artifact together with its current evidence.
 	assert.equal(f.readState(session, 0, "session").artifacts[source]?.description, "Version two");
+	assert.deepEqual(provenance()[source], currentEvidence);
 	await session.reload();
 	f.faux.setResponses([(context) => {
+		assert.deepEqual(projection(context).state.artifacts[source], { description: "Version two" });
 		assert.equal(projection(context).artifact_invalidations, undefined);
 		return fauxAssistantMessage("Current evidence retained.");
 	}]);
@@ -1851,7 +1838,7 @@ for (const operation of ["restore", "fork"] as const) test(`real Pi ${operation}
 	assert.deepEqual(provenance()[source], currentEvidence);
 });
 
-test("real Pi fork rejects inherited history but explicit Start preserves its current child-owned memory", { timeout: 30_000 }, async (t) => {
+test("real Pi child navigation to an inherited parent step keeps current child-owned memory", { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { mode: "off" });
 	const runtime = await f.createRuntime();
 	t.after(() => runtime.dispose());
@@ -1872,7 +1859,8 @@ test("real Pi fork rejects inherited history but explicit Start preserves its cu
 	const before = files.map((path) => readFileSync(path));
 	const head = runGit(f.repositoryRoot, "rev-parse", "HEAD");
 	await child.navigateTree(inheritedPoint, { summarize: false });
-	assert.equal(child.getActiveToolNames().includes("patch_state"), false);
+	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
+	assert.deepEqual(f.readState(child), selected, "an inherited native step never rewinds or recopies child memory");
 	await child.prompt("/state-flow-active");
 	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
 	assert.deepEqual(f.readState(child), selected, "activation uses the existing child's current memory, not an empty reset or a new parent copy");
@@ -1930,13 +1918,13 @@ for (const passive of [false, true]) for (const invalid of ["identity", "cwd"] a
 	assert.equal((await runtime.fork(parent.sessionManager.getLeafId()!, { position: "at" })).cancelled, false);
 	runtime.setBeforeSessionInvalidate(undefined);
 	const child = runtime.session;
-	assert.equal(child.getActiveToolNames().includes("patch_state"), passive);
+	assert.equal(child.getActiveToolNames().includes("patch_state"), true, "failed Active never falls back to the configured inactive policy");
 	assert.throws(() => f.readState(child, 0, "session"), /unavailable/);
 	assert.match(f.notifications.at(-1)!, /identity mismatch/);
 	assert.deepEqual(snapshots(child).at(-1)!.data, sourceCheckpoint);
 	const entries = structuredClone(child.sessionManager.getEntries());
 	await child.prompt("/state-flow-active");
-	assert.equal(child.getActiveToolNames().includes("patch_state"), passive);
+	assert.equal(child.getActiveToolNames().includes("patch_state"), true);
 	assert.deepEqual(child.sessionManager.getEntries(), entries);
 	writeFileSync(file, before);
 	await child.prompt("/state-flow-active");
@@ -3001,7 +2989,7 @@ for (const normalizedImage of [false, true]) test(`real Pi compaction retains th
 	assert.deepEqual(f.readState(session), state);
 });
 
-test("real Pi preserves branch-local state through compaction and rejects an expired sibling after fresh-origin navigation", async (t) => {
+test("real Pi branch navigation through compaction restores branch modes over current memory", async (t) => {
 	const fixture = await realPiFixture(t, { mode: "configured" });
 	writeFileSync(join(fixture.repositoryRoot, "config.json"), JSON.stringify({ mode: "off" }));
 	const session = await fixture.createSession();
@@ -3053,14 +3041,11 @@ test("real Pi preserves branch-local state through compaction and rejects an exp
 	await session.navigateTree(base.id, { summarize: false });
 	assert.equal(latestSnapshot(session).config.mode, "active");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), true);
-	assert.equal(latestSnapshot(session).meta.step, 2);
+	assert.equal(latestSnapshot(session).meta.step, 4, "the step counter follows current memory, not the branch point");
+	assert.equal(fixture.readState(session, 0, "session").working.branch, "future", "a branch step never rewinds memory");
 
 	await session.navigateTree(stopped.id, { summarize: false });
-	try {
-		assert.notEqual(latestSnapshot(session).config.mode, "active");
-	} catch (error) {
-		assert.match(error instanceof Error ? error.message : String(error), /outside the retained temporal window/);
-	}
+	assert.notEqual(latestSnapshot(session).config.mode, "active");
 	assert.equal(session.getActiveToolNames().includes("patch_state"), false);
 });
 
@@ -3094,7 +3079,7 @@ test("real Pi Stop preserves a global-only passive branch through reload, patch,
 	assert.equal(existsSync(join(f.repositoryRoot, ".git")), false);
 });
 
-for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi activates current ${mode} memory after expired tree selection and reload`, { timeout: 30_000 }, async (t) => {
+for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi keeps current ${mode} memory after old-step tree selection and reload`, { timeout: 30_000 }, async (t) => {
 	let session: Awaited<ReturnType<RealPiFixture["createSession"]>>;
 	let interrupted = false;
 	const f = await realPiFixture(t, {
@@ -3119,23 +3104,11 @@ for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi 
 	assert.equal(latestSnapshot(session).config.mode === "active", mode === "active");
 	assert.equal(latestSnapshot(session).meta.specification !== undefined, mode === "interrupted");
 	assert.equal(f.readState(session, 0, "session").working.private, 9);
+	const notices = f.notifications.length;
 	await session.navigateTree(old!.id, { summarize: false });
-	assert.match(f.notifications.at(-1)!, /outside the retained temporal window/);
-	if (mode === "active") {
-		const calls = f.faux.state.callCount;
-		const files = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
-		await session.prompt("Must not expose native history after expired tree selection");
-		assert.equal(f.faux.state.callCount, calls);
-		assert.match(f.notifications.at(-1)!, /inference blocked/);
-		assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), files);
-	}
 	await session.reload();
-	if (mode === "active") {
-		const calls = f.faux.state.callCount;
-		await session.prompt("Must remain blocked after cold restoration");
-		assert.equal(f.faux.state.callCount, calls);
-		assert.match(f.notifications.at(-1)!, /inference blocked/);
-	}
+	assert.equal(f.notifications.length, notices, "an old Pi step is neither a recovery failure nor an inference block");
+	assert.equal(f.readState(session, 0, "session").working.private, 9);
 	const paths = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
 	const privateBefore = readFileSync(paths.checkpoint, "utf8");
 	await session.prompt("/state-flow-active");
@@ -3157,7 +3130,7 @@ for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi 
 	assert.equal(f.readState(session, 0, "session").working.private, 9);
 });
 
-test("real Pi expired selection fences passive publication until explicit current-memory activation", { timeout: 30_000 }, async (t) => {
+test("real Pi old-step navigation keeps current memory; Passive and Active stay writable across reload", { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { initializeRepository: false, mode: "passive" });
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
@@ -3175,36 +3148,28 @@ test("real Pi expired selection fences passive publication until explicit curren
 	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 	const before = files();
 	await session.navigateTree(expired.id, { summarize: false });
-	assert.match(f.notifications.at(-1)!, /outside the retained temporal window/);
 	assert.equal(f.readState(session, 0, "global").working.shared, "retained");
-	assert.throws(() => f.readState(session, 0, "session"), /selected branch is unavailable/);
+	assert.equal(f.readState(session, 0, "session").working.private, 5);
 	await session.prompt("/state-flow-passive");
-	assert.deepEqual(files(), before);
-	assert.deepEqual(snapshots(session).at(-1), expired);
+	assert.equal(latestSnapshot(session).config.mode, "passive");
+	assert.equal(f.readState(session, 0, "session").working.private, 5, "current memory is accepted, never an empty substitute");
+	const semanticFiles = (cohort: ReturnType<typeof files>) => cohort.filter(({ path }) => !/\/(?:config|runtime)\.json$/.test(path));
+	assert.deepEqual(semanticFiles(files()), semanticFiles(before), "Passive acceptance never rewinds current semantics");
 	const notices = f.notifications.length;
 	await session.reload();
-	assert.equal(f.notifications.length, notices, "degraded Stop does not repeat restoration warnings");
+	assert.equal(f.notifications.length, notices, "accepted Passive restores without a recovery warning");
+	f.faux.setResponses(scopedResponses([{ scope: "session", patch: { working: { passive: true } } }], "Passive write accepted."));
+	await session.prompt("Patch passively after recovery");
+	assert.equal(f.readState(session, 0, "session").working.passive, true);
 	assert.equal(f.readState(session, 0, "session").working.private, 5);
-	assert.deepEqual(files(), before);
-	f.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("patch_state", { global: { working: { unsafe: true } } }), { stopReason: "toolUse" }),
-		fauxAssistantMessage("The selected private state remains unavailable."),
-	]);
-	await session.prompt("Try a passive patch after failed restoration");
-	const rejected = session.sessionManager.getEntries().findLast((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "patch_state");
-	assert.ok(rejected?.type === "message" && rejected.message.role === "toolResult" && rejected.message.isError);
-	assert.match(JSON.stringify(rejected.message.content), /paused after mode change/);
-	assert.deepEqual(snapshots(session).at(-1), expired);
-	assert.deepEqual(files(), before, "passive tools and ordinary answers cannot publish an empty substitute session");
 	await session.prompt("/state-flow-active");
 	assert.equal(latestSnapshot(session).config.mode, "active");
 	assert.equal(f.readState(session, 0, "session").working.private, 5);
 	assert.match(f.notifications.at(-1)!, /State Flow active/);
-	await session.navigateTree(retained.id, { summarize: false });
-	assert.equal(f.readState(session, 0, "session").working.private, 5);
-	f.faux.setResponses(sessionResponses({ working: { continued: true } }, "Restored safely."));
-	await session.prompt("Continue from the retained boundary");
-	assert.equal(f.readState(session).working.continued, true);
+	f.faux.setResponses(sessionResponses({ working: { continued: true } }, "Continued safely."));
+	await session.prompt("Continue actively");
+	assert.deepEqual(f.readState(session, 0, "session").working, { private: 5, passive: true, continued: true });
+	assert.ok(retained.id, "the older retained selection remains native history only");
 });
 
 test("real Pi refuses contradictory session files without passive substitution and retries the repaired selection", { timeout: 30_000 }, async (t) => {
@@ -4183,7 +4148,7 @@ test("a fresh real Pi agent continues from compact state and a runtime-compiled 
 	assert.doesNotMatch(observedContext, /OLD-CONVERSATION-MARKER/);
 });
 
-test("real Pi old tree branch stop and resume preserve selected semantics without rewinding shared files", async (t) => {
+test("real Pi old tree branch stop and resume keep current semantics without rewinding any files", async (t) => {
 	const fixture = await realPiFixture(t);
 	const session = await fixture.createSession();
 	await session.prompt("/state-flow-active");
@@ -4203,11 +4168,12 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 		{ scope: "session", patch: { working: { selected: "new" } } },
 	], "New answer"));
 	await session.prompt("New state");
+	const currentStep = latestSnapshot(session).meta.step;
 	await session.navigateTree(old.id, { summarize: false });
-	assert.equal(fixture.readState(session).working.selected, "old");
+	assert.equal(fixture.readState(session).working.selected, "new", "a native branch step never rewinds memory");
 	await session.prompt("/state-flow-passive");
 	const stopped = latestSnapshot(session);
-	assert.equal(stopped.meta.step, 2);
+	assert.equal(stopped.meta.step, currentStep);
 	const file = session.sessionFile!;
 	session.dispose();
 	const resumed = await fixture.createSession("resume", SessionManager.open(file, fixture.sessionDir));
@@ -4222,20 +4188,15 @@ test("real Pi old tree branch stop and resume preserve selected semantics withou
 	assert.match(passiveContext, /State Flow exit handoff/);
 	assert.match(passiveContext, /Continue while State Flow is stopped/);
 	assert.doesNotMatch(passiveContext, /Old state|New state/);
-	assert.equal(fixture.readState(resumed).working.selected, "old");
-	assert.ok(["old", "new"].includes(fixture.readState(resumed).working.branch as string));
-	try {
-		assert.equal(fixture.readState(resumed, 1).response, "");
-	} catch (error) {
-		assert.match(error instanceof Error ? error.message : String(error), /predates the proven temporal origin/);
-	}
+	assert.equal(fixture.readState(resumed).working.selected, "new");
+	assert.equal(fixture.readState(resumed).working.branch, "new");
 	await resumed.prompt("/state-flow-active");
 	assert.equal(resumed.getActiveToolNames().includes("patch_state"), true);
-	assert.equal(fixture.readState(resumed).working.selected, "old");
+	assert.equal(fixture.readState(resumed).working.selected, "new");
 	assert.equal(fixture.readState(resumed).working.branch, "new");
 });
 
-test("real Pi persists without Git, resumes retained boundaries, and later backs up without semantic Git adoption", async (t) => {
+test("real Pi persists without Git, resumes current memory with its history, and later backs up without semantic Git adoption", async (t) => {
 	const fixture = await realPiFixture(t, { initializeRepository: false });
 	const spawn = childProcess.spawnSync;
 	let probes = 0;
@@ -4288,7 +4249,7 @@ test("real Pi persists without Git, resumes retained boundaries, and later backs
 	assert.throws(() => fixture.readState(resumed), /temporal runtime is unavailable/);
 	await resumed.prompt("/state-flow-passive");
 	assert.deepEqual(fixture.readState(resumed), before[0]);
-	assert.throws(() => fixture.readState(resumed, 1), /predates the proven temporal origin/);
+	assert.deepEqual(fixture.readState(resumed, 1), before[1], "resuming current memory keeps its retained history");
 	assert.equal(fixture.notifications.some((message) => /push.*pending|could not initialize/i.test(message)), false);
 	childProcess.spawnSync = spawn;
 	syncBuiltinESMExports();

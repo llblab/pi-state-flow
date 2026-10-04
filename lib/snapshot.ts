@@ -9,8 +9,6 @@ const MAX_LEGACY_VALIDATION_ATTEMPT = 7;
 /** Missing operational capability is not evidence that a checkpoint target is invalid. */
 export class RevisionUnavailableError extends Error {}
 
-/** Expired history cannot be restored, but explicit activation may use validated current memory. */
-export class HistoryBoundaryExpiredError extends RevisionUnavailableError {}
 
 export type StateFlowMode = "active" | "passive" | "off";
 export type InactiveMode = Exclude<StateFlowMode, "active">;
@@ -56,6 +54,11 @@ export interface StateFlowSnapshot {
 }
 
 export type Snapshot = StateFlowSnapshot;
+
+/** Failed Active selection retains its policy and fences inference until explicit recovery or an inactive choice. */
+export function isActiveRestorationBlocked(snapshot: Snapshot): boolean {
+	return snapshot.config.mode === "active" && snapshot.meta.validation?.attempt === 0;
+}
 
 export interface SessionRuntime {
 	config: SnapshotConfig;
@@ -249,7 +252,7 @@ export function parseRetainedPiCheckpoint(value: unknown, inactiveMode: Inactive
 	};
 }
 
-export function migrationFailure(data: JsonObject, error: string, mode: InactiveMode = "passive"): Snapshot {
+export function migrationFailure(data: JsonObject, error: string, mode: StateFlowMode = "passive"): Snapshot {
 	const meta = restoredMeta(data.meta, data);
 	meta.validation = {
 		attempt: 0,

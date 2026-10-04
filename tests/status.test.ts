@@ -44,6 +44,18 @@ test("renders only the state-flow name and mode, hiding only off", () => {
 	assert.equal(compactStatus({ ...snapshot, config: { mode: "off" as const } }, revisions, colorize), undefined);
 });
 
+test("failed Active is visibly blocked while inactive policies never claim an inference fence", () => {
+	const failed = { ...snapshot, meta: { step: 0, validation: { attempt: 0, error: "Expired history", instruction: "Recover" } } };
+	const revisions = { global: 0, cwd: 0, session: 0 };
+	for (const mode of ["active", "passive", "off"] as const) {
+		const selected = { ...failed, config: { mode } };
+		assert.equal(compactStatus(selected, revisions, (_color, text) => text), mode === "off" ? undefined : `state-flow ${mode === "active" ? "active (blocked)" : mode}`);
+		const output = detailedStatus(selected, diagnostics({ temporal: undefined, durableStateError: "Expired history" }));
+		assert.equal(output.includes("Inference blocked:"), mode === "active");
+		assert.match(output, new RegExp(`Mode: ${mode}`));
+	}
+});
+
 test("a passive patch keeps the compact mode stable and exposes revisions only in detailed status", async () => {
 	const h = harness({ mode: "passive" });
 	await h.tools.get("patch_state")!.execute("passive", { global: { working: { passiveCounter: true } } }, undefined, undefined, h.ctx);
@@ -160,7 +172,7 @@ test("unavailable temporal state is not represented as empty materialization or 
 	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "off" }]);
 });
 
-test("status distinguishes live shared tails from fresh restored-session depth", async () => {
+test("status keeps live shared tails and full hot history after old-step tree navigation", async () => {
 	const h = harness();
 	await start(h);
 	let oldEntries: any[] = [];
@@ -182,7 +194,7 @@ test("status distinguishes live shared tails from fresh restored-session depth",
 	await h.handlers.get("session_tree")!({}, h.ctx);
 	await h.commands.get("state-flow-status").handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /"n": 8/);
-	assert.match(h.notifications.at(-1)!, /Hot history: offsets 0\.\.[01]; maximum depth 7/);
+	assert.match(h.notifications.at(-1)!, /Hot history: offsets 0\.\.7; maximum depth 7/, "an old Pi step does not discard retained history");
 	for (const [index, file] of files.entries()) assert.deepEqual(readFileSync(join(h.repositoryRoot, file)), bytes[index]);
 });
 

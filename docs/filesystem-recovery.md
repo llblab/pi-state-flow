@@ -21,9 +21,9 @@ State Flow classifies absence separately from partial or malformed evidence. Rec
 ### Session `checkpoint.json` + `patches.jsonl`
 
 - **Authority:** State Flow; authoritative private semantics.
-- **Wholly absent:** Fresh lifecycle origin may initialize; an existing selected session requires exact retained authority.
+- **Wholly absent:** Fresh lifecycle origin may initialize; an existing session with a checkpoint requires its current files.
 - **Partial or malformed:** Partial or malformed pair fails closed.
-- **Allowed repair and writes:** Fresh initialization or exact retained-boundary recovery only.
+- **Allowed repair and writes:** Fresh initialization or acceptance of validated current memory only.
 
 ### Global/CWD `meta.json`
 
@@ -91,8 +91,8 @@ State Flow classifies absence separately from partial or malformed evidence. Rec
 ### Pi State Flow entries
 
 - **Authority:** Pi session log / State Flow entry owner.
-- **Wholly absent:** Missing required selected boundary blocks that restore.
-- **Partial or malformed:** Malformed or contradictory owner/version/boundary fails the dependent restore.
+- **Wholly absent:** No checkpoint means no recorded branch mode; memory is not affected.
+- **Partial or malformed:** Malformed or unsupported envelopes are skipped or fail the dependent mode selection; a checkpoint boundary is never a memory revision to restore.
 - **Allowed repair and writes:** Append through Pi entry APIs only; never replace failed selection with passive state.
 
 ### Optional diagnostic log

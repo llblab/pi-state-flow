@@ -40,10 +40,6 @@ export declare function adoptTemporalStreams(scopes: Record<StateScope, ScopeStr
 export declare function createTemporalState(states: ScopedSemanticStates, id: string, historyLimit?: number): TemporalState;
 /** Fold retained tails to a lower configured limit without inventing history. */
 export declare function constrainTemporalState(view: TemporalState, historyLimit: number): TemporalState;
-/** Select one scope at a proven retained boundary from its owning runtime lineage. */
-export declare function selectScopeStreamAtBoundary(stream: ScopeStream, scope: StateScope, boundary: TransitionBoundary, historyLimit?: number): ScopeStream;
-/** Select one still-retained causal boundary without consulting an external history store. */
-export declare function selectTemporalStateBoundary(view: TemporalState, boundaryId: string, historyLimit?: number): TemporalState;
 /** Current independent scope revisions; Effective uses this vector rather than inventing a scalar owner. */
 export declare function temporalScopeRevisions(view: TemporalState): ScopeRevisions;
 /** Exact scope semantics for authored staging; defaults must never become implicit writes. */

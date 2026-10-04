@@ -51,9 +51,9 @@ test("a selected boundary's resolution failure is final and never names an older
 	// Selection happens before any awaited resolution; its failure cannot fall through to older boundaries or disabled markers.
 	const selection = selectRetainedCheckpoint([{ boundary: "selected", enabled: true, step: 2 }, { boundary: "older", enabled: true, step: 1 }, { disabled: true }]);
 	assert.deepEqual(selection.kind === "boundary" && selection.checkpoint.boundary, "selected");
-	for (const cause of ["Invalid canonical JSON", "outside retained temporal window"]) {
-		const failure = selectedBoundaryFailure(cause);
-		assert.notEqual(failure.config.mode, "active");
+	for (const mode of ["active", "passive", "off"] as const) for (const cause of ["Invalid canonical JSON", "outside retained temporal window"]) {
+		const failure = selectedBoundaryFailure(cause, mode);
+		assert.equal(failure.config.mode, mode, "unavailable memory must not silently change selected policy");
 		assert.equal(failure.meta.validation?.attempt, 0);
 		assert.equal(failure.meta.validation?.error, `Snapshot restoration failed: ${cause}`);
 	}

@@ -235,42 +235,6 @@ export function constrainTemporalState(view: TemporalState, historyLimit: number
 	return next;
 }
 
-/** Select one scope at a proven retained boundary from its owning runtime lineage. */
-export function selectScopeStreamAtBoundary(stream: ScopeStream, scope: StateScope, boundary: TransitionBoundary, historyLimit = DEFAULT_HISTORY_LIMIT): ScopeStream {
-	validateHistoryLimit(historyLimit);
-	validateBoundary(boundary);
-	validateScopeStream(stream, scope, historyLimit);
-	if (boundary.position < stream.checkpoint.through.position) {
-		throw new Error("Selected State Flow history boundary predates the retained scope checkpoint");
-	}
-	const selected = structuredClone(stream);
-	const retained = selected.patches.filter(({ transition }) => transition.position <= boundary.position);
-	selected.revision -= selected.patches.length - retained.length;
-	selected.patches = retained;
-	validateScopeStream(selected, scope, historyLimit);
-	return selected;
-}
-
-/** Select one still-retained causal boundary without consulting an external history store. */
-export function selectTemporalStateBoundary(view: TemporalState, boundaryId: string, historyLimit = DEFAULT_HISTORY_LIMIT): TemporalState {
-	validateHistoryLimit(historyLimit);
-	validateTemporalState(view, historyLimit);
-	if (typeof boundaryId !== "string" || boundaryId.trim().length === 0) throw new Error("State Flow temporal boundary identity must be non-empty");
-	const index = view.lineage.findIndex(({ id }) => id === boundaryId);
-	if (index < 0) throw new Error("Selected State Flow history boundary is outside the retained temporal window");
-	const target = view.lineage[index]!;
-	const selected = structuredClone(view);
-	selected.lineage = selected.lineage.slice(0, index + 1);
-	for (const scope of SCOPES) {
-		const stream = selected.scopes[scope];
-		const retained = stream.patches.filter(({ transition }) => transition.position <= target.position);
-		stream.revision -= stream.patches.length - retained.length;
-		stream.patches = retained;
-	}
-	validateTemporalState(selected, historyLimit);
-	return selected;
-}
-
 /** Current independent scope revisions; Effective uses this vector rather than inventing a scalar owner. */
 export function temporalScopeRevisions(view: TemporalState): ScopeRevisions {
 	const revisions = {

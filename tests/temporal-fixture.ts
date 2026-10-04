@@ -1,16 +1,19 @@
 import { readFileSync } from "node:fs";
 import type { ArtifactProvenanceRegistry } from "../lib/artifact.ts";
-import { TemporalRuntime } from "../lib/runtime.ts";
 import { emptySnapshot, parseRetainedPiCheckpoint, type Snapshot } from "../lib/snapshot.ts";
 import { loadScopeStream, parseScopeProvenance, temporalScopePaths } from "../lib/durable.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 import { overlayStates, type StateScope } from "../lib/state.ts";
 
-/** Explicit test-only projection; raw Pi checkpoint data is never replaced or normalized. */
-export function resolveCheckpoint(data: unknown, cwd: string, sessionId: string, root: string, sessionKey = sessionId): Snapshot {
+/** Explicit test-only projection of the lifecycle a Pi checkpoint records; it never selects a memory revision. */
+export function resolveCheckpoint(data: unknown, _cwd: string, _sessionId: string, _root: string, _sessionKey?: string): Snapshot {
 	const retained = parseRetainedPiCheckpoint(data);
 	if (!("boundary" in retained)) return emptySnapshot(retained.mode);
-	return new TemporalRuntime(cwd, sessionId, root, sessionKey).prepareBoundaryRestore(retained).snapshot;
+	return { config: { mode: retained.mode }, meta: {
+		step: retained.step,
+		...(retained.bootstrap ? { bootstrap: true } : {}),
+		...(retained.specification === undefined ? {} : { specification: retained.specification }),
+	} };
 }
 
 export * from "../lib/durable.ts";

@@ -21,6 +21,8 @@ export function stateFlowTelegramSectionSpecifiers(moduleUrl = import.meta.url):
 export interface StateFlowTelegramSnapshot {
 	/** The current session's selected mode. */
 	mode: StateFlowMode;
+	/** Failed Active restoration fences inference without silently selecting an inactive mode. */
+	inferenceBlocked?: boolean;
 	/** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
 	step: number;
 	revisions?: ScopeRevisions;
@@ -132,7 +134,7 @@ export interface StateFlowTelegramAdapter {
 
 /** Main-menu section label shows only the current session mode. */
 export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string {
-	return `🌀 State Flow: ${snapshot.mode}`;
+	return `🌀 State Flow: ${snapshot.mode}${snapshot.mode === "active" && snapshot.inferenceBlocked ? " (blocked)" : ""}`;
 }
 
 export const STATE_FLOW_MODES = ["off", "passive", "active"] as const satisfies readonly StateFlowMode[];
@@ -160,6 +162,10 @@ export function buildStateFlowSectionView(
 	return {
 		text: [
 			`<b>🌀 State Flow:</b> <code>${snapshot.mode}</code>`,
+			...(snapshot.mode === "active" && snapshot.inferenceBlocked ? [
+				"",
+				"<b>Inference blocked:</b> Active memory restoration failed. Select Active to accept current session memory, or Passive/Off to permit native context.",
+			] : []),
 			"",
 			"<b>Mode</b> — choose a workflow (switching modes never erases stored memory):",
 			"",

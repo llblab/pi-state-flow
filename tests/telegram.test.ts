@@ -102,6 +102,38 @@ test("Telegram section discovery covers the package and compiled sibling layouts
 	]);
 });
 
+for (const recovery of ["active", "passive", "off"] as const) test(`failed Active stays visible and ${recovery} recovers through the runtime Telegram port`, async () => {
+	const modules = fakeModules();
+	const h = harness({ initializeRepository: false, telegram: { load: async () => modules.modules } });
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.commands.get("state-flow-active").handler("", h.ctx);
+	await h.tools.get("patch_state")!.execute("seed", { session: { working: { private: 9 } } }, undefined, undefined, h.ctx);
+	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+	const runtimePath = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).runtime;
+	const original = readFileSync(runtimePath);
+	writeFileSync(runtimePath, "malformed runtime");
+	let before = files();
+	await h.handlers.get("session_tree")!({}, h.ctx);
+	const section = modules.sections[0];
+	assert.equal(section.getLabel!(), "🌀 State Flow: active (blocked)");
+	const view = await section.render(sectionContext("refresh").context);
+	assert.match(view.text, /Inference blocked:/);
+	assert.equal(view.replyMarkup!.inline_keyboard[0][2].text, "🟢 Active");
+	assert.deepEqual(files(), before);
+	const blocked = new AbortController();
+	await h.inferenceContext([], blocked);
+	assert.equal(blocked.signal.aborted, true);
+	writeFileSync(runtimePath, original);
+	before = files();
+	await section.handleCallback!(sectionContext(recovery).context);
+	assert.equal(section.getLabel!(), `🌀 State Flow: ${recovery}`);
+	const permitted = new AbortController();
+	await h.inferenceContext([], permitted);
+	assert.equal(permitted.signal.aborted, false);
+	if (recovery === "off") assert.deepEqual(files(), before, "Off releases inference only, not historical write authority");
+	else assert.equal(h.readState(0, "session").working.private, 9, "Active and Passive accept current memory without claiming expired history");
+});
+
 test("main-menu section label uses the lowercase mode regardless of revisions or pending work", () => {
 	for (const mode of ["off", "passive", "active"] as const) {
 		for (const revisions of [undefined, { global: 15, cwd: 8, session: 31 }]) {
@@ -432,7 +464,7 @@ test("Telegram Off remains responsive without acquiring publication and repeated
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
 });
 
-for (const next of ["passive", "active", "expired"] as const) test(`Off inspection reads current private bytes without acquiring policy or replacing selected history (next=${next})`, async () => {
+for (const next of ["passive", "active", "expired"] as const) test(`Off inspection reads current private bytes without acquiring policy; later selection uses current memory (next=${next})`, async () => {
 	const { modules, sections } = fakeModules();
 	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
@@ -463,8 +495,8 @@ for (const next of ["passive", "active", "expired"] as const) test(`Off inspecti
 	assert.deepEqual(h.entries, entries);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, "harness-session", h.repositoryRoot), files);
 	await h.commands.get(next === "active" ? "state-flow-active" : "state-flow-passive")!.handler("", h.ctx);
-	if (next === "expired") await assert.rejects(h.tools.get("read_state")!.execute("expired", { path: "session.working.private" }), /outside the retained temporal window/);
-	else assert.equal(h.readState(0, "session").working.private, next === "passive" ? "SELECTED-OLD" : "CURRENT-1");
+	// Memory is always the current JSON state, whatever Pi step recorded the mode.
+	assert.equal(h.readState(0, "session").working.private, next === "expired" ? "CURRENT-9" : "CURRENT-1");
 });
 
 for (const fault of ["missing", "malformed", "pending-fork"] as const) test(`Off private/Effective inspection rejects unproven current memory (fault=${fault})`, async () => {

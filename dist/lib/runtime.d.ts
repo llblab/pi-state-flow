@@ -2,7 +2,7 @@ import { type SessionAddress } from "./durable.ts";
 import { type ArtifactProvenance, type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { publishTemporalStateToFiles } from "./storage.ts";
 import { type AcceptedTransition, type RecentTransitionWindow } from "./history.ts";
-import { type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot } from "./snapshot.ts";
+import { type RetainedPiCheckpoint, type Snapshot, type StateFlowMode } from "./snapshot.ts";
 import { type MaterializedState, type SemanticState, type ScopedSemanticStates, type ScopedStates, type StateScope } from "./state.ts";
 import { type TemporalState } from "./temporal.ts";
 export type RuntimePublication = ReturnType<typeof publishTemporalStateToFiles>;
@@ -11,6 +11,11 @@ export interface RuntimePatchTransaction {
     readonly causalBasis: string;
     readonly provenance: Record<StateScope, ArtifactProvenanceRegistry>;
     publish(snapshot: Snapshot, accepted?: AcceptedTransition, provenance?: Partial<Record<StateScope, Record<string, ArtifactProvenance>>>): RuntimePublication;
+}
+/** Child policy recorded by the native fork; memory always comes from the parent's current files. */
+export interface ForkLifecycle {
+    mode: StateFlowMode;
+    bootstrap?: true;
 }
 /** A targeted removed scope was deliberately adopted as empty before refusing the stale semantic patch. */
 export declare class SharedScopeRemovalConflictError extends Error {
@@ -24,7 +29,6 @@ export declare class TemporalRuntime {
     private semanticRevision;
     private savedRuntime;
     private transaction;
-    private restoredOriginPending;
     private provenanceByScope;
     /** Shared scopes whose wholly absent live basis was accepted after one stale-target refusal. */
     private readonly absentSharedScopes;
@@ -52,28 +56,9 @@ export declare class TemporalRuntime {
     retainedCheckpoint(snapshot: Snapshot): RetainedPiCheckpoint;
     usesCanonicalFiles(): boolean;
     recent(): RecentTransitionWindow;
-    /** Prepare a retained session boundary from current canonical files; shared scopes remain live. */
-    prepareBoundaryRestore(checkpoint: RetainedBoundaryCheckpoint): {
-        snapshot: Snapshot;
-        restore: () => Snapshot;
-    };
-    private prepareBoundaryRestoreBase;
-    /** Restore and canonically accept one retained boundary as a single lifecycle operation. */
-    restoreBoundary(checkpoint: RetainedBoundaryCheckpoint): {
-        snapshot: Snapshot;
-        publication: RuntimePublication;
-    };
     /** Await a coherent read-only recovery view; this neither activates policy nor accepts publication authority. */
     refreshCurrentMemory(signal?: AbortSignal): Promise<Snapshot | undefined>;
     private loadCurrentMemoryBase;
-    /** Copy one retained source-session boundary over the child's current shared scopes. */
-    prepareBoundaryFork(source: SessionAddress, checkpoint: RetainedBoundaryCheckpoint): {
-        snapshot: Snapshot;
-        fork: () => {
-            snapshot: Snapshot;
-            publication: RuntimePublication;
-        };
-    };
     initialize(snapshot: Snapshot, allowCreateCwd: boolean, expectedShared?: Pick<ScopedStates, "global" | "cwd">, newSessionOrigin?: boolean): RuntimePublication | undefined;
     private initializeOrigin;
     /** Copy the private origin and apply configured retention folding, preserving live shared values/provenance. */
@@ -95,16 +80,12 @@ export declare class TemporalRuntime {
     withPatchTransaction<T>(action: (transaction: RuntimePatchTransaction) => T, signal?: AbortSignal): Promise<T>;
     /** Activate current owned memory; the caller must authorize a wholly absent private origin after waiting. */
     withStartTransaction<T>(action: (current: Snapshot | undefined, publish: (snapshot: Snapshot) => RuntimePublication) => T, signal?: AbortSignal, allowCreateOrigin?: boolean): Promise<T>;
-    /** Select one retained private boundary beside current shared streams, then accept only after caller policy is rechecked. */
-    withRestoreTransaction<T>(checkpoint: RetainedBoundaryCheckpoint, action: (selected: Snapshot, publish: (snapshot: Snapshot) => RuntimePublication) => T, signal?: AbortSignal): Promise<T>;
-    /** Copy exact retained parent authority into an unoccupied child; the caller rechecks native selection after waiting. */
-    withForkTransaction<T>(source: SessionAddress, checkpoint: RetainedBoundaryCheckpoint, action: (selected: Snapshot, publish: (snapshot: Snapshot) => RuntimePublication) => T, signal?: AbortSignal): Promise<T>;
+    /** Copy the parent's current session memory into an unoccupied child; the caller rechecks native selection after waiting. */
+    withForkTransaction<T>(source: SessionAddress, lifecycle: ForkLifecycle, action: (selected: Snapshot, publish: (snapshot: Snapshot) => RuntimePublication) => T, signal?: AbortSignal): Promise<T>;
     private prepareForkCandidate;
     /** Recheck caller policy after waiting, then accept only config/runtime over an already accepted private basis. */
     withLifecycleTransaction<T>(action: (publish: (snapshot: Snapshot) => RuntimePublication) => T, signal?: AbortSignal): Promise<T>;
     private withPublicationTransaction;
-    /** Canonically accept a prepared retained-boundary origin before lifecycle-only persistence. */
-    acceptRestoredOrigin(snapshot: Snapshot): RuntimePublication;
     publish(snapshot: Snapshot, semantic?: boolean, accepted?: AcceptedTransition, options?: {
         provenance?: Partial<Record<StateScope, Record<string, ArtifactProvenance>>>;
     }): RuntimePublication | undefined;

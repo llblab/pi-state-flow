@@ -35,7 +35,7 @@ Each `patch_state` is an inference barrier, not automatically the end of an iter
 
 Native compaction is separate from model-context projection; its safety checks and usage threshold still apply.
 
-Active, Passive and Off select the session's workflow and model-facing access, not a different storage algorithm. Native Off attachment defers memory acquisition, including creation of a fork's private memory, until Passive or Active is explicitly selected. Once acquired, a fork owns Session state copied from the selected parent boundary and lives independently in its selected mode. See [fork support](#fork-support-and-limits).
+Active, Passive and Off select the session's workflow and model-facing access, not a different storage algorithm. Native Off attachment defers memory acquisition, including creation of a fork's private memory, until Passive or Active is explicitly selected. Once acquired, a fork owns Session state copied from the parent's current memory and lives independently in its selected mode. See [fork support](#fork-support-and-limits).
 
 ### Lifecycle operations
 
@@ -44,8 +44,8 @@ Active, Passive and Off select the session's workflow and model-facing access, n
 - Starting mid-conversation keeps Pi's active context for one complete bootstrap run, during which the agent must compile future-relevant information into state.
 - Repeating Active while already active leaves the in-progress run unchanged.
 - On an attached branch, activation waits asynchronously for a coherent canonical cohort; pending repeats share the wait.
-- Until acceptance, the existing inactive mode, deferred historical selection and any write fence stay in effect.
-- Cancelling a pending Active from Off preserves later acquisition choices. A superseding Passive still selects its retained private boundary rather than newer current memory, and ordinary cancellation creates no write fence.
+- Until acceptance, the existing inactive mode and any write fence stay in effect.
+- Cancelling a pending Active from Off preserves later acquisition choices; ordinary cancellation creates no write fence.
 - Passive, Off or a branch selection can withdraw an obsolete activation. An error after acceptance does not undo accepted memory.
 
 How each lifecycle event behaves:
@@ -54,9 +54,10 @@ How each lifecycle event behaves:
   - An inactive default is recorded once in Pi as `{mode:"off"}` or `{mode:"passive"}`, without creating semantic storage.
   - An Active default initializes a distinct empty Session layer over global/CWD memory, never another session's private continuation.
 - **Resume:** Keeps the selected session's mode; later global default changes do not override it.
-  - Passive/Active restore state and lineage.
+  - Passive/Active attach the current same-session memory and its retained history.
   - Off attaches native policy only, without probing semantic files or emitting recovery warnings.
-- **Tree navigation:** In Passive/Active, restores the selected retained private boundary over live shared scopes, without checking out or resetting the shared store. Off defers this acquisition until a mode is explicitly selected.
+- **Tree navigation:** Restores the selected branch's mode, but never rewinds memory: State Flow does not depend on the Pi step. Passive/Active keep the current JSON state of every scope, which changes only through accepted patches. Off defers acquisition until a mode is explicitly selected.
+- **Fork:** The child copies its parent's current memory into its own session layer, independent of the step it forked from.
 - **Abort inference:** Stops generation or an outstanding response-publication wait. Already accepted patches stay durable, so work and corrected direction can continue in the same session.
   - Cancellation before response acceptance keeps the previous response and the unfinished run.
   - Cancellation after acceptance never rolls it back.
@@ -75,7 +76,7 @@ How each lifecycle event behaves:
   - The selected Passive policy stays applied. Accepted memory and the native conversation stay intact.
   - Pi records the selected mode and a write fence, not a replacement semantic checkpoint. This needs a writable Pi trace and never repairs storage; native fenced policy overrides an older canonical config.
   - Tree/reload/resume in Passive read validated current same-session memory without publishing or restoring an older selection.
-  - Off keeps the native policy and the write fence without reading memory, and still exposes no State Flow context or tools; explicit Passive may acquire that read-only current authority later.
+  - Off keeps the native policy and the write fence without reading memory, and still exposes no State Flow context or tools. A later explicit Passive retries current-memory acceptance; success clears the fence.
   - Newer mode choices survive an in-flight read-only recovery. Repeating the same choice is inert; changing the inactive mode updates only native policy and keeps the fence.
   - Explicit Active clears the fence only after canonical acceptance.
 - **Continue in Passive after Active:** The same physical session projects a frozen state handoff, any interrupted current request and tool trajectory (including late results), and the conversation after Stop. Which earlier conversation is kept:
@@ -101,11 +102,10 @@ State Flow does not undo tool effects. After an interruption or a return to an o
 
 ### Fork support and limits
 
-**What a fork copies.** Memory-enabled native fork replacement copies the source session checkpoint, retained patch tail and matching provenance into the new session's own storage.
+**What a fork copies.** Memory-enabled native fork replacement copies the parent's **current** session checkpoint, retained patch tail and matching provenance into the new session's own storage, independent of the Pi step it forked from.
 
 - Off records only a child-owned pending-fork policy. Header/store reads and copying wait until an explicit Passive/Active, including after a cold reload.
 - Global/CWD values and provenance stay current. Applying a smaller `historyLimit` may fold shared tails under CAS.
-- An earlier fork selection copies that point's private state, not the parent's later private work.
 - Parent-private data and history stay intact. The selected mode is kept, so an inactive source does not become Active automatically.
 
 **The child's own history.** The child starts at step zero with a new temporal origin.
@@ -114,11 +114,11 @@ State Flow does not undo tool effects. After an interruption or a return to an o
 - The child's own transitions build its hot window, and owned checkpoints support normal reload/resume.
 - Parent Stop projection is not inherited, including after a child reload.
 
-**Requirements for the initial copy:** a native fork start event, a regular canonical direct-parent session file, matching CWD/identity, a readable temporal source and an unused child namespace. Missing or unsafe evidence or a CAS conflict leaves the copy unavailable rather than importing unrelated or newer private state. Explicit Start can retry an unaccepted copy in the same loaded fork once the cause is corrected.
+**Requirements for the initial copy:** a native fork start event, a regular canonical direct-parent session file, matching CWD/identity, a readable temporal source and an unused child namespace. Missing or unsafe evidence or a CAS conflict leaves the copy unavailable rather than importing unrelated private state. Explicit Start can retry an unaccepted copy in the same loaded fork once the cause is corrected.
 
 **Limits:**
 
-- Selecting a copied parent checkpoint through the child's `/tree` does not make it child-owned: historical restoration stays disabled without resetting existing child data. Instead, select a child-owned checkpoint, resume the original session, or explicitly Start from the validated current child-owned memory. Start does not copy newer parent data.
+- Selecting a copied parent step through the child's `/tree` keeps current child-owned memory; it neither rewinds nor recopies parent data.
 - Cold recovery before the first child checkpoint requires an Off-deferred pending-fork marker. Otherwise, it and startup paths lacking the fork event remain unsupported.
 - In-memory parent locators and cross-CWD imports remain unsupported.
 - File-only copying requires an exact still-available source cohort.
@@ -194,17 +194,17 @@ Treat logs and state files as private. Removing a secret from current state does
 - A `Scope memory:` block with one line per scope that has content: the UTF-8 byte size of each present nonempty plane and, when `working` or `lazy` has top-level entries, the share owned by an open intent of that scope (for example `- cwd: intents 137 B, working 32 B; intent-owned working 1/2`). It is operator-only: no notice, threshold or model-facing effect.
 - One JSON representation of effective global → CWD → session memory, with a blank line between top-level semantic planes. Nested JSON is unchanged; individual scope JSON remains available through `read_state`.
 
-Status omits the already-visible mode and generic ownership/configuration prose. Failed inspection reports unavailable evidence, not invented empty state. Status is observational: it does not read source files, calculate fingerprints, create invalidations or mutate semantic state.
+Status reports the selected mode and any Active restoration inference fence, while omitting generic ownership/configuration prose. Failed inspection reports unavailable evidence, not invented empty state. Status is observational: it does not read source files, calculate fingerprints, create invalidations or mutate semantic state.
 
 **Revisions and indicators:**
 
-- The terminal indicator is accent `state-flow` plus dim `active` or `passive`; Off hides it.
+- The terminal indicator is accent `state-flow` plus dim `active` or `passive`; Off hides it. Failed Active restoration stays visible as `active (blocked)`, never as an apparently inactive mode.
 - Global, CWD and Session own independent semantic revisions. One atomic transition advances each materially changed scope once, including session-only response reconciliation.
 - Effective has no scalar counter. It uses the compact lowercase `g#c#s#` revision vector (for example, `g15c8s31`), with no slashes or spaces between counters. The vector appears in `/state-flow-status` and in Telegram's Effective inspection, not in the compact indicators.
 
 ### Telegram controls
 
-When `pi-telegram` is available, its main-menu section shows `State Flow: active`, `State Flow: passive` or `State Flow: off`. The adapter is optional; the Pi commands work without it. All Telegram controls use the same lifecycle owners as the terminal commands.
+When `pi-telegram` is available, its main-menu section shows `State Flow: active`, `State Flow: passive` or `State Flow: off`. Failed Active restoration shows `State Flow: active (blocked)` and recovery guidance in the submenu; the Active control can retry current-memory acceptance. The adapter is optional; the Pi commands work without it. All Telegram controls use the same lifecycle owners as the terminal commands.
 
 **Mode controls:**
 
@@ -234,9 +234,8 @@ When `pi-telegram` is available, its main-menu section shows `State Flow: active
 **Inspecting while Off.** Explicit Off inspection reads current stored memory through a disposable reader.
 
 - Session and Effective require validated same-session private authority and cannot show a fabricated empty layer or revision. Shared Global/CWD inspection stays available independently of private failures.
-- These reads install no model/runtime cache, change no bytes or mode, clear no write fence, and leave the selected historical/fork boundary intact for a future Passive/Active acquisition.
+- These reads install no model/runtime cache, change no bytes or mode, clear no write fence, and leave pending fork acquisition intact for a future Passive/Active selection.
 - Automatic Off callbacks never acquire memory.
-- Current stored data does not prove that a selected past boundary is restorable.
 
 Open implementation work is tracked in [BACKLOG.md](../BACKLOG.md).
 
@@ -277,25 +276,25 @@ See the [storage contract](architecture.md#storage-and-identity) for the exact l
 - semantic/metadata boundary mismatches and identity contradictions;
 - partial session runtime evidence.
 
-A missing or expired private retained boundary is unavailable; State Flow does not substitute Git history or newer private files.
+Memory never depends on the Pi step, so an old or expired branch checkpoint is not a failure: attachment always uses the current same-session files. State Flow does not substitute Git history, empty memory or another session's files.
 
-**After a selected-boundary failure:**
+**When current session memory is unreadable** (missing, corrupt, partial or contradictory files):
 
-- If the selected Active boundary cannot be restored, live inference is aborted before the provider instead of silently sending native history under an inactive fallback. Reload/resume retains this fence. Select a valid branch or explicitly Start from current same-session memory; explicit Passive/Off permits native context without repairing historical authority. Signal-less inspection remains observational.
-- Passive may still expose current global/CWD memory, but never the unavailable historical session layer or permission to publish an empty replacement.
-- Historical session reads and every `patch_state` refuse without changing canonical files or appending substitute checkpoints.
-- Passive/Off selection stays available and records the native policy/write fence described above. A later reload may expose validated current memory read-only, not the unavailable selected history.
+- Under Active, the selected mode remains Active and the indicator shows `active (blocked)`. Live inference is aborted before the provider instead of silently sending native history under an inactive fallback. Reload/resume retains this fence. Repair the files and choose Active/Passive; explicit Off permits native context without reading memory. Signal-less inspection remains observational.
+- Global/CWD memory stays readable; the unavailable session layer is never replaced by an empty one.
+- Session reads and every `patch_state` refuse without changing canonical files or appending substitute checkpoints.
+- **Modes are stable.** Explicit Passive accepts validated current same-session memory exactly like Active, keeping Passive policy. Only while current memory is still unreadable or unpublishable does Passive keep native inference with paused writes and report the cause. Off records native policy only.
 - Status distinguishes a write fence from unavailable materialization.
 
-**Explicit Start uses current memory, not unavailable history.**
+**Explicit Start uses current memory.**
 
 - It independently validates the current same-session canonical cohort, preserving private memory, artifact provenance, revisions, step and available aligned history.
 - Expired active/passive pointers and unfinished runtime work do not block activation. A pre-runtime selection also keeps current accepted same-session memory instead of resetting it.
 - Start bootstraps the conversation available on the selected Pi branch, without resurrecting an old unfinished specification or claiming that expired historical private state was restored.
 - Independently advanced shared scopes may require a new temporal origin; unavailable history is never invented.
 - Exact-cohort CAS rejects a concurrent writer, and incomplete or corrupt storage stays untouched.
-- An unaccepted native fork still retries its exact source rather than inventing child memory.
-- When evidence is missing, repair it, select a retained boundary, or open a genuinely new Pi session.
+- An unaccepted native fork retries copying its parent's current memory rather than inventing child memory.
+- When evidence is missing, repair it or open a genuinely new Pi session.
 
 **Artifact evidence and replication:**
 
@@ -307,7 +306,7 @@ See the complete [filesystem recovery contract](filesystem-recovery.md).
 
 ### Canonical files and optional Git backup
 
-Canonical scope/runtime files own the current materialization and retained hot history, whether or not Git is available. Pi checkpoints identify a retained semantic boundary, not a Git commit or an arbitrary historical snapshot. Restart and branch restoration fail closed when the selected boundary has expired, rather than substituting newer files as the selected past.
+Canonical scope/runtime files own the current materialization and retained hot history, whether or not Git is available. Pi checkpoints record mode and run lifecycle for a branch, not a Git commit or a memory revision to rewind to. Restart and branch navigation always attach the current files; historical states remain available only through explicit `read_state` offsets within retained history.
 
 **Local backup commit:**
 

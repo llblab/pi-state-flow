@@ -261,7 +261,7 @@ for (const scope of ["global", "cwd"] as const) for (const limit of [0, 7]) {
 		assert.deepEqual(captureTemporalFileBases(f.root, "a", root), files, "inspection cannot publish or repair");
 		assert.deepEqual(inspected.stateFlow, { enabled: true, restorable: true }, inspected.reason);
 		const restored = new TemporalRuntime(f.root, "a", root, undefined, limit);
-		restored.restoreBoundary(checkpoint);
+		await restored.refreshCurrentMemory();
 		assert.deepEqual(restored.read(0, "session").working, { owner: "A" });
 		assert.deepEqual(restored.read(0, scope).working, { shared: "B" });
 	});

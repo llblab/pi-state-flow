@@ -961,7 +961,7 @@ test("new sessions project durable causality without old conversation trajectori
 	assert.equal(projected.messages.some((item: any) => item.content?.[0]?.text === "Persist project decision"), false);
 });
 
-test("tree restoration selects private state while shared scopes remain proven or live", async () => {
+test("tree navigation keeps current memory; native steps never rewind any scope", async () => {
 	const h = harness();
 	await start(h, "Branch task");
 	const commitAll = (value: string) => commitScopedTerminal(h, [
@@ -977,21 +977,17 @@ test("tree restoration selects private state while shared scopes remain proven o
 	await h.beginRun("Branch task");
 	const projected = h.handlers.get("context")!({ messages: [user("Branch task", 1)] });
 	const text = projected.messages[0].content[0].text as string;
-	const sharedSelected = text.includes('"globalBranch":"base"') && text.includes('"cwdBranch":"base"');
-	const sharedLive = text.includes('"globalBranch":"abandoned-future"') && text.includes('"cwdBranch":"abandoned-future"');
-	assert.equal(sharedSelected || sharedLive, true);
-	assert.match(text, /"sessionBranch":"base"/);
-	assert.doesNotMatch(text, /"sessionBranch":"abandoned-future"/);
+	// Memory is the current JSON state: a native branch step changes neither shared nor session scopes.
+	for (const key of ["globalBranch", "cwdBranch", "sessionBranch"]) assert.match(text, new RegExp(`"${key}":"abandoned-future"`));
 
 	await commitTerminal(h, {}, { sessionBranch: "restored-next" });
 	assert.equal(h.resolveSnapshot().meta.validation, undefined);
 	assert.doesNotMatch(JSON.stringify(h.sentMessages), /cannot publish/);
-	// Untouched shared scopes are adopted from the live basis while the restored session continues.
+	// Patching continues from the current state.
 	await h.beginRun("Branch task");
 	const adopted = h.handlers.get("context")!({ messages: [user("Branch task", 2)] });
 	const adoptedText = adopted.messages[0].content[0].text as string;
 	assert.match(adoptedText, /"globalBranch":"abandoned-future"/);
 	assert.match(adoptedText, /"cwdBranch":"abandoned-future"/);
 	assert.match(adoptedText, /"sessionBranch":"restored-next"/);
-	assert.doesNotMatch(adoptedText, /"sessionBranch":"abandoned-future"/);
 });

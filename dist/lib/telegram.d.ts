@@ -6,6 +6,8 @@ export declare function stateFlowTelegramSectionSpecifiers(moduleUrl?: string): 
 export interface StateFlowTelegramSnapshot {
     /** The current session's selected mode. */
     mode: StateFlowMode;
+    /** Failed Active restoration fences inference without silently selecting an inactive mode. */
+    inferenceBlocked?: boolean;
     /** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
     step: number;
     revisions?: ScopeRevisions;

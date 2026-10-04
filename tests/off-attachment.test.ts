@@ -75,20 +75,21 @@ test("explicit Active from a deferred Off branch does not rewind current private
 	assert.equal(h.resolveSnapshot().config.mode, "active");
 });
 
-test("deferred expired history stays unavailable in Passive; explicit Active validates current same-session memory", async () => {
+test("a deferred old checkpoint never rewinds memory; explicit Passive or Active uses current same-session memory", async () => {
 	const { resumed: h } = await offBranch();
 	h.entries.at(-1)!.data.boundary = "outside-retained-window";
 	await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 	assert.deepEqual(h.notifications, []);
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
-	assert.throws(() => h.readState(0, "session"), /selected branch is unavailable/);
-	assert.ok(h.notifications.some((message) => /retained temporal window/.test(message)));
+	assert.equal(h.readState(0, "session").working.retained, "PRIVATE");
+	assert.equal(h.resolveSnapshot().config.mode, "passive");
+	await h.tools.get("patch_state")!.execute("passive", { session: { working: { passive: true } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-active")!.handler("", h.ctx);
 	assert.equal(h.readState(0, "session").working.retained, "PRIVATE");
 	assert.equal(h.resolveSnapshot().config.mode, "active");
 });
 
-test("fenced Off reload does not read memory; explicit Passive acquires read-only current authority without clearing its fence", async (t) => {
+test("fenced Off reload does not read memory; explicit Passive accepts current authority and clears its resolved fence", async (t) => {
 	const { source, resumed: h, files } = await offBranch();
 	await source.commands.get("state-flow-active")!.handler("", source.ctx);
 	const lock = join(source.repositoryRoot, ".state-flow-publication.lock");
@@ -104,10 +105,13 @@ test("fenced Off reload does not read memory; explicit Passive acquires read-onl
 	assert.deepEqual(h.notifications, []);
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 	assert.equal(h.readState(0, "session").working.retained, "PRIVATE");
-	await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { working: { unsafe: true } } }, undefined, undefined, h.ctx), /Memory writes paused/);
-	assert.deepEqual(files(), before);
+	assert.equal(h.notifications.at(-1), "State Flow passive; memory writes resumed from current session memory.");
+	const semantic = (cohort: ReturnType<typeof files>) => cohort.filter(({ path }) => !/\/(?:config|runtime)\.json$/.test(path));
+	assert.deepEqual(semantic(files()), semantic(before), "acceptance never rewinds current semantics");
 	assert.equal(h.entries.at(-1)!.data.mode, "passive");
-	assert.ok(h.entries.at(-1)!.data.persistenceError);
+	assert.equal(typeof h.entries.at(-1)!.data.boundary, "string");
+	await h.tools.get("patch_state")!.execute("writable", { session: { working: { writable: true } } }, undefined, undefined, h.ctx);
+	assert.equal(h.readState(0, "session").working.writable, true);
 });
 
 for (const fenced of [false, true]) test(`Off defers fork acquisition across reload until explicit Passive (source fenced=${fenced})`, async (t) => {

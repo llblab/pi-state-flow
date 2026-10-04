@@ -1,5 +1,6 @@
 import { ownedTopLevelKeys } from "./ownership.js";
 import { conciseDiagnostic } from "./protocol.js";
+import { isActiveRestorationBlocked } from "./snapshot.js";
 import { overlayStates, projectSemanticState } from "./state.js";
 export const STATUS_KEY = "state-flow";
 export function formatScopeRevisionVector(revisions) {
@@ -9,7 +10,7 @@ export function compactStatus(snapshot, _revisions, colorize) {
     const { mode } = snapshot.config;
     if (mode === "off")
         return undefined;
-    return `${colorize("accent", "state-flow")} ${colorize("dim", mode)}`;
+    return `${colorize("accent", "state-flow")} ${colorize("dim", isActiveRestorationBlocked(snapshot) ? "active (blocked)" : mode)}`;
 }
 function countArtifacts(states, scope) {
     return Object.keys(states[scope].artifacts).length;
@@ -62,6 +63,8 @@ export function detailedStatus(snapshot, diagnostics) {
     const artifacts = (scope) => countArtifacts(diagnostics.scopeStates, scope);
     const hasArtifacts = available && ["global", "cwd", "session"].some((scope) => artifacts(scope) > 0);
     return [
+        `Mode: ${snapshot.config.mode}`,
+        ...(isActiveRestorationBlocked(snapshot) ? ["Inference blocked: Active memory restoration failed. Use /state-flow-active for current memory or select Passive/Off for native context."] : []),
         `Repository: ${diagnostics.repositoryRoot}`,
         `Scope keys: CWD ${diagnostics.cwdScopeKey}; session ${diagnostics.sessionScopeKey}`,
         ...temporalLines,

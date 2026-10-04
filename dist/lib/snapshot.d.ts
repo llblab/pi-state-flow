@@ -4,9 +4,6 @@ import { type TransitionBoundary } from "./temporal.ts";
 /** Missing operational capability is not evidence that a checkpoint target is invalid. */
 export declare class RevisionUnavailableError extends Error {
 }
-/** Expired history cannot be restored, but explicit activation may use validated current memory. */
-export declare class HistoryBoundaryExpiredError extends RevisionUnavailableError {
-}
 export type StateFlowMode = "active" | "passive" | "off";
 export type InactiveMode = Exclude<StateFlowMode, "active">;
 export declare function isStateFlowMode(value: unknown): value is StateFlowMode;
@@ -38,6 +35,8 @@ export interface StateFlowSnapshot {
     meta: SnapshotMeta;
 }
 export type Snapshot = StateFlowSnapshot;
+/** Failed Active selection retains its policy and fences inference until explicit recovery or an inactive choice. */
+export declare function isActiveRestorationBlocked(snapshot: Snapshot): boolean;
 export interface SessionRuntime {
     config: SnapshotConfig;
     meta: SnapshotMeta & {
@@ -85,5 +84,5 @@ export declare function retainedBoundaryCheckpoint(snapshot: Snapshot, boundary:
 export declare function preRuntimeCheckpoint(mode: StateFlowMode): PreRuntimeCheckpoint;
 /** Decode the retained-window checkpoint contract; legacy `enabled`/`{disabled:true}` markers map through `inactiveMode`. */
 export declare function parseRetainedPiCheckpoint(value: unknown, inactiveMode?: InactiveMode): RetainedPiCheckpoint;
-export declare function migrationFailure(data: JsonObject, error: string, mode?: InactiveMode): Snapshot;
+export declare function migrationFailure(data: JsonObject, error: string, mode?: StateFlowMode): Snapshot;
 export {};

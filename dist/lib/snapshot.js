@@ -8,9 +8,6 @@ const MAX_LEGACY_VALIDATION_ATTEMPT = 7;
 /** Missing operational capability is not evidence that a checkpoint target is invalid. */
 export class RevisionUnavailableError extends Error {
 }
-/** Expired history cannot be restored, but explicit activation may use validated current memory. */
-export class HistoryBoundaryExpiredError extends RevisionUnavailableError {
-}
 export function isStateFlowMode(value) {
     return value === "active" || value === "passive" || value === "off";
 }
@@ -25,6 +22,10 @@ export function readCheckpointMode(value, inactiveMode = "passive") {
     if (Object.hasOwn(value, "mode"))
         return Object.hasOwn(value, "enabled") || !isStateFlowMode(value.mode) ? undefined : value.mode;
     return typeof value.enabled === "boolean" ? value.enabled ? "active" : inactiveMode : undefined;
+}
+/** Failed Active selection retains its policy and fences inference until explicit recovery or an inactive choice. */
+export function isActiveRestorationBlocked(snapshot) {
+    return snapshot.config.mode === "active" && snapshot.meta.validation?.attempt === 0;
 }
 export function validateSessionRuntime(value, cwd, sessionId) {
     if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "config,meta"

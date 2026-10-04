@@ -201,16 +201,15 @@ The default store is `~/.pi/agent/state-flow/`, independent of registered source
 - Shutdown cancels owned pushes and waits for that repository's active push to close or time out.
 - Commit failures warn locally. Repeated push failures produce one concise warning until a push succeeds, with redacted Git detail kept in the local diagnostic log. Neither failure rejects or rolls back accepted memory.
 - Backup needs a Git commit identity; accepting and persisting state does not.
-- Git history can be inspected separately, but it is not the authority for `read_state` or for automatic restoration of expired semantic boundaries.
+- Git history can be inspected separately, but it is not the authority for `read_state` or for restoring memory.
 
 **Resume, tree navigation and forks:**
 
-- Memory-enabled resume and tree navigation restore the selected retained session boundary over the current shared global/CWD memory. Off defers this acquisition.
+- **State Flow does not depend on the Pi step.** Memory is the current JSON state of each scope and changes only through accepted `patch_state` calls and run lifecycle. Resume and tree navigation restore the branch's mode, never an older memory revision; Off defers acquisition. Past values stay readable through `read_state` offsets within retained history.
 - A new session gets its own session layer.
-- Supported native forks copy the selected session state into a new owner without changing the parent's private data.
-- Expired, incomplete or contradictory boundaries never silently substitute newer private state during restoration.
-- Explicit Start is a mode change, not historical restoration. It activates the validated **current** memory of that same session, including private state, even after expired active/passive, interrupted or pre-runtime selections. Available aligned history and revisions survive; unavailable history is not recreated.
-- Malformed storage, unsafe fork copying and concurrent writes remain fenced.
+- Supported native forks copy the parent's **current** session memory into a new owner without changing the parent's private data.
+- Explicit Active or Passive accepts the validated current memory of that same session; modes stay stable.
+- Missing, malformed or contradictory current files, unsafe fork copying and concurrent writes remain fenced and are never replaced by empty or foreign memory.
 
 See [fork support](docs/usage.md#fork-support-and-limits) and [storage recovery](docs/usage.md#storage-and-recovery).
 
@@ -221,9 +220,9 @@ See [fork support](docs/usage.md#fork-support-and-limits) and [storage recovery]
 
 How mode changes interact with storage:
 
-- Selecting Passive switches local policy/context immediately and awaits runtime-only persistence. Passive keeps independently owned restoration/fork work. If its persistence fails, local policy stays and publication is fenced until an accepted activation.
+- Selecting Passive switches local policy/context immediately and awaits runtime-only persistence. Passive keeps independently owned attachment/fork work. If its persistence fails, local policy stays and publication is fenced until a later accepted Active or Passive selection.
 - Off cancels owned memory waits and saves only native mode/continuation/fork bookkeeping, without validating or rewriting canonical storage. It also cancels restoration/fork work and defers later acquisition.
-- Explicit Off inspection may read current stored values through a disposable validated reader. It does not activate memory, install cache or change the selected historical/fork boundary. Missing private authority stays unavailable.
+- Explicit Off inspection may read current stored values through a disposable validated reader. It does not activate memory, install cache or change pending fork acquisition. Missing private authority stays unavailable.
 - Active waits for a coherent capture and acceptance; another mode or selection can withdraw its wait.
 
 State Flow accepts only the canonical store contract and provides no in-place format converter. Preserve existing data and check the [format boundary](docs/usage.md#moving-a-store-and-supported-formats) before changing versions or moving a store.

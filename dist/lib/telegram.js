@@ -22,7 +22,7 @@ export function stateFlowTelegramSectionSpecifiers(moduleUrl = import.meta.url) 
 }
 /** Main-menu section label shows only the current session mode. */
 export function formatStateFlowSectionLabel(snapshot) {
-    return `🌀 State Flow: ${snapshot.mode}`;
+    return `🌀 State Flow: ${snapshot.mode}${snapshot.mode === "active" && snapshot.inferenceBlocked ? " (blocked)" : ""}`;
 }
 export const STATE_FLOW_MODES = ["off", "passive", "active"];
 const STATE_FLOW_MODE_LABELS = { off: "Off", passive: "Passive", active: "Active" };
@@ -44,6 +44,10 @@ export function buildStateFlowSectionView(snapshot, callbackData) {
     return {
         text: [
             `<b>🌀 State Flow:</b> <code>${snapshot.mode}</code>`,
+            ...(snapshot.mode === "active" && snapshot.inferenceBlocked ? [
+                "",
+                "<b>Inference blocked:</b> Active memory restoration failed. Select Active to accept current session memory, or Passive/Off to permit native context.",
+            ] : []),
             "",
             "<b>Mode</b> — choose a workflow (switching modes never erases stored memory):",
             "",
