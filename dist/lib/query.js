@@ -1,6 +1,6 @@
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.js";
 import { isObject, sameJson } from "./json.js";
-import { emptyState, projectSemanticPatch, projectStateForModel } from "./state.js";
+import { emptyState, projectSemanticPatch, projectStateForRead } from "./state.js";
 import { readTemporalView } from "./temporal.js";
 const MAX_REFERENCE_SOURCES = 3;
 const MAX_REFERENCE_SCAN_NODES = 10_000;
@@ -32,7 +32,7 @@ export function readStatePath(view, path, historyLimit = DEFAULT_HISTORY_LIMIT) 
         const boundary = view.lineage[view.lineage.length - 1 - query.offset];
         if (!boundary)
             throw new Error("Requested history predates the proven temporal origin");
-        return { path, boundary: structuredClone(boundary), state: projectStateForModel(readTemporalView(view, query.offset, query.scope, historyLimit)) };
+        return { path, boundary: structuredClone(boundary), state: projectStateForRead(readTemporalView(view, query.offset, query.scope, historyLimit)) };
     }
     const record = view.scopes[query.scope].patches.at(-1 - query.offset);
     if (!record)
@@ -271,7 +271,7 @@ export function readProjectedState(view, paths, projection = "value", historyLim
                 throw new Error("Value and keys projections require a state path");
             const readsLazy = selectors[0]?.kind === "key" && selectors[0].key === "lazy";
             const raw = readTemporalView(view, query.offset, query.scope, historyLimit);
-            const state = readsLazy ? raw : projectStateForModel(raw);
+            const state = readsLazy ? raw : projectStateForRead(raw);
             const field = selectors.length === 1 && selectors[0]?.kind === "key" ? selectors[0].key : undefined;
             if (projection === "value" && field !== undefined && Object.hasOwn(emptyState(), field) && !Object.hasOwn(state, field))
                 return { value: null };

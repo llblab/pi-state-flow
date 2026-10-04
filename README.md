@@ -145,6 +145,7 @@ Registered Pi Skills may be compiled into source-addressed artifacts when durabl
 - Overlapping assignments follow successful acceptance order. Correct repeats succeed without new semantic revisions.
 - Session remains private.
 - Object patches merge recursively, and `null` deletes an object key instead of being stored.
+- Accepted supplied scopes recursively drop empty object fields and planes, including explicit `{}`; empty ancestors disappear. Array slots and empty arrays stay intact. Cleanup is scope-local and may reveal inherited values. Model context hides legacy empty branches, but reading never rewrites history. See [patch semantics](docs/architecture.md#model-tools).
 
 ```json
 {

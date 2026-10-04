@@ -1,6 +1,6 @@
 import { compileArtifact, ORDINARY_ARTIFACT_COMPILER, validateArtifactMetadata, validateArtifactRegistry, validateModelArtifactPatch, } from "./artifact.js";
 import { createAcceptedTransition } from "./history.js";
-import { applyPatch, containsNull, hashJson, isObject, validatePatch } from "./json.js";
+import { applyPatch, containsNull, hashJson, isObject, pruneEmptyObjects, validatePatch } from "./json.js";
 import { cascadeDeletionPatch, computeIntentCascade } from "./ownership.js";
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER } from "./skills.js";
 import { emptyState } from "./state.js";
@@ -137,27 +137,37 @@ function stageScopedSemanticTransition(currentStates, transition, successfulSkil
     const nextStates = { ...currentStates };
     const provenanceUpdates = { global: {}, cwd: {}, session: {} };
     const cascades = { global: [], cwd: [], session: [] };
+    const missingDeletions = [];
     for (const scope of SCOPES) {
         const authored = patches.get(scope) ?? {};
         const patch = { ...authored, ...(scope === "session" && acceptedResponse !== undefined ? { response: acceptedResponse } : {}) };
-        let materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch);
+        const scopedMissing = [];
+        const normalize = patches.has(scope) || scope === "session" && acceptedResponse !== undefined;
+        const applied = applyPatch(currentStates[scope], patch, scopedMissing);
+        const patched = normalize ? pruneEmptyObjects(applied) : applied;
+        missingDeletions.push(...scopedMissing.map(({ path, unavailablePath }) => ({
+            path: `/${scope}${path}`, unavailablePath: `/${scope}${unavailablePath}`,
+        })));
+        let materialized = { ...emptyState(), ...patched };
         // Authored operations first, then the same-scope intent ownership cascade.
         const cascade = cascades[scope] = computeIntentCascade(scope, currentStates[scope], materialized);
         if (cascade.length > 0)
             materialized = applyPatch(materialized, cascadeDeletionPatch(cascade));
         compileReadArtifacts(materialized, { artifacts: authored.artifacts ?? {} }, artifactReads.filter((read) => (read.scope ?? "global") === scope), provenanceUpdates[scope]);
         compileReadSkills(scope, materialized, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
-        validateMaterializedTransition(materialized, scope);
         const nextState = materialized;
         for (const key of Object.keys(emptyState())) {
-            if (!Object.hasOwn(currentStates[scope], key) && !Object.hasOwn(patch, key)
+            if (!Object.hasOwn(patched, key)
                 && !(key === "artifacts" && Object.keys(provenanceUpdates[scope]).length > 0))
                 delete nextState[key];
         }
-        nextStates[scope] = nextState;
+        const normalized = normalize ? pruneEmptyObjects(nextState) : nextState;
+        validateMaterializedTransition({ ...emptyState(), ...normalized }, scope);
+        nextStates[scope] = normalized;
     }
     return {
         nextStates,
+        missingDeletions,
         cascades,
         provenanceUpdates,
         stateHashes: {

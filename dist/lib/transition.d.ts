@@ -1,12 +1,15 @@
 import { type ArtifactProvenance } from "./artifact.ts";
 import type { SuccessfulArtifactRead } from "./acquisition.ts";
 import { type AcceptedTransition } from "./history.ts";
+import { type MissingDeletion } from "./json.ts";
 import { type OwnedPath } from "./ownership.ts";
 import { type SuccessfulSkillRead } from "./skills.ts";
 import type { Snapshot } from "./snapshot.ts";
 import type { AtomicScopePatches, ScopedSemanticStates, StateScope, TerminalTransition } from "./state.ts";
 export interface StagedScopedTransition {
     nextStates: ScopedSemanticStates;
+    /** Authored no-op deletions; presentation evidence only, never replay input. */
+    missingDeletions: MissingDeletion[];
     /** Scope-local targets removed by the staged intent cascade, not replay input. */
     cascades: Record<StateScope, OwnedPath[]>;
     stateHashes: Record<StateScope, string>;

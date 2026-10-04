@@ -4,7 +4,7 @@ import { commitScopedTransition, stageAtomicScopePatches, stageScopedTransition 
 import type { AcceptedTransition } from "../lib/history.ts";
 import { ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
-import { advanceTemporalState, createTemporalState, readTemporalState } from "../lib/temporal.ts";
+import { advanceTemporalState, createTemporalState, readTemporalScopes, readTemporalState } from "../lib/temporal.ts";
 import { parseScopeStream, serializeScopeMetadata, serializeScopeStream } from "../lib/durable.ts";
 import { emptyState, type AtomicScopePatches, type ScopedSemanticStates, type ScopedStates } from "../lib/state.ts";
 import { loadCwdState, loadGlobalState, loadSessionMaterialization, loadSessionState } from "./temporal-fixture.ts";
@@ -20,6 +20,63 @@ function snapshot() {
 	result.meta.bootstrap = true;
 	return result;
 }
+
+test("accepted patches prune empty objects scope-locally and replay exact history", () => {
+	for (const owner of ["global", "cwd", "session"] as const) {
+		const current: ScopedSemanticStates = {
+			global: { working: { fallback: "global", legacy: {} } },
+			cwd: { working: { fallback: "cwd", legacy: {} } },
+			session: { working: { fallback: "session", legacy: {} } },
+		};
+		current[owner] = {
+			intents: { task: { $ref: `${owner}.lazy.chain.leaf` } },
+			working: { fallback: { last: 1 }, scalar: 1, array: [1], items: [{ last: 1 }, { keep: true }] },
+			artifacts: { "/last.txt": { description: "Last" } },
+			lazy: { chain: { leaf: "owned" } },
+		};
+		const before = structuredClone(current);
+		const temporal = createTemporalState(current, "origin");
+		const stage = stageAtomicScopePatches(current, { [owner]: {
+			intents: { task: null }, artifacts: { "/last.txt": null }, contract: {},
+			working: {
+				fallback: { last: null }, scalar: { missing: null }, array: { missing: null },
+				items: { "[0]": { last: null } }, explicit: {}, nested: { empty: {} },
+				whole: [{ empty: {} }, {}, []],
+				...JSON.parse('{"__proto__":{"child":null}}'),
+			},
+		} }, [], "origin");
+		assert.deepEqual(stage.nextStates[owner], { working: { items: [{}, { keep: true }], whole: [{}, {}, []] } });
+		for (const other of ["global", "cwd", "session"] as const) if (other !== owner) assert.deepEqual(stage.nextStates[other], before[other]);
+		assert.deepEqual(current, before);
+		let accepted: AcceptedTransition | undefined;
+		const snap = snapshot();
+		commitScopedTransition(snap, current, stage, (cohort) => { accepted = cohort; }, "origin", { finalizeRun: false });
+		assert.equal(snap.meta.step, 1);
+		assert.deepEqual(accepted!.transitions.map(({ scope }) => scope), [owner]);
+		assert.deepEqual(applyPatch(before[owner], accepted!.transitions[0]!.patch as JsonObject), current[owner]);
+		const next = advanceTemporalState(temporal, accepted!.transitions, accepted!.id);
+		assert.deepEqual(readTemporalScopes(next)[owner], current[owner]);
+		assert.deepEqual(readTemporalScopes(next, 1), before);
+		const repeat = stageAtomicScopePatches(current, { [owner]: { working: { explicit: {}, scalar: { missing: null } } } }, [], accepted!.id);
+		commitScopedTransition(snap, current, repeat, (cohort) => assert.equal(cohort, undefined), accepted!.id, { finalizeRun: false });
+		assert.equal(snap.meta.step, 1);
+	}
+});
+
+test("normalization can close an emptied intent and preserves lower-scope fallback", () => {
+	const current: ScopedSemanticStates = {
+		global: { working: { draft: "fallback" } }, cwd: {},
+		session: { intents: { task: { $ref: "session.working.draft" } }, working: { draft: "private" } },
+	};
+	const stage = stageAtomicScopePatches(current, { session: { intents: { task: { $ref: null } } } }, [], "origin");
+	assert.deepEqual(stage.nextStates.session, {});
+	assert.deepEqual(stage.cascades.session, [{ plane: "working", keys: ["draft"] }]);
+	assert.equal(readTemporalState(createTemporalState(stage.nextStates, "next")).working.draft, "fallback");
+	const empty: ScopedSemanticStates = { global: {}, cwd: {}, session: {} };
+	const noOp = stageAtomicScopePatches(empty, { session: { working: {}, lazy: { empty: {} } } }, [], "origin");
+	commitScopedTransition(snapshot(), empty, noOp, (cohort) => assert.equal(cohort, undefined), "origin", { finalizeRun: false });
+	assert.deepEqual(empty, { global: {}, cwd: {}, session: {} });
+});
 
 test("stages every canonical scope combination as one atomic transition", () => {
 	const combinations = [
@@ -49,6 +106,50 @@ test("stages every canonical scope combination as one atomic transition", () => 
 		assert.ok(accepted!.id.length > 0);
 		for (const scope of scopes) assert.equal(state[scope].working[scope], true);
 	}
+});
+
+test("missing nested deletions are no-ops across scopes, including absent semantic planes", () => {
+	for (const populated of [false, true]) {
+		const scopeState: ScopedSemanticStates["session"] = populated ? { working: { keep: true }, lazy: { keep: true }, intents: { keep: true }, contract: { keep: true }, artifacts: { "/kept.txt": { description: "Keep" } } } : {};
+		const state: ScopedSemanticStates = { global: structuredClone(scopeState), cwd: structuredClone(scopeState), session: structuredClone(scopeState) };
+		const before = structuredClone(state);
+		const patches: AtomicScopePatches = {};
+		for (const scope of ["global", "cwd", "session"] as const) patches[scope] = {
+			working: { missing: { child: null, nested: { leaf: null } } },
+			lazy: { missing: { child: null } },
+			intents: { missing: { child: null } },
+			contract: { missing: { child: null } },
+			artifacts: { "/missing.txt": { description: null } },
+		};
+		const current = snapshot();
+		const stage = stageAtomicScopePatches(state, patches, [], "origin");
+		assert.deepEqual(stage.nextStates, before);
+		let publications = 0;
+		commitScopedTransition(current, state, stage, (cohort) => { if (cohort) publications++; }, "origin", { finalizeRun: false });
+		assert.equal(publications, 0);
+		assert.equal(current.meta.step, 0);
+		assert.deepEqual(state, before);
+	}
+});
+
+test("missing deletions do not block another scope's writes and accepted patches replay exactly", () => {
+	const state: ScopedSemanticStates = { global: {}, cwd: {}, session: {} };
+	const before = structuredClone(state);
+	const stage = stageAtomicScopePatches(state, {
+		global: { working: { missing: { child: null } } },
+		cwd: { working: { added: { discarded: null, value: 0 } } },
+		session: { lazy: { missing: { nested: { leaf: null } } } },
+	}, [], "origin");
+	let accepted: AcceptedTransition | undefined;
+	commitScopedTransition(snapshot(), state, stage, (cohort) => { accepted = cohort; }, "origin", { finalizeRun: false });
+	assert.deepEqual(stage.missingDeletions, [
+		{ path: "/global/working/missing/child", unavailablePath: "/global/working" },
+		{ path: "/cwd/working/added/discarded", unavailablePath: "/cwd/working" },
+		{ path: "/session/lazy/missing/nested/leaf", unavailablePath: "/session/lazy" },
+	]);
+	assert.deepEqual(accepted!.transitions, [{ scope: "cwd", patch: { working: { added: { value: 0 } } } }]);
+	assert.deepEqual(state, { global: {}, cwd: { working: { added: { value: 0 } } }, session: {} });
+	assert.deepEqual(applyPatch(before.cwd, accepted!.transitions[0]!.patch as JsonObject), state.cwd);
 });
 
 for (const owner of ["global", "cwd", "session"] as const) test(`ordinary artifact compilation is bound to its observed ${owner} owner`, () => {
@@ -92,7 +193,7 @@ test("stages intent lifecycle updates as ordinary atomic semantic transitions", 
 	const fulfilled = stageAtomicScopePatches(selected.nextStates, {
 		cwd: { intents: { release: null }, working: { release: "validated" } },
 	}, [], "origin");
-	assert.equal(Object.hasOwn(fulfilled.nextStates.cwd.intents!, "release"), false);
+	assert.equal(fulfilled.nextStates.cwd.intents, undefined);
 	assert.equal(fulfilled.nextStates.cwd.working!.release, "validated");
 	assert.throws(() => stageAtomicScopePatches(state, {
 		cwd: { intents: "invalid" as unknown as JsonObject },
@@ -104,7 +205,7 @@ test("model-facing intent behavior distinguishes possibilities, commitments, han
 	state = stageAtomicScopePatches(state, {
 		cwd: { working: { possibleAction: "Benchmark later" }, lazy: { plan: { steps: ["validate", "publish"] } } },
 	}, [], "origin").nextStates;
-	assert.equal(Object.hasOwn(state.cwd.intents!, "possibleAction"), false);
+	assert.equal(state.cwd.intents, undefined);
 
 	state = stageAtomicScopePatches(state, {
 		cwd: { intents: { release: { action: "Validate", plan: { $ref: "cwd.lazy.plan" } } } },
@@ -123,10 +224,10 @@ test("model-facing intent behavior distinguishes possibilities, commitments, han
 	state = stageAtomicScopePatches(state, {
 		cwd: { intents: { release: null }, working: { release: "published" } },
 	}, [], "origin").nextStates;
-	assert.equal(Object.hasOwn(state.cwd.intents!, "release"), false);
+	assert.equal(state.cwd.intents, undefined);
 	assert.equal(state.cwd.working!.release, "published");
 	// Fulfilling the intent deletes the lazy plan it owned by structured reference.
-	assert.deepEqual(state.cwd.lazy, {});
+	assert.equal(state.cwd.lazy, undefined);
 });
 
 test("deleting an intent cascades its same-scope owned working/lazy keys after authored operations", () => {
@@ -165,7 +266,7 @@ test("deleting an intent cascades its same-scope owned working/lazy keys after a
 		assert.equal(current.meta.step, 1);
 		// The cascade is stored as explicit deletions in the one accepted record.
 		assert.deepEqual(accepted!.transitions, [{ scope, patch: {
-			intents: { task: null }, working: { step: null, notes: { a: null } }, lazy: { plan: null },
+			intents: null, working: { step: null, notes: { a: null } }, lazy: { plan: null },
 		} }]);
 		assert.deepEqual(applyPatch(before[scope], accepted!.transitions[0]!.patch as JsonObject), state[scope]);
 	}
@@ -184,11 +285,11 @@ test("writes into owned targets in the same patch that deletes their intent are 
 		lazy: { plan: ["b"] },
 	} }, [], "origin");
 	assert.deepEqual(stage.nextStates.session.working, { kept: "unowned" }, "updates, nested additions and newly created owned keys are all removed");
-	assert.deepEqual(stage.nextStates.session.lazy, {});
+	assert.equal(stage.nextStates.session.lazy, undefined);
 	let accepted: AcceptedTransition | undefined;
 	commitScopedTransition(snapshot(), state, stage, (cohort) => { accepted = cohort; }, "origin", { finalizeRun: false });
 	assert.deepEqual(accepted!.transitions, [{ scope: "session", patch: {
-		intents: { task: null }, working: { draft: null, kept: "unowned" }, lazy: { plan: null },
+		intents: null, working: { draft: null, kept: "unowned" }, lazy: null,
 	} }], "the record stores the net result, not the discarded writes");
 	assert.deepEqual(applyPatch(before.session, accepted!.transitions[0]!.patch as JsonObject), state.session);
 });
@@ -314,7 +415,7 @@ test("publishes one exact multi-scope replay cohort without explanatory windows 
 	assert.deepEqual(accepted!.transitions.map(({ scope }) => scope), ["global", "cwd", "session"]);
 	const next = advanceTemporalState(view, accepted!.transitions, accepted!.id);
 	for (const scope of ["global", "cwd", "session"] as const) {
-		assert.deepEqual(readTemporalState(next, 0, scope), state[scope]);
+		assert.deepEqual(readTemporalScopes(next)[scope], state[scope]);
 		assert.equal(next.scopes[scope].patches[0]!.transition.id, accepted!.id);
 	}
 	assert.equal(current.meta.step, 1);
@@ -352,7 +453,7 @@ test("normalizes artifact replacements and runtime compilation evidence after fi
 		const bytes = serializeScopeStream(accepted.scopes[scope], scope, identity);
 		accepted.scopes[scope] = parseScopeStream(bytes.checkpoint, bytes.patches, scope, identity,
 			serializeScopeMetadata({}, accepted.scopes[scope], scope, identity))!;
-		assert.deepEqual(readTemporalState(accepted, 0, scope), state[scope]);
+		assert.deepEqual(readTemporalScopes(accepted)[scope], state[scope]);
 		assert.deepEqual(readTemporalState(accepted, 1, scope), before[scope]);
 		assert.equal(accepted.scopes[scope].patches[0]!.transition.id, cohort!.id);
 	}
@@ -366,7 +467,7 @@ test("finalized response controls no-op identity and step independently of lifec
 	const current = snapshot();
 	current.meta.step = Number.MAX_SAFE_INTEGER;
 	const state = states();
-	state.session.response = "Same";
+	state.session = { response: "Same" } as typeof state.session;
 	const stage = stageScopedTransition(state, { transitions: [], response: "Draft" }, [], "origin");
 	stage.nextStates.session.response = "Same";
 	commitScopedTransition(current, state, stage, (accepted) => assert.equal(accepted, undefined), "origin");
@@ -385,7 +486,7 @@ test("finalized response controls no-op identity and step independently of lifec
 test("an empty accepted response remains a session-owned semantic transition", () => {
 	const current = snapshot();
 	const state = states();
-	state.session.response = "Previous answer";
+	state.session = { response: "Previous answer" } as typeof state.session;
 	const stage = stageScopedTransition(state, { transitions: [], response: "" }, [], "origin");
 	commitScopedTransition(current, state, stage, (accepted) => assert.deepEqual(accepted!.transitions, [
 		{ scope: "session", patch: { response: "" } },
@@ -552,7 +653,7 @@ test("legacy provenance remains readable while semantic edits, nested metadata, 
 		assert.deepEqual(edited.nextStates[scope].artifacts!["/legacy.md"], { ...legacy, ...semantic });
 		assert.deepEqual(edited.provenanceUpdates, { global: {}, cwd: {}, session: {} });
 		const deleted = stageAtomicScopePatches(state, { [scope]: { artifacts: { "/legacy.md": null } } }, [], "origin");
-		assert.equal(deleted.nextStates[scope].artifacts!["/legacy.md"], undefined);
+		assert.equal(deleted.nextStates[scope].artifacts?.["/legacy.md"], undefined);
 		assert.deepEqual(state[scope].artifacts["/legacy.md"], legacy);
 	}
 });

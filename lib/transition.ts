@@ -9,7 +9,7 @@ import {
 } from "./artifact.ts";
 import type { SuccessfulArtifactRead } from "./acquisition.ts";
 import { createAcceptedTransition, type AcceptedTransition } from "./history.ts";
-import { applyPatch, containsNull, hashJson, isObject, validatePatch, type JsonObject } from "./json.ts";
+import { applyPatch, containsNull, hashJson, isObject, pruneEmptyObjects, validatePatch, type JsonObject, type MissingDeletion } from "./json.ts";
 import { cascadeDeletionPatch, computeIntentCascade, type OwnedPath } from "./ownership.ts";
 import { hasCompiledSkillArtifact, SKILL_ARTIFACT_COMPILER, type SuccessfulSkillRead } from "./skills.ts";
 import type { Snapshot } from "./snapshot.ts";
@@ -29,6 +29,8 @@ import type {
 
 export interface StagedScopedTransition {
 	nextStates: ScopedSemanticStates;
+	/** Authored no-op deletions; presentation evidence only, never replay input. */
+	missingDeletions: MissingDeletion[];
 	/** Scope-local targets removed by the staged intent cascade, not replay input. */
 	cascades: Record<StateScope, OwnedPath[]>;
 	stateHashes: Record<StateScope, string>;
@@ -189,10 +191,18 @@ function stageScopedSemanticTransition(
 	const nextStates = { ...currentStates };
 	const provenanceUpdates: Record<StateScope, Record<string, ArtifactProvenance>> = { global: {}, cwd: {}, session: {} };
 	const cascades: Record<StateScope, OwnedPath[]> = { global: [], cwd: [], session: [] };
+	const missingDeletions: MissingDeletion[] = [];
 	for (const scope of SCOPES) {
 		const authored = patches.get(scope) ?? {};
 		const patch = { ...authored, ...(scope === "session" && acceptedResponse !== undefined ? { response: acceptedResponse } : {}) };
-		let materialized = applyPatch({ ...emptyState(), ...currentStates[scope] }, patch) as StateDocument;
+		const scopedMissing: MissingDeletion[] = [];
+		const normalize = patches.has(scope) || scope === "session" && acceptedResponse !== undefined;
+		const applied = applyPatch(currentStates[scope], patch, scopedMissing);
+		const patched = normalize ? pruneEmptyObjects(applied) : applied;
+		missingDeletions.push(...scopedMissing.map(({ path, unavailablePath }) => ({
+			path: `/${scope}${path}`, unavailablePath: `/${scope}${unavailablePath}`,
+		})));
+		let materialized = { ...emptyState(), ...patched } as StateDocument;
 		// Authored operations first, then the same-scope intent ownership cascade.
 		const cascade = cascades[scope] = computeIntentCascade(scope, currentStates[scope], materialized);
 		if (cascade.length > 0) materialized = applyPatch(materialized, cascadeDeletionPatch(cascade)) as StateDocument;
@@ -203,16 +213,18 @@ function stageScopedSemanticTransition(
 			provenanceUpdates[scope],
 		);
 		compileReadSkills(scope, materialized, { artifacts: authored.artifacts ?? {} }, skillReads.filter((read) => read.scope === scope), provenanceUpdates[scope]);
-		validateMaterializedTransition(materialized, scope);
 		const nextState: SemanticState = materialized;
 		for (const key of Object.keys(emptyState())) {
-			if (!Object.hasOwn(currentStates[scope], key) && !Object.hasOwn(patch, key)
+			if (!Object.hasOwn(patched, key)
 				&& !(key === "artifacts" && Object.keys(provenanceUpdates[scope]).length > 0)) delete nextState[key];
 		}
-		nextStates[scope] = nextState;
+		const normalized = normalize ? pruneEmptyObjects(nextState) : nextState;
+		validateMaterializedTransition({ ...emptyState(), ...normalized }, scope);
+		nextStates[scope] = normalized;
 	}
 	return {
 		nextStates,
+		missingDeletions,
 		cascades,
 		provenanceUpdates,
 		stateHashes: {

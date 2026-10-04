@@ -6,7 +6,7 @@ import {
 	type ArtifactModelHints,
 	type ArtifactRegistry,
 } from "./artifact.ts";
-import { applyPatch, isObject, type JsonObject } from "./json.ts";
+import { applyPatch, isObject, pruneEmptyObjects, type JsonObject } from "./json.ts";
 
 /** Runtime defaults for documented semantic planes; stored objects may omit them or retain other fields. */
 export type MaterializedState = JsonObject & {
@@ -148,10 +148,15 @@ export function projectSemanticPatch(patch: JsonObject): JsonObject {
 	return projected;
 }
 
-/** Model-visible projection: lazy bodies and runtime artifact bookkeeping stay out of ordinary context. */
-export function projectStateForModel(state: SemanticState, artifactHints: ArtifactModelHints = {}): SemanticState {
+/** Explicit hot reads filter hidden bodies/bookkeeping without normalizing legacy semantic data. */
+export function projectStateForRead(state: SemanticState, artifactHints: ArtifactModelHints = {}): SemanticState {
 	const { lazy: _hidden, ...visible } = state;
 	const projected = projectSemanticState(visible);
 	if (projected.artifacts) projected.artifacts = projectArtifactsForModel(projected.artifacts, artifactHints);
 	return projected;
+}
+
+/** Ordinary model context omits empty object fields; exact reads and replay remain observational. */
+export function projectStateForModel(state: SemanticState, artifactHints: ArtifactModelHints = {}): SemanticState {
+	return pruneEmptyObjects(projectStateForRead(state, artifactHints));
 }

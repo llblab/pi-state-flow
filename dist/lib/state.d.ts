@@ -83,5 +83,7 @@ export declare function selectSemanticFields(value: JsonObject): JsonObject;
 export declare function projectSemanticState(state: JsonObject): SemanticState;
 /** Preserve deletion meaning in visible history without exposing ignored fields or empty responses. */
 export declare function projectSemanticPatch(patch: JsonObject): JsonObject;
-/** Model-visible projection: lazy bodies and runtime artifact bookkeeping stay out of ordinary context. */
+/** Explicit hot reads filter hidden bodies/bookkeeping without normalizing legacy semantic data. */
+export declare function projectStateForRead(state: SemanticState, artifactHints?: ArtifactModelHints): SemanticState;
+/** Ordinary model context omits empty object fields; exact reads and replay remain observational. */
 export declare function projectStateForModel(state: SemanticState, artifactHints?: ArtifactModelHints): SemanticState;

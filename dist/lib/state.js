@@ -1,5 +1,5 @@
 import { isArtifactRegistry, projectArtifactsForModel, updateArtifactRegistry, } from "./artifact.js";
-import { applyPatch, isObject } from "./json.js";
+import { applyPatch, isObject, pruneEmptyObjects } from "./json.js";
 export function emptyState() {
     return { intents: {}, contract: {}, working: {}, artifacts: {}, response: "", lazy: {} };
 }
@@ -50,11 +50,15 @@ export function projectSemanticPatch(patch) {
         projected.response = null;
     return projected;
 }
-/** Model-visible projection: lazy bodies and runtime artifact bookkeeping stay out of ordinary context. */
-export function projectStateForModel(state, artifactHints = {}) {
+/** Explicit hot reads filter hidden bodies/bookkeeping without normalizing legacy semantic data. */
+export function projectStateForRead(state, artifactHints = {}) {
     const { lazy: _hidden, ...visible } = state;
     const projected = projectSemanticState(visible);
     if (projected.artifacts)
         projected.artifacts = projectArtifactsForModel(projected.artifacts, artifactHints);
     return projected;
+}
+/** Ordinary model context omits empty object fields; exact reads and replay remain observational. */
+export function projectStateForModel(state, artifactHints = {}) {
+    return pruneEmptyObjects(projectStateForRead(state, artifactHints));
 }

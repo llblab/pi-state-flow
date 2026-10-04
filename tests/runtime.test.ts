@@ -136,7 +136,7 @@ test("current-head patch preparation never publishes empty initialization or ins
 	const snapshot = emptySnapshot();
 	const files = () => captureTemporalFileBases(cwd, "owner", root);
 	const empty = files();
-	await assert.rejects(patchCurrent(runtime, snapshot, { global: { working: { tentative: true } }, session: { artifacts: { invalid: {} } } }), /non-empty description/);
+	await assert.rejects(patchCurrent(runtime, snapshot, { global: { working: { tentative: true } }, session: { artifacts: { invalid: { kind: "document" } } } }), /non-empty description/);
 	assert.deepEqual(files(), empty);
 	assert.equal(runtime.view, undefined);
 	assert.deepEqual(snapshot, emptySnapshot());

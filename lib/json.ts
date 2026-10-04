@@ -3,6 +3,12 @@ import { createHash } from "node:crypto";
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export interface JsonObject { [key: string]: JsonValue }
 
+export interface MissingDeletion {
+	/** JSON Pointer paths relative to the patched object. */
+	path: string;
+	unavailablePath: string;
+}
+
 const ARRAY_INDEX_SELECTOR = /^\[(0|[1-9]\d*)\]$/;
 
 function isIndexedArrayPatch(value: JsonObject): boolean {
@@ -10,17 +16,22 @@ function isIndexedArrayPatch(value: JsonObject): boolean {
 	return keys.length > 0 && keys.every((key) => ARRAY_INDEX_SELECTOR.test(key));
 }
 
-function applyOwnedValue(current: JsonValue | undefined, value: JsonValue, owned: boolean): JsonValue {
+function applyOwnedValue(
+	current: JsonValue | undefined, value: JsonValue, owned: boolean,
+	missingDeletions: MissingDeletion[] | undefined, path: string, unavailablePath?: string,
+): JsonValue {
 	// Preserve inherited-object merge semantics without borrowing prototype objects.
 	if (!owned && current !== null && typeof current === "object") current = structuredClone(current);
 	return Array.isArray(current) && isObject(value) && isIndexedArrayPatch(value)
-		? applyOwnedArrayPatch(current, value)
-		: isObject(current) && isObject(value)
-			? applyOwnedPatch(current, value)
+		? applyOwnedArrayPatch(current, value, missingDeletions, path, unavailablePath)
+		: isObject(value)
+			? applyOwnedPatch(isObject(current) ? current : {}, value, missingDeletions, path, unavailablePath ?? (!isObject(current) ? path : undefined))
 			: structuredClone(value);
 }
 
-function applyOwnedArrayPatch(state: JsonValue[], patch: JsonObject): JsonValue[] {
+function applyOwnedArrayPatch(
+	state: JsonValue[], patch: JsonObject, missingDeletions: MissingDeletion[] | undefined, path: string, unavailablePath?: string,
+): JsonValue[] {
 	let next = state;
 	for (const [selector, value] of Object.entries(patch)) {
 		const index = Number(ARRAY_INDEX_SELECTOR.exec(selector)![1]);
@@ -30,7 +41,7 @@ function applyOwnedArrayPatch(state: JsonValue[], patch: JsonObject): JsonValue[
 		if (value === null) throw new Error(`State patch array index ${selector} cannot be deleted; replace the whole array instead`);
 		const owns = Object.hasOwn(next, index);
 		const current = next[index];
-		const materialized = applyOwnedValue(current, value, owns);
+		const materialized = applyOwnedValue(current, value, owns, missingDeletions, `${path}/${index}`, unavailablePath);
 		if (owns && Object.is(current, materialized)) continue;
 		if (next === state) next = state.slice();
 		next[index] = materialized;
@@ -38,18 +49,27 @@ function applyOwnedArrayPatch(state: JsonValue[], patch: JsonObject): JsonValue[
 	return next;
 }
 
-function applyOwnedPatch(state: JsonObject, patch: JsonObject): JsonObject {
+function applyOwnedPatch(
+	state: JsonObject, patch: JsonObject, missingDeletions?: MissingDeletion[], path = "", unavailablePath?: string,
+): JsonObject {
 	let next = state;
 	for (const [key, value] of Object.entries(patch)) {
 		const owns = Object.hasOwn(next, key);
+		const target = missingDeletions ? `${path}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}` : "";
 		if (value === null) {
-			if (!owns) continue;
+			if (!owns) {
+				missingDeletions?.push({ path: target, unavailablePath: unavailablePath ?? target });
+				continue;
+			}
 			if (next === state) next = { ...state };
 			delete next[key];
 			continue;
 		}
 		const current = next[key];
-		const materialized = applyOwnedValue(current, value, owns);
+		const materialized = applyOwnedValue(current, value, owns, missingDeletions, target, unavailablePath ?? (!owns ? target : undefined));
+		// Deletion-only patches must not fabricate absent ancestor objects; explicit {} still writes.
+		if (!owns && current === undefined && isObject(value) && Object.keys(value).length > 0
+			&& isObject(materialized) && Object.keys(materialized).length === 0) continue;
 		if (owns && Object.is(current, materialized)) continue;
 		if (next === state) next = { ...state };
 		Object.defineProperty(next, key, { value: materialized, enumerable: true, configurable: true, writable: true });
@@ -57,9 +77,39 @@ function applyOwnedPatch(state: JsonObject, patch: JsonObject): JsonObject {
 	return next;
 }
 
+/** Remove empty object fields without removing array slots or mutating the input. */
+export function pruneEmptyObjects(value: JsonObject): JsonObject;
+export function pruneEmptyObjects(value: JsonValue): JsonValue;
+export function pruneEmptyObjects(value: JsonValue): JsonValue {
+	if (Array.isArray(value)) {
+		let next = value;
+		for (let index = 0; index < value.length; index++) {
+			const pruned = pruneEmptyObjects(value[index]!);
+			if (pruned === value[index]) continue;
+			if (next === value) next = value.slice();
+			next[index] = pruned;
+		}
+		return next;
+	}
+	if (!isObject(value)) return value;
+	let next = value as JsonObject;
+	for (const [key, child] of Object.entries(value)) {
+		const pruned = pruneEmptyObjects(child);
+		const empty = isObject(pruned) && Object.keys(pruned).length === 0;
+		if (!empty && pruned === child) continue;
+		if (next === value) next = { ...value };
+		if (empty) delete next[key];
+		else Object.defineProperty(next, key, { value: pruned, enumerable: true, configurable: true, writable: true });
+	}
+	return next;
+}
+
 /** Detach at the mutable public boundary; share untouched paths only inside the owned draft. */
-export function applyPatch(state: JsonObject, patch: JsonObject): JsonObject {
-	return applyOwnedPatch(structuredClone(state), patch);
+export function applyPatch(state: JsonObject, patch: JsonObject, missingDeletions?: MissingDeletion[]): JsonObject {
+	const collected = missingDeletions ? [] as MissingDeletion[] : undefined;
+	const next = applyOwnedPatch(structuredClone(state), patch, collected);
+	if (collected) missingDeletions!.push(...collected);
+	return next;
 }
 
 export function isObject(value: JsonValue | unknown): value is JsonObject {

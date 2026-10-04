@@ -1,13 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { findStateReferenceSources, parseStateReadPath, readProjectedState, readStatePath, type StateReadResult } from "../lib/query.ts";
-import { emptyState } from "../lib/state.ts";
+import { emptyState, type SemanticState } from "../lib/state.ts";
 import { advanceTemporalState, createTemporalState } from "../lib/temporal.ts";
 
 function state(result: StateReadResult) {
 	if (!("state" in result)) assert.fail("Expected a state result");
 	return result.state;
 }
+
+test("explicit current and historical hot reads preserve legacy empty objects", () => {
+	const legacy: SemanticState = { working: { chain: { empty: {} }, items: [{ empty: {} }, {}] }, intents: {}, lazy: { empty: {} } };
+	let view = createTemporalState({ global: legacy, cwd: {}, session: {} }, "origin");
+	view = advanceTemporalState(view, [{ scope: "session", patch: { working: { next: true } } }], "next");
+	const before = structuredClone(view);
+	assert.deepEqual(readProjectedState(view, ["global.working.chain"]), { value: { empty: {} } });
+	assert.deepEqual(readProjectedState(view, ["global[1].working.chain"]), { value: { empty: {} } });
+	assert.deepEqual(readProjectedState(view, ["global[1].working.items"]), { value: [{ empty: {} }, {}] });
+	assert.deepEqual(readProjectedState(view, ["global[1].intents"]), { value: {} });
+	assert.deepEqual(readProjectedState(view, ["global[1].lazy.empty"]), { value: {} });
+	assert.deepEqual(view, before);
+});
 
 test("optimistic views omit absent and unknown planes across scopes and history, with null for absent value reads", () => {
 	let view = createTemporalState({ global: { extra: { ignored: null } }, cwd: {}, session: { response: "" } }, "empty");

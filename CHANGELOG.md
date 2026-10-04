@@ -2,6 +2,13 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## Unreleased
+
+## 0.25.4: Empty-Object Cleanup and Deletion Hints
+
+- `Safe missing deletions`: Deletion-only patches through absent ancestors succeed without creating data or blocking other writes. Missing authored targets report their owner-scoped JSON Pointer and first unavailable component; hints remain outside state/history and create no revisions. Mixed new objects process `null` as deletion markers. Stored null and array-index deletion remain rejected; ordinary repeats and intent cascades stay quiet.
+- `Recursive empty-object cleanup`: Accepted supplied scopes and response-owned Session omit empty object fields/planes, before ownership and after cascades/compilation. Explicit `{}` carries no retained value; roots, array slots and empty arrays survive. Model context hides legacy empty branches; untouched scopes and exact historical reads/replay remain unchanged. Cleanup can reveal inherited values and is recorded once as ordinary deletions.
+
 ## 0.25.3: Readable Telegram Inspection
 
 - `Readable inspection`: Telegram memory inspection shows large fields as direct pretty-printed JSON prefixes instead of JSON-encoded `preview` strings with escaped layout and quotes. A separate notice reports omitted characters. Transport-aware budgeting preserves the Rich message ceiling and Unicode boundaries; genuine JSON string escapes, stored state and exact `read_state` results remain unchanged.

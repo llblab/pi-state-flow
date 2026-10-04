@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyPatch, canonicalJson, validatePatch } from "../index.ts";
-import { presentationJson, sameJson } from "../lib/json.ts";
+import { presentationJson, pruneEmptyObjects, sameJson, type MissingDeletion } from "../lib/json.ts";
+
+test("empty-object pruning is recursive, immutable and idempotent without deleting array slots", () => {
+	const state = JSON.parse('{"empty":{},"chain":{"leaf":{}},"kept":{"empty":{},"value":0},"items":[{},{"empty":{}},[{"empty":{}}]],"array":[],"flag":false,"text":"","__proto__":{"empty":{}}}');
+	const before = structuredClone(state);
+	const next = pruneEmptyObjects(state);
+	assert.deepEqual(next, { kept: { value: 0 }, items: [{}, {}, [{}]], array: [], flag: false, text: "" });
+	assert.deepEqual(state, before);
+	assert.equal(pruneEmptyObjects(next), next);
+	assert.deepEqual(pruneEmptyObjects({}), {});
+	assert.equal(Object.getPrototypeOf(next), Object.prototype);
+	const prototype = pruneEmptyObjects(JSON.parse('{"__proto__":{"empty":{},"kept":true}}'));
+	assert.equal(Object.hasOwn(prototype, "__proto__"), true);
+	assert.deepEqual(prototype.__proto__, { kept: true });
+	assert.equal(Object.getPrototypeOf(prototype), Object.prototype);
+});
 
 test("presentation JSON preserves intentional insertion order without relaxing JSON validation", () => {
 	assert.equal(presentationJson({ intents: {}, contract: {}, working: {} }), '{"intents":{},"contract":{},"working":{}}');
@@ -13,6 +28,48 @@ test("recursively merges patches and applies null deletion", () => {
 	const next = applyPatch(state, { inventory: { a: null, c: "new" } });
 	assert.deepEqual(next, { inventory: { b: "other", c: "new" }, attempts: ["x"] });
 	assert.deepEqual(state, { inventory: { a: "item", b: "other" }, attempts: ["x"] });
+});
+
+test("deletion-only patches do not create missing ancestors or remove existing parents", () => {
+	const deletions: Parameters<typeof applyPatch>[1][] = [{ child: null }, { child: { leaf: null }, other: null }];
+	for (const deletion of deletions) {
+		assert.deepEqual(applyPatch({}, { missing: deletion }), {});
+		assert.deepEqual(applyPatch({ missing: {} }, { missing: deletion }), { missing: {} });
+		assert.deepEqual(applyPatch({ missing: { keep: true } }, { missing: deletion }), { missing: { keep: true } });
+	}
+	assert.deepEqual(applyPatch({ parent: { child: 1 } }, { parent: { child: null } }), { parent: {} });
+});
+
+test("missing-deletion diagnostics identify exact targets and the first unavailable component", () => {
+	const state = { present: { remove: true }, scalar: 1, items: [{ keep: true }] };
+	const patch = {
+		present: { remove: null, absent: null },
+		missing: { child: { leaf: null }, keep: true },
+		scalar: { child: null },
+		items: { "[0]": { absent: null } },
+		"a/b~c": { leaf: null },
+	};
+	const missing: MissingDeletion[] = [];
+	assert.deepEqual(applyPatch(state, patch, missing), applyPatch(state, patch));
+	assert.deepEqual(missing, [
+		{ path: "/present/absent", unavailablePath: "/present/absent" },
+		{ path: "/missing/child/leaf", unavailablePath: "/missing" },
+		{ path: "/scalar/child", unavailablePath: "/scalar" },
+		{ path: "/items/0/absent", unavailablePath: "/items/0/absent" },
+		{ path: "/a~1b~0c/leaf", unavailablePath: "/a~1b~0c" },
+	]);
+	assert.deepEqual(state, { present: { remove: true }, scalar: 1, items: [{ keep: true }] });
+	assert.throws(() => applyPatch(state, { absent: null, items: { "[1]": true } }, missing), /out of bounds/);
+	assert.equal(missing.length, 5, "rejected patches must not leak partial diagnostics");
+});
+
+test("new object patches process deletion markers while preserving writes and explicit empty objects", () => {
+	const patch = { missing: { deleted: null, nested: { deleted: null, keep: false }, empty: {}, items: [] } };
+	const expected = { missing: { nested: { keep: false }, empty: {}, items: [] } };
+	assert.deepEqual(applyPatch({}, patch), expected);
+	assert.deepEqual(applyPatch({ missing: "replaced" }, patch), expected);
+	assert.deepEqual(applyPatch({}, { missing: {} }), { missing: {} });
+	assert.equal(patch.missing.deleted, null, "caller deletion markers remain intact");
 });
 
 test("public patch results stay detached from basis and caller patch containers", () => {

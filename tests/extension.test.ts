@@ -549,9 +549,7 @@ test("read_state lazily projects all hot historical paths and scopes without pub
 				const result = await read.execute("history", { path }, undefined);
 				const value = JSON.parse(result.content[0].text);
 				const working = scope === "effective" ? { ...states.global, ...states.cwd, ...states.session } : states[scope];
-				const position = history.length - 1 - offset;
-				const present = scope === "effective" || changes.slice(0, position).some(([changedScope]) => changedScope === scope);
-				assert.deepEqual(value.value, present ? { working } : {});
+				assert.deepEqual(value.value, Object.keys(working!).length > 0 ? { working } : {});
 				assert.deepEqual(result.details, { path, projection: "value" });
 			}
 		}
@@ -1327,7 +1325,7 @@ test("an empty accepted answer finalizes the run and stores an empty response", 
 	assert.equal(h.notifications.some((notice) => /could not reconcile the final response/i.test(notice)), false);
 });
 
-test("accepts canonical atomic scope patches and correct repeats without another checkpoint", async () => {
+test("accepts canonical atomic scope patches, correct repeats and missing nested deletions without another checkpoint", async () => {
 	const h = harness();
 	await start(h, "Resolve me");
 	const execute = (input: unknown) => h.tools.get("patch_state")!.execute("invalid", input, undefined, undefined, h.ctx);
@@ -1339,10 +1337,34 @@ test("accepts canonical atomic scope patches and correct repeats without another
 	const checkpointCount = h.entries.length;
 	const result = await execute({ session: { working: { value: true, alreadyAbsent: null } } });
 	assert.equal(result.details.changed, false);
-	assert.equal(result.content[0].text, "\nState already current.");
-	assert.equal(result.content.length, 1, "no-op deletion and correct repeat need no semantic echo");
+	assert.match(result.content[0].text, /^\nState already current\.\n\nHint: deletion skipped at \/session\/working\/alreadyAbsent/);
+	assert.deepEqual(result.details.missingDeletions, [{ path: "/session/working/alreadyAbsent", unavailablePath: "/session/working/alreadyAbsent" }]);
+	assert.equal(result.content.length, 1, "diagnostics stay in the acknowledgement, without a semantic echo");
+	const nested = await execute({
+		global: { lazy: { missing: { child: null } } },
+		cwd: { working: { missing: { nested: { leaf: null } } } },
+		session: { working: { missing: { child: null } } },
+	});
+	assert.equal(nested.details.changed, false);
+	assert.match(nested.content[0].text, /^\nState already current\./);
+	assert.deepEqual(nested.details.missingDeletions, [
+		{ path: "/global/lazy/missing/child", unavailablePath: "/global/lazy" },
+		{ path: "/cwd/working/missing/nested/leaf", unavailablePath: "/cwd/working" },
+		{ path: "/session/working/missing/child", unavailablePath: "/session/working/missing" },
+	]);
+	for (const hint of nested.details.missingDeletions) assert.ok(nested.content[0].text.includes(`First unavailable component: ${hint.unavailablePath}.`));
 	assert.equal(h.entries.length, checkpointCount);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
+	const repeated = await execute({ session: { working: { value: true } } });
+	assert.equal(repeated.content[0].text, "\nState already current.", "ordinary repeats stay quiet");
+	assert.deepEqual(repeated.details.missingDeletions, []);
+	const mixed = await execute({ cwd: { working: { kept: true, absent: null } }, session: { working: { value: null } } });
+	assert.equal(mixed.details.changed, true);
+	assert.match(mixed.content[0].text, /State materialized atomically/);
+	assert.match(mixed.content[0].text, /Hint: deletion skipped at \/cwd\/working\/absent/);
+	assert.deepEqual(mixed.details.missingDeletions, [{ path: "/cwd/working/absent", unavailablePath: "/cwd/working" }]);
+	assert.equal(h.readState().working.kept, true);
+	assert.equal(Object.hasOwn(h.readState().working, "value"), false);
 	const message = finalMessage("Resolved directly.");
 	h.handlers.get("message_end")!({ message }, h.ctx);
 	await h.handlers.get("turn_end")!({ message }, h.ctx);
@@ -1395,7 +1417,7 @@ test("a rejected first passive patch leaves no empty canonical initialization or
 	const before = files();
 	const entries = structuredClone(h.entries);
 	const execute = (patch: unknown) => h.tools.get("patch_state")!.execute("first", patch, undefined, undefined, h.ctx);
-	await assert.rejects(execute({ global: { working: { rejected: true } }, session: { artifacts: { invalid: {} } } }), /non-empty description/);
+	await assert.rejects(execute({ global: { working: { rejected: true } }, session: { artifacts: { invalid: { kind: "document" } } } }), /non-empty description/);
 	assert.deepEqual(files(), before);
 	assert.deepEqual(h.entries, entries);
 	assert.throws(() => h.readState(0, "global"), /runtime is unavailable/, "a failed patch cannot install an unpublished empty view");

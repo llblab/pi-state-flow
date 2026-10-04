@@ -808,9 +808,9 @@ export default function stateFlowExtension(pi, options = {}) {
                         ? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
                         : "\nState already current.";
                     return { content: [
-                            { type: "text", text: acknowledgement },
+                            { type: "text", text: acknowledgement + stage.missingDeletions.map(({ path, unavailablePath }) => `\n\nHint: deletion skipped at ${path}; target absent. First unavailable component: ${unavailablePath}. Check the path if you expected an existing value.`).join("") },
                             ...(updates ? [{ type: "text", text: `\n${presentationJson({ state_updates: updates })}` }] : []),
-                        ], details: { scopes, step: snapshot.meta.step, changed } };
+                        ], details: { scopes, step: snapshot.meta.step, changed, missingDeletions: stage.missingDeletions } };
                 }, signal);
             }
             catch (error) {

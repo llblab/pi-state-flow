@@ -111,7 +111,7 @@ test("requested curation compiles an acquired Skill with one atomic scope move",
 	const owners = await readState.execute("verify-owners", {
 		paths: ["global.contract", "cwd.contract"],
 	}, undefined, undefined, h.ctx);
-	assert.deepEqual(JSON.parse(owners.content[0].text).value, [{}, { projectRule: "project-only" }]);
+	assert.deepEqual(JSON.parse(owners.content[0].text).value, [null, { projectRule: "project-only" }]);
 	assert.equal(h.readState(1, "global").contract.projectRule, "project-only");
 	assert.equal(h.readState(1, "cwd").contract.projectRule, undefined);
 	assert.deepEqual(h.readState(0, "cwd").artifacts[source], compilerOutput("Curate one requested cohort"));

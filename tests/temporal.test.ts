@@ -329,7 +329,7 @@ test("intent ownership cascades replay from stored explicit deletions through ho
 		};
 		accept({ cwd: { intents: { task: { owns: [{ $ref: "cwd.working.step" }, { $ref: "cwd.lazy.plan" }] } } } }, "T1");
 		const closed = accept({ cwd: { intents: { task: null } } }, "T2");
-		assert.deepEqual(closed.transitions, [{ scope: "cwd", patch: { intents: { task: null }, working: { step: null }, lazy: { plan: null } } }]);
+		assert.deepEqual(closed.transitions, [{ scope: "cwd", patch: { intents: null, working: { step: null }, lazy: null } }]);
 		assert.deepEqual(readTemporalState(view, 0, "cwd", historyLimit), overlayStates(snapshots.at(-1)!.cwd));
 		assert.deepEqual(readTemporalView(view, 0, "cwd", historyLimit).working, { keep: 2 });
 		if (historyLimit > 0) {
@@ -339,7 +339,7 @@ test("intent ownership cascades replay from stored explicit deletions through ho
 		// Replay applies stored deletions verbatim; it never re-derives ownership from references.
 		const stored = closed.transitions[0]!.patch as JsonObject;
 		const unrelated = { intents: { other: { $ref: "cwd.working.step" } }, working: { step: "foreign" }, lazy: { plan: "foreign" } };
-		assert.deepEqual(applyPatch(unrelated, stored), { intents: { other: { $ref: "cwd.working.step" } }, working: {}, lazy: {} });
+		assert.deepEqual(applyPatch(unrelated, stored), { working: {} }, "accepted plane deletions replay verbatim, not as newly authored intent ownership");
 		const reloaded = createTemporalState(snapshots.at(-1)! as ScopedStates, "reload", historyLimit);
 		assert.deepEqual(readTemporalView(reloaded, 0, "cwd", historyLimit), readTemporalView(view, 0, "cwd", historyLimit));
 	}

@@ -239,7 +239,7 @@ for (const scope of ["global", "cwd", "session"] as const) test(`real Pi deletin
 		// Active Session additionally reconciles the accepted answer as its own response revision.
 		assert.equal(temporalScopeRevisions(current)[scope], revisions[scope] + (scope === "session" && mode === "active" ? 2 : 1), `${mode}: one revision for the cohort`);
 		const patches = current.scopes[scope].patches;
-		assert.deepEqual(patches.findLast((record) => Object.hasOwn(record.patch, "intents"))!.patch, { intents: { task: null }, working: { draft: null }, lazy: { notes: null, plans: { x: null } } }, mode);
+		assert.deepEqual(patches.findLast((record) => Object.hasOwn(record.patch, "intents"))!.patch, { intents: null, working: { draft: null }, lazy: { notes: null, plans: { x: null } } }, mode);
 	}
 });
 
@@ -1150,7 +1150,7 @@ for (const scope of ["global", "cwd", "session"] as const) test(`real Pi transpo
 	let before: ReturnType<typeof files> | undefined;
 	let afterRejection: ReturnType<typeof files> | undefined;
 	let nextInput: Context | undefined;
-	const attempted = { [scope]: { working: { diagnosticProbe: true }, artifacts: { [path]: {} } } };
+	const attempted = { [scope]: { working: { diagnosticProbe: true }, artifacts: { [path]: { kind: "document" } } } };
 	f.faux.setResponses([
 		() => {
 			before = files();

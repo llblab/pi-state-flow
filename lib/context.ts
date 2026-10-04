@@ -44,9 +44,13 @@ function lazyValueKind(value: JsonValue): LazyValueKind {
 	return typeof value as Exclude<LazyValueKind, "array" | "object">;
 }
 
+function hasLazyContent(value: JsonValue): boolean {
+	return !isObject(value) || Object.values(value).some(hasLazyContent);
+}
+
 /** Fixed-budget navigation only: never place lazy bodies or partial key catalogs in baseline context. */
 export function lazyNavigationHint(state: SemanticState): { available: boolean; path: string; keys?: Record<string, LazyValueKind> } {
-	const entries = isObject(state.lazy) ? Object.entries(state.lazy) : [];
+	const entries = isObject(state.lazy) ? Object.entries(state.lazy).filter(([, value]) => hasLazyContent(value)) : [];
 	const base = { available: entries.length > 0, path: LAZY_HINT_PATH };
 	if (!base.available) return base;
 	if (entries.length > LAZY_HINT_MAX_KEYS) return base;
@@ -184,6 +188,7 @@ export class ContextProjection {
 		const prefix = (a: readonly (string | number)[], b: readonly (string | number)[]) =>
 			a.length <= b.length && a.every((part, index) => part === b[index]);
 		updates.effective = updates.effective.filter((entry) => {
+			if ("deleted" in entry && this.view && known(entry.path) === undefined) return false;
 			const matches = ({ path }: typeof leaves[number]) => path.length === entry.path.length && prefix(path, entry.path);
 			const authored = leaves.findLast(matches) ?? objects.findLast(matches);
 			if (!authored) return true;

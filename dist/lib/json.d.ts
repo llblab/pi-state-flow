@@ -2,8 +2,16 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObj
 export interface JsonObject {
     [key: string]: JsonValue;
 }
+export interface MissingDeletion {
+    /** JSON Pointer paths relative to the patched object. */
+    path: string;
+    unavailablePath: string;
+}
+/** Remove empty object fields without removing array slots or mutating the input. */
+export declare function pruneEmptyObjects(value: JsonObject): JsonObject;
+export declare function pruneEmptyObjects(value: JsonValue): JsonValue;
 /** Detach at the mutable public boundary; share untouched paths only inside the owned draft. */
-export declare function applyPatch(state: JsonObject, patch: JsonObject): JsonObject;
+export declare function applyPatch(state: JsonObject, patch: JsonObject, missingDeletions?: MissingDeletion[]): JsonObject;
 export declare function isObject(value: JsonValue | unknown): value is JsonObject;
 export declare function validatePatch(value: unknown): asserts value is JsonObject;
 export declare function canonicalJson(value: JsonValue | unknown): string;

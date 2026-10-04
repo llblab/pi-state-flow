@@ -4,17 +4,17 @@ function isIndexedArrayPatch(value) {
     const keys = Object.keys(value);
     return keys.length > 0 && keys.every((key) => ARRAY_INDEX_SELECTOR.test(key));
 }
-function applyOwnedValue(current, value, owned) {
+function applyOwnedValue(current, value, owned, missingDeletions, path, unavailablePath) {
     // Preserve inherited-object merge semantics without borrowing prototype objects.
     if (!owned && current !== null && typeof current === "object")
         current = structuredClone(current);
     return Array.isArray(current) && isObject(value) && isIndexedArrayPatch(value)
-        ? applyOwnedArrayPatch(current, value)
-        : isObject(current) && isObject(value)
-            ? applyOwnedPatch(current, value)
+        ? applyOwnedArrayPatch(current, value, missingDeletions, path, unavailablePath)
+        : isObject(value)
+            ? applyOwnedPatch(isObject(current) ? current : {}, value, missingDeletions, path, unavailablePath ?? (!isObject(current) ? path : undefined))
             : structuredClone(value);
 }
-function applyOwnedArrayPatch(state, patch) {
+function applyOwnedArrayPatch(state, patch, missingDeletions, path, unavailablePath) {
     let next = state;
     for (const [selector, value] of Object.entries(patch)) {
         const index = Number(ARRAY_INDEX_SELECTOR.exec(selector)[1]);
@@ -25,7 +25,7 @@ function applyOwnedArrayPatch(state, patch) {
             throw new Error(`State patch array index ${selector} cannot be deleted; replace the whole array instead`);
         const owns = Object.hasOwn(next, index);
         const current = next[index];
-        const materialized = applyOwnedValue(current, value, owns);
+        const materialized = applyOwnedValue(current, value, owns, missingDeletions, `${path}/${index}`, unavailablePath);
         if (owns && Object.is(current, materialized))
             continue;
         if (next === state)
@@ -34,20 +34,27 @@ function applyOwnedArrayPatch(state, patch) {
     }
     return next;
 }
-function applyOwnedPatch(state, patch) {
+function applyOwnedPatch(state, patch, missingDeletions, path = "", unavailablePath) {
     let next = state;
     for (const [key, value] of Object.entries(patch)) {
         const owns = Object.hasOwn(next, key);
+        const target = missingDeletions ? `${path}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}` : "";
         if (value === null) {
-            if (!owns)
+            if (!owns) {
+                missingDeletions?.push({ path: target, unavailablePath: unavailablePath ?? target });
                 continue;
+            }
             if (next === state)
                 next = { ...state };
             delete next[key];
             continue;
         }
         const current = next[key];
-        const materialized = applyOwnedValue(current, value, owns);
+        const materialized = applyOwnedValue(current, value, owns, missingDeletions, target, unavailablePath ?? (!owns ? target : undefined));
+        // Deletion-only patches must not fabricate absent ancestor objects; explicit {} still writes.
+        if (!owns && current === undefined && isObject(value) && Object.keys(value).length > 0
+            && isObject(materialized) && Object.keys(materialized).length === 0)
+            continue;
         if (owns && Object.is(current, materialized))
             continue;
         if (next === state)
@@ -56,9 +63,43 @@ function applyOwnedPatch(state, patch) {
     }
     return next;
 }
+export function pruneEmptyObjects(value) {
+    if (Array.isArray(value)) {
+        let next = value;
+        for (let index = 0; index < value.length; index++) {
+            const pruned = pruneEmptyObjects(value[index]);
+            if (pruned === value[index])
+                continue;
+            if (next === value)
+                next = value.slice();
+            next[index] = pruned;
+        }
+        return next;
+    }
+    if (!isObject(value))
+        return value;
+    let next = value;
+    for (const [key, child] of Object.entries(value)) {
+        const pruned = pruneEmptyObjects(child);
+        const empty = isObject(pruned) && Object.keys(pruned).length === 0;
+        if (!empty && pruned === child)
+            continue;
+        if (next === value)
+            next = { ...value };
+        if (empty)
+            delete next[key];
+        else
+            Object.defineProperty(next, key, { value: pruned, enumerable: true, configurable: true, writable: true });
+    }
+    return next;
+}
 /** Detach at the mutable public boundary; share untouched paths only inside the owned draft. */
-export function applyPatch(state, patch) {
-    return applyOwnedPatch(structuredClone(state), patch);
+export function applyPatch(state, patch, missingDeletions) {
+    const collected = missingDeletions ? [] : undefined;
+    const next = applyOwnedPatch(structuredClone(state), patch, collected);
+    if (collected)
+        missingDeletions.push(...collected);
+    return next;
 }
 export function isObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);

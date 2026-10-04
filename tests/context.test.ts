@@ -22,6 +22,14 @@ const message = (role: string, text: string, timestamp: number, customType?: str
 	...(customType ? { customType } : {}),
 }) as any;
 
+test("legacy empty lazy branches are absent from navigation without mutating storage", () => {
+	const state = { lazy: { empty: {}, chain: { empty: {} }, items: [{}], list: [] } };
+	const before = structuredClone(state);
+	assert.deepEqual(lazyNavigationHint(state), { available: true, path: "effective.lazy", keys: { items: "array", list: "array" } });
+	assert.deepEqual(lazyNavigationHint({ lazy: { empty: {} } }), { available: false, path: "effective.lazy" });
+	assert.deepEqual(state, before);
+});
+
 test("context omits absent planes, empty responses and unknown fields in current and recent views", () => {
 	const snapshot = startEpisode(false);
 	const projected = runtimeContextMessage(snapshot, { response: "", extra: "not semantic" }, [
@@ -317,7 +325,7 @@ test("deletion receipts omit only unchanged effective values, not unknown fallba
 	projection.project([user("delete", 1)], contextView(visible, {}, []), () => user("HEAD", 0));
 	const removed = emptyState();
 	assert.deepEqual(projection.acceptPatch(visible, removed, { session: { working: { owned: null } } }, {})?.effective,
-		[{ path: ["working", "owned"], deleted: true }], "effective-only head cannot prove the deleted key's scope owner");
+		[{ path: ["working"], deleted: true }], "effective-only head cannot prove the deleted key's scope owner");
 });
 
 test("intent ownership cascades reach the receipt as deletions without rewriting the frozen head", () => {
@@ -543,6 +551,7 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		const context = JSON.parse(serialized);
 		assert.match(serialized, /"state":\{"intents":.*,"contract":.*,"working":.*,"artifacts":/);
 		const { response: _emptyResponse, ...visibleState } = state;
+		if (Object.keys(visibleState.artifacts).length === 0) delete (visibleState as Partial<typeof visibleState>).artifacts;
 		assert.deepEqual(context.state, visibleState);
 		assert.deepEqual(context.state.intents.current, { action: "Continue accepted work", detail: { $ref: "session.lazy.plan" } });
 		assert.equal(Object.hasOwn(context.state, "lazy"), false);

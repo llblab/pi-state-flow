@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { emptyState, isSemanticState, isStateDocument, overlayStates, projectStateForModel, updateMaterializedArtifacts } from "../lib/state.ts";
+import { emptyState, isSemanticState, isStateDocument, overlayStates, projectSemanticState, projectStateForModel, updateMaterializedArtifacts, type SemanticState } from "../lib/state.ts";
 
 function state(contract: Record<string, any> = {}) {
 	return { artifacts: {}, contract, working: {}, intents: {}, response: "", lazy: {} };
@@ -14,9 +14,17 @@ test("creates isolated state documents with the exact public shape", () => {
 
 test("materialized and model-facing states preserve intentional intent-first plane order", () => {
 	assert.deepEqual(Object.keys(emptyState()), ["intents", "contract", "working", "artifacts", "response", "lazy"]);
-	assert.deepEqual(Object.keys(projectStateForModel({ ...emptyState(), response: "Answer", lazy: { plan: true } })), [
+	assert.deepEqual(Object.keys(projectStateForModel({ ...emptyState(), intents: { task: "Continue" }, contract: { rule: true }, working: { result: 1 }, artifacts: { "/a.md": { description: "A" } }, response: "Answer", lazy: { plan: true } })), [
 		"intents", "contract", "working", "artifacts", "response",
 	]);
+});
+
+test("model projection hides legacy empty branches without changing exact semantic reads", () => {
+	const stored: SemanticState = { working: { chain: { empty: {} }, keep: 1, items: [{ empty: {} }, {}] }, intents: {}, artifacts: {}, lazy: { empty: {} } };
+	const before = structuredClone(stored);
+	assert.deepEqual(projectStateForModel(stored), { working: { keep: 1, items: [{}, {}] } });
+	assert.deepEqual(projectSemanticState(stored), before);
+	assert.deepEqual(stored, before);
 });
 
 test("adds deterministic runtime hints only to model artifact projection", () => {
