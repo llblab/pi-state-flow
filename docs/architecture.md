@@ -328,7 +328,7 @@ The current user specification stays at user authority and appears only in synth
 
 **Why no retain-none boundaries.** State Flow does not use retain-none boundary compactions. Completed canonical state omits the exact user prompt, and foreign custom context can legitimately occur inside the latest retained iteration; hiding both would make the projected semantic state a lossy substitute for native context.
 
-**What prevents the boundary:** unknown or smaller usage, foreign custom metadata or native `custom_message` context in the prefix that would be removed, stale selection, Stop/bootstrap/error/abort, and pending input. User manual and native threshold/overflow compaction stay unmodified; unaccepted work stays under Pi's native compaction contract.
+**What prevents the boundary:** unknown or smaller usage, foreign custom metadata or native `custom_message` context in the prefix that would be removed, stale selection, Stop/bootstrap/error/abort, and pending input. The exact native `custom` type `codemode-store` is exempt alongside State Flow metadata: it carries no model context, and Codemode reconstructs its values/deletions from the full append-only branch even after compaction. Unknown types, similarly named types and visible custom messages are not exempt. User manual and native threshold/overflow compaction stay unmodified; unaccepted work stays under Pi's native compaction contract.
 
 ### Context view and trajectory
 
@@ -509,6 +509,8 @@ Without removals on a complete accepted cohort, publication preserves semantic/p
 2. **While waiting,** the mode is the selected inactive policy, and private reads/publication report the pending selection.
 3. **Acceptance.** The selected boundary, the exact-source fork, a truly new auto-start origin (`withStartTransaction` with creation authority, rechecking branch evidence after waiting) or failed-Stop read-only recovery then use the awaited runtime API. Bootstrap and policy are derived after waiting and published in that single acceptance.
 4. **Installation.** Only the current lifetime installs memory, checkpoint, continuation, tools and UI before yielding; a later native-write failure only warns.
+
+**Failed Active selection.** An unaccepted Active restoration/fork or automatic Start failure carries an inference fence independently of the inactive fallback mode. The live `context` hook calls public `ctx.abort()` before returning; merely throwing would let Pi continue with native history. Re-selecting/reloading the failed Active boundary reconstructs the fence. Accepted Start or a valid branch releases it; explicit Passive/Off permits native context but grants no missing historical/publication authority. Signal-less inspection does not cancel or clear the fence.
 
 **Interaction with mode choices:**
 

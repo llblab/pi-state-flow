@@ -87,6 +87,19 @@ for (const foreignType of ["custom", "custom_message"] as const) {
 	});
 }
 
+test("native codemode metadata permits shortening, but similarly named or visible entries remain protected", () => {
+	for (const customType of ["codemode-store", "codemode-store-extra", "foreign-policy"]) {
+		for (const type of ["custom", "custom_message"]) {
+			const active = entries();
+			active.splice(2, 0, { id: "metadata", type, customType });
+			const before = structuredClone(active);
+			const plan = planStateFlowCompaction(active, revision, 12, runAnchorTimestamp);
+			assert.equal(plan?.firstKeptEntryId, type === "custom" && customType === "codemode-store" ? "user-latest" : undefined);
+			assert.deepEqual(active, before, "planning must not rewrite metadata or native history");
+		}
+	}
+});
+
 for (const retainedForeign of [false, true]) {
 	test(`compaction retains the run anchor across steering and tool results (foreign=${retainedForeign})`, () => {
 		const active = entries({ steering: true, retainedForeign, foreignType: "custom_message" });

@@ -414,6 +414,11 @@ test("failed historical selection keeps publication fenced until explicit Start 
 		await h.handlers.get("session_tree")!({}, h.ctx);
 		assert.match(h.notifications.at(-1)!, /outside the retained temporal window/);
 		assert.deepEqual(files(), before);
+		const blocked = new AbortController();
+		await h.inferenceContext([user("Do not send the raw history", 100)], blocked);
+		assert.equal(blocked.signal.aborted, true);
+		assert.match(h.notifications.at(-1)!, /inference blocked/);
+		assert.deepEqual(files(), before);
 		if (passiveTools) {
 			const shared = await h.tools.get("read_state")!.execute("shared", { path: "global.working.shared" });
 			assert.deepEqual(JSON.parse(shared.content[0].text), { value: "retained" });
@@ -424,6 +429,9 @@ test("failed historical selection keeps publication fenced until explicit Start 
 			await assert.rejects(patch.execute("refused", { [scope]: { working: { unsafe: true } } }, undefined, undefined, h.ctx), /selected branch is unavailable|tools are off/);
 		}
 		await h.commands.get(`state-flow-${mode}`).handler("", h.ctx);
+		const permitted = new AbortController();
+		await h.inferenceContext([user("Explicit native context policy", 101)], permitted);
+		assert.equal(permitted.signal.aborted, false, "an explicit inactive choice releases only the inference fence");
 		assert.equal(h.statuses.at(-1), passiveBootstrap || passiveTools ? "<accent>state-flow</accent> <dim>passive</dim>" : undefined);
 		assert.ok(mode === "off" ? h.entries.at(-1)!.data.memoryDeferred : h.entries.at(-1)!.data.persistenceError);
 		await h.commands.get("state-flow-status").handler("", h.ctx);

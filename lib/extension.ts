@@ -93,7 +93,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	let scopeStates: ScopedStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
 	let effectiveState: SemanticState = {};
 	let branchStartsWithoutRuntime = false;
-	let selectedHistoryExpired = false;
+	let selectedBoundaryError: { expired: boolean; blockInference: boolean } | undefined;
 	let modePersistenceError: string | undefined;
 	/** One pending inactive-mode persistence; later inactive choices coalesce until it publishes. */
 	const inactivePersistence = new OwnedOperationSlot<InactivePersistence>();
@@ -448,7 +448,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				runtime = undefined;
 				snapshot = emptySnapshot("off");
 				branchStartsWithoutRuntime = withoutRuntime;
-				selectedHistoryExpired = false;
+				selectedBoundaryError = undefined;
 				modePersistenceError = persistenceError;
 				forkInitialization = reason === "fork";
 				installScopeStates();
@@ -464,7 +464,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		runtime = createRuntime(ctx);
 		installScopeStates();
 		branchStartsWithoutRuntime = false;
-		selectedHistoryExpired = false;
+		selectedBoundaryError = undefined;
 		forkInitialization = sessionStartReason === "fork";
 		let selection: BranchSelection = { kind: "settled" };
 		let skipped = 0;
@@ -492,6 +492,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 						selection = { kind: "fork", source, checkpoint: sourceFence?.persistenceError !== undefined
 							? { ...selected.checkpoint, mode: sourceFence.mode ?? config.inactiveMode } : selected.checkpoint };
 					} catch (error) {
+						selectedBoundaryError = { expired: error instanceof HistoryBoundaryExpiredError,
+							blockInference: selected.checkpoint.mode === "active" && requestedMode === undefined };
 						snapshot = selectedBoundaryFailure(diagnosticText(error), inactiveSelection(selected.checkpoint.mode));
 					}
 				} else if (selected.kind === "boundary") {
@@ -548,6 +550,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			if (!isCurrent()) throw new Error("State Flow branch selection changed while awaiting publication");
 		};
 		let accepted = false;
+		const failSelection = (error: unknown): void => {
+			selectedBoundaryError = { expired: error instanceof HistoryBoundaryExpiredError,
+				blockInference: pending.requestedMode === undefined && (selection.kind === "auto-start"
+					|| ((selection.kind === "restore" || selection.kind === "fork") && selection.checkpoint.mode === "active")) };
+			snapshot = selectedBoundaryFailure(diagnosticText(error), inactiveSelection(snapshot.config.mode));
+			installScopeStates();
+		};
 		// Install accepted memory before native writes; later ancillary failures cannot revert or replay it.
 		const accept = (candidate: TemporalRuntime, next: Snapshot, nativeWrites: () => void): void => {
 			accepted = true;
@@ -616,9 +625,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 						return;
 					}
 					if (!isCurrent()) return;
-					if (error instanceof HistoryBoundaryExpiredError) selectedHistoryExpired = true;
-					snapshot = selectedBoundaryFailure(diagnosticText(error), snapshot.config.mode === "active" ? config.inactiveMode : snapshot.config.mode);
-					installScopeStates();
+					failSelection(error);
 				} finally {
 					pending.awaitingAcceptance = false;
 				}
@@ -637,8 +644,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		} catch (error) {
 			// Host failures before acceptance leave the selection unavailable, never invented empty memory.
 			if (accepted || !isCurrent()) return;
-			snapshot = selectedBoundaryFailure(diagnosticText(error), snapshot.config.mode === "active" ? config.inactiveMode : snapshot.config.mode);
-			installScopeStates();
+			failSelection(error);
 		} finally {
 			pending.awaitingAcceptance = false;
 			branchRestoration.release(pending);
@@ -668,7 +674,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	function settleSelection(ctx: ExtensionContext, reason: unknown, notifyRecovery: boolean, skipped: number, selectedMemory: boolean): void {
 		const failure = !isActive() && snapshot.meta.validation?.attempt === 0 ? snapshot.meta.validation.error : undefined;
 		if (failure !== undefined && notifyRecovery && !modePersistenceError) {
-			if (selectedHistoryExpired) notifyProblem(ctx, "State Flow history is outside the retained temporal window; /state-flow-active can use current session memory.", "warning");
+			if (selectedBoundaryError?.expired) notifyProblem(ctx, "State Flow history is outside the retained temporal window; /state-flow-active can use current session memory.", "warning");
 			else notifyProblem(ctx, `State Flow restore failed: ${failure}`, "error");
 		}
 		const continuation = selectedMemory ? selectedContinuation(ctx, reason) : undefined;
@@ -909,14 +915,14 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					? findPassiveStopBoundary(ctx.sessionManager.getBranch(), owner, PASSIVE_STOP_ENTRY_TYPE) : undefined;
 				const bootstrap = hasPriorConversation(ctx.sessionManager.getBranch()) || passiveContinuation !== undefined || boundary !== undefined;
 				const activated = current ? resumeEpisode(current, bootstrap) : startEpisode(bootstrap);
-				const recoveredCurrent = selectedHistoryExpired;
+				const recoveredCurrent = selectedBoundaryError?.expired;
 				publish(activated);
 				accepted = true;
 				inactivePersistence.cancel();
 				runtime = selected = activation;
 				snapshot = activated;
 				activeContext = ctx;
-				selectedHistoryExpired = false;
+				selectedBoundaryError = undefined;
 				modePersistenceError = undefined;
 				installScopeStates();
 				const continuation = passiveContinuation ?? bootstrapContinuation ?? (deferred ? selectedContinuation(ctx, deferred.reason) : undefined);
@@ -984,6 +990,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	/** Local policy, tools and UI change before any canonical wait. */
 	function applyInactiveMode(ctx: ExtensionContext, mode: InactiveMode): void {
 		snapshot = deactivateEpisode(snapshot, mode);
+		if (selectedBoundaryError) selectedBoundaryError.blockInference = false;
 		clearRunTransient();
 		syncStateFlowTools();
 		updateUi(ctx);
@@ -1064,7 +1071,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		acquisition.reset();
 		runtime = undefined;
 		snapshot = emptySnapshot("off");
-		selectedHistoryExpired = false;
+		selectedBoundaryError = undefined;
 		branchStartsWithoutRuntime = preRuntime;
 		forkInitialization = pendingFork;
 		deferredBranch = { owner: address.key, cwd: ctx.cwd, reason: pendingFork ? "fork" : undefined };
@@ -1296,6 +1303,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	}
 
 	function prepareContext(messages: AgentMessage[], ctx: ExtensionContext): ReturnType<typeof projectContext> | Promise<ReturnType<typeof projectContext>> {
+		// Pi continues after hook errors; public Abort fences inference instead of exposing the native history fallback.
+		if (selectedBoundaryError?.blockInference && ctx.signal && !shuttingDown) {
+			ctx.abort();
+			notifyProblem(ctx, "State Flow inference blocked: Active memory restoration failed. Select a valid branch or use /state-flow-active for current memory; /state-flow-passive or /state-flow-off explicitly permits native context.", "error");
+			return;
+		}
 		const pending = inferencePreparation.current;
 		const selected = runtime;
 		const operationSignal = ctx.signal;

@@ -93,7 +93,7 @@ How each lifecycle event behaves:
   - A missing or ambiguous native anchor skips compaction instead of choosing the last steering message.
   - On resume, native `buildContextEntries()` and TUI rendering omit the older completed prefix.
   - Unknown or smaller usage skips the request, and custom Pi retention settings may still decline it benignly.
-  - These prevent State Flow-owned shortening: foreign custom context in the prefix that would be removed, bootstrap/abort/error, Stop and pending input.
+  - These prevent State Flow-owned shortening: foreign custom context in the prefix that would be removed, bootstrap/abort/error, Stop and pending input. Pi's context-invisible `codemode-store` metadata does not block shortening: it stays on the full native branch, so `load()` and deletions survive compaction and resume. Unknown metadata and all `custom_message` entries remain protected.
   - Obsolete or inactive owned requests are canceled before their hook can fall through to a model summary, and a late completion cannot clear a newer request.
   - Ordinary manual/threshold/overflow compaction stays native and may preserve unfinished work not yet patched into memory.
 
@@ -281,6 +281,7 @@ A missing or expired private retained boundary is unavailable; State Flow does n
 
 **After a selected-boundary failure:**
 
+- If the selected Active boundary cannot be restored, live inference is aborted before the provider instead of silently sending native history under an inactive fallback. Reload/resume retains this fence. Select a valid branch or explicitly Start from current same-session memory; explicit Passive/Off permits native context without repairing historical authority. Signal-less inspection remains observational.
 - Passive may still expose current global/CWD memory, but never the unavailable historical session layer or permission to publish an empty replacement.
 - Historical session reads and every `patch_state` refuse without changing canonical files or appending substitute checkpoints.
 - Passive/Off selection stays available and records the native policy/write fence described above. A later reload may expose validated current memory read-only, not the unavailable selected history.

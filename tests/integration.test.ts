@@ -8,7 +8,7 @@ import { basename, join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import test from "node:test";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage, getCurrentTools, getSystemMessageText, Type, type Context, type ImageContent } from "@earendil-works/pi-ai";
-import { SessionManager, type AgentSession, type AgentBeforeSettleEvent, type ExtensionContext, type TurnEndEvent } from "@earendil-works/pi-coding-agent";
+import { createCodemodeExtension, SessionManager, type AgentSession, type AgentBeforeSettleEvent, type ExtensionContext, type TurnEndEvent } from "@earendil-works/pi-coding-agent";
 import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER, type ArtifactProvenanceRegistry } from "../lib/artifact.ts";
 import { STATE_FLOW_COMPACTION_SUMMARY } from "../lib/compaction.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
@@ -2737,11 +2737,15 @@ test("real Pi threshold compaction preserves partial tool work before the first 
 });
 
 test("real Pi compacts accepted State Flow history without another model call and resumes from the same full session", { timeout: 30_000 }, async (t) => {
-	const fixture = await realPiFixture(t, { mode: "active" });
+	const fixture = await realPiFixture(t, { mode: "active", tools: ["read", "patch_state", "read_state", "codemode"],
+		extensions: [{ name: "native-codemode", factory: createCodemodeExtension({ models: false }) }] });
 	let session = await fixture.createSession("new");
 	t.after(() => session.dispose());
 	const id = session.sessionId;
 	const file = session.sessionFile!;
+	session.sessionManager.appendCustomEntry("codemode-store", { set: { cursor: "retained-cursor", removed: "old" }, delete: [] });
+	session.sessionManager.appendCustomEntry("codemode-store", { set: {}, delete: ["removed"] });
+	const storeEntries = session.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === "codemode-store");
 	const calls = fixture.faux.state.callCount;
 	fixture.faux.setResponses(sessionResponses({
 		working: { retainedAcrossCompaction: true },
@@ -2778,6 +2782,16 @@ test("real Pi compacts accepted State Flow history without another model call an
 	assert.equal(session.sessionId, id);
 	assert.deepEqual(fixture.readState(session), state);
 	assert.ok(session.sessionManager.buildContextEntries().length < session.sessionManager.getEntries().length);
+	assert.deepEqual(session.sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === "codemode-store"), storeEntries);
+	fixture.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("codemode", { code: 'text({ cursor: load("cursor"), deleted: load("removed") === undefined });' }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Verified the native store after resume."),
+	]);
+	await session.prompt("Read the native codemode store after compaction and resume");
+	const loaded = session.sessionManager.getEntries().findLast((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "codemode");
+	assert.ok(loaded?.type === "message" && loaded.message.role === "toolResult" && !loaded.message.isError);
+	assert.match(JSON.stringify(loaded.message.content), /retained-cursor/);
+	assert.match(JSON.stringify(loaded.message.content), /deleted\\\":true/);
 });
 
 function wideSyntheticImage(width = 3000, height = 10): ImageContent {
@@ -3107,7 +3121,21 @@ for (const mode of ["passive", "active", "interrupted"] as const) test(`real Pi 
 	assert.equal(f.readState(session, 0, "session").working.private, 9);
 	await session.navigateTree(old!.id, { summarize: false });
 	assert.match(f.notifications.at(-1)!, /outside the retained temporal window/);
+	if (mode === "active") {
+		const calls = f.faux.state.callCount;
+		const files = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+		await session.prompt("Must not expose native history after expired tree selection");
+		assert.equal(f.faux.state.callCount, calls);
+		assert.match(f.notifications.at(-1)!, /inference blocked/);
+		assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), files);
+	}
 	await session.reload();
+	if (mode === "active") {
+		const calls = f.faux.state.callCount;
+		await session.prompt("Must remain blocked after cold restoration");
+		assert.equal(f.faux.state.callCount, calls);
+		assert.match(f.notifications.at(-1)!, /inference blocked/);
+	}
 	const paths = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
 	const privateBefore = readFileSync(paths.checkpoint, "utf8");
 	await session.prompt("/state-flow-active");
@@ -3205,6 +3233,10 @@ test("real Pi refuses contradictory session files without passive substitution a
 	assert.ok(f.notifications.some((message) => /Conflicting State Flow temporal lineage/.test(message)));
 	assert.equal(f.readState(session, 0, "global").working.shared, "retained");
 	assert.throws(() => f.readState(session, 0, "session"), /selected branch is unavailable/);
+	const calls = f.faux.state.callCount;
+	await session.prompt("Must not infer from contradictory Active restoration");
+	assert.equal(f.faux.state.callCount, calls);
+	assert.match(f.notifications.at(-1)!, /inference blocked/);
 	const notices = f.notifications.length;
 	await session.prompt("/state-flow-active");
 	assert.equal(f.notifications.length, notices + 1, "a refused activation emits only one final error");

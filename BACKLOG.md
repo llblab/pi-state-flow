@@ -1,12 +1,17 @@
 # Backlog
 
-The **0.25.4: Empty-Object Cleanup and Deletion Hints** hotfix is published (exact-tag workflow, GitHub Release and npm commit verified) and bundled in published Pi Kit 0.27.5; outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains installed-client gates and deferred decisions.
+The **0.25.5: Active Restoration Fence and Codemode Compaction** hotfix is prepared; outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains publication, installed-client gates and deferred decisions.
 
 ## Out of scope
 
 - Changing what a cascade deletes, including writes into an owned target made by the closing patch. That stays deleted by design and already appears in the receipt.
 - Nested `lazy_navigation` and intent-ownership warnings, validation or rejection. Authored missing-deletion hints do not change cascade behavior.
 - Any reduction of lifecycle state; the tagged-union question stays deferred.
+
+## 0.25.5 acceptance
+
+- **Publication.** Run the exact-tag workflow and verify GitHub Release/npm identity, then synchronize and release Pi Kit 0.27.6.
+- **Installed restoration/compaction smoke (operator-owned).** After separately authorized reload, use disposable storage to confirm failed Active restoration blocks provider inference across tree/reload, explicit mode recovery remains available, and native Codemode values/deletions survive completed-history compaction. Local/native tests do not certify the installed client.
 
 ## Carried gates
 

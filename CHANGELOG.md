@@ -2,7 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
-## Unreleased
+## 0.25.5: Active Restoration Fence and Codemode Compaction
+
+- `Active restoration fence`: Failed retained Active restoration aborts live inference instead of silently exposing native history under an inactive fallback. Expired tree/reload and contradictory-lineage native tests prove zero provider calls and unchanged memory. Valid selection, accepted Start or explicit Passive/Off releases the fence; historical authority is never substituted.
+- `Codemode-safe compaction`: Exact native `codemode-store` metadata no longer blocks completed-history compaction. Full branch records remain intact; native Codemode reads prove values and deletions survive compaction, reload and resume. Unknown metadata and visible custom context remain protected.
 
 ## 0.25.4: Empty-Object Cleanup and Deletion Hints
 

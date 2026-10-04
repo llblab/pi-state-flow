@@ -3,10 +3,11 @@ import { estimateTokens } from "@earendil-works/pi-coding-agent";
 export const STATE_FLOW_COMPACTION_SUMMARY = "State Flow accepted the completed work before this boundary. Current memory is restored from its retained semantic boundary and projected separately; use the retained native entries for subsequent work.";
 /** A modest margin above Pi's default 20k retained suffix absorbs estimation drift. */
 export const STATE_FLOW_COMPACTION_MIN_CONTEXT_TOKENS = 24_000;
-function stateFlowEntry(entry) {
+function contextInvisibleEntry(entry) {
+    // Codemode reconstructs its store from the full native branch, not the compacted model context.
     return entry.type === "custom"
         && typeof entry.customType === "string"
-        && entry.customType.startsWith("state-flow-");
+        && (entry.customType.startsWith("state-flow-") || entry.customType === "codemode-store");
 }
 export function shouldRequestStateFlowCompaction(usage) {
     return typeof usage?.tokens === "number"
@@ -45,7 +46,7 @@ export function planStateFlowCompaction(entries, boundary, step, runAnchorTimest
     const keep = entries.findIndex(isRunAnchor);
     if (keep < 0 || keep > terminal || entries.findLastIndex(isRunAnchor) !== keep)
         return undefined;
-    if (entries.slice(0, keep).some((entry) => entry.type === "custom_message" || (entry.type === "custom" && !stateFlowEntry(entry))))
+    if (entries.slice(0, keep).some((entry) => entry.type === "custom_message" || (entry.type === "custom" && !contextInvisibleEntry(entry))))
         return undefined;
     const firstKeptEntryId = entries[keep]?.id;
     const leafId = entries.at(-1)?.id;

@@ -26,10 +26,11 @@ type ActiveEntry = {
 	message?: { role?: unknown; stopReason?: unknown; content?: unknown; timestamp?: unknown };
 };
 
-function stateFlowEntry(entry: ActiveEntry): boolean {
+function contextInvisibleEntry(entry: ActiveEntry): boolean {
+	// Codemode reconstructs its store from the full native branch, not the compacted model context.
 	return entry.type === "custom"
 		&& typeof entry.customType === "string"
-		&& entry.customType.startsWith("state-flow-");
+		&& (entry.customType.startsWith("state-flow-") || entry.customType === "codemode-store");
 }
 
 export function shouldRequestStateFlowCompaction(usage: { tokens: number | null } | undefined): boolean {
@@ -70,7 +71,7 @@ export function planStateFlowCompaction(
 	const isRunAnchor = (entry: ActiveEntry) => entry.type === "message" && entry.message?.role === "user" && entry.message.timestamp === runAnchorTimestamp;
 	const keep = entries.findIndex(isRunAnchor);
 	if (keep < 0 || keep > terminal || entries.findLastIndex(isRunAnchor) !== keep) return undefined;
-	if (entries.slice(0, keep).some((entry) => entry.type === "custom_message" || (entry.type === "custom" && !stateFlowEntry(entry)))) return undefined;
+	if (entries.slice(0, keep).some((entry) => entry.type === "custom_message" || (entry.type === "custom" && !contextInvisibleEntry(entry)))) return undefined;
 	const firstKeptEntryId = entries[keep]?.id;
 	const leafId = entries.at(-1)?.id;
 	if (typeof firstKeptEntryId !== "string" || typeof leafId !== "string") return undefined;

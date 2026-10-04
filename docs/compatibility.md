@@ -53,7 +53,7 @@ On the tested SDK, `before_agent_start` precedes the low-level agent's `prompt`;
 2. The active `context` hook supplies the operation signal and awaits preparation/maintenance before provider inference.
 3. If preparation fails, State Flow calls public `ctx.abort()`. Pi catches context-hook errors and may otherwise continue inference, so a thrown error alone is not a fence.
 
-Native tests prove no provider call before coherent acceptance, cancellation while an independent writer remains held, rollback without draft installation and preservation of uncompiled native input.
+Native tests prove no provider call before coherent acceptance, cancellation while an independent writer remains held, rollback without draft installation and preservation of uncompiled native input. Failed retained Active restoration also aborts live inference before the provider; native witnesses cover expired tree selection/reload and contradictory private lineage without changing canonical bytes. Explicit inactive policy releases that inference fence, not the write fence.
 
 **Signals are not universal.** Idle commands and session events can lack them. Do not infer native Abort cancellation from an extension-owned shutdown signal or generalize active-run tests to idle waits.
 
@@ -126,7 +126,7 @@ This optional-backup policy does not apply to required semantic publication or r
 **State Flow-owned compaction:**
 
 - Requires known sufficient context usage and a proven retained run anchor.
-- Preserves the complete accepted run, skips protected foreign context and never requests retain-none shortening.
+- Preserves the complete accepted run, skips protected foreign context and never requests retain-none shortening. Exact native `codemode-store` custom metadata permits shortening; native tests preserve its branch records and verify `load()` values/deletions through the real Codemode extension after compaction/reload/resume.
 - Leaves native manual/threshold/overflow compaction to Pi.
 - Awaits native compaction completion or refusal in the settled handler, so deferred companion prompts do not race it.
 - Skips compaction when usage is unknown or insufficient; a benign refusal permits a later attempt.
