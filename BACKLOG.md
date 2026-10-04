@@ -1,6 +1,6 @@
 # Backlog
 
-The **0.25.5: Active Restoration Fence and Codemode Compaction** hotfix is prepared; outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains publication, installed-client gates and deferred decisions.
+The **0.25.5: Active Restoration Fence and Codemode Compaction** hotfix is published (exact-tag workflow, GitHub Release and npm commit verified) and bundled in published Pi Kit 0.27.6; outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains installed-client gates and deferred decisions.
 
 ## Out of scope
 
@@ -10,7 +10,6 @@ The **0.25.5: Active Restoration Fence and Codemode Compaction** hotfix is prepa
 
 ## 0.25.5 acceptance
 
-- **Publication.** Run the exact-tag workflow and verify GitHub Release/npm identity, then synchronize and release Pi Kit 0.27.6.
 - **Installed restoration/compaction smoke (operator-owned).** After separately authorized reload, use disposable storage to confirm failed Active restoration blocks provider inference across tree/reload, explicit mode recovery remains available, and native Codemode values/deletions survive completed-history compaction. Local/native tests do not certify the installed client.
 
 ## Carried gates
