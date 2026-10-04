@@ -730,13 +730,15 @@ export default function stateFlowExtension(pi, options = {}) {
             cwd: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Optional project semantic patch" })),
             session: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Optional session semantic patch" })),
         }, { additionalProperties: false }),
-        renderResult(result, { isPartial }, theme, context) {
+        renderCall(args, theme, context) {
+            const title = theme.fg("toolTitle", theme.bold(PATCH_STATE_TOOL_NAME));
+            if (!config.showSuccessfulPatches && !context.isError)
+                return new Text(title, 0, 0);
+            return new Text(`${title}\n${separatedOutput(theme.fg("dim", formatPatchStateArguments(args)))}`, 0, 0);
+        },
+        renderResult(result) {
             const text = result.content.find((block) => block.type === "text")?.text ?? "";
-            if (context.isError)
-                return new Text(separatedOutput(text), 0, 0);
-            if (isPartial || !config.showSuccessfulPatches)
-                return new Text(text, 0, 0);
-            return new Text(separatedOutput(theme.fg("dim", formatPatchStateArguments(context.args))), 0, 0);
+            return new Text(separatedOutput(text), 0, 0);
         },
         async execute(toolCallId, params, signal, _onUpdate, ctx) {
             signal = signal ? AbortSignal.any([signal, memoryToolLifetime.signal]) : memoryToolLifetime.signal;

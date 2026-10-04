@@ -680,7 +680,7 @@ test("patch_state commits global, CWD, and session as one model-facing atomic ba
 	assert.equal(h.readState().response, "Still pending.");
 });
 
-test("patch_state materializes session state before the next inference and response reconciliation", async (t) => {
+test("patch_state materializes session state before the next inference and response reconciliation", async () => {
 	const h = harness();
 	await start(h, "Long-running task");
 	const patchState = h.tools.get("patch_state")!;
@@ -697,61 +697,6 @@ test("patch_state materializes session state before the next inference and respo
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "");
-	const visibleArgs = {
-		global: { working: { shared: true } },
-		cwd: { working: { project: true } },
-		session: {
-			artifacts: { source: { description: "compiled" } },
-			contract: { mode: "strict" },
-			working: { verified: "intermediate" },
-			response: null,
-		},
-	};
-	const rendered = patchState.renderResult(
-		result,
-		{ expanded: false, isPartial: false },
-		{ fg: (_color: string, text: string) => text } as any,
-		{ args: visibleArgs, isError: false } as any,
-	);
-	const visibleText = rendered.render(1_000).map((line: string) => line.trimEnd()).join("\n");
-	assert.ok(visibleText.startsWith("\n"), "successful patch JSON should follow the tool heading after one blank line");
-	assert.doesNotMatch(visibleText, /State materialized|session scope/);
-	assert.match(visibleText, /"global": \{[\s\S]+\n\n  "cwd": \{[\s\S]+\n\n  "session": \{/);
-	assert.match(visibleText, /"artifacts": \{[\s\S]+\n\n    "contract": \{[\s\S]+\n\n    "working": \{[\s\S]+\n\n    "response": null/);
-	assert.deepEqual(JSON.parse(visibleText), visibleArgs);
-	const renderedError = patchState.renderResult(
-		{ content: [{ type: "text", text: "WebSocket error" }] },
-		{ expanded: false, isPartial: false },
-		{ fg: (_color: string, text: string) => text } as any,
-		{ args: visibleArgs, isError: true } as any,
-	);
-	const renderedErrorText = renderedError.render(1_000).map((line: string) => line.trimEnd()).join("\n");
-	assert.equal(renderedErrorText, "\nWebSocket error");
-
-	const hiddenAgentDir = mkdtempSync(join(tmpdir(), "state-flow-hidden-patches-"));
-	t.after(() => rmSync(hiddenAgentDir, { recursive: true, force: true }));
-	mkdirSync(join(hiddenAgentDir, "state-flow"));
-	writeFileSync(join(hiddenAgentDir, "state-flow", "config.json"), JSON.stringify({ showSuccessfulPatches: false }));
-	const hidden = harness({ agentDir: hiddenAgentDir, repositoryRoot: join(hiddenAgentDir, "state-flow") });
-	await start(hidden, "Hide successful patch details");
-	const hiddenPatch = hidden.tools.get("patch_state")!;
-	const hiddenResult = await hiddenPatch.execute(
-		"hidden-patch",
-		{ session: { working: { secretFromToolRow: "hidden" } } },
-		undefined,
-		undefined,
-		hidden.ctx,
-	);
-	const hiddenRendered = hiddenPatch.renderResult(
-		hiddenResult,
-		{ expanded: false, isPartial: false },
-		{ fg: (_color: string, text: string) => text } as any,
-		{ args: { session: { working: { secretFromToolRow: "hidden" } } }, isError: false } as any,
-	);
-	const hiddenText = hiddenRendered.render(120).join("\n");
-	assert.match(hiddenText, /State materialized atomically at session scope\./);
-	assert.doesNotMatch(hiddenText, /secretFromToolRow|"hidden"/);
-
 	const acceptedResult = { role: "toolResult", toolCallId: "patch-1", toolName: "patch_state", content: result.content, timestamp: 2 };
 	const projected = h.handlers.get("context")!({ messages: [user("Long-running task", 1), acceptedResult] }, h.ctx);
 	assert.equal(projected.messages.filter((message: any) => message.content?.[0]?.text?.startsWith("State Flow runtime context")).length, 1);
@@ -764,6 +709,74 @@ test("patch_state materializes session state before the next inference and respo
 	assert.equal(h.resolveSnapshot().meta.step, 2);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.working.verified, "intermediate");
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "Complete.");
+});
+
+test("patch_state renders arguments once with separate changed, no-op and error results", async () => {
+	const h = harness();
+	await start(h, "Single patch display");
+	const patchState = h.tools.get("patch_state")!;
+	const args = {
+		global: { working: { shared: true } },
+		cwd: { working: { project: true } },
+		session: { contract: { mode: "strict" }, working: { visiblePatch: "intermediate" } },
+	};
+	const changed = await patchState.execute("display-change", args, undefined, undefined, h.ctx);
+	const current = await patchState.execute("display-no-op", args, undefined, undefined, h.ctx);
+	assert.equal(changed.details.changed, true);
+	assert.equal(current.details.changed, false);
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as any;
+	const context = { args, isError: false } as any;
+	const call = patchState.renderCall(args, theme, context);
+	const callText = call.render(1_000).map((line: string) => line.trimEnd()).join("\n");
+	assert.ok(callText.startsWith("patch_state\n\n{"));
+	assert.deepEqual(JSON.parse(callText.slice(callText.indexOf("\n") + 1)), args);
+	assert.match(callText, /"global": \{[\s\S]+\n\n  "cwd": \{[\s\S]+\n\n  "session": \{/);
+	assert.match(callText, /"contract": \{[\s\S]+\n\n    "working": \{/);
+	for (const result of [changed, current]) {
+		const before = structuredClone(result);
+		for (const expanded of [false, true]) {
+			const rendered = patchState.renderResult(result, { expanded, isPartial: false }, theme, context);
+			const text = rendered.render(1_000).map((line: string) => line.trimEnd()).join("\n");
+			assert.equal(text, result.content[0].text);
+			assert.doesNotMatch(text, /visiblePatch|"global"|"cwd"|"session"/);
+			for (const width of [40, 80, 120]) {
+				const row = [...call.render(width), ...rendered.render(width)].join("\n");
+				assert.equal(row.split("visiblePatch").length - 1, 1);
+			}
+		}
+		assert.deepEqual(result, before, "rendering must not change the model-facing receipt");
+	}
+	for (const [text, isPartial, isError] of [["Pending", true, false], ["WebSocket error", false, true]] as const) {
+		const rendered = patchState.renderResult(
+			{ content: [{ type: "text", text }, { type: "text", text: '\n{"state_updates":{"effective":[]}}' }] },
+			{ expanded: true, isPartial }, theme, { ...context, isError },
+		);
+		assert.equal(rendered.render(1_000).map((line: string) => line.trimEnd()).join("\n"), `\n${text}`);
+	}
+});
+
+test("patch_state suppresses call arguments when configured but retains rejected arguments", async (t) => {
+	const agentDir = mkdtempSync(join(tmpdir(), "state-flow-hidden-patches-"));
+	t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+	mkdirSync(join(agentDir, "state-flow"));
+	writeFileSync(join(agentDir, "state-flow", "config.json"), JSON.stringify({ showSuccessfulPatches: false }));
+	const h = harness({ agentDir, repositoryRoot: join(agentDir, "state-flow") });
+	await start(h, "Hide successful patch details");
+	const patchState = h.tools.get("patch_state")!;
+	const args = { session: { working: { hiddenPatch: "hidden" } } };
+	const result = await patchState.execute("hidden-patch", args, undefined, undefined, h.ctx);
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as any;
+	for (const expanded of [false, true]) {
+		const context = { args, expanded, isError: false } as any;
+		const call = patchState.renderCall(args, theme, context);
+		assert.equal(call.render(120).map((line: string) => line.trimEnd()).join("\n"), "patch_state");
+		const rendered = patchState.renderResult(result, { expanded, isPartial: false }, theme, context);
+		const row = [...call.render(120), ...rendered.render(120)].join("\n");
+		assert.match(row, /patch_state\s+State materialized atomically at session scope\./);
+		assert.doesNotMatch(row, /hiddenPatch|"hidden"/);
+	}
+	const rejected = patchState.renderCall(args, theme, { args, isError: true } as any);
+	assert.match(rejected.render(120).join("\n"), /hiddenPatch/);
 });
 
 test("patch_state is the only tool allowed to execute from its assistant response", async (t) => {

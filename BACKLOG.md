@@ -1,6 +1,6 @@
 # Backlog
 
-The **0.25.1: Cascade Receipts** release is published (exact-tag workflow, GitHub Release and npm commit verified); outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains installed-client gates and deferred decisions. Cascade semantics, canonical storage, stored patch records and lifecycle behaviour remain unchanged.
+The **0.25.2: Single Patch Display** hotfix is prepared; implementation outcomes belong in [CHANGELOG.md](CHANGELOG.md). This backlog retains publication and installed-client gates and deferred decisions. Cascade semantics, canonical storage, stored patch records and lifecycle behaviour remain unchanged.
 
 ## Out of scope
 
@@ -10,6 +10,8 @@ The **0.25.1: Cascade Receipts** release is published (exact-tag workflow, GitHu
 
 ## Carried gates
 
+- **0.25.2 publication.** Verify the exact-tag workflow, GitHub Release and npm commit identity before closing this gate.
+- **Installed 0.25.2 smoke (operator-owned).** Disposable store: confirm one patch argument block followed by changed/no-op acknowledgements, compact rows with `showSuccessfulPatches: false`, and visible rejected arguments/errors.
 - **Installed 0.25.1 smoke (operator-owned).** Disposable store: close an intent that owns a nested lazy key and confirm the receipt lists it under `cascaded`. May be combined with the open 0.25.0 smoke.
 - **Installed 0.22.0, 0.23.0, 0.24.0 and 0.25.0 smokes** remain open as recorded.
 

@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.25.2: Single Patch Display
+
+- `Single patch display`: Interactive `patch_state` rows show JSON arguments once in the call, followed by the actual acceptance, no-op or error acknowledgement instead of a second patch. `showSuccessfulPatches: false` hides call arguments while retaining compact acknowledgements; rejected arguments remain visible. Atomic publication, stored state and model-facing `state_updates` receipts are unchanged.
+
 ## 0.25.1: Cascade Receipts
 
 - `Composition ceiling`: One invariant now counts mutable closure bindings plus `OwnedOperationSlot` and `RenewableLifetime` instances in `lib/extension.ts`, including const-bound holders, against the current total of 24 (17 + 5 + 2). Existing named owner assertions remain. Mutation checks reject an added binding, operation slot or lifetime; lifecycle source and behavior are unchanged.
