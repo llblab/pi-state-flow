@@ -224,6 +224,7 @@ When `pi-telegram` is available, its main-menu section shows `State Flow: active
 **Memory inspection:**
 
 - Owner-scope Rich snapshots show `#revision`; Effective shows the vector.
+- Fields show pretty-printed JSON directly. Large fields show a bounded JSON prefix with a separate truncation notice and omitted-character count, not a JSON-encoded `preview` string. The preview may end mid-value; actual escapes inside JSON string values remain intact. These presentation limits never truncate stored memory or successful `read_state` results.
 - During a failed-Passive write fence, memory-enabled inspection uses the accepted cache without a potentially conflicting refresh.
 - Otherwise, inspection waits cancelably to load or refresh one coherent shared view, even when passive model tools are disabled. It does not initialize, publish or advance storage.
 - Data and displayed revisions come from the same observation; absent or invalid memory stays unavailable.

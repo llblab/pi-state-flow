@@ -574,6 +574,42 @@ test("Rich state inspection omits absent fields and empty responses instead of i
 	assert.doesNotMatch(JSON.stringify(visible), /response|artifacts|lazy/);
 });
 
+test("Rich inspection renders JSON once and keeps truncation notices outside the preview", () => {
+	const revisions = { global: 1, cwd: 2, session: 3 };
+	const values = [
+		{ note: 'Real newline:\nQuote: " and backslash: \\ 🌀' },
+		{ telegramBacklog: { plan: ["Проверить состояние"], detail: "long ".repeat(2_000) } },
+		Object.fromEntries(Array.from({ length: 2_000 }, (_, index) => [`key${index}`, true])),
+		...['"', "\\", "\n", "🌀"].flatMap((char) => [char.repeat(900), char.repeat(40_000)]),
+	];
+	for (const value of values) {
+		const state = { lazy: value };
+		const before = structuredClone(state);
+		const message = renderStateFlowRichState("effective", revisions, state);
+		const field = message.blocks[1]!;
+		assert.equal(field.type, "details");
+		if (field.type !== "details") throw new Error("Expected details");
+		const preview = field.blocks[0]!;
+		assert.equal(preview.type, "pre");
+		if (preview.type !== "pre" || typeof preview.text !== "string") throw new Error("Expected literal pre text");
+		const json = JSON.stringify(value, null, 2);
+		assert.ok(preview.text.length > 0);
+		assert.equal(preview.text, json.slice(0, preview.text.length));
+		assert.ok(JSON.stringify(preview.text).length <= 3_000);
+		assert.doesNotMatch(preview.text, /[\uD800-\uDBFF]$/);
+		if (preview.text.length === json.length) {
+			assert.deepEqual(JSON.parse(preview.text), value);
+			assert.equal(field.blocks.length, 1);
+		} else {
+			assert.deepEqual(field.blocks[1], {
+				type: "pre", text: `Truncated preview — ${json.length - preview.text.length} characters omitted.`,
+			});
+			assert.equal(field.blocks.length, 2);
+		}
+		assert.deepEqual(state, before);
+	}
+});
+
 test("Rich state rendering bounds unbounded semantic fields with explicit truncation", () => {
 	const message = renderStateFlowRichState("global", { global: 12, cwd: 7, session: 9 }, {
 		artifacts: { huge: "x".repeat(40_000) },
@@ -585,11 +621,9 @@ test("Rich state rendering bounds unbounded semantic fields with explicit trunca
 	});
 	const serialized = JSON.stringify(message);
 	assert.ok(serialized.length < 32_768);
-	assert.equal((serialized.match(/\\"truncated\\": true/g) ?? []).length, 5);
-	assert.equal((serialized.match(/omittedChars/g) ?? []).length, 5);
-	for (const key of ["rules", "memory", "projects", "soul", "vision"]) {
-		assert.match(serialized, new RegExp(`\\\\"${key}\\\\"`));
-	}
+	assert.equal((serialized.match(/Truncated preview — \d+ characters omitted\./g) ?? []).length, 5);
+	assert.doesNotMatch(serialized, /omittedChars|\\"preview\\"/);
+	assert.ok(serialized.includes('\\"rules\\"'));
 	for (const hostile of ['"', "\\", "\n", "🌀"]) {
 		const hostileMessage = renderStateFlowRichState("effective", { global: 12, cwd: 7, session: 9 }, {
 			artifacts: { huge: hostile.repeat(40_000) },

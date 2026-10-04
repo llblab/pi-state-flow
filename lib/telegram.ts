@@ -191,34 +191,31 @@ const STATE_FLOW_SCOPE_LABELS: Record<StateFlowTelegramScope, string> = {
 	effective: "🧬 Effective",
 };
 
-// The complete message serializes each preformatted field one additional time;
-// 3,000 leaves safe headroom for worst-case JSON escaping across all four fields.
+// Budget the transport-serialized text, leaving room for six fields and notices
+// below Telegram's 32,768-character Rich message ceiling.
 const STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS = 3_000;
 
-function renderStateFlowTelegramField(value: unknown): string {
+function renderStateFlowTelegramField(value: unknown): StateFlowTelegramRichBlock[] {
 	const json = JSON.stringify(value, null, 2);
-	if (json.length <= STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS) return json;
+	if (JSON.stringify(json).length <= STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS) {
+		return [{ type: "pre", language: "json", text: json }];
+	}
 	let low = 0;
-	let high = json.length;
-	let rendered = "";
+	let high = Math.min(json.length, STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS);
 	while (low <= high) {
 		const length = Math.floor((low + high) / 2);
-		const candidate = JSON.stringify({
-			truncated: true,
-			...(value !== null && typeof value === "object" && !Array.isArray(value)
-				? { keys: Object.keys(value) }
-				: {}),
-			preview: json.slice(0, length),
-			omittedChars: json.length - length,
-		}, null, 2);
-		if (candidate.length <= STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS) {
-			rendered = candidate;
+		if (JSON.stringify(json.slice(0, length)).length <= STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS) {
 			low = length + 1;
 		} else {
 			high = length - 1;
 		}
 	}
-	return rendered;
+	// Do not split a Unicode surrogate pair at the preview boundary.
+	if (/[\uD800-\uDBFF]/.test(json.charAt(high - 1))) high -= 1;
+	return [
+		{ type: "pre", language: "json", text: json.slice(0, high) },
+		{ type: "pre", text: `Truncated preview — ${json.length - high} characters omitted.` },
+	];
 }
 
 export function renderStateFlowRichState(scope: StateFlowTelegramScope, revisions: ScopeRevisions, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
@@ -238,7 +235,7 @@ export function renderStateFlowRichState(scope: StateFlowTelegramScope, revision
 			...fields.filter((field) => state[field] !== undefined && state[field] !== "").map((field) => ({
 				type: "details" as const,
 				summary: { type: "code" as const, text: field },
-				blocks: [{ type: "pre" as const, language: "json", text: renderStateFlowTelegramField(state[field]) }],
+				blocks: renderStateFlowTelegramField(state[field]),
 			})),
 		],
 		skip_entity_detection: true,

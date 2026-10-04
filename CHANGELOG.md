@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.25.3: Readable Telegram Inspection
+
+- `Readable inspection`: Telegram memory inspection shows large fields as direct pretty-printed JSON prefixes instead of JSON-encoded `preview` strings with escaped layout and quotes. A separate notice reports omitted characters. Transport-aware budgeting preserves the Rich message ceiling and Unicode boundaries; genuine JSON string escapes, stored state and exact `read_state` results remain unchanged.
+
 ## 0.25.2: Single Patch Display
 
 - `Single patch display`: Interactive `patch_state` rows show JSON arguments once in the call, followed by the actual acceptance, no-op or error acknowledgement instead of a second patch. `showSuccessfulPatches: false` hides call arguments while retaining compact acknowledgements; rejected arguments remain visible. Atomic publication, stored state and model-facing `state_updates` receipts are unchanged.
