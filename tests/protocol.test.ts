@@ -35,6 +35,15 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	}
 });
 
+test("response is read-only in active, bootstrap and passive model protocols", () => {
+	for (const bootstrap of [false, true]) {
+		assert.match(stateFlowProtocol(bootstrap), /response: read-only prior answer; never patch it in any scope/);
+		assert.match(stateFlowProtocol(bootstrap), /Auto-stored at turn_end/);
+	}
+	assert.match(PASSIVE_MEMORY_PROTOCOL, /Never patch response in global, cwd or session, including clearing\/deleting it/);
+	assert.match(PASSIVE_MEMORY_PROTOCOL, /captures your final answer automatically in Active mode/);
+});
+
 test("runtime and Skill guidance preserve reported ordinary and provenance-derived Skill owners", () => {
 	for (const bootstrap of [false, true]) {
 		const protocol = stateFlowProtocol(bootstrap);
@@ -81,7 +90,7 @@ test("compact protocol retains read, patch, stewardship and acquisition obligati
 		/contract: durable requirements, decisions, rejections, interfaces\./,
 		/working: temporary context of intents: facts, validation, failures, domain state\./,
 		/artifacts: source-path routing metadata; descriptions do not imply body acquisition/,
-		/response: previous answer; runtime stores the exact accepted answer at turn_end \(empty=""\)/,
+		/response: read-only prior answer; never patch it in any scope\. Auto-stored at turn_end \(empty=""\)/,
 		/lazy: retrieve explicitly/,
 		/read_state for concrete scope\/retained-history gaps/,
 		/lazy_navigation lists bounded effective lazy keys, not bodies/,

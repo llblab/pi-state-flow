@@ -22,7 +22,7 @@ import { awaitInFlightBackupPushes, backupCurrentStateFlowFiles, SettledTurnBack
 import { projectRecentTransitionsWithLimit } from "./history.ts";
 import { isObject, presentationJson, sameJson } from "./json.ts";
 import { StateFlowDiagnosticWriter, stateFlowLogPath, type DiagnosticExtras, type StateFlowDiagnosticCategory } from "./logging.ts";
-import { assistantToolCallCount, conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPatchStateArguments, PASSIVE_MEMORY_PROTOCOL, separatedFailure, separatedOutput, stateFlowProtocol } from "./protocol.ts";
+import { assistantToolCallCount, conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPatchStateArguments, PASSIVE_MEMORY_PROTOCOL, RESPONSE_PATCH_GUIDELINE, separatedFailure, separatedOutput, stateFlowProtocol } from "./protocol.ts";
 import { OwnedOperationSlot, RenewableLifetime, type OwnedOperation } from "./operation.ts";
 import { readProjectedState, readStatePath } from "./query.ts";
 import { selectedBoundaryFailure, selectRetainedCheckpoint, waitForRecovery } from "./recovery.ts";
@@ -746,6 +746,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		description: "The sole State Flow semantic mutation protocol. Supply one or more global, cwd, or session patches; all supplied scopes commit atomically. This call must be the only State Flow barrier in its assistant response. Deleting an intent also deletes same-scope working/lazy keys its {\"$ref\"} values own unless another intent refs them. Name keys in ASCII ([A-Za-z_$][A-Za-z0-9_$-]*) so read paths and refs resolve; values may use any language.",
 		promptSnippet: "Atomically patch one or more global/cwd/session scopes",
 		promptGuidelines: [
+			RESPONSE_PATCH_GUIDELINE,
 			"Use patch_state only for material durable semantic changes; ordinary answers need no finalization call.",
 			"Use patch_state as reconciliation, not append-only notes: place new knowledge at the narrowest valid scope and remove superseded or completed state from touched branches.",
 			"Call patch_state alone in an assistant response; after its acknowledgement, further reasoning, tools, and later patch_state calls remain allowed.",

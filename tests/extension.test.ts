@@ -177,6 +177,8 @@ test("registers patch_state plus read-only read_state and exposes the lifecycle 
 	assert.equal(patchState.executionMode, "sequential");
 	assert.match(patchState.description, /one or more global, cwd, or session patches/);
 	assert.match(patchState.promptGuidelines.join("\n"), /ordinary answers need no finalization call/);
+	assert.match(patchState.promptGuidelines.join("\n"), /Never patch response in global, cwd or session, including clearing\/deleting it/);
+	assert.match(patchState.promptGuidelines.join("\n"), /captures your final answer automatically in Active mode/);
 	assert.match(patchState.promptGuidelines.join("\n"), /Call patch_state alone in an assistant response/);
 	assert.match(patchState.description, /Deleting an intent also deletes same-scope working\/lazy keys its \{"\$ref"\} values own/);
 	assert.match(patchState.description, /Name keys in ASCII/);

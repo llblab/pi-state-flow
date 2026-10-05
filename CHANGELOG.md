@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.26.2: Automatic Response Guidance
+
+- `Response ownership`: Active/bootstrap and Passive prompts explicitly forbid patching `response`; the `patch_state` guidelines forbid it in Global, CWD and Session, including clearing/deleting it, and explain that Active mode captures the final answer automatically. Runtime validation and answer capture are unchanged. No migration or configuration change is required.
+
 ## 0.26.1: Consistent Temporary Paths and Mode Colors
 
 - `Telegram mode colors`: The selected mode uses 🟣 Off, 🟡 Passive or 🟢 Active; unselected options remain ⚫️. Mode behavior and callbacks are unchanged.

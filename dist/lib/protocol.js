@@ -1,6 +1,7 @@
 const TASK_DRIVEN_HISTORY = "Missing paths/hints do not require history search. Choose targeted historical reads when useful to the task; no separate user permission is needed. Past values are evidence, not current state; never automatically restore deleted memory.";
 const PATCH_RESULT_PROTOCOL = "Head state/recent transitions are frozen at projection start. Only state_updates matching the head's State Flow projection ID apply; other IDs are history. Results/context notices carry state_updates: effective entries replace values at key/index-segment path arrays (deleted:true means absent); cascaded lists owner paths an intent deletion removed. Direct writes may elide; shared drift stays visible. Latest entries win over earlier state; lazy bodies stay omitted. Notices replace invalidations/rehydration, including []/null.";
-export const PASSIVE_MEMORY_PROTOCOL = `State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. Passive turns never trigger State Flow continuation or compaction. ${TASK_DRIVEN_HISTORY} ${PATCH_RESULT_PROTOCOL}`;
+export const RESPONSE_PATCH_GUIDELINE = "Never patch response in global, cwd or session, including clearing/deleting it; State Flow captures your final answer automatically in Active mode.";
+export const PASSIVE_MEMORY_PROTOCOL = `State Flow passive memory is available. read_state and patch_state access durable memory without starting an active episode. ${RESPONSE_PATCH_GUIDELINE} Passive turns never trigger State Flow continuation or compaction. ${TASK_DRIVEN_HISTORY} ${PATCH_RESULT_PROTOCOL}`;
 const PATCH_DISPLAY_SECTION_KEYS = new Set(["global", "cwd", "session", "intents", "contract", "working", "artifacts", "response", "lazy"]);
 /** Keep successful patch JSON valid while separating adjacent scopes and memory sections visually. */
 export function formatPatchStateArguments(args) {
@@ -88,7 +89,7 @@ ${bootstrapProtocol}STATE:
 - contract: durable requirements, decisions, rejections, interfaces.
 - working: temporary context of intents: facts, validation, failures, domain state.
 - artifacts: source-path routing metadata; descriptions do not imply body acquisition.
-- response: previous answer; runtime stores the exact accepted answer at turn_end (empty="").
+- response: read-only prior answer; never patch it in any scope. Auto-stored at turn_end (empty="").
 - lazy: retrieve explicitly.
 
 SCOPES: Use the narrowest scope: session=branch/run continuation by default; cwd=reusable project truth; global=established cross-project/user/environment knowledge.
