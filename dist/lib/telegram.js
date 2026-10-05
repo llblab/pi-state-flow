@@ -26,7 +26,7 @@ export function formatStateFlowSectionLabel(snapshot) {
 }
 export const STATE_FLOW_MODES = ["off", "passive", "active"];
 const STATE_FLOW_MODE_LABELS = { off: "Off", passive: "Passive", active: "Active" };
-const STATE_FLOW_SELECTED_MARKERS = { off: "🟡", passive: "🟣", active: "🟢" };
+const STATE_FLOW_SELECTED_MARKERS = { off: "🟣", passive: "🟡", active: "🟢" };
 function isStateFlowModeAction(value) {
     return STATE_FLOW_MODES.includes(value);
 }

@@ -59,7 +59,7 @@ This is the source-bound **paragraph-to-owner parity map** for the 8,141-word pr
 - L43 terminal status and read-only scope inspection → [status and controls](usage.md#status-and-controls), [observability](architecture.md#observability).
 - L48 system section, context refresh and foreign prompt precedence → [Pi lifecycle](architecture.md#pi-lifecycle), [host context compatibility](compatibility.md#context-tools-and-provider-input).
 - L50 extension-agnostic core and Telegram controls/receipts → [composition](architecture.md#composition), [observability](architecture.md#observability), [Telegram compatibility](compatibility.md#telegram-adapter).
-- L52 tag release authority and version alignment → [release workflow](../.github/workflows/release.yml), [release boundary](../BACKLOG.md#release-boundary). Retain the durable no-token constraint in compact `AGENTS.md` until a permanent developer contract owns it.
+- L52 tag release authority and version alignment → [release workflow](../.github/workflows/release.yml), [release boundary](../AGENTS.md#delivery-discipline). Retain the durable no-token constraint in compact `AGENTS.md` until a permanent developer contract owns it.
 - L53 opt-in benchmark location and source identity → [benchmark guide](../benchmarks/README.md), [performance validation](performance.md#validation-and-reporting).
 - L54 provider callback completion witness → [temporal acceptance](temporal-acceptance.md#required-properties-and-witnesses), [integration tests](../tests/integration.test.ts).
 - L55 awaited fixture handlers and withdrawal witness → [temporal acceptance](temporal-acceptance.md#required-properties-and-witnesses), [extension tests](../tests/extension.test.ts).

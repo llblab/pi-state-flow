@@ -174,8 +174,8 @@ test("section view uses capitalized radio modes with one semantic selected marke
 			"<code>-</code> <code>effective</code>: merged Global, CWD and Session state; the agent can use it when memory is enabled and available.",
 		].join("\n"));
 		assert.deepEqual(view.replyMarkup?.inline_keyboard, [[
-			{ text: `${mode === "off" ? "🟡" : "⚫️"} Off`, callback_data: "cb:off" },
-			{ text: `${mode === "passive" ? "🟣" : "⚫️"} Passive`, callback_data: "cb:passive" },
+			{ text: `${mode === "off" ? "🟣" : "⚫️"} Off`, callback_data: "cb:off" },
+			{ text: `${mode === "passive" ? "🟡" : "⚫️"} Passive`, callback_data: "cb:passive" },
 			{ text: `${mode === "active" ? "🟢" : "⚫️"} Active`, callback_data: "cb:active" },
 		], [
 			{ text: "🌐 Global", callback_data: "cb:inspect:global" },
@@ -350,7 +350,7 @@ for (const superseded of [false, true]) test(`pre-runtime Telegram Passive repor
 	} else {
 		assert.equal(h.readState(0, "global").working.retained, "SHARED");
 		assert.equal(passive.edits.length, 1);
-		assert.equal(passive.edits[0]!.replyMarkup?.inline_keyboard[0][1].text, "🟣 Passive");
+		assert.equal(passive.edits[0]!.replyMarkup?.inline_keyboard[0][1].text, "🟡 Passive");
 		assert.doesNotMatch(passive.edits[0]!.text, /\n\nState Flow passive$/);
 		assert.doesNotMatch(passive.edits[0]!.text, /superseded|failed/);
 	}
@@ -753,7 +753,7 @@ test("start defers while a run is active and reports a pending intent", async ()
 	assert.deepEqual(notices, ["State Flow will become active after the current turn"]);
 	assert.match(edits[0].text, /^<b>🌀 State Flow:<\/b>/);
 	assert.deepEqual(edits[0].replyMarkup?.inline_keyboard[0], [
-		{ text: "🟡 Off", callback_data: "section:0:off" }, { text: "⚫️ Passive", callback_data: "section:0:passive" }, { text: "⚫️ Active", callback_data: "section:0:active" },
+		{ text: "🟣 Off", callback_data: "section:0:off" }, { text: "⚫️ Passive", callback_data: "section:0:passive" }, { text: "⚫️ Active", callback_data: "section:0:active" },
 	]);
 });
 
@@ -798,7 +798,7 @@ test("start failure surfaces the control message without corrupting the menu", a
 	assert.equal(await sections[0].handleCallback!(context), "handled");
 	assert.deepEqual(notices, ["Selected branch revision is unavailable Retry after recovery"]);
 	assert.match(edits[0].text, /^<b>🌀 State Flow:<\/b>/);
-	assert.equal(edits[0].replyMarkup?.inline_keyboard[0][0].text, "🟡 Off");
+	assert.equal(edits[0].replyMarkup?.inline_keyboard[0][0].text, "🟣 Off");
 });
 
 test("render and dynamic label always read the live snapshot", async () => {
@@ -809,7 +809,7 @@ test("render and dynamic label always read the live snapshot", async () => {
 	const section = sections[0];
 	const renderContext = { callbackData: (action: string) => `cb:${action}` } as StateFlowTelegramSectionContext;
 	assert.equal(section.getLabel!(), "🌀 State Flow: off");
-	assert.equal((await section.render(renderContext)).replyMarkup?.inline_keyboard[0][0].text, "🟡 Off");
+	assert.equal((await section.render(renderContext)).replyMarkup?.inline_keyboard[0][0].text, "🟣 Off");
 	await port.deferStart();
 	assert.equal(section.getLabel!(), "🌀 State Flow: off");
 });

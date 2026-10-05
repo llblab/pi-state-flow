@@ -2,6 +2,11 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.26.1: Consistent Temporary Paths and Mode Colors
+
+- `Telegram mode colors`: The selected mode uses 🟣 Off, 🟡 Passive or 🟢 Active; unselected options remain ⚫️. Mode behavior and callbacks are unchanged.
+- `Diagnostic directory`: New diagnostics and Git push failure logs use `<agentDir>/tmp/pi-state-flow/logs.jsonl`, matching the Pi extension temporary-directory naming convention. Older `tmp/state-flow` logs are left untouched; canonical `state-flow/` memory storage is unchanged.
+
 ## 0.26.0: Stable Modes
 
 - `Step-independent memory`: Memory no longer depends on the Pi step. Startup, reload, resume and `/tree` attach the current same-session JSON state; native checkpoints supply only mode and run lifecycle. Old or expired branch points never block or rewind memory. Forks copy the parent's current memory. Past values remain readable through `read_state` offsets within retained history.

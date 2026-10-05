@@ -16,7 +16,7 @@ export function projectDiagnosticContent(content) {
 }
 /** Diagnostic JSONL lives beneath the active Pi agent directory, never inside the state repository. */
 export function stateFlowLogPath(agentDir) {
-    return join(agentDir, "tmp", "state-flow", "logs.jsonl");
+    return join(agentDir, "tmp", "pi-state-flow", "logs.jsonl");
 }
 function ensureDiagnosticDirectory(path) {
     if (dirname(path) !== path)

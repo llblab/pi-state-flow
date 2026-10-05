@@ -3300,7 +3300,7 @@ test("real Pi isolates same-CWD sessions and retains seven patches per scope", a
 
 test("real Pi logs rejected patches but not accepted patches or answers", async (t) => {
 	const fixture = await realPiFixture(t);
-	const logPath = join(fixture.agentDir, "tmp", "state-flow", "logs.jsonl");
+	const logPath = join(fixture.agentDir, "tmp", "pi-state-flow", "logs.jsonl");
 	const disabled = await fixture.createSession();
 	t.after(() => disabled.dispose());
 	await disabled.prompt("/state-flow-active");

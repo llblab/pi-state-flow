@@ -13,11 +13,14 @@ test("diagnostics preserve text but not reasoning bodies", () => {
 	]), [{ type: "text", text: "bad patch" }, { type: "thinking" }]);
 });
 
-test("diagnostics append local JSONL records", () => {
+test("diagnostics append local JSONL records under tmp/pi-state-flow", (t) => {
 	const agentDir = mkdtempSync(join(tmpdir(), "state-flow-log-"));
+	t.after(() => rmSync(agentDir, { recursive: true, force: true }));
 	const path = stateFlowLogPath(agentDir);
+	assert.equal(path, join(agentDir, "tmp", "pi-state-flow", "logs.jsonl"));
 	appendStateFlowDiagnostic(path, { at: "2026-01-01T00:00:00.000Z", sessionId: "s", cwd: "/cwd", category: "invalid-patch", error: "invalid" });
 	assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { at: "2026-01-01T00:00:00.000Z", sessionId: "s", cwd: "/cwd", category: "invalid-patch", error: "invalid" });
+	assert.equal(existsSync(join(agentDir, "tmp", "state-flow")), false);
 });
 
 test("barrier-block diagnostics persist only tool identities and batch names when enabled", (t) => {
@@ -48,7 +51,7 @@ test("diagnostics refuse symlinked paths without writing through them", (t) => {
 	const target = join(root, "target");
 	writeFileSync(target, "unchanged\n");
 	const record = { at: "2026-01-01T00:00:00.000Z", sessionId: "s", cwd: "/cwd", category: "publication-conflict" as const, error: "failed" };
-	const directory = join(root, "agent", "tmp", "state-flow");
+	const directory = join(root, "agent", "tmp", "pi-state-flow");
 	mkdirSync(directory, { recursive: true });
 	symlinkSync(target, join(directory, "logs.jsonl"));
 	assert.throws(() => appendStateFlowDiagnostic(join(directory, "logs.jsonl"), record));

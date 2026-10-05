@@ -139,7 +139,7 @@ export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot)
 
 export const STATE_FLOW_MODES = ["off", "passive", "active"] as const satisfies readonly StateFlowMode[];
 const STATE_FLOW_MODE_LABELS: Record<StateFlowMode, string> = { off: "Off", passive: "Passive", active: "Active" };
-const STATE_FLOW_SELECTED_MARKERS: Record<StateFlowMode, string> = { off: "🟡", passive: "🟣", active: "🟢" };
+const STATE_FLOW_SELECTED_MARKERS: Record<StateFlowMode, string> = { off: "🟣", passive: "🟡", active: "🟢" };
 
 function isStateFlowModeAction(value: string): value is StateFlowMode {
 	return (STATE_FLOW_MODES as readonly string[]).includes(value);

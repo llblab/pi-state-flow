@@ -144,7 +144,7 @@ The canonical store is `state-flow/` beneath the agent directory. Keeping config
   - Active initializes missing storage when safe.
   - Passive reads existing memory without publishing; its first explicit patch may initialize absent storage without starting an episode or compaction.
   - Off exposes neither memory tools nor State Flow context.
-- `logging`: Defaults to `false`. When enabled, rejected patch executions, active barrier blocks, preparation failures and accepted-answer reconciliation failures are recorded locally at `tmp/state-flow/logs.jsonl` beneath the agent directory. Asynchronous Git push failures are recorded there even when this setting is off.
+- `logging`: Defaults to `false`. When enabled, rejected patch executions, active barrier blocks, preparation failures and accepted-answer reconciliation failures are recorded locally at `tmp/pi-state-flow/logs.jsonl` beneath the agent directory. Older `tmp/state-flow` logs are left untouched and are not migrated. Asynchronous Git push failures are recorded there even when this setting is off.
 - `showSuccessfulPatches`: Defaults to `true`. In interactive Pi, `patch_state` rows show pretty-printed JSON arguments once in the call, with blank lines between adjacent memory sections; the result shows the acceptance or no-op acknowledgement, never a second patch. Set it to `false` to hide call arguments and keep the compact acknowledgement. Rejected calls retain their arguments and error acknowledgement; State Flow adds no private validation turn.
 - `historyLimit`: Defaults to `7` and accepts integers from `0` through `100`. It counts accepted semantic transitions, **not elapsed time or conversation length**, and bounds materialized-history and scope patch-history offsets.
   - Lowering it on reload/restore/fork folds excess tails forward without losing current state; selected boundaries outside the new window become unavailable.
@@ -208,7 +208,7 @@ When `pi-telegram` is available, its main-menu section shows `State Flow: active
 
 **Mode controls:**
 
-- A horizontal radio row presents `Off | Passive | Active`. The selected option uses 🟡, 🟣 or 🟢 respectively; each inactive option uses ⚫️.
+- A horizontal radio row presents `Off | Passive | Active`. The selected option uses 🟣, 🟡 or 🟢 respectively; each inactive option uses ⚫️.
 - Telegram Active requested during a run waits for settlement; Passive and Off apply immediately.
 - Ordinary successful controls add no redundant mode receipt; diagnostic outcomes stay visible.
 - Off exposes neither tool nor State Flow model context.
