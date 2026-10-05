@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.26.3: Passive Response Isolation
+
+- `Passive context`: Automatic Passive memory heads, Stop handoffs and state-update receipts omit the `response` plane, including after reload and mode changes. Active still sees the previous accepted answer. Canonical response storage, explicit reads and native/user/tool history are unchanged; no migration or configuration change is required.
+
 ## 0.26.2: Automatic Response Guidance
 
 - `Response ownership`: Active/bootstrap and Passive prompts explicitly forbid patching `response`; the `patch_state` guidelines forbid it in Global, CWD and Session, including clearing/deleting it, and explain that Active mode captures the final answer automatically. Runtime validation and answer capture are unchanged. No migration or configuration change is required.

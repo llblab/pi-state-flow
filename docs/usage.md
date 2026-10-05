@@ -13,7 +13,8 @@ State Flow has three distinct model-facing states. **Active versus passive chang
   - The final meaningful semantic patch preserves the decisions, outcomes and continuation needed once the completed conversation leaves model projection.
   - The next iteration starts from accepted state and its new input, not from the previous iteration's completed reasoning.
   - The native trace stays inspectable: a clean model context does not mean deleting Pi history.
-- **Passive:** Both memory tools are available, existing state is projected into context, and the agent may read or patch it as useful.
+- **Passive:** Both memory tools are available, existing state except the `response` plane is projected into context, and the agent may read or patch memory as useful.
+  - The last Active answer is not repeated in automatic memory context, Stop handoffs or state updates. Its stored value and explicit `read_state` access remain intact; native/user/tool history is not redacted.
   - Ordinary conversation continuity remains: there is no active iteration-ending context reset and no mandatory consolidation pressure.
   - Accepted patches still reach the same canonical store, with the same validation and ownership guarantees.
 - **Off:** Neither memory tool is exposed to the model, and State Flow injects no protocol, bootstrap/state context or frozen passive handoff. Stored memory and the native conversation trace are not deleted.

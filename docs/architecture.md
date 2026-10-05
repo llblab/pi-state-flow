@@ -42,7 +42,7 @@ Runtime views select these documented semantic planes when present. Stored scope
 - `contract` retains durable requirements, decisions, interfaces and rejected approaches.
 - `working` is the temporary working context of those actions: verified current facts, results and uncertainties.
 - `artifacts` maps exact source paths to compiled routing metadata.
-- `response` is owned only by the session scope and stores the exact latest accepted assistant answer, including the empty string. Global/CWD do not receive newly accepted answers, and stored scopes may omit response entirely. An explicit nonempty Session answer overrides inherited values; an empty or absent response contributes nothing to projection.
+- `response` is owned only by the session scope and stores the exact latest accepted assistant answer, including the empty string. Global/CWD do not receive newly accepted answers, and stored scopes may omit response entirely. An explicit nonempty Session answer overrides inherited values; an empty or absent response contributes nothing to Active projection. Automatic Passive context omits the response plane, including frozen Stop handoffs and state-update receipts. Canonical storage, explicit reads and native answer text are unchanged.
 - `lazy` is an optional stored object root for ordinary JSON detail. It defaults to `{}` only in internal compatibility views, is omitted from baseline model state and is read explicitly.
   - Automatic recent-transition projection also removes each whole `patch.lazy`, including deletions. Empty scoped patches and transitions disappear, and an empty projected window is omitted.
   - Visible hot patches keep their original identities, order and positions. Canonical history and explicit current/historical reads are unchanged.
@@ -61,7 +61,7 @@ Later scopes win. A scope-local `null` deletion removes only that scope's key an
 - Checkpoint/tail codecs select only known top-level fields on read and write; unknown fields are neither kept in runtime streams nor carried into later writes. Nested data within known planes stays intact.
 - Retained record identities and positions survive even when filtering leaves an empty patch.
 - `readTemporalView` selects present known fields at the requested boundary, then overlays scopes without inventing fields.
-- Empty and absent responses mean the same for projection; clearing a nonempty response projects as a deletion.
+- Empty and absent responses mean the same for Active projection; clearing a nonempty response projects as a deletion. Passive omits the plane regardless of its value.
 - Explicit reads of absent documented top-level fields return `null`.
 - `readTemporalState` and the embedding callback keep default-bearing compatibility views for internal registry consumers. Those defaults never become stored overrides or model context.
 - Passive reads and Start do not fill checkpoint fields or create revisions for normalization; missing shared pairs initialize as empty objects.

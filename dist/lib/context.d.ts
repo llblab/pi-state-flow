@@ -39,7 +39,7 @@ export interface ContextView {
         phase: RehydrationPhase;
     } | null;
 }
-export declare function contextView(state: SemanticState, hints: ArtifactModelHints, invalidations: readonly ArtifactInvalidationNotice[], phase?: RehydrationPhase): ContextView;
+export declare function contextView(state: SemanticState, hints: ArtifactModelHints, invalidations: readonly ArtifactInvalidationNotice[], phase?: RehydrationPhase, includeResponse?: boolean): ContextView;
 /** Volatile model projection only. Native messages own trajectory; this cache owns no persistence or lifecycle. */
 export declare class ContextProjection {
     private identity;
@@ -49,7 +49,7 @@ export declare class ContextProjection {
     private notices;
     reset(): void;
     /** Called only after successful publication and ancillary acceptance, immediately before returning the native result. */
-    acceptPatch(before: SemanticState, after: SemanticState, patches: AtomicScopePatches, hints: ArtifactModelHints, cascades?: Partial<Record<StateScope, readonly OwnedPath[]>>): {
+    acceptPatch(before: SemanticState, after: SemanticState, patches: AtomicScopePatches, hints: ArtifactModelHints, cascades?: Partial<Record<StateScope, readonly OwnedPath[]>>, includeResponse?: boolean): {
         effective: ModelStateUpdate[];
         lazy_navigation?: {
             available: boolean;

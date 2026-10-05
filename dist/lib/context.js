@@ -129,8 +129,14 @@ function projectedStateUpdates(previous, current, patches, beforeNavigation, nav
         }
     return { effective, ...(navigation !== undefined && (beforeNavigation === undefined || !sameJson(beforeNavigation, navigation)) ? { lazy_navigation: navigation } : {}) };
 }
-export function contextView(state, hints, invalidations, phase) {
-    return { state: projectStateForModel(state, hints), lazy_navigation: lazyNavigationHint(state),
+function projectContextState(state, hints, includeResponse) {
+    const projected = projectStateForModel(state, hints);
+    if (!includeResponse)
+        delete projected.response;
+    return projected;
+}
+export function contextView(state, hints, invalidations, phase, includeResponse = true) {
+    return { state: projectContextState(state, hints, includeResponse), lazy_navigation: lazyNavigationHint(state),
         artifact_invalidations: structuredClone(invalidations), knowledge_rehydration: phase === undefined ? null : { phase } };
 }
 /** Volatile model projection only. Native messages own trajectory; this cache owns no persistence or lifecycle. */
@@ -148,11 +154,11 @@ export class ContextProjection {
         this.notices = [];
     }
     /** Called only after successful publication and ancillary acceptance, immediately before returning the native result. */
-    acceptPatch(before, after, patches, hints, cascades = {}) {
-        const state = projectStateForModel(after, hints);
+    acceptPatch(before, after, patches, hints, cascades = {}, includeResponse = true) {
+        const state = projectContextState(after, hints, includeResponse);
         const navigation = lazyNavigationHint(after);
         const beforeNavigation = this.view?.lazy_navigation ?? lazyNavigationHint(before);
-        const updates = projectedStateUpdates(this.view?.state ?? projectStateForModel(before, hints), state, patches, beforeNavigation, navigation);
+        const updates = projectedStateUpdates(this.view?.state ?? projectContextState(before, hints, includeResponse), state, patches, beforeNavigation, navigation);
         // Suppress direct writes only when the accepted effective value matches.
         // Overlap stays conservative except for explicit top-scope replacements:
         // Session scalars/arrays mask every lower-scope value at that path.
@@ -319,12 +325,14 @@ function messageText(message) {
     return contentText(message.content);
 }
 export function createPassiveContinuation(state, startedAt = Date.now(), activeRunStartedAt, preserveContext = false) {
+    const visibleState = structuredClone(state);
+    delete visibleState.response;
     return {
         startedAt,
-        state: structuredClone(state),
+        state: visibleState,
         ...(activeRunStartedAt === undefined ? {} : { activeRunStartedAt }),
         ...(preserveContext ? { preserveContext: true } : {}),
-        handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${presentationJson({ state, continuation: preserveContext
+        handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${presentationJson({ state: visibleState, continuation: preserveContext
                 ? "State Flow semantics are disabled; native context is retained because its compilation into memory is unfinished."
                 : "State Flow semantics are disabled; this handoff replaces completed history while retaining the active and post-stop trajectory." })}`),
     };

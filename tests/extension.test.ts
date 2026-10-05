@@ -18,6 +18,34 @@ import { emptyState } from "../lib/state.ts";
 import { writeCwdState, writeGlobalState } from "./storage-fixture.ts";
 import { commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
+test("Passive response disappears immediately while Stop persistence is blocked", async () => {
+	const h = harness();
+	await start(h);
+	await commitTerminal(h, {}, { seed: true }, "LAST_ACTIVE_RESPONSE");
+	await h.beginRun("Next Active request");
+	const native = [user("Next Active request", Date.now())];
+	const active = await h.handlers.get("context")!({ messages: native }, h.ctx);
+	assert.match(JSON.stringify(active), /LAST_ACTIVE_RESPONSE/);
+	let enter!: () => void, release!: () => void;
+	const entered = new Promise<void>((resolve) => { enter = resolve; });
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const holder = withStorageTransaction(h.repositoryRoot, async () => { enter(); await gate; });
+	let selecting: Promise<unknown> | undefined;
+	try {
+		await entered;
+		selecting = h.commands.get("state-flow-passive")!.handler("", h.ctx);
+		await delay(0);
+		assert.match(h.statuses.at(-1)!, /<dim>passive<\/dim>/);
+		const passive = await h.handlers.get("context")!({ messages: native }, h.ctx);
+		assert.match(JSON.stringify(passive), /State Flow (passive memory|exit handoff)/);
+		assert.equal(JSON.stringify(passive).includes("LAST_ACTIVE_RESPONSE"), false);
+		assert.equal(h.readState(0, "session").response, "LAST_ACTIVE_RESPONSE");
+	} finally {
+		release(); await holder; await selecting;
+		await h.handlers.get("session_shutdown")!({}, h.ctx);
+	}
+});
+
 test("lifecycle and write-fence diagnostics retain causes and filenames under long spaced storage paths", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-diagnostic-storage-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -81,7 +81,7 @@ New sessions default to **Off**. Choose Passive for ordinary conversation with m
 ### Active, passive, off
 
 - `Active`: Memory tools are available, and the agent consolidates necessary final state changes before completing an iteration. Later iterations use accepted state and new input rather than completed prior reasoning.
-- `Passive`: Both memory tools are available, and existing state is projected once a validated memory view is available. The agent patches on demand, and ordinary conversation context continues without State Flow's active iteration reset.
+- `Passive`: Both memory tools are available, and existing state except `response` is projected once a validated memory view is available. The agent patches on demand, and ordinary conversation context continues without State Flow's active iteration reset.
 - `Off`: The model sees neither memory tool nor any State Flow context, including a frozen passive handoff.
   - Startup, reload and tree attachment do not read or restore memory.
   - Selecting Off cancels pending memory waits and records only native policy/bookmarks.
@@ -115,7 +115,7 @@ Runtime views provide these documented planes:
 - `contract`: Requirements, decisions, rejected approaches, constraints and interface commitments.
 - `working`: Temporary context of those actions: observations, results and uncertainties.
 - `artifacts`: Source-addressed descriptions and compiled knowledge.
-- `response`: The exact latest accepted answer, including an empty string. The runtime captures it only in Session; Global/CWD receive no newly accepted answers, and stored scopes may omit it entirely. Effective uses the highest-priority nonempty value.
+- `response`: The exact latest accepted answer, including an empty string. The runtime captures it only in Session; Global/CWD receive no newly accepted answers, and stored scopes may omit it entirely. Effective uses the highest-priority nonempty value. Active automatically projects it; Passive omits it from automatic context while keeping storage and explicit reads intact.
 - `lazy`: Supporting memory available through explicit reads; its body is omitted from baseline model context.
 
 Every plane is optional on disk:

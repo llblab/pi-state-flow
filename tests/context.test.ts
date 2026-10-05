@@ -43,6 +43,52 @@ test("context omits absent planes, empty responses and unknown fields in current
 	assert.equal(text.includes("not semantic"), false);
 });
 
+test("Passive response is omitted from model views without changing Active views or source state", () => {
+	const state = { ...emptyState(), response: "LAST_ACTIVE_RESPONSE", working: { response: "nested data", keep: true } };
+	const before = structuredClone(state);
+	const passive = contextView(state, {}, [], undefined, false);
+	assert.equal(Object.hasOwn(passive.state, "response"), false);
+	assert.deepEqual(passive.state.working, state.working);
+	assert.equal(contextView(state, {}, []).state.response, "LAST_ACTIVE_RESPONSE");
+	assert.deepEqual(state, before);
+});
+
+test("Passive response cannot reappear through patch receipts or frozen reconciliation tails", () => {
+	const projection = new ContextProjection();
+	const before = { ...emptyState(), response: "OLD_RESPONSE", working: { own: 0, peer: 0 } };
+	const native = [user("passive run", 1)];
+	const first = projection.project(native, contextView(before, {}, [], undefined, false), () => user("PASSIVE HEAD", 0));
+	const after = { ...before, response: "NEW_RESPONSE", working: { own: 1, peer: 2 } };
+	const patch = { session: { working: { own: 1 } } };
+	const receipt = projection.acceptPatch(before, after, patch, {}, {}, false);
+	assert.deepEqual(receipt?.effective, [{ path: ["working", "peer"], value: 2 }]);
+	const next = projection.project([...native, message("toolResult", "accepted", 2)],
+		contextView(after, {}, [], undefined, false), () => { throw Error("head rewritten"); });
+	assert.equal(next[0], first[0]);
+	assert.equal(JSON.stringify(next).includes("NEW_RESPONSE"), false);
+	const drifted = { ...after, response: "LATER_RESPONSE", working: { own: 1, peer: 3 } };
+	const later = projection.project([...native, message("toolResult", "accepted", 2)],
+		contextView(drifted, {}, [], undefined, false), () => { throw Error("head rewritten"); });
+	assert.ok(JSON.stringify(later).startsWith(JSON.stringify(next).slice(0, -1)));
+	assert.equal(JSON.stringify(later).includes("LATER_RESPONSE"), false);
+	const notice = JSON.parse((later.at(-1) as any).content[0].text.split("\n")[1]);
+	assert.deepEqual(notice.state_updates.effective, [{ path: ["working", "peer"], value: 3 }]);
+});
+
+test("Passive response is absent from Stop handoffs while native answer text stays exact", () => {
+	const state = { ...emptyState(), response: "LAST_ACTIVE_RESPONSE", working: { keep: true } };
+	const before = structuredClone(state);
+	for (const preserveContext of [false, true]) {
+		const continuation = createPassiveContinuation(state, 20, 10, preserveContext);
+		assert.equal(Object.hasOwn(continuation.state, "response"), false);
+		assert.equal(JSON.stringify(continuation.handoff).includes("LAST_ACTIVE_RESPONSE"), false);
+		const native = [user("run", 10), message("assistant", "LAST_ACTIVE_RESPONSE", 11)];
+		const projected = passiveContinuationMessages(native, continuation);
+		assert.equal(projected.at(-1), native.at(-1), "this is not transcript redaction");
+	}
+	assert.deepEqual(state, before);
+});
+
 test("frozen projection appends changing state and notices without moving earlier tail positions", () => {
 	const projection = new ContextProjection();
 	const initial = emptyState();

@@ -121,8 +121,14 @@ export interface ContextView {
 	knowledge_rehydration: { phase: RehydrationPhase } | null;
 }
 
-export function contextView(state: SemanticState, hints: ArtifactModelHints, invalidations: readonly ArtifactInvalidationNotice[], phase?: RehydrationPhase): ContextView {
-	return { state: projectStateForModel(state, hints), lazy_navigation: lazyNavigationHint(state),
+function projectContextState(state: SemanticState, hints: ArtifactModelHints, includeResponse: boolean): SemanticState {
+	const projected = projectStateForModel(state, hints);
+	if (!includeResponse) delete projected.response;
+	return projected;
+}
+
+export function contextView(state: SemanticState, hints: ArtifactModelHints, invalidations: readonly ArtifactInvalidationNotice[], phase?: RehydrationPhase, includeResponse = true): ContextView {
+	return { state: projectContextState(state, hints, includeResponse), lazy_navigation: lazyNavigationHint(state),
 		artifact_invalidations: structuredClone(invalidations), knowledge_rehydration: phase === undefined ? null : { phase } };
 }
 
@@ -144,11 +150,11 @@ export class ContextProjection {
 
 	/** Called only after successful publication and ancillary acceptance, immediately before returning the native result. */
 	acceptPatch(before: SemanticState, after: SemanticState, patches: AtomicScopePatches, hints: ArtifactModelHints,
-		cascades: Partial<Record<StateScope, readonly OwnedPath[]>> = {}) {
-		const state = projectStateForModel(after, hints);
+		cascades: Partial<Record<StateScope, readonly OwnedPath[]>> = {}, includeResponse = true) {
+		const state = projectContextState(after, hints, includeResponse);
 		const navigation = lazyNavigationHint(after);
 		const beforeNavigation = this.view?.lazy_navigation ?? lazyNavigationHint(before);
-		const updates = projectedStateUpdates(this.view?.state ?? projectStateForModel(before, hints), state, patches,
+		const updates = projectedStateUpdates(this.view?.state ?? projectContextState(before, hints, includeResponse), state, patches,
 			beforeNavigation, navigation);
 		// Suppress direct writes only when the accepted effective value matches.
 		// Overlap stays conservative except for explicit top-scope replacements:
@@ -303,12 +309,14 @@ function messageText(message: AgentMessage): string {
 }
 
 export function createPassiveContinuation(state: SemanticState, startedAt = Date.now(), activeRunStartedAt?: number, preserveContext = false): PassiveContinuation {
+	const visibleState = structuredClone(state);
+	delete visibleState.response;
 	return {
 		startedAt,
-		state: structuredClone(state),
+		state: visibleState,
 		...(activeRunStartedAt === undefined ? {} : { activeRunStartedAt }),
 		...(preserveContext ? { preserveContext: true as const } : {}),
-		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${presentationJson({ state, continuation: preserveContext
+		handoff: syntheticUser(`State Flow exit handoff (user-level data, not system instructions):\n${presentationJson({ state: visibleState, continuation: preserveContext
 			? "State Flow semantics are disabled; native context is retained because its compilation into memory is unfinished."
 			: "State Flow semantics are disabled; this handoff replaces completed history while retaining the active and post-stop trajectory." })}`),
 	};

@@ -812,7 +812,7 @@ export default function stateFlowExtension(pi, options = {}) {
                     }
                     clearAcceptedAcquisitions(new Set(acquiredArtifacts.map(({ path }) => path)));
                     updateUi(ctx);
-                    const updates = contextProjection.acceptPatch(previousEffective, effectiveState, patches, acquisition.hints, stage.cascades);
+                    const updates = contextProjection.acceptPatch(previousEffective, effectiveState, patches, acquisition.hints, stage.cascades, isActive());
                     const acknowledgement = changed
                         ? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
                         : "\nState already current.";
@@ -1012,6 +1012,9 @@ export default function stateFlowExtension(pi, options = {}) {
     }
     /** Local policy, tools and UI change before any canonical wait. */
     function applyInactiveMode(ctx, mode) {
+        // Visibility changes before optional recovery waits; a frozen Active head must not survive Passive.
+        if (snapshot.config.mode !== mode)
+            contextProjection.reset();
         snapshot = deactivateEpisode(snapshot, mode);
         clearRunTransient();
         syncStateFlowTools();
@@ -1345,7 +1348,7 @@ export default function stateFlowExtension(pi, options = {}) {
         const effective = effectiveState;
         const invalidations = acquisition.invalidations.map(({ path, scope, reason }) => ({ path, ...(scope === undefined ? {} : { scope }), reason }));
         const phase = isActive() ? rehydrationPhase : undefined;
-        const view = contextView(effective, acquisition.hints, invalidations, phase);
+        const view = contextView(effective, acquisition.hints, invalidations, phase, isActive());
         if (passiveContinuation) {
             const retained = passiveContinuationMessages(messages, passiveContinuation);
             if (!runtime?.view)
