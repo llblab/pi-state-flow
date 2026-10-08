@@ -851,6 +851,41 @@ test("unfinished compilation preserves all available native context without muta
 	assert.deepEqual(passiveContinuationMessages([], continuation), [continuation.handoff]);
 });
 
+test("idle passive continuation keeps post-stop compaction and every later tool turn", () => {
+	const continuation = createPassiveContinuation(emptyState(), 20);
+	const persistent = message("custom", "Foreign policy", 1, "foreign-policy");
+	const oldSummary = { role: "compactionSummary", summary: "Completed history", tokensBefore: 5000, timestamp: 10 } as AgentMessage;
+	const summary = { role: "compactionSummary", summary: "Selected task and unfinished tools", tokensBefore: 6000, timestamp: 30 } as AgentMessage;
+	const call = toolAssistant("early-read") as AgentMessage;
+	const result = { role: "toolResult", toolCallId: "early-read", toolName: "read", content: [{ type: "text", text: "Early evidence" }], timestamp: 25 } as AgentMessage;
+	const lateCall = toolAssistant("late-read") as AgentMessage;
+	const lateResult = { ...result, toolCallId: "late-read", timestamp: 31 };
+	const steering = user("Post-compaction refinement", 32);
+	const nextSummary = { ...summary, summary: "Updated native summary", timestamp: 40 };
+	const nativePrefix = [persistent, oldSummary, user("Completed request", 11)];
+	const beforeContinuation = structuredClone(continuation);
+	for (const suffix of [[summary, call, result], [summary, call, result, lateCall, lateResult],
+		[summary, call, result, lateCall, lateResult, steering], [nextSummary, lateCall, lateResult]]) {
+		const native = [...nativePrefix, ...suffix];
+		const before = structuredClone(native);
+		const projected = passiveContinuationMessages(native, continuation);
+		assert.deepEqual(projected, [continuation.handoff, persistent, ...suffix]);
+		assert.ok(projected.slice(1).every((entry, index) => entry === [persistent, ...suffix][index]), "preserve native identity and order");
+		assert.deepEqual(native, before);
+		assert.deepEqual(continuation, beforeContinuation);
+	}
+});
+
+test("idle passive continuation does not promote old summaries or summary-looking text", () => {
+	const continuation = createPassiveContinuation(emptyState(), 20);
+	const persistent = message("custom", "Foreign policy", 1, "foreign-policy");
+	const summary = { role: "compactionSummary", summary: "Completed history", tokensBefore: 5000, timestamp: 10 } as AgentMessage;
+	const prefix = [persistent, summary, user("Completed request", 11), message("assistant", "compactionSummary after Stop", 30)];
+	assert.deepEqual(passiveContinuationMessages(prefix, continuation), [continuation.handoff, persistent]);
+	const later = user("Later request", 31);
+	assert.deepEqual(passiveContinuationMessages([...prefix, later], continuation), [continuation.handoff, persistent, later]);
+});
+
 test("idle and legacy passive cutoffs retain only later conversation plus foreign custom context", () => {
 	const persistent = message("custom", "Persistent policy", 1, "foreign-policy");
 	const later = message("user", "Later request", 22);

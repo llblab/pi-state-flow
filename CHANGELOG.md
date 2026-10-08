@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.26.4: Passive Compaction Continuity
+
+- `Passive continuation`: After idle Stop, native compaction can replace the later user anchor with a summary. Passive now retains that summary, the available tool calls/results and later refinements instead of reducing requests to a frozen handoff. Reload/resume preserve the same continuation; discarded raw history is not reconstructed. Native compaction, memory scopes and stored state are unchanged; no migration or configuration change is required.
+
 ## 0.26.3: Passive Response Isolation
 
 - `Passive context`: Automatic Passive memory heads, Stop handoffs and state-update receipts omit the `response` plane, including after reload and mode changes. Active still sees the previous accepted answer. Canonical response storage, explicit reads and native/user/tool history are unchanged; no migration or configuration change is required.

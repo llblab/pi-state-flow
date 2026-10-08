@@ -85,7 +85,7 @@ How each lifecycle event behaves:
   - If native split-turn compaction removed the original request anchor, Stop keeps the available summary and tools instead, without reconstructing discarded raw input.
   - An unfinished bootstrap keeps all available native context, or the earlier passive boundary it received. Repeated Start/Stop cannot move that boundary past uncompiled conversation.
   - An interrupted run keeps its captured anchor even after Pi becomes idle, and falls back to all available context when that anchor is unknown.
-  - Only Stop after a completed idle run keeps just the later conversation plus foreign custom context. Other extensions' custom context survives in every case.
+  - Only Stop after a completed idle run keeps just the later conversation plus foreign custom context. A native compaction summary created after Stop keeps its complete available tool suffix and later refinements, even when the original user anchor is no longer present. Earlier summaries do not reopen completed history. Other extensions' custom context survives in every case.
   - Mid-tool Start and repeated Start/Stop keep the first user event already observed while disabled, so a later Stop does not mistake that busy run for idle.
   - Reload/resume/tree preserve this projection; new or forked physical sessions do not inherit it.
   - Active restart uses the retained projection for one bootstrap run. Off keeps this boundary for a later Passive/Active selection but never projects it.

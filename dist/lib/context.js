@@ -345,7 +345,8 @@ export function passiveContinuationMessages(messages, continuation) {
         const trajectory = currentRunTrajectory(messages, "", continuation.activeRunStartedAt);
         return [continuation.handoff, ...trajectory.messages];
     }
-    const start = messages.findIndex((message) => message.role === "user"
+    // A post-stop native summary replaces its compacted user anchor, including the retained tool suffix.
+    const start = messages.findIndex((message) => (message.role === "user" || message.role === "compactionSummary")
         && typeof message.timestamp === "number"
         && message.timestamp >= continuation.startedAt);
     return [continuation.handoff, ...messages.filter((message, index) => message.role === "custom" || (start >= 0 && index >= start))];

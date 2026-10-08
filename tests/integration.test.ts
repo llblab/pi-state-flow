@@ -2222,6 +2222,90 @@ for (const stopDuringTool of [false, true]) test(`real Pi retains a native split
 	assert.match(JSON.stringify(nextInput!.messages), /FOREIGN-SPLIT-CONTEXT/, "foreign custom context stays persistent after the bootstrap run");
 });
 
+test("real Pi idle Stop retains later native split-turn compaction through tools and resume", { timeout: 30_000 }, async (t) => {
+	const f = await realPiFixture(t, {
+		mode: "active", initializeRepository: false, contextWindow: 4_000,
+		compaction: { enabled: false, keepRecentTokens: 200, reserveTokens: 500 },
+	});
+	const session = await f.createSession("new");
+	t.after(() => session.dispose());
+	f.faux.setResponses([fauxAssistantMessage("Completed before idle Stop.")]);
+	await session.prompt("Complete the active run");
+	await session.prompt("/state-flow-passive");
+	const stop = session.sessionManager.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === "state-flow-passive-stop");
+	assert.ok(stop?.type === "custom");
+	assert.equal((stop.data as { from?: number }).from, undefined, "this is the idle, not interrupted-run branch");
+	const frozen = f.readState(session);
+	const step = latestSnapshot(session).meta.step;
+	writeFileSync(join(f.cwd, "early.txt"), `PASSIVE-EARLY-EVIDENCE\n${"e".repeat(6000)}`);
+	writeFileSync(join(f.cwd, "late.txt"), "PASSIVE-LATE-EVIDENCE\n");
+	const inputs: Context[] = [];
+	let summaries = 0;
+	const respond = async (context: Context) => {
+		if (context.messages.some((message) => message.role === "system" && getSystemMessageText(message).startsWith("You are a context summarization assistant."))) {
+			summaries++;
+			return fauxAssistantMessage("NATIVE-PASSIVE-SUMMARY: retain the selected task and unfinished reads.");
+		}
+		inputs.push(context);
+		if (inputs.length === 1) return fauxAssistantMessage(fauxToolCall("read", { path: "early.txt" }, { id: "passive-early" }), { stopReason: "toolUse" });
+		if (inputs.length === 2) {
+			session.setAutoCompactionEnabled(false);
+			await session.sendCustomMessage({ customType: "foreign-passive-context", content: "FOREIGN-PASSIVE-CONTEXT", display: false }, { triggerTurn: false });
+			return fauxAssistantMessage(fauxToolCall("read", { path: "late.txt" }, { id: "passive-late" }), { stopReason: "toolUse" });
+		}
+		return fauxAssistantMessage("Finished the passive task.");
+	};
+	f.faux.setResponses(Array(10).fill(respond));
+	session.setAutoCompactionEnabled(true);
+	await session.prompt(`POST-STOP-SPLIT-REQUEST:${"x".repeat(20_000)}`);
+	assert.equal(inputs.length, 3);
+	assert.ok(summaries > 0);
+	const branch = session.sessionManager.getBranch();
+	const compaction = branch.findLast((entry) => entry.type === "compaction");
+	assert.ok(compaction?.type === "compaction");
+	assert.equal(compaction.fromHook, false);
+	assert.match(compaction.summary, /Turn Context \(split turn\)/);
+	const kept = branch.slice(branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId)).find((entry) => entry.type === "message");
+	assert.ok(kept?.type === "message" && kept.message.role === "assistant");
+	assert.equal(session.sessionManager.buildSessionContext().messages.some((message) => message.role === "user" && JSON.stringify(message.content).includes("POST-STOP-SPLIT-REQUEST")), false);
+	const assertContinuation = (context: Context, late: boolean) => {
+		const text = JSON.stringify(context.messages);
+		for (const marker of ["State Flow exit handoff", "NATIVE-PASSIVE-SUMMARY", "PASSIVE-EARLY-EVIDENCE",
+			...(late ? ["PASSIVE-LATE-EVIDENCE", "FOREIGN-PASSIVE-CONTEXT"] : [])]) assert.ok(text.includes(marker), marker);
+		const calls = context.messages.flatMap((message) => message.role === "assistant" ? message.content.filter((part) => part.type === "toolCall").map((part) => part.id) : []);
+		const results = context.messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId);
+		assert.deepEqual(calls, late ? ["passive-early", "passive-late"] : ["passive-early"]);
+		assert.deepEqual(results, calls);
+		assert.doesNotMatch(text, /POST-STOP-SPLIT-REQUEST/, "do not reconstruct the compacted raw request");
+	};
+	assertContinuation(inputs[1]!, false);
+	assertContinuation(inputs[2]!, true);
+	const file = session.sessionFile!;
+	const trace = readFileSync(file, "utf8");
+	const assertFrozen = (current: AgentSession) => {
+		assert.deepEqual(f.readState(current), frozen);
+		assert.equal(latestSnapshot(current).meta.step, step);
+		assert.equal(latestSnapshot(current).config.mode, "passive");
+	};
+	await session.reload();
+	session.setAutoCompactionEnabled(false);
+	let reloadedInput: Context | undefined;
+	f.faux.setResponses([(context) => { reloadedInput = context; return fauxAssistantMessage("Continued after reload."); }]);
+	await session.prompt("Refine the selected passive task");
+	assertContinuation(reloadedInput!, true);
+	assertFrozen(session);
+	assert.ok(readFileSync(file, "utf8").startsWith(trace));
+	session.dispose();
+	const resumed = await f.createSession("resume", SessionManager.open(file, f.sessionDir));
+	t.after(() => resumed.dispose());
+	resumed.setAutoCompactionEnabled(false);
+	let resumedInput: Context | undefined;
+	f.faux.setResponses([(context) => { resumedInput = context; return fauxAssistantMessage("Continued after resume."); }]);
+	await resumed.prompt("Continue the passive task after cold resume");
+	assertContinuation(resumedInput!, true);
+	assertFrozen(resumed);
+});
+
 test("real Pi edited-context accounting discards stale provider usage", { timeout: 15_000 }, async (t) => {
 	const f = await realPiFixture(t, { mode: "active", initializeRepository: false, contextWindow: 4_000 });
 	const session = await f.createSession("new");

@@ -290,7 +290,7 @@ Which boundary Stop keeps:
 
 - A recorded active anchor uses the same conservative selector as active inference. If native compaction removed it, or matching is ambiguous or nonfinite, the available native summary and tool trajectory are kept, without guessing a post-stop boundary or rereading discarded raw entries.
 - An interrupted run keeps its captured anchor even after Pi becomes idle. If capture is unavailable, Stop preserves all available context.
-- Completed idle runs, and markers without an active anchor or preservation flag, keep only post-stop conversation plus foreign custom context.
+- Completed idle runs, and markers without an active anchor or preservation flag, keep only post-stop conversation plus foreign custom context. A native `compactionSummary` timestamped at or after Stop is also a continuation boundary: its entire available suffix remains visible through later tool turns and user refinements. Pre-stop summaries do not reopen completed history; no discarded raw request is reconstructed.
 
 The initial system prompt is composed at `before_agent_start`. Stop does not rewrite an already-issued request; the next provider request receives the current owned protocol section, as described below.
 
