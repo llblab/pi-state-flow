@@ -211,6 +211,7 @@ When `pi-telegram` is available, its main-menu section shows `State Flow: active
 
 - A horizontal radio row presents `Off | Passive | Active`. The selected option uses 🟣, 🟡 or 🟢 respectively; each inactive option uses ⚫️.
 - Telegram Active requested during a run waits for settlement; Passive and Off apply immediately.
+- The first accepted Passive click refreshes the selected button after memory restoration or write-fence recovery, including while the agent is busy. A later mode or branch selection still suppresses an obsolete menu update.
 - Ordinary successful controls add no redundant mode receipt; diagnostic outcomes stay visible.
 - Off exposes neither tool nor State Flow model context.
 

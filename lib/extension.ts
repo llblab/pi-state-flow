@@ -1200,11 +1200,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			});
 			if (!modePersistenceError) {
 				appendCheckpoint();
-				return { ok: true, message: `State Flow ${selectedMode}` };
+				return { ok: true, message: `State Flow ${selectedMode}`, signal: sharedInspectionLifetime.signal };
 			}
 			const message = conciseDiagnostic(`State Flow ${selectedMode}; memory writes paused: ${modePersistenceError}`);
 			notifyProblem(ctx, message, "warning");
-			return { ok: true, message };
+			return { ok: true, message, signal: sharedInspectionLifetime.signal };
 		};
 		let accepted = false;
 		try {
@@ -1272,10 +1272,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				if (!activeContext) throw new Error("State Flow is not attached to an active session yet");
 				const operation = selectMode(activeContext, mode);
 				if (mode === "active") return operation;
-				// Inactive choices revoke older presentation at once; the receipt belongs to the new lifetime.
+				// Native-only outcomes use the selected lifetime; async acceptance may renew and return its own receipt.
 				const signal = sharedInspectionLifetime.signal;
 				try {
-					return { ...await operation, signal };
+					const result = await operation;
+					return { ...result, signal: result.signal ?? signal };
 				} catch (error) {
 					return { ok: false, message: diagnosticText(error), signal };
 				}

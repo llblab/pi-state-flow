@@ -22,7 +22,7 @@ import {
 } from "../lib/telegram.ts";
 import { captureTemporalFileBases, sessionRuntimePaths } from "../lib/durable.ts";
 import { emptyState } from "../lib/state.ts";
-import { harness } from "./harness.ts";
+import { harness, user } from "./harness.ts";
 import { writeGlobalState } from "./storage-fixture.ts";
 
 function snapshot(overrides: Partial<StateFlowTelegramSnapshot> = {}): StateFlowTelegramSnapshot {
@@ -318,6 +318,71 @@ async function holdInspectionStorage(t: TestContext, root: string) {
 	await entered;
 	return async () => { release(); await holder; };
 }
+
+async function restoredOffTelegramHarness(t: TestContext, busy: boolean, fenced = false) {
+	const modules = fakeModules();
+	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules.modules } });
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await delay(0);
+	await h.tools.get("patch_state")!.execute("seed", { session: { working: { retained: "PRIVATE" } } }, undefined, undefined, h.ctx);
+	if (fenced) {
+		const publication = t.mock.method(TemporalRuntime.prototype, "withLifecycleTransaction", async () => { throw new Error("Controlled mode-persistence failure"); });
+		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
+		publication.mock.restore();
+	}
+	await h.commands.get("state-flow-off")!.handler("", h.ctx);
+	const operation = new AbortController();
+	h.ctx.isIdle = () => !busy;
+	Object.defineProperty(h.ctx, "signal", { get: () => busy ? operation.signal : undefined });
+	if (busy) {
+		h.beforeAgentStart("Continue the native run");
+		const message = user("Continue the native run", Date.now());
+		h.entries.push({ type: "message", message });
+		await h.handlers.get("message_end")!({ message }, h.ctx);
+	}
+	t.after(async () => { await h.handlers.get("session_shutdown")!({ reason: "quit" }, h.ctx); });
+	assert.equal(modules.sections[0]!.getLabel!(), "🌀 State Flow: off");
+	return { h, section: modules.sections[0]! };
+}
+
+for (const busy of [false, true]) for (const fenced of [false, true]) test(`restored-memory Passive refreshes its first Telegram click (busy=${busy}, fenced=${fenced})`, async (t) => {
+	const { h, section } = await restoredOffTelegramHarness(t, busy, fenced);
+	for (const press of [1, 2]) {
+		const control = sectionContext("passive");
+		assert.equal(await section.handleCallback!(control.context), "handled");
+		assert.equal(section.getLabel!(), "🌀 State Flow: passive");
+		assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
+		assert.equal(control.edits.length, 1, `click ${press} must update the accepted mode without a repeat`);
+		assert.equal(control.edits[0]!.replyMarkup!.inline_keyboard[0][1].text, "🟡 Passive");
+		assert.deepEqual(control.notices, ["Switching State Flow to passive"]);
+		assert.equal(h.readState(0, "session").working.retained, "PRIVATE");
+	}
+});
+
+for (const superseding of ["off", "active", "tree", "off-passive", "shutdown"] as const) test(`accepted Passive Telegram receipt is revoked by ${superseding} during acknowledgement`, async (t) => {
+	const { h, section } = await restoredOffTelegramHarness(t, true);
+	const control = sectionContext("passive");
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	t.after(release);
+	control.context.answerCallback = async (notice) => { control.notices.push(notice); await gate; };
+	const selecting = section.handleCallback!(control.context);
+	await delay(0);
+	// Join the same in-flight acceptance (or its already-accepted no-op) without a second Telegram interaction.
+	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
+	await delay(0);
+	assert.equal(section.getLabel!(), "🌀 State Flow: passive");
+	assert.deepEqual(control.edits, []);
+	if (superseding === "tree") await h.handlers.get("session_tree")!({}, h.ctx);
+	else if (superseding === "shutdown") await h.handlers.get("session_shutdown")!({ reason: "quit" }, h.ctx);
+	else {
+		await h.commands.get(superseding === "active" ? "state-flow-active" : "state-flow-off")!.handler("", h.ctx);
+		if (superseding === "off-passive") await h.commands.get("state-flow-passive")!.handler("", h.ctx);
+	}
+	release();
+	assert.equal(await selecting, "handled");
+	assert.deepEqual(control.edits, [], "an old accepted receipt cannot overwrite a newer selection, even the same mode");
+});
 
 for (const superseded of [false, true]) test(`pre-runtime Telegram Passive reports only its current successful selection (superseded=${superseded})`, async (t) => {
 	const { modules, sections } = fakeModules();

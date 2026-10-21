@@ -2,6 +2,10 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.26.5: Telegram Mode Receipt Hotfix
+
+- `Telegram mode controls`: Passive now refreshes the selected button on the first accepted click after Off, including existing-memory restoration and write-fence recovery during an active run. Accepted controls retain their renewed presentation receipt instead of being mistaken for canceled work; later mode choices, branch changes and shutdown still suppress obsolete updates. Memory storage and mode semantics are unchanged; no migration is required.
+
 ## 0.26.4: Passive Compaction Continuity
 
 - `Passive continuation`: After idle Stop, native compaction can replace the later user anchor with a summary. Passive now retains that summary, the available tool calls/results and later refinements instead of reducing requests to a frozen handoff. Reload/resume preserve the same continuation; discarded raw history is not reconstructed. Native compaction, memory scopes and stored state are unchanged; no migration or configuration change is required.

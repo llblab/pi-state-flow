@@ -138,7 +138,7 @@ The optional adapter presents one Off | Passive | Active row and uses the same m
 - Inspection returns coherent state plus matching revisions, without publication.
 - Controls and inspections acknowledge callbacks before waiting, suppress revoked results and escape late failures in the current menu.
 - Synchronous mode-selection ports are supported.
-- A first Passive selection may install a read-only shared cache without invalidating its own success receipt. Later controls, branch changes and cancellation still revoke obsolete presentation.
+- Passive acceptance returns its current presentation receipt after any internal restoration or lifetime renewal, including existing-memory reacquisition after Off and write-fence recovery. The adapter preserves that accepted receipt, so the first click refreshes the button in both busy and idle sessions. Pre-runtime shared-cache loading also retains its receipt. Later controls, branch changes and shutdown still revoke obsolete presentation, including a change away and back to the same mode while callback acknowledgement waits.
 
 Adapter tests establish these contracts with isolated transport fixtures; they are not a live Telegram smoke test. Missing or unready transport remains fail-open and cannot change core memory behavior.
 
