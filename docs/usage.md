@@ -51,6 +51,8 @@ Active, Passive and Off select the session's workflow and model-facing access, n
 
 All three mode commands accept optional exact owner tokens, in any order: `/state-flow-active session`, `/state-flow-passive cwd global`, `/state-flow-off cwd session`. Any nonempty unique subset of `global cwd session` is valid; autocomplete offers only unused matching tokens and replaces the full argument prefix. Blank/whitespace-only arguments preserve the captured choice. Unknown/duplicate names, flags and comma-separated forms fail before policy or mode changes. Commands never edit global defaults. Off scope changes record native policy only, without reading or initializing canonical memory. Active explicitly owns acquisition where independently permitted; Passive observation alone cannot acquire missing Session or borrow pending fork permission.
 
+Selection is not materialization: all three scopes are selected by default, but a pre-runtime Passive session can have no private Session cohort yet. Read-only observation exposes existing shared owners without inventing empty Session state. An explicit read of a selected owner missing from that read view reports `selected, unavailable`, not `excluded`; an actually excluded owner is rejected by the selection guard. A legitimate first Session patch on an eligible non-fork branch can acquire private memory through normal atomic acceptance. Do not send an empty patch just to initialize it or bypass pending-fork authority.
+
 How each lifecycle event behaves:
 
 - **New session:** Adopts the global `mode`, defaulting to Off.

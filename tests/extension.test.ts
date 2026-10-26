@@ -42,6 +42,37 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 {
 	const text = (message: ToolResultMessage) => message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
 	const observe = (context: Context, results: Map<string, ToolResultMessage>) => { for (const message of context.messages) if (message.role === "toolResult") results.set(message.toolCallId, message); };
+	test("Passive distinguishes selected unavailable Session from excluded owners without acquiring on reads", { timeout: 30_000 }, async t => {
+		for (const wanted of [["global", "cwd", "session"], ["session"], ["global", "cwd"]] as const) {
+			const f = await realPiFixture(t, { initializeRepository: false }), seed = await f.createSession("new");
+			const results = new Map<string, ToolResultMessage>();
+			const run = async (session: AgentSession, name: string, args: JsonObject, id: string) => {
+				f.faux.setResponses([fauxAssistantMessage(fauxToolCall(name, args, { id }), { stopReason: "toolUse" }), context => { observe(context, results); return fauxAssistantMessage("Observed"); }]);
+				await session.prompt(id); const result = results.get(id)!; assert.ok(result); return result;
+			};
+			await seed.prompt("/state-flow-passive global cwd");
+			assert.notEqual((await run(seed, "patch_state", { global: { strategy: { privateSentinel: "SHARED_VALUE_NOT_A_PARTIAL_RESULT" } }, cwd: { strategy: { seed: true } } }, "seed-shared")).isError, true);
+			const session = await f.createSession("new");
+			await session.prompt(wanted.length === 3 ? "/state-flow-passive" : `/state-flow-passive ${wanted.join(" ")}`);
+			const before = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
+			const hasSession = (wanted as readonly StateScope[]).includes("session");
+			const error = hasSession ? /State Flow session: selected, unavailable/ : /Model read scope is excluded/;
+			const reads: JsonObject[] = [{ path: "session" }, { path: "session.strategy" }];
+			if (wanted.length === 3) reads.push({ paths: ["global.strategy", "session.strategy"] });
+			for (const args of reads) {
+				const result = await run(session, "read_state", args, `read-unavailable-${JSON.stringify(args)}`);
+				assert.equal(result.isError, true); assert.match(text(result), error);
+				assert.ok(!text(result).includes("SHARED_VALUE_NOT_A_PARTIAL_RESULT"));
+				assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), before, "read cannot initialize private memory or write canonical state");
+			}
+			if (hasSession) {
+				const patch: JsonObject = wanted.length === 1 ? { strategy: { available: true } } : { session: { strategy: { available: true } } };
+				assert.notEqual((await run(session, "patch_state", patch, "material-session-write")).isError, true);
+				assert.deepEqual(JSON.parse(text(await run(session, "read_state", { path: "session.strategy" }, "read-after-accepted-acquisition"))), { value: { available: true } });
+			}
+		}
+	});
+
 	test("ordinary public consumers fork only current seventh-plane content from an older native point without parent mutation", { timeout: 30_000 }, async t => {
 		for (const immutable of [false, true]) {
 			let desired = 1;

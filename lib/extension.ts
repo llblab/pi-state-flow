@@ -988,6 +988,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					const paths = requestedPaths.map(path => normalizeModelReadPath(path, wanted, config.historyLimit));
 					check();
 					const view = readableView(selected);
+					// Wanted policy was checked by normalization; an observational subset is not an exclusion.
+					for (const path of paths) {
+						const owner = /^(global|cwd|session)(?=\.|\[|$)/.exec(path)?.[1] as StateScope | undefined;
+						if (owner && !view?.selection.includes(owner)) throw new Error(`State Flow ${owner}: selected, unavailable`);
+					}
 					if (!view) throw new Error("State Flow temporal runtime is unavailable");
 					check();
 					if (paths.some((path) => /^session(?:\.|\[|$)/.test(path))) assertSelectedBranchAvailable();

@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.27.1: Selected Scope Read Diagnostics
+
+- `Read availability`: Explicit reads now distinguish a selected owner with no available read view from an excluded owner. In pre-runtime Passive sessions, an unacquired Session no longer incorrectly reports itself excluded. Reads still do not create private memory, widen the selection or return partial multi-path results; normal accepted writes retain their acquisition rules.
+
 ## 0.27.0: Semantic Memory and Scope Selection
 
 - `Semantic API (breaking)`: `strategy`/`tactics` replace `contract`/`working` in runtime fields, public types, schemas, queries, receipts and Skills. Strategy retains binding requirements, accepted approaches and rejection reasons; tactics holds operational evidence. Proposals are not commitments. New-format retired-root writes reject; ordinary nested keys remain legal.
