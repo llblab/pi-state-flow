@@ -1,9 +1,12 @@
+import { type ScopeSelection } from "./selection.ts";
 import { type InactiveMode, type StateFlowMode } from "./snapshot.ts";
 export interface StateFlowConfig {
     /** Canonical State Flow repository. SDK callers may still override it explicitly. */
     directory: string;
     /** Default mode for genuinely new sessions only; each session owns its selected mode. */
     mode: StateFlowMode;
+    /** Concrete default selection for genuinely new or not-yet-captured legacy sessions. */
+    scopes: ScopeSelection;
     /** Non-active fallback for legacy `enabled:false` evidence and unavailable selections; never serialized. */
     inactiveMode: InactiveMode;
     /** Opt-in local capture of rejected patch attempts and unresolved terminal drafts. */

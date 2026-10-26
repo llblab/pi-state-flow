@@ -19,6 +19,7 @@ import {
 import { fauxProvider, InMemoryCredentialStore, type FauxModelDefinition, type FauxProviderHandle } from "@earendil-works/pi-ai";
 import stateFlowExtension from "../index.ts";
 import type { ModelState, StateScope } from "../lib/state.ts";
+import type { StateFlowTelegramLoader } from "../lib/telegram.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
 import type { RetainedPiCheckpoint, Snapshot, StateFlowMode } from "../lib/snapshot.ts";
 import { resolveCheckpoint } from "./temporal-fixture.ts";
@@ -56,6 +57,8 @@ export async function realPiFixture(t: TestContext, options: {
 	/** SDK default-mode override for new sessions; "configured" follows repository config.json. Defaults to off. */
 	mode?: StateFlowMode | "configured";
 	stateFlow?: boolean;
+	/** Existing optional presentation-loader seam, without network delivery or replacement mode owners. */
+	telegram?: { load?: StateFlowTelegramLoader };
 	extensions?: InlineExtension[];
 	/** Observe the public factory result before awaiting native extension binding. */
 	onSessionCreated?: (session: AgentSession, event: SessionStartEvent) => void;
@@ -140,7 +143,7 @@ export async function realPiFixture(t: TestContext, options: {
 			extensionFactories: [
 				...(options.stateFlow === false ? [] : [{
 					name: "state-flow-integration",
-					factory: (pi: Parameters<typeof stateFlowExtension>[0]) => stateFlowExtension(pi, { agentDir, repositoryRoot, ...(options.mode === "configured" ? {} : { mode: options.mode ?? "off" }), onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
+					factory: (pi: Parameters<typeof stateFlowExtension>[0]) => stateFlowExtension(pi, { agentDir, repositoryRoot, ...(options.mode === "configured" ? {} : { mode: options.mode ?? "off" }), ...(options.telegram === undefined ? {} : { telegram: options.telegram }), onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
 				}]),
 				...(options.extensions ?? []),
 			],

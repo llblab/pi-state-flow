@@ -54,6 +54,22 @@ test("owned operation slot can keep ownership past settlement and still drains s
 	assert.deepEqual(slot.inflight, []);
 });
 
+test("operation cancellation and lifetime renewal preserve owners created synchronously by abort listeners", () => {
+	const slot = new OwnedOperationSlot<Entry>();
+	const first = slot.claim({ controller: new AbortController(), label: "first" });
+	const replacement = { controller: new AbortController(), label: "replacement" };
+	first.controller.signal.addEventListener("abort", () => slot.claim(replacement), { once: true });
+	slot.cancel();
+	assert.equal(slot.current, replacement, "cancel must forget only its old owner before dispatch");
+	const lifetime = new RenewableLifetime();
+	const original = lifetime.signal;
+	let observed: AbortSignal | undefined;
+	original.addEventListener("abort", () => { observed = lifetime.signal; lifetime.end(); }, { once: true });
+	lifetime.renew();
+	assert.notEqual(observed, original, "replacement signal must be visible to synchronous abort listeners");
+	assert.equal(lifetime.signal, observed); assert.equal(lifetime.signal.aborted, true, "reentrant end cannot be overwritten by outer renewal");
+});
+
 test("renewable lifetime aborts current holders on renewal and stays ended after shutdown", () => {
 	const lifetime = new RenewableLifetime();
 	const first = lifetime.signal;

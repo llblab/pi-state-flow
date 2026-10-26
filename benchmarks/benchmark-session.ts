@@ -120,9 +120,9 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 		if (action === "patch") {
 			if (acceptedPatches === 1) {
 				const global = loadGlobalState(fixture.repositoryRoot)!;
-				writeGlobalState({ working: { ...global.working, trajectoryForeign: "adopted" } }, fixture.repositoryRoot);
+				writeGlobalState({ tactics: { ...global.tactics, trajectoryForeign: "adopted" } }, fixture.repositoryRoot);
 			}
-			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { trajectoryBarrier: acceptedPatches + 1 } } }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { trajectoryBarrier: acceptedPatches + 1 } } }), { stopReason: "toolUse" });
 		}
 		const call = fauxToolCall("read", { path: source });
 		readIds.add(call.id);
@@ -139,7 +139,7 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 			else {
 				assert.equal(event.result.content.length, 2, "shared surprise needs one reconciliation tail");
 				assert.deepEqual(JSON.parse(tail).state_updates.effective,
-					[{ path: ["working", "trajectoryForeign"], value: "adopted" }]);
+					[{ path: ["tactics", "trajectoryForeign"], value: "adopted" }]);
 			}
 			acceptedPatches++;
 		}
@@ -153,8 +153,8 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 		assert.equal(observed, actions.length, "provider assertions must not be swallowed");
 		assert.equal(completedReads, 8);
 		assert.equal(acceptedPatches, 2);
-		assert.equal(fixture.readState(session).working.trajectoryBarrier, 2);
-		assert.equal(fixture.readState(session).working.trajectoryForeign, "adopted");
+		assert.equal(fixture.readState(session).tactics.trajectoryBarrier, 2);
+		assert.equal(fixture.readState(session).tactics.trajectoryForeign, "adopted");
 		return { inferences, patchStateBarriers: acceptedPatches, reconciliationTailBytes,
 			readResultBytes: Buffer.byteLength(sourceText), completedReads };
 	} finally { unsubscribe(); }
@@ -233,7 +233,7 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 		...(stateFlow ? [(context: Context) => {
 			observe(context);
 			assertRead(context);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { counter, ...(counter === 1 ? { payload: "x".repeat(size) } : {}) } } }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { counter, ...(counter === 1 ? { payload: "x".repeat(size) } : {}) } } }), { stopReason: "toolUse" });
 		}] : []),
 		(context) => { observe(context); assertRead(context); return fauxAssistantMessage(`Accepted ${counter}`); },
 	]);
@@ -272,8 +272,8 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 		if (stateFlow) {
 			assert.ok(session.getActiveToolNames().includes("patch_state"), "cannot benchmark silently disabled State Flow");
 			const state = fixture.readState(session);
-			assert.equal(state.working.counter, counter, "patch was not accepted");
-			assert.equal(state.working.payload, "x".repeat(size));
+			assert.equal(state.tactics.counter, counter, "patch was not accepted");
+			assert.equal(state.tactics.payload, "x".repeat(size));
 			assert.equal(state.response, `Accepted ${counter}`, "terminal response was not accepted");
 		}
 		assert.equal(inferenceCount, stateFlow ? 3 : 2, "benchmark inference sequence changed");

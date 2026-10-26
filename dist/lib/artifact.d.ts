@@ -107,6 +107,8 @@ export declare function isArtifactRegistry(value: unknown): value is ArtifactReg
 export declare function parseArtifactProvenanceRegistry(value: unknown, context?: string): ArtifactProvenanceRegistry;
 /** Canonical retained form; uninterpretable entries cannot round-trip and are omitted. */
 export declare function serializeArtifactProvenanceRegistry(registry: Readonly<ArtifactProvenanceRegistry>): JsonObject;
+/** Eligibility to revoke known evidence, not retained-data admission or a sanitizer. */
+export declare function isInterpretableArtifactProvenance(entry: unknown): entry is ArtifactProvenance;
 /** Decide whether retained compilation evidence requires source reacquisition. */
 export declare function classifyArtifactCompilationNeed(source: ArtifactSourceIdentity, metadata: unknown, compiler: string, explicitRefresh?: boolean, provenance?: unknown): ArtifactCompilationNeed;
 /** Split one compiler output into model-visible semantics and runtime-owned provenance. */

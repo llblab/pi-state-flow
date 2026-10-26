@@ -5,6 +5,7 @@ import {
 } from "./acquisition.ts";
 import type { ArtifactSourceIdentity } from "./artifact.ts";
 import type { StateScope } from "./state.ts";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION, type ScopeSelection } from "./selection.ts";
 
 export type RehydrationPhase = "resume-bootstrap" | "new-bootstrap" | "step";
 
@@ -33,6 +34,8 @@ export interface RehydrationPlan {
 }
 
 export interface RehydrationOptions {
+	/** Legacy callers default to all owners; selected callers must pass their captured concrete policy. */
+	selection?: ScopeSelection;
 	maxReads?: number;
 	maxSourceBytes?: number;
 }
@@ -43,13 +46,19 @@ export function planKnowledgeRehydration(
 	routes: readonly RehydrationRoute[],
 	options: RehydrationOptions = {},
 ): RehydrationPlan {
+	const selection = captureScopeSelection(options.selection ?? DEFAULT_SCOPE_SELECTION);
+	const selected = routes.filter(route => {
+		if (!DEFAULT_SCOPE_SELECTION.includes(route.scope)) throw new Error("Unknown State Flow rehydration owner");
+		return selection.includes(route.scope);
+	});
 	const maxReads = Math.max(0, Math.floor(options.maxReads ?? 1));
 	const maxSourceBytes = Math.max(0, Math.floor(options.maxSourceBytes ?? 64 * 1024));
 	const reads: RehydrationRead[] = [];
 	const materialized: string[] = [];
 	const deferred: RehydrationPlan["deferred"] = [];
 	let sourceBytes = 0;
-	for (const route of [...routes].sort((left, right) => left.source.path.localeCompare(right.source.path))) {
+	for (const route of [...selected].sort((left, right) => left.source.path.localeCompare(right.source.path))) {
+		if (route.source.scope !== undefined && route.source.scope !== route.scope) throw new Error("State Flow rehydration source owner does not match its route");
 		if (phase === "new-bootstrap" && route.scope === "session") {
 			deferred.push({ path: route.source.path, reason: "new-session-scope" });
 			continue;

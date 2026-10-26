@@ -118,7 +118,7 @@ for (const boundary of ["abort", "shutdown", "stop"] as const) test(`awaited bac
 	assert.deepEqual(h.entries, entries, "backup completion never checkpoints or replaces policy state");
 	if (boundary === "stop") {
 		assert.notEqual(head(), before);
-		await assert.rejects(h.tools.get("patch_state").execute("late", { session: { working: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
+		await assert.rejects(h.tools.get("patch_state").execute("late", { session: { tactics: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 	} else if (boundary === "abort") {
 		await commitTerminal(h, {}, { next: true }, "Accepted retry");
 		await h.handlers.get("agent_before_settle")!({}, h.ctx);
@@ -294,8 +294,8 @@ test("start creates the CWD activation marker and stop preserves branch state", 
 	assert.equal(h.activeTools.includes("patch_state"), true);
 	assert.deepEqual(loadCwdState(h.ctx.cwd, h.repositoryRoot), {
 		artifacts: {},
-		contract: {},
-		working: {},
+		strategy: {},
+		tactics: {},
 		intents: {},
 		response: "",
 		lazy: {},

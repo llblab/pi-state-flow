@@ -1,7 +1,81 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import test from "node:test";
-import { conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPatchStateArguments, PASSIVE_MEMORY_PROTOCOL, separatedFailure, stateFlowProtocol } from "../lib/protocol.ts";
+import { conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPatchStateArguments, passiveMemoryProtocol, PASSIVE_MEMORY_PROTOCOL, RESPONSE_PATCH_GUIDELINE, SCOPE_PARTICIPATION_GUIDELINE, separatedFailure, stateFlowProtocol } from "../lib/protocol.ts";
+import { DEFAULT_SCOPE_SELECTION, type ScopeSelection } from "../lib/selection.ts";
+
+const selections: ScopeSelection[] = [["global"], ["cwd"], ["session"], ["global", "cwd"], ["global", "session"], ["cwd", "session"], ["global", "cwd", "session"]];
+
+test("seven selected Active/bootstrap protocols advertise only participating targets and truthful answer ownership", () => {
+	for (const selected of selections) for (const bootstrap of [false, true]) {
+		const protocol = stateFlowProtocol(bootstrap, selected), scope = protocol.split("\n").find(line => line.startsWith("SCOPES:"))!;
+		assert.match(protocol, /sole model-authored semantic mutation mechanism/); assert.match(protocol, /Proposals are not commitments/);
+		assert.match(protocol, /PATCH: Use /);
+		if (selected.length === 1) {
+			assert.match(protocol, /PATCH: Use flat semantic plane object patches/);
+			assert.doesNotMatch(protocol, new RegExp(`PATCH: Use ${selected[0]} object patches`));
+			assert.match(protocol, /never add an owner wrapper/);
+			assert.match(protocol, /artifacts\/strategy\/tactics\/intents\/lazy are objects; nested values are ordinary JSON/);
+			assert.match(protocol, /Compile acquired invalidated artifacts directly at artifacts\[exact path\]/);
+			assert.match(protocol, /A cross-owner move requires both owners to participate/);
+		} else {
+			assert.ok(protocol.includes(`PATCH: Use ${selected.join("/")} object patches`));
+			assert.ok(protocol.includes(`in reported scope (${selected.join("/")})`));
+		}
+		for (const name of DEFAULT_SCOPE_SELECTION) assert.equal(scope.includes(`${name}=`), selected.includes(name));
+		if (selected.length < 3) { assert.ok(scope.includes(`Participating owners: ${selected.join(" ")}.`)); assert.match(scope, /Excluded owners cannot be read, patched or acquired as memory/); assert.match(scope, /Do not broaden\/relocate/); }
+		if (selected.includes("session")) assert.match(protocol, /Auto-stored at turn_end/);
+		else { assert.doesNotMatch(protocol, /Auto-stored at turn_end|session=branch\/run continuation by default/); assert.match(protocol, /Session excluded: new answers are delivered, not stored or backfilled/); assert.match(protocol, /read-only selected legacy data/); }
+		const ref = selected.includes("cwd") ? "cwd" : selected.includes("session") ? "session" : "global";
+		const path = selected.length === 1 ? "lazy.plan" : `${ref}.lazy.plan`;
+		assert.ok(protocol.includes(`{"$ref":"${path}"}`)); assert.ok(protocol.includes(`$${path}`));
+		assert.match(protocol, /no authority, hydration, execution, or completion/);
+		if (selected.length === 1) assert.match(protocol, /Registered Skill reads remain provenance-bound and limited to participating memory/);
+		else assert.match(protocol, /user→global, project→cwd, temporary→session/);
+	}
+});
+
+test("selected Passive guidance keeps answers conditional and prohibits grammar-as-permission", () => {
+	assert.match(RESPONSE_PATCH_GUIDELINE, /automatically in Active mode only when Session participates/);
+	assert.match(SCOPE_PARTICIPATION_GUIDELINE, /grammar, not participation grants/);
+	for (const selected of selections) {
+		const protocol = passiveMemoryProtocol(selected); assert.match(protocol, /Passive turns never trigger State Flow continuation or compaction/);
+		assert.match(protocol, /Never patch response/); assert.match(protocol, /only when Session participates/);
+		if (selected.length < 3) assert.ok(protocol.includes(`Participating owners: ${selected.join(" ")}.`));
+		if (selected.length === 1) {
+			assert.match(protocol, /patch_state takes intents\/strategy\/tactics\/artifacts\/lazy object planes directly/);
+			assert.match(protocol, /never add an owner wrapper/);
+			assert.match(protocol, /nested array\[N\] stays an array index/);
+		}
+		if (!selected.includes("session")) assert.match(protocol, /Session excluded: new answers are delivered, not stored or backfilled/);
+	}
+	assert.equal(passiveMemoryProtocol(), PASSIVE_MEMORY_PROTOCOL);
+});
+
+test("protocol selection is canonical and leaves caller-owned permutations unchanged", () => {
+	for (const selected of selections) {
+		const reverse = [...selected].reverse() as unknown as ScopeSelection, before = [...reverse];
+		for (const bootstrap of [false, true]) assert.equal(stateFlowProtocol(bootstrap, reverse), stateFlowProtocol(bootstrap, selected));
+		assert.equal(passiveMemoryProtocol(reverse), passiveMemoryProtocol(selected)); assert.deepEqual(reverse, before);
+	}
+});
+
+test("malformed explicit protocol selections refuse instead of widening", () => {
+	const inherited = Object.setPrototypeOf(new Array(1), { 0: "cwd" });
+	for (const value of [null, {}, "cwd", [], ["cwd", "cwd"], ["invalid"], new Array(1), inherited]) {
+		assert.throws(() => stateFlowProtocol(false, value as ScopeSelection), /nonempty unique array/);
+		assert.throws(() => passiveMemoryProtocol(value as ScopeSelection), /nonempty unique array/);
+	}
+});
+
+test("all-three Active and bootstrap protocol bodies retain accepted intent-first guidance bytes", () => {
+	const expected = ["1ff1598b1122d0ca53df7a65ba27d8217105cfe095a3c16d7074b239c77a18e5", "4c0bc5e7dd89be7358e8aacbb2eb9e6c04cf3eb9f878200cbe702272f2346344"];
+	for (const [index, bootstrap] of [false, true].entries()) {
+		const protocol = stateFlowProtocol(bootstrap); assert.equal(createHash("sha256").update(protocol).digest("hex"), expected[index]);
+		assert.equal(stateFlowProtocol(bootstrap, ["session", "global", "cwd"]), protocol);
+	}
+});
 
 test("protocol names patch_state as the sole semantic mutation mechanism", () => {
 	const protocol = stateFlowProtocol(false);
@@ -25,8 +99,8 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.match(protocol, /Resolve only when needed/);
 	assert.match(protocol, /Hint paths are current reference owners, not relocated targets or proof of staleness/);
 	assert.match(protocol, /Fix proven stale refs only as needed; never scan refs or history offsets/);
-	assert.match(protocol, /In an intent, \$ref owns a same-scope working\/lazy key; deleting the intent deletes keys no other intent refs \(supersede in one patch\)\. Text refs only use\./);
-	assert.match(protocol, /Before deleting, save survivors unowned: results to working\/contract\/broader scope, abandonment reasons to contract\. Unowned entries are fine\./);
+	assert.match(protocol, /Intent \$ref owns same-scope strategy\/tactics\/lazy keys; text refs only use\./);
+	assert.match(protocol, /Fixed phases, not JSON order: intents, cleanup, other planes, compile\/normalize\. Remaining\/new intents keep targets\/ancestors\/descendants\. Rewrite same\/new path: fresh, no old fields; unowned legal\./);
 	assert.doesNotMatch(protocol, /MUST|compiled knowledge|unresolved work, continuation/);
 	for (const bootstrap of [false, true]) {
 		const candidate = stateFlowProtocol(bootstrap);
@@ -74,9 +148,9 @@ test("protocol presents semantic planes once in intentional intent-first order",
 	for (const bootstrap of [false, true]) {
 		const protocol = stateFlowProtocol(bootstrap);
 		assert.deepEqual([...protocol.matchAll(/^- ([a-z]+):/gm)].map((match) => match[1]),
-			["intents", "contract", "working", "artifacts", "response", "lazy"]);
+			["intents", "strategy", "tactics", "artifacts", "response", "lazy"]);
 		assert.doesNotMatch(protocol, /STATE: \{/, "the field list already defines the state shape");
-		for (const rule of [/branch\/run continuation/g, /reusable project truth/g, /cross-project\/user\/environment knowledge/g,
+		for (const rule of [/branch\/run continuation/g, /project knowledge/g, /cross-project\/user\/environment knowledge/g,
 			/user→global, project→cwd, temporary→session/g, /provenance/g, /turn_end/g]) {
 			assert.equal([...protocol.matchAll(rule)].length, 1, `one owner for ${rule}`);
 		}
@@ -87,8 +161,9 @@ test("compact protocol retains read, patch, stewardship and acquisition obligati
 	const obligations = [
 		/owns durable memory/,
 		/Use the narrowest scope/,
-		/contract: durable requirements, decisions, rejections, interfaces\./,
-		/working: temporary context of intents: facts, validation, failures, domain state\./,
+		/strategy: binding requirements, accepted plans\/decisions, rejections, interfaces\./,
+		/tactics: temporary context: progress, failures, blockers, next checks\./,
+		/Proposals are not commitments\./,
 		/artifacts: source-path routing metadata; descriptions do not imply body acquisition/,
 		/response: read-only prior answer; never patch it in any scope\. Auto-stored at turn_end \(empty=""\)/,
 		/lazy: retrieve explicitly/,
@@ -96,7 +171,7 @@ test("compact protocol retains read, patch, stewardship and acquisition obligati
 		/lazy_navigation lists bounded effective lazy keys, not bodies/,
 		/global\/cwd\/session object patches for material updates, not acknowledgments/,
 		/Omit empty scopes/,
-		/artifacts\/contract\/working\/intents are objects; lazy is ordinary JSON/,
+		/artifacts\/strategy\/tactics\/intents are objects; lazy is ordinary JSON/,
 		/Omitted fields persist/,
 		/Never patch runtime config\/meta\/response/,
 		/Objects merge recursively; arrays\/primitives replace/,
@@ -241,7 +316,7 @@ test("bootstrap adds only its reconciliation obligation to the compact active pr
 	for (const protocol of [ordinary, PASSIVE_MEMORY_PROTOCOL]) {
 		assert.match(protocol, /state_updates: effective entries replace values at key\/index-segment path arrays/);
 		assert.match(protocol, /deleted:true means absent/);
-		assert.match(protocol, /cascaded lists owner paths an intent deletion removed/);
+		assert.match(protocol, /cascaded lists owner paths cleared before authored rewrites; effective is final/);
 		assert.match(protocol, /Latest entries win over earlier state/);
 		assert.match(protocol, /Head state\/recent transitions are frozen at projection start/);
 		assert.match(protocol, /Only state_updates matching the head's State Flow projection ID apply/);

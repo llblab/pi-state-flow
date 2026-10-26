@@ -2,27 +2,40 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { emptyState, isSemanticState, isStateDocument, overlayStates, projectSemanticState, projectStateForModel, updateMaterializedArtifacts, type SemanticState } from "../lib/state.ts";
 
-function state(contract: Record<string, any> = {}) {
-	return { artifacts: {}, contract, working: {}, intents: {}, response: "", lazy: {} };
+function state(strategy: Record<string, any> = {}) {
+	return { artifacts: {}, strategy, tactics: {}, intents: {}, response: "", lazy: {} };
 }
 
 test("creates isolated state documents with the exact public shape", () => {
 	const first = emptyState();
-	first.contract.changed = true;
-	assert.deepEqual(emptyState(), { intents: {}, contract: {}, working: {}, artifacts: {}, response: "", lazy: {} });
+	first.strategy.changed = true;
+	assert.deepEqual(emptyState(), { intents: {}, strategy: {}, tactics: {}, artifacts: {}, response: "", lazy: {} });
+});
+
+test("retired roots reject across public views rather than disappearing, while nested keys remain ordinary data", () => {
+	for (const plane of ["contract", "working"]) {
+		const input = { [plane]: { retained: true } };
+		const before = structuredClone(input);
+		assert.equal(isSemanticState(input), false);
+		assert.throws(() => projectSemanticState(input), /Retired State Flow semantic plane/);
+		assert.throws(() => projectStateForModel(input), /Retired State Flow semantic plane/);
+		assert.throws(() => overlayStates(input), /Retired State Flow semantic plane/);
+		assert.deepEqual(input, before);
+	}
+	assert.deepEqual(projectSemanticState({ strategy: { contract: true, working: true } }), { strategy: { contract: true, working: true } });
 });
 
 test("materialized and model-facing states preserve intentional intent-first plane order", () => {
-	assert.deepEqual(Object.keys(emptyState()), ["intents", "contract", "working", "artifacts", "response", "lazy"]);
-	assert.deepEqual(Object.keys(projectStateForModel({ ...emptyState(), intents: { task: "Continue" }, contract: { rule: true }, working: { result: 1 }, artifacts: { "/a.md": { description: "A" } }, response: "Answer", lazy: { plan: true } })), [
-		"intents", "contract", "working", "artifacts", "response",
+	assert.deepEqual(Object.keys(emptyState()), ["intents", "strategy", "tactics", "artifacts", "response", "lazy"]);
+	assert.deepEqual(Object.keys(projectStateForModel({ ...emptyState(), intents: { task: "Continue" }, strategy: { rule: true }, tactics: { result: 1 }, artifacts: { "/a.md": { description: "A" } }, response: "Answer", lazy: { plan: true } })), [
+		"intents", "strategy", "tactics", "artifacts", "response",
 	]);
 });
 
 test("model projection hides legacy empty branches without changing exact semantic reads", () => {
-	const stored: SemanticState = { working: { chain: { empty: {} }, keep: 1, items: [{ empty: {} }, {}] }, intents: {}, artifacts: {}, lazy: { empty: {} } };
+	const stored: SemanticState = { tactics: { chain: { empty: {} }, keep: 1, items: [{ empty: {} }, {}] }, intents: {}, artifacts: {}, lazy: { empty: {} } };
 	const before = structuredClone(stored);
-	assert.deepEqual(projectStateForModel(stored), { working: { keep: 1, items: [{}, {}] } });
+	assert.deepEqual(projectStateForModel(stored), { tactics: { keep: 1, items: [{}, {}] } });
 	assert.deepEqual(projectSemanticState(stored), before);
 	assert.deepEqual(stored, before);
 });
@@ -41,15 +54,15 @@ test("materialized views have defaulted planes and retain additional semantic fi
 		hash: `sha256:${"a".repeat(64)}`,
 		compiler: "artifact-v1",
 	};
-	assert.equal(isStateDocument({ artifacts: { "/a.md": artifact }, contract: {}, working: {}, intents: {}, response: "done", lazy: {} }), true);
-	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, response: "done", lazy: {} }), false);
-	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, intents: "invalid", response: "done", lazy: {} }), false);
-	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "done" }), false);
-	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "done", lazy: [] }), false);
+	assert.equal(isStateDocument({ artifacts: { "/a.md": artifact }, strategy: {}, tactics: {}, intents: {}, response: "done", lazy: {} }), true);
+	assert.equal(isStateDocument({ artifacts: {}, strategy: {}, tactics: {}, response: "done", lazy: {} }), false);
+	assert.equal(isStateDocument({ artifacts: {}, strategy: {}, tactics: {}, intents: "invalid", response: "done", lazy: {} }), false);
+	assert.equal(isStateDocument({ artifacts: {}, strategy: {}, tactics: {}, intents: {}, response: "done" }), false);
+	assert.equal(isStateDocument({ artifacts: {}, strategy: {}, tactics: {}, intents: {}, response: "done", lazy: [] }), false);
 	// Semantic-only artifacts are usable; missing provenance is not corrupt state.
-	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "Semantic only" } }, contract: {}, working: {}, intents: {}, response: "done", lazy: {} }), true);
-	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "" } }, contract: {}, working: {}, intents: {}, response: "done", lazy: {} }), false);
-	assert.equal(isStateDocument({ artifacts: {}, contract: {}, working: {}, intents: {}, response: "done", lazy: {}, extra: true }), true);
+	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "Semantic only" } }, strategy: {}, tactics: {}, intents: {}, response: "done", lazy: {} }), true);
+	assert.equal(isStateDocument({ artifacts: { "/a.md": { description: "" } }, strategy: {}, tactics: {}, intents: {}, response: "done", lazy: {} }), false);
+	assert.equal(isStateDocument({ artifacts: {}, strategy: {}, tactics: {}, intents: {}, response: "done", lazy: {}, extra: true }), true);
 });
 
 test("stored semantic objects may omit any documented plane without losing present fields", () => {
@@ -73,7 +86,7 @@ test("overlays global, CWD, and session state recursively with session precedenc
 	const global = state({ policy: { source: "global", retained: true } });
 	const cwd = state({ policy: { source: "cwd", project: true } });
 	const session = state({ policy: { source: "session" } });
-	assert.deepEqual(overlayStates(global, cwd, session).contract, {
+	assert.deepEqual(overlayStates(global, cwd, session).strategy, {
 		policy: { source: "session", retained: true, project: true },
 	});
 });
@@ -91,13 +104,13 @@ test("scope-local deletion reveals lower-scope values on the next overlay", () =
 	const global = state({ mode: "global" });
 	const cwd = state({ mode: "cwd" });
 	const session = state({ mode: "session" });
-	delete session.contract.mode;
-	assert.equal(overlayStates(global, cwd, session).contract.mode, "cwd");
+	delete session.strategy.mode;
+	assert.equal(overlayStates(global, cwd, session).strategy.mode, "cwd");
 });
 
 test("atomically updates artifact metadata with its materialized scope", () => {
 	const global = emptyState();
-	global.contract.policy = "preserve";
+	global.strategy.policy = "preserve";
 	const source = { path: "/knowledge/a.md", hash: `sha256:${"a".repeat(64)}` };
 	const next = updateMaterializedArtifacts(global, [{
 		source,
@@ -110,16 +123,16 @@ test("atomically updates artifact metadata with its materialized scope", () => {
 				description: "Routes artifact requests",
 			},
 		},
-		contract: { policy: "preserve" },
-		working: {},
+		strategy: { policy: "preserve" },
+		tactics: {},
 		intents: {},
 		response: "",
 		lazy: {},
 	});
 	assert.deepEqual(global, {
 		artifacts: {},
-		contract: { policy: "preserve" },
-		working: {},
+		strategy: { policy: "preserve" },
+		tactics: {},
 		intents: {},
 		response: "",
 		lazy: {},

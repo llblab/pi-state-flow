@@ -270,42 +270,41 @@ function isProvenanceEntry(value: unknown): value is ArtifactProvenance {
 export function parseArtifactProvenanceRegistry(value: unknown, context = "Artifact provenance"): ArtifactProvenanceRegistry {
 	if (value === undefined) return {};
 	if (!isObject(value)) throw new Error(`${context} must be a path-keyed JSON object`);
-	const registry: ArtifactProvenanceRegistry = {};
-	for (const [path, entry] of Object.entries(value)) {
+	const known = new Set(["sourceHash", "sourceFingerprint", "compilerRevision", "compiledAt"]);
+	return Object.fromEntries(Object.entries(value).map(([path, entry]) => {
 		if (path.trim().length === 0) throw new Error(`${context} path keys must be non-empty`);
-		if (!isObject(entry) || !isJsonValue(entry)) {
-			registry[path] = { malformed: true };
-			continue;
-		}
-		const known = new Set(["sourceHash", "sourceFingerprint", "compilerRevision", "compiledAt"]);
-		if (Object.keys(entry).some((key) => !known.has(key))) {
-			registry[path] = { malformed: true };
-			continue;
-		}
-		registry[path] = {
+		if (!isObject(entry) || !isJsonValue(entry) || Object.keys(entry).some(key => !known.has(key))) return [path, { malformed: true }];
+		return [path, {
 			...(Object.hasOwn(entry, "sourceHash") ? { sourceHash: entry.sourceHash } : {}),
 			...(Object.hasOwn(entry, "sourceFingerprint") ? { sourceFingerprint: entry.sourceFingerprint } : {}),
 			...(Object.hasOwn(entry, "compilerRevision") ? { compilerRevision: entry.compilerRevision } : {}),
 			...(Object.hasOwn(entry, "compiledAt") ? { compiledAt: entry.compiledAt } : {}),
-		};
-	}
-	return registry;
+		}];
+	}));
 }
 
 /** Canonical retained form; uninterpretable entries cannot round-trip and are omitted. */
 export function serializeArtifactProvenanceRegistry(registry: Readonly<ArtifactProvenanceRegistry>): JsonObject {
-	const artifacts: JsonObject = {};
-	for (const [path, entry] of Object.entries(registry)) {
-		if (entry.malformed === true) continue;
+	return Object.fromEntries(Object.entries(registry).flatMap(([path, entry]) => {
+		if (entry.malformed === true) return [];
 		const fields: JsonObject = {};
 		if (entry.sourceHash !== undefined) fields.sourceHash = entry.sourceHash as JsonValue;
 		if (entry.sourceFingerprint !== undefined) fields.sourceFingerprint = entry.sourceFingerprint as JsonValue;
 		if (entry.compilerRevision !== undefined) fields.compilerRevision = entry.compilerRevision as JsonValue;
 		if (entry.compiledAt !== undefined) fields.compiledAt = entry.compiledAt as JsonValue;
-		if (Object.keys(fields).length === 0) continue;
-		artifacts[path] = fields;
-	}
-	return artifacts;
+		return Object.keys(fields).length === 0 ? [] : [[path, fields]];
+	}));
+}
+
+/** Eligibility to revoke known evidence, not retained-data admission or a sanitizer. */
+export function isInterpretableArtifactProvenance(entry: unknown): entry is ArtifactProvenance {
+	if (!isObject(entry)) return false;
+	const keys = Object.keys(entry);
+	return keys.length > 0 && keys.every(key => ["sourceHash", "sourceFingerprint", "compilerRevision", "compiledAt"].includes(key))
+		&& (!Object.hasOwn(entry, "sourceHash") || isArtifactHash(entry.sourceHash))
+		&& (!Object.hasOwn(entry, "sourceFingerprint") || parseArtifactSourceFingerprint(entry.sourceFingerprint) !== undefined)
+		&& (!Object.hasOwn(entry, "compilerRevision") || (typeof entry.compilerRevision === "string" && entry.compilerRevision.trim().length > 0))
+		&& (!Object.hasOwn(entry, "compiledAt") || typeof entry.compiledAt === "string");
 }
 
 function invalidField(value: unknown, validate: (candidate: unknown) => boolean): boolean {

@@ -1,5 +1,5 @@
 import { type JsonObject, type JsonValue } from "./json.ts";
-import type { ScopedSemanticStates, StateScope } from "./state.ts";
+import type { ScopeStateValues, StateScope } from "./state.ts";
 export declare const DEFAULT_HISTORY_LIMIT = 7;
 export declare const MAX_HISTORY_LIMIT = 100;
 export interface RecentScopePatch {
@@ -7,8 +7,8 @@ export interface RecentScopePatch {
     patch: {
         [key: string]: JsonValue | undefined;
         intents?: JsonObject | null;
-        contract?: JsonObject | null;
-        working?: JsonObject | null;
+        strategy?: JsonObject | null;
+        tactics?: JsonObject | null;
         artifacts?: JsonObject | null;
         lazy?: JsonObject | null;
         response?: string | null;
@@ -25,6 +25,6 @@ export interface RecentTransition extends AcceptedTransition {
 }
 export type RecentTransitionWindow = RecentTransition[];
 export declare function validateRecentTransition(value: unknown): asserts value is RecentTransition;
-export declare function createAcceptedTransition(currentStates: ScopedSemanticStates, nextStates: ScopedSemanticStates, id?: string): AcceptedTransition | undefined;
+export declare function createAcceptedTransition(currentStates: ScopeStateValues, nextStates: ScopeStateValues, id?: string): AcceptedTransition | undefined;
 /** Preserve the configured per-scope budget, filtering in selected-lineage order. */
 export declare function projectRecentTransitionsWithLimit(limit: number, lineage: readonly RecentTransition[]): RecentTransitionWindow;

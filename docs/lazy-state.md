@@ -42,8 +42,8 @@ Runtime views select present documented semantic planes in intent-first order, o
 ```text
 global | CWD | session
 ├── intents
-├── contract
-├── working
+├── strategy
+├── tactics
 ├── artifacts
 ├── response (session-owned; empty structural slot in Global/CWD)
 └── lazy
@@ -51,7 +51,7 @@ global | CWD | session
 
 Hot planes:
 
-- `intents`, `contract`, `working` and `artifacts` stay hot in every scope.
+- `intents`, `strategy`, `tactics` and `artifacts` stay hot in every scope.
 - Session-owned `response` is also hot. New Global and CWD states use an empty structural slot, and stored scopes may omit it. Effective uses the highest-priority present response, and each newly accepted answer is written only in Session.
 - `intents` may keep compact active direction while referring to large supporting detail in `lazy`.
 
@@ -71,7 +71,9 @@ A reference is semantic content, not a runtime type. There are two forms:
 
 File paths, document sections, URIs, artifact locators, Skill identities and agent identities keep their native syntax.
 
-**What State Flow does with references.** It preserves all forms exactly as ordinary JSON. It does not scan prose, index targets, validate existence, rewrite relative locators, or infer authority, dependency, hydration, execution or completion. The single exception is [intent ownership](#intent-ownership).
+**What State Flow does with references.** References are ordinary JSON, with a documented model/canonical translation: for exactly one WANTED owner, eligible flat current semantic `$ref` values anchor to that owner before ownership/staging. For example, `{"$ref":"lazy.plan"}` becomes `{"$ref":"cwd.lazy.plan"}` when only CWD is selected; model reads project eligible same-owner current refs back relatively. Historical, `effective`, explicit cross-owner and resource refs, as well as ordinary text, keep their identity. See the [single-scope interface](single-scope-interface-contract.md#detached-canonical-boundary).
+
+This translation does not scan prose, index targets, validate existence, or infer authority, hydration, execution or completion. The separate [intent ownership](#intent-ownership) rule gives eligible canonical refs their bounded cleanup meaning.
 
 When a reference matters, the agent resolves it explicitly: with `read_state` for semantic paths, or with the appropriate external read/tool for other resources. A locator helps retrieval but does not replace content required for the current decision.
 
@@ -116,32 +118,34 @@ State Flow does not inject IDs, provenance, revisions, range descriptors, or tru
 
 Intents can own the memory they create:
 
-- A structured `{"$ref"}` anywhere inside an `intents` entry means "delete with me" for an existing object key under `working` or `lazy` of the same scope, such as `{"$ref":"cwd.lazy.plan"}` inside `cwd.intents.release`.
+- A structured `{"$ref"}` anywhere inside an `intents` entry means "delete with me" for an existing object key under `strategy`, `tactics` or `lazy` of the same scope, such as `{"$ref":"cwd.lazy.plan"}` inside `cwd.intents.release`.
 - A textual `$cwd.lazy.plan` mention means "I use this" and never owns.
 
-**What happens when a patch deletes an intent key.** State Flow first applies the authored operations, then deletes each owned target that no remaining intent of that scope references, directly, through an ancestor or through a descendant. Everything happens in one atomic cohort, with one revision per changed scope.
+Ownership evaluates canonical references after model anchoring. A sole-CWD model intent containing `{"$ref":"lazy.plan"}` can therefore own `cwd.lazy.plan`; its flat presentation is not a non-owning unscoped canonical reference.
+
+**What happens when a patch deletes an intent key.** Independent of JSON insertion order, State Flow applies intents only, clears eligible targets of deleted intent keys unless final remaining/new same-scope intents reference them directly or through ancestors/descendants, then applies remaining authored planes before existing compilation/normalization and atomic publication. Everything happens in one atomic cohort, with one revision per changed scope.
 
 - **Supersession works in one patch:** delete the old intent and reference the same targets from its replacement.
-- **Writes in the deleting patch do not save a target.** Updates, nested additions and keys created by that same patch are deleted silently along with it, and the accepted record stores only the net deletion. Save survivors to an unowned path instead.
+- **Rewrite survivors in the deleting patch.** Remaining authored planes run after cleanup. An explicit rewrite at the same or a new path creates fresh knowledge without old fields from a cleared target. Strategy is owned too, not an automatic safe haven.
 - **Editing is not deleting.** Editing an intent to drop a reference leaves the target as ordinary unowned state. Unowned entries remain legal.
 
-**What is never deleted.** The cascade reads only the `intents` plane of the intent's own scope. These targets are skipped silently, and no patch is rejected, warned about or delayed:
+**What ownership does not target.** After model anchoring, the cascade reads only the `intents` plane of the intent's own scope. These canonical targets are skipped silently, and no patch is rejected, warned about or delayed:
 
 - other scopes;
 - plane roots and array elements;
-- `contract`/`artifacts`/`response`/`intents` targets;
-- unscoped or `effective` paths;
+- `artifacts`/`response`/`intents` targets;
+- paths still unscoped in canonical data, or `effective` paths;
 - missing targets;
 - keys outside the `read_state` key grammar `[A-Za-z_$][A-Za-z0-9_$-]*`, for example keys with spaces, dots or non-Latin letters.
 
-**Receipt.** `state_updates.cascaded` lists all owner-scoped targets removed by intent deletion, for example `["session.lazy.plans.x", "session.working.draft"]`. Paths only, never lazy bodies or deleted values. The list is deterministic (Global, CWD, Session, then each scope's cascade order), absent when no target cascaded, and never omitted as a predictable write. Nested lazy deletions are reported even when the top-level `lazy_navigation` catalog is unchanged.
+**Receipt.** `state_updates.cascaded` lists all owner-scoped targets cleared in the intermediate ownership phase, even if later authored writes recreate them, for example `["session.lazy.plans.x", "session.tactics.draft"]`. Paths only, never lazy bodies or deleted values. The list is deterministic (Global, CWD, Session, then each scope's cascade order), absent when no target cascaded, and never omitted as a predictable write. Nested lazy deletions are reported even when the top-level `lazy_navigation` catalog is unchanged.
 
 **Edge cases:**
 
-- Deletion is scope-local, so an effective read may afterwards show a same-path value inherited from a broader scope. The receipt's `effective` entry then reports that value rather than `deleted: true`; `cascaded` still identifies the deleted owner path.
+- Deletion is scope-local, so an effective read may afterwards show a same-path value inherited from a broader scope. The receipt's `effective` entry then reports that value rather than `deleted: true`; `cascaded` still identifies the cleared owner path. A later authored rewrite can also recreate it; final `effective` values describe the actual accepted state.
 - Concurrent shared writers keep last-accepted-wins behaviour: a later write into an intent another session already deleted simply recreates a partial intent.
 
-**History and limits.** The accepted patch record stores cascaded keys as explicit deletions, so replay never re-derives them, and nothing is archived beyond ordinary retained history. Ownership adds no validation, unresolved-reference warning, cross-scope cascade, age-based cleanup, size budget, growth notice, archive of deleted entries or automatic hydration.
+**History and limits.** The accepted patch record stores the actual net patch, including explicit deletions or fresh replacements, so replay never reruns cascade. Old accepted history is unchanged; existing current strategy references acquire ownership only for future accepted intent deletions, and nothing is archived beyond ordinary retained history. Ownership adds no validation, unresolved-reference warning, cross-scope cascade, age-based cleanup, size budget, growth notice, archive of deleted entries or automatic hydration.
 
 ### Effective lazy overlay
 
@@ -169,7 +173,7 @@ Active obligations, current constraints, unresolved next actions, and facts requ
   "paths": [
     "effective.lazy.rules",
     "cwd.lazy.memory[0..10]",
-    "session.working.nextAction"
+    "session.tactics.nextAction"
   ],
   "projection": "value"
 }
@@ -199,7 +203,7 @@ A single-path request returns one payload. A multi-path request returns position
 One missing value path with exact current durable references returns this sentinel instead; it is diagnostic metadata, not semantic state:
 
 ```json
-{ "value": null, "hint": [{ "type": "dangling-reference", "message": "The requested value is unavailable in the selected state. These current values reference that path, not a verified new location. Use this evidence if relevant to the task.", "paths": ["cwd.working.note"] }] }
+{ "value": null, "hint": [{ "type": "dangling-reference", "message": "The requested value is unavailable in the selected state. These current values reference that path, not a verified new location. Use this evidence if relevant to the task.", "paths": ["cwd.tactics.note"] }] }
 ```
 
 What each projection contains:
@@ -214,7 +218,7 @@ Errors use the normal tool-error channel, never successful JSON with an `error` 
 
 ### Path and range model
 
-Unscoped semantic paths alias current effective state. Explicit roots and selectors address:
+In the canonical read grammar, unscoped semantic paths alias current effective state. At the sole-WANTED-owner model boundary, eligible flat current paths instead bind to that selected owner before canonical reading; this is distinct from structured-reference ownership. Explicit roots and selectors address:
 
 - `effective` for the current composed overlay or an indexed historical effective root.
 - `global`, `cwd`, and `session` for explicit current or historical scopes.
@@ -227,7 +231,7 @@ Examples:
 
 ```text
 effective.lazy
-effective.working.nextAction
+effective.tactics.nextAction
 cwd.lazy.memory
 cwd.lazy.memory[4]
 cwd.lazy.memory[10:20]
@@ -447,8 +451,8 @@ A lazy read enriches only the current tool-result trajectory. It does not:
 
 When a retrieved fact becomes necessary for future correctness, the agent promotes a distilled consequence through an ordinary hot `patch_state` mutation:
 
-- Durable requirement or decision → `contract`.
-- Current fact, uncertainty, or continuation → `working`.
+- Durable requirement or decision → `strategy`.
+- Current fact, uncertainty, or continuation → `tactics`.
 - Source-addressed reusable compilation → `artifacts`.
 - Historical support with no current consequence → remain under `lazy`.
 

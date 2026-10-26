@@ -67,7 +67,7 @@ test("rejected patch_state diagnostics retain the exact attempted arguments", as
 	writeFileSync(join(root, "state-flow", "config.json"), JSON.stringify({ logging: true }));
 	const h = harness({ agentDir: root, repositoryRoot: join(root, "state-flow") });
 	await start(h, "Reject an invalid patch");
-	const attempted = { global: { working: { example: true } }, final: "maybe" };
+	const attempted = { global: { tactics: { example: true } }, final: "maybe" };
 	await assert.rejects(
 		h.tools.get("patch_state")!.execute("attempted", attempted, undefined, undefined, h.ctx),
 		/does not accept field final/,

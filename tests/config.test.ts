@@ -6,7 +6,9 @@ import test, { type TestContext } from "node:test";
 import { loadStateFlowConfig } from "../lib/config.ts";
 import { captureTemporalFileBases } from "../lib/durable.ts";
 import stateFlowExtension from "../lib/extension.ts";
+import { DEFAULT_SCOPE_SELECTION } from "../lib/selection.ts";
 import { commitTerminal, harness } from "./harness.ts";
+import { nativePolicyMarker } from "./temporal-fixture.ts";
 
 function fixture(t: TestContext) {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-config-"));
@@ -21,7 +23,7 @@ function fixture(t: TestContext) {
 test("configuration is optional, read-only, and lives at the global repository root", (t) => {
 	const f = fixture(t);
 	assert.deepEqual(loadStateFlowConfig(f.agentDir), {
-		directory: f.repositoryRoot, mode: "off", inactiveMode: "off", logging: false, showSuccessfulPatches: true, historyLimit: 7,
+		directory: f.repositoryRoot, mode: "off", scopes: DEFAULT_SCOPE_SELECTION, inactiveMode: "off", logging: false, showSuccessfulPatches: true, historyLimit: 7,
 	});
 	assert.equal(existsSync(f.path), false);
 	for (const [value, mode, inactiveMode] of [
@@ -33,11 +35,83 @@ test("configuration is optional, read-only, and lives at the global repository r
 		assert.deepEqual(loadStateFlowConfig(f.agentDir), {
 			directory: f.repositoryRoot,
 			mode,
+			scopes: DEFAULT_SCOPE_SELECTION,
 			inactiveMode,
 			logging: "logging" in value,
 			showSuccessfulPatches: !("showSuccessfulPatches" in value),
 			historyLimit: "historyLimit" in value ? value.historyLimit : 7,
 		});
+		assert.deepEqual(readFileSync(f.path), bytes);
+	}
+});
+
+test("configured scopes admit every nonempty set and permutation as immutable canonical data without rewriting bytes", (t) => {
+	const f = fixture(t);
+	const order = ["global", "cwd", "session"] as const;
+	function permutations(values: readonly string[]): string[][] {
+		return values.length === 0 ? [[]] : values.flatMap((scope, index) =>
+			permutations(values.filter((_, position) => position !== index)).map((rest) => [scope, ...rest]));
+	}
+	for (let mask = 1; mask < 8; mask++) {
+		const expected = order.filter((_, index) => mask & (1 << index));
+		for (const input of permutations(expected)) {
+			const bytes = ` { "scopes": ${JSON.stringify(input)}, "mode": "off", "logging": true, "showSuccessfulPatches": false, "historyLimit": 0 }\n`;
+			writeFileSync(f.path, bytes);
+			const config = loadStateFlowConfig(f.agentDir);
+			assert.deepEqual(config, {
+				directory: f.repositoryRoot, mode: "off", scopes: expected, inactiveMode: "off",
+				logging: true, showSuccessfulPatches: false, historyLimit: 0,
+			});
+			assert.equal(Object.isFrozen(config.scopes), true);
+			assert.throws(() => (config.scopes as string[]).push("global"), TypeError);
+			assert.equal(readFileSync(f.path, "utf8"), bytes);
+		}
+	}
+});
+
+test("missing scopes use the frozen default and later read-time edits cannot mutate previously loaded values", (t) => {
+	const f = fixture(t);
+	for (const value of [undefined, {}, { mode: "off", logging: true }]) {
+		if (value !== undefined) f.write(value);
+		const config = loadStateFlowConfig(f.agentDir);
+		assert.deepEqual(config.scopes, ["global", "cwd", "session"]);
+		assert.equal(Object.isFrozen(config.scopes), true);
+	}
+	f.write({ scopes: ["session", "global"] });
+	const first = loadStateFlowConfig(f.agentDir);
+	const again = loadStateFlowConfig(f.agentDir);
+	assert.notEqual(first.scopes, again.scopes, "each explicit value is separately captured");
+	f.write({ scopes: ["cwd"] });
+	const changedBytes = readFileSync(f.path);
+	assert.deepEqual(loadStateFlowConfig(f.agentDir).scopes, ["cwd"]);
+	assert.deepEqual(readFileSync(f.path), changedBytes);
+	assert.deepEqual(first.scopes, ["global", "session"]);
+	assert.deepEqual(again.scopes, first.scopes);
+	f.write({});
+	const missingBytes = readFileSync(f.path);
+	assert.deepEqual(loadStateFlowConfig(f.agentDir).scopes, DEFAULT_SCOPE_SELECTION);
+	assert.deepEqual(first.scopes, ["global", "session"]);
+	assert.deepEqual(readFileSync(f.path), missingBytes);
+	assert.deepEqual(DEFAULT_SCOPE_SELECTION, ["global", "cwd", "session"]);
+});
+
+test("malformed present scopes fail with fixed path diagnostics and leave exact config bytes unchanged", (t) => {
+	const f = fixture(t);
+	for (const scopes of [null, [], ["cwd", "cwd"], "cwd", {}, true, 1, ["CWD"], ["unknown-private-value"], [null], ["global", "session", "cwd", "cwd"]]) {
+		f.write({ scopes, mode: "passive", autoStart: true, passiveTools: false, logging: true, historyLimit: 12 });
+		const bytes = readFileSync(f.path);
+		assert.throws(() => loadStateFlowConfig(f.agentDir), (error: unknown) => {
+			assert.ok(error instanceof Error);
+			assert.equal(error.message, `Invalid State Flow scopes configuration: ${f.path}`);
+			assert.equal(error.cause, undefined);
+			return true;
+		});
+		assert.deepEqual(readFileSync(f.path), bytes);
+	}
+	for (const invalid of [{ scopes: ["cwd"], unexpected: true }, { scopes: ["session"], logging: null }, { scopes: ["global"], mode: "Active" }, { scopes: ["cwd"], historyLimit: -1 }]) {
+		f.write(invalid);
+		const bytes = readFileSync(f.path);
+		assert.throws(() => loadStateFlowConfig(f.agentDir), /State Flow/);
 		assert.deepEqual(readFileSync(f.path), bytes);
 	}
 });
@@ -57,9 +131,10 @@ test("legacy autoStart/passive flags map read-only to the default mode; explicit
 		[{ mode: "active", passiveBootstrap: false, passiveTools: false }, "active", "passive"],
 		[{ mode: "off", autoStart: true, passiveTools: true }, "off", "off"],
 	] as const) {
-		f.write(value);
+		f.write({ ...value, scopes: ["session", "global"] });
 		const bytes = readFileSync(f.path);
 		const config = loadStateFlowConfig(f.agentDir);
+		assert.deepEqual(config.scopes, ["global", "session"]);
 		assert.deepEqual([config.mode, config.inactiveMode], [mode, inactiveMode], JSON.stringify(value));
 		assert.deepEqual(readFileSync(f.path), bytes, "compatibility mapping never rewrites operator configuration");
 	}
@@ -71,6 +146,9 @@ test("invalid configuration fails before extension registration or state writes,
 	for (const value of [null, [], true, { directory: "../elsewhere" }, { autoStart: "true" }, { autoStart: null }, { passiveBootstrap: "true" }, { passiveTools: null }, { enabled: true },
 		{ mode: "on" }, { mode: "Active" }, { mode: null }, { mode: true }, { passive: true },
 		{ memoryOwner: "none" }, { memoryOwner: true }, { globalMemory: "false" }, { globalMemory: null },
+		{ scopes: null }, { scopes: [] }, { scopes: ["cwd", "cwd"] }, { scopes: "cwd" },
+		{ scopes: ["CWD"] }, { scopes: ["unknown"] }, { scopes: [1] },
+		{ mode: "active", scopes: ["session", null], logging: true, historyLimit: 3 },
 		{ remotePublication: "off" }, { remotePublication: "turn-end" }, { remotePublication: "async" }, { remotePublication: "transition" }, { remotePublication: true },
 		{ logging: "true" }, { logging: 1 }, { logging: null },
 		{ showSuccessfulPatches: "true" }, { showSuccessfulPatches: 1 }, { showSuccessfulPatches: null },
@@ -118,7 +196,7 @@ test("load-time default mode controls new sessions, not resumed branch mode", as
 	const reloaded = harness({ ...options, sessionId: "after-reload" });
 	await reloaded.handlers.get("session_start")!({ reason: "new" }, reloaded.ctx);
 	assert.equal(reloaded.activeTools.includes("patch_state"), false);
-	assert.deepEqual(reloaded.entries.map(({ data }) => data), [{ mode: "off" }]);
+	assert.deepEqual(reloaded.entries.map(({ data }) => data), [nativePolicyMarker("after-reload", "off")]);
 });
 
 test("without configuration a new session defaults to Off without manufacturing storage", async (t) => {
@@ -128,7 +206,7 @@ test("without configuration a new session defaults to Off without manufacturing 
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	assert.deepEqual(["read_state", "patch_state"].map((name) => h.activeTools.includes(name)), [false, false]);
 	assert.equal(h.statuses.at(-1), undefined);
-	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "off" }], "the inherited default becomes session-owned without semantic storage");
+	assert.deepEqual(h.entries.map(({ data }) => data), [nativePolicyMarker("default-off", "off")], "the inherited default becomes session-owned without semantic storage");
 	assert.equal(existsSync(join(f.repositoryRoot, "checkpoint.json")), false);
 	assert.equal(existsSync(f.path), false);
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
@@ -148,8 +226,8 @@ for (const reason of ["new", "resume"] as const) for (const mode of ["off", "pas
 	await h.handlers.get("session_start")!({ reason }, h.ctx);
 	const inherited = h.entries.length;
 	await h.commands.get(`state-flow-${mode}`)!.handler("", h.ctx);
-	assert.equal(h.entries.length, reason === "new" ? inherited : inherited + 1, "first explicit choice is saved only when no mode was retained");
-	assert.deepEqual(h.entries.at(-1)!.data, { mode });
+	assert.equal(h.entries.length, inherited, "session admission already retained the selected native policy");
+	assert.deepEqual(h.entries.at(-1)!.data, nativePolicyMarker("pre-runtime", mode));
 	const selected = structuredClone(h.entries);
 	await h.commands.get(`state-flow-${mode}`)!.handler("", h.ctx);
 	assert.deepEqual(h.entries, selected, "repeated selection is inert");
@@ -180,7 +258,7 @@ test("configured historyLimit controls runtime folding and historical reads", as
 		await h.beginRun(`Iteration ${index}`);
 		await commitTerminal(h, {}, { index }, `Answer ${index}`);
 	}
-	assert.equal(h.readState(3).working.index, 4);
+	assert.equal(h.readState(3).tactics.index, 4);
 	assert.throws(() => h.readState(4), /integer from 0 to 3/);
 });
 
@@ -193,7 +271,7 @@ for (const historyLimit of [0, 1, 7, 12]) test(`scope patch-history reads honor 
 	await h.beginRun("Build retained history");
 	for (let index = 1; index <= historyLimit + 1; index++) {
 		await h.tools.get("patch_state")!.execute(`patch-${index}`, {
-			global: { working: { index } }, cwd: { working: { index } }, session: { working: { index } },
+			global: { tactics: { index } }, cwd: { tactics: { index } }, session: { tactics: { index } },
 		}, undefined, undefined, h.ctx);
 	}
 	const entries = h.entries.length;
@@ -202,14 +280,14 @@ for (const historyLimit of [0, 1, 7, 12]) test(`scope patch-history reads honor 
 		return JSON.parse(result.content[0].text);
 	};
 	for (const scope of ["global", "cwd", "session"]) {
-		assert.equal((await read({ path: `${scope}[${historyLimit}].working.index` })).value, 1);
+		assert.equal((await read({ path: `${scope}[${historyLimit}].tactics.index` })).value, 1);
 		for (const offset of new Set([0, 7, 8, historyLimit - 1].filter((index) => index >= 0 && index < historyLimit))) {
 			const path = `${scope}.patches[${offset}]`;
-			const expected = { patch: { working: { index: historyLimit + 1 - offset } } };
+			const expected = { patch: { tactics: { index: historyLimit + 1 - offset } } };
 			assert.deepEqual(await read({ path }), expected);
 			assert.deepEqual(await read({ paths: [path] }), expected);
 		}
-		if (historyLimit > 0) assert.equal((await read({ path: `${scope}.patches` })).patch.working.index, historyLimit + 1);
+		if (historyLimit > 0) assert.equal((await read({ path: `${scope}.patches` })).patch.tactics.index, historyLimit + 1);
 		await assert.rejects(read({ path: `${scope}.patches[${historyLimit}]` }), /predates retained hot history/);
 		await assert.rejects(read({ path: `${scope}.patches[${historyLimit + 1}]` }), new RegExp(`integer from 0 to ${historyLimit}`));
 	}
@@ -229,7 +307,7 @@ test("historyLimit zero retains only current state through runtime publication",
 		await h.beginRun(`Iteration ${index}`);
 		await commitTerminal(h, {}, { index }, `Answer ${index}`);
 	}
-	assert.equal(h.readState(0).working.index, 2);
+	assert.equal(h.readState(0).tactics.index, 2);
 	assert.equal(h.readState(0).response, "Answer 2");
 	assert.throws(() => h.readState(1), /integer from 0 to 0/);
 });

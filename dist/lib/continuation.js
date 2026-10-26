@@ -1,11 +1,11 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { parseScopeStream, resolveSessionAddress, sessionRuntimePaths, temporalScopePaths } from "./durable.js";
+import { captureOwnedFileBases, resolveSessionAddress, sessionRuntimePaths } from "./durable.js";
 import { MAX_HISTORY_LIMIT } from "./history.js";
 import { diagnosticText } from "./protocol.js";
-import { parseSessionRuntime } from "./snapshot.js";
+import { DEFAULT_SCOPE_SELECTION } from "./selection.js";
+import { prepareSessionPolicyMigration } from "./snapshot.js";
 import { withStorageTransaction } from "./storage.js";
-import { validateScopeLineage } from "./temporal.js";
 /**
  * Preserve host-owned explicit session intent and consult State Flow only for
  * an ordinary default launch. The recommender is a read-only advisory port;
@@ -142,23 +142,19 @@ export async function inspectStateFlowContinuationProvenance(header, repositoryR
         if (!lstatSync(root, { throwIfNoEntry: false }))
             return absent;
         const result = await withStorageTransaction(root, (tx) => {
-            const files = new Map(tx.capture(selected.cwd, selected.id, root, sessionKey).files.map((file) => [file.path, file.content]));
-            const privatePaths = temporalScopePaths(selected.cwd, selected.id, "session", root, sessionKey);
-            if ([paths.config, paths.runtime, privatePaths.meta, privatePaths.checkpoint, privatePaths.patches].every((path) => files.get(path) === undefined))
+            const lifecycleFiles = captureOwnedFileBases([paths.config, paths.runtime], root);
+            const files = new Map(lifecycleFiles.map(file => [file.path, file.content]));
+            const policy = prepareSessionPolicyMigration(files.get(paths.config), files.get(paths.runtime), selected.cwd, selected.id, DEFAULT_SCOPE_SELECTION);
+            if (!policy) {
+                // Confirm absence/private presence without reading any shared or private semantic body.
+                if (tx.hasSelectedCurrentAuthority(selected.cwd, selected.id, DEFAULT_SCOPE_SELECTION, root, sessionKey))
+                    throw new Error("State Flow lifecycle changed during inspection");
                 return absent;
-            const runtime = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), selected.cwd, selected.id);
-            if (!runtime)
-                throw new Error("incomplete canonical session runtime");
-            if (runtime.config.mode !== "active")
+            }
+            // Reuse current admission; bind the decoded selection to exact lifecycle bytes before any wider interpretation.
+            const current = tx.prepareSelectedCurrent(selected.cwd, selected.id, policy.runtime.config.scopes, MAX_HISTORY_LIMIT, root, sessionKey, { files: lifecycleFiles });
+            if (current.lifecycle.runtime.config.mode !== "active")
                 return { stateFlow: { enabled: false, restorable: true }, reason: "State Flow is not active on selected runtime" };
-            const streams = ["global", "cwd", "session"].map((scope) => {
-                const owned = temporalScopePaths(selected.cwd, selected.id, scope, root, sessionKey);
-                return parseScopeStream(files.get(owned.checkpoint), files.get(owned.patches), scope, scope === "cwd" ? selected.cwd : undefined, files.get(owned.meta));
-            });
-            if (streams.some((stream) => stream === undefined))
-                throw new Error("incomplete canonical temporal cohort");
-            // Shared streams remain current and independently valid; only the private stream binds to this lineage.
-            validateScopeLineage(streams[2], "session", runtime.meta.lineage, MAX_HISTORY_LIMIT);
             return { stateFlow: { enabled: true, restorable: true }, reason: "canonical session lineage is valid beside current shared streams" };
         }, signal);
         signal?.throwIfAborted();

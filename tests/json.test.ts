@@ -19,7 +19,7 @@ test("empty-object pruning is recursive, immutable and idempotent without deleti
 });
 
 test("presentation JSON preserves intentional insertion order without relaxing JSON validation", () => {
-	assert.equal(presentationJson({ intents: {}, contract: {}, working: {} }), '{"intents":{},"contract":{},"working":{}}');
+	assert.equal(presentationJson({ intents: {}, strategy: {}, tactics: {} }), '{"intents":{},"strategy":{},"tactics":{}}');
 	assert.throws(() => presentationJson({ invalid: undefined }), /finite, acyclic JSON/);
 });
 

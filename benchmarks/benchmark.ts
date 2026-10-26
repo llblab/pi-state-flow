@@ -144,11 +144,11 @@ test("large-trajectory active and passive prompt prefixes", { skip: !prefixWorkl
 		const session = await fixture.createSession();
 		if (mode !== "passive") await session.prompt("/state-flow-active");
 		fixture.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("patch_state", { session: { working: { seed: "prefix baseline" } } }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { seed: "prefix baseline" } } }), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Seed accepted"),
 		]);
 		await session.prompt("Seed memory before measurement");
-		assert.equal(fixture.readState(session).working.seed, "prefix baseline");
+		assert.equal(fixture.readState(session).tactics.seed, "prefix baseline");
 		const seeded = session.messages.at(-1);
 		assert.ok(seeded?.role === "assistant");
 		assert.deepEqual(seeded.content, [{ type: "text", text: "Seed accepted" }]);
@@ -191,7 +191,7 @@ test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_0
 				session = restored.result;
 				if (stateFlow) {
 					assert.ok(session.getActiveToolNames().includes("patch_state"));
-					assert.equal(fixture.readState(session).working.counter, counter);
+					assert.equal(fixture.readState(session).tactics.counter, counter);
 				}
 			}
 			const previousCheckpoint = checkpoints[checkpoints.indexOf(counter) - 1] ?? 0;
@@ -259,10 +259,10 @@ test("two-process publication interleavings", { timeout: 180_000 }, async (t) =>
 		assert.ok(accepted > 0, "no writer published usable evidence");
 		if (scope === "session") {
 			for (const writer of writers.filter(({ accepted }) => accepted > 0)) {
-				assert.equal(loadSessionState(writer.cwd, writer.id, fixture.repositoryRoot)?.working.writer, writer.id);
+				assert.equal(loadSessionState(writer.cwd, writer.id, fixture.repositoryRoot)?.tactics.writer, writer.id);
 			}
 		} else {
-			assert.ok(writers.some(({ id }) => loadGlobalState(fixture.repositoryRoot)?.working.writer === id));
+			assert.ok(writers.some(({ id }) => loadGlobalState(fixture.repositoryRoot)?.tactics.writer === id));
 		}
 		const errors = results.flatMap((result) => result.error ? [result.error.replaceAll(fixture.root, "<fixture>")] : []);
 		const entry = { sameCwd, scope, attempts: results.length, accepted, failed: results.length - accepted, wallMs: distribution(results.map((r) => r.ms)), errors: Object.fromEntries([...new Set(errors)].map((error) => [error, errors.filter((value) => value === error).length])) };

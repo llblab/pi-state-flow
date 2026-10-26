@@ -1,0 +1,75 @@
+# Semantic extensibility decision
+
+## Scope and accepted disposition
+
+The later explicit module request supplied additional manual, read-only, exact-window and asynchronous-producer requirements. The [internal semantic-module contract](semantic-module-contract.md) implements their bounded internal seam. The no-new-API decision below records the earlier M5 checkpoint, not a current prohibition; public loading, new stored planes, production archive/scheduler and sandbox/quality claims remain deferred.
+
+**M5 accepted decision: no NEW semantic-module API at that checkpoint; explicitly defer declarative manifests, module loading and executable invariant registration.** Retain existing internal functions and reviewed private protocol snippets. This is a demand/alternatives decision, not implementation of a module framework, a ban on future helpers, or a claim that there are no existing public APIs. Actual independent integrated review is **APPROVE — bounded no-new-semantic-module-API / explicit expansion-deferral decision**; its complete report was consumed after ROOT terminal before acceptance. [BACKLOG](../BACKLOG.md#12-ordered-implementation-backlog) alone owns remaining work.
+
+The accepted [M4 retain/defer decision](protocol-composition-decision.md) found no earned descriptor layer. M5 asks whether an actual caller or invariant needs a new contract despite that result. The bounded repository/design/task evidence below establishes useful existing functions but no currently unmet semantic-module requirement. It cannot establish that no external user anywhere wants modules. No external discovery, live user/model experiment or production-store inspection was performed.
+
+## Actual demand and smallest existing contract
+
+The authorized roadmap's offline-bundle scenario needs continuity of a binding outcome, accepted method and rationale, failed prerequisite, revision on contradictory evidence, intent closure and retained consequence. These are requirements for meaningful ordinary JSON, not inherently for adding a fourth plane, task schema or callback. The [handoff contract](semantic-handoff-contract.md#purpose-and-reconstruction-boundary) distinguishes these facts without requiring fixed record keys.
+
+The accepted [linked native checkpoint](single-scope-interface-contract.md#deterministic-m3-checkpoint) and the linked-checkpoint group in `tests/extension.test.ts` are a concrete mechanical witness: requirements/accepted approach/unaccepted proposal/prerequisites/dependencies are supplied JSON; a real native reload, reasoned partial revision, historical read and intent closure retain the appropriate consequence across all seven choices. This is a fixture-backed instance of that handoff structure, not an execution of the offline-bundle scenario, observed production demand or model discovery of the right plan. It does not prove that the external report was published, the premise was true, or a model will retain every commitment. Those quality claims remain gated separately.
+
+A minimal existing model-facing contract for that use case is, with **exactly Session wanted**, a direct flat patch such as:
+
+```json
+{
+  "strategy": {
+    "requirements": { "constraint": "No account operations" },
+    "accepted": { "id": "verify-first", "rationale": "The initial assumption was contradicted by fixture evidence" },
+    "prerequisites": { "inputAssumption": "failed" }
+  },
+  "tactics": { "reportWork": { "observation": "Verification passed", "next": "publish" } }
+}
+```
+
+Those nested names are example data, not a new schema, trust grant or required module envelope. Multi-owner wanted choices instead require selected explicit owner roots even when supplying one target. The original native request, wanted owner, readable/private/source authority and canonical atomic staging/publication still apply. A stored prohibition does not enforce account permissions; external effects require the existing host/tool policy and fresh evidence. A pure memory validator could not establish those facts merely by checking this JSON.
+
+Other observed needs already have distinct owners:
+
+- **Procedural reuse and source knowledge:** Registered Pi Skills and exact-source artifact compilation are existing facilities. Skill competence is not a new semantic plane. Source provenance/freshness, optional compilation and selected-owner placement remain runtime-owned; a Skill read or artifact body is not admitted trusted system-protocol text or publication permission.
+- **Protocol maintenance:** M4's real two-site owner-meaning wording could earn a tiny preventive private helper on an authorized meaning change. This is a credible local maintenance opportunity without a current bug, not evidence for a public manifest ABI or executable hook.
+- **Deterministic invariants:** Recursive JSON semantics, selected/canonical admission, same-scope intent cascade, artifact provenance, causal/private proof and final publication already have centralized owners. No demonstrated additional core-plane invariant in this scoped task is obstructed by those internal functions. This is not a theorem about all future domains.
+- **Integration/presentation:** `index.ts` already exports embedding APIs, and the optional Telegram presentation leaf has its own existing public adapter/loader. Those are not semantic-plane registration. Pi's existing extension/tool mechanisms are not a new State Flow module ABI, nor a reason to bypass an original State Flow request or move source/private/publication authority into an arbitrary tool. Host extensions already execute code; no sandbox guarantee is inferred from their availability.
+
+The illustrative `hypotheses` idea is not a requested fourth-plane acceptance case. Assumptions, contrary evidence and reconsideration conditions already fit task-appropriate Strategy/Tactics data. This does not prove a dedicated cognitive role could never help. Reaching M5 alone does not authorize that role, automatic promotions, additional scopes, optional-plane controls or storage changes.
+
+## Alternatives against the same need
+
+### A — Existing functions and private snippets (selected)
+
+Expresses the current task with ordinary JSON and the existing single engine. Determinism, failure atomicity, source/intent/publication ownership and prompt order stay under their existing tests. There is no new loader, dependency graph, manifest admission, stored envelope or public support/versioning commitment. Costs are package-owned edits and existing local wording synchronization. This does not eliminate maintenance work or promise general module expressiveness; a small private helper remains available when an actual edit earns it.
+
+### B — Static internal declarative descriptors
+
+Can single-source a genuinely repeated contract while keeping package-owned trust and fixed order. Testability would focus on completeness/order/mode/selection and exact prompt behavior; storage, publication and intent cascade would remain centralized. It still needs no external loader or API. M4 found the current three plane summaries one actual producer with existing shared fragments, so additional descriptor keys/assembly are not earned now. A second producer or preventive helper opportunity can be addressed privately without first promising third-party compatibility.
+
+### C — New public declarative manifest
+
+Could serve independently authored, independently versioned cognitive roles only if there is a real consumer and a reason reviewed package code is insufficient. That requirement is not established here. Even without executable callbacks, new trusted instructions/plane names need admission, collision policy, deterministic order, compatibility and a support owner. A data manifest is not automatically trusted because it is JSON; ordinary memory, source text and compiled Skills must never supply system authority. New top-level planes would also interact with the closed patch/read grammar, sparse storage/replay, retired roots and migration rather than merely add prose. These are qualitative costs, not measured implementation effort. No manifest schema or public version is sketched or frozen without demand.
+
+### D — Narrowly pure executable invariants
+
+Might express a real cross-field rule a future accepted use case cannot represent declaratively. Start with the smallest internal validation in the existing staged transaction if that requirement appears, not external registration or rewrite callbacks. A new rejection can break previously valid memory, so input semantics, compatibility and all-or-error acceptance must be explicitly reviewed. Testability additionally needs detached inputs, determinism, mutation isolation, fail-before-publication and adversarial cross-plane/selection cases. Rewrites/order/dependencies can create hidden reactions; no current case earns them. A TypeScript `readonly` or synchronous function signature cannot enforce absence of ambient I/O, time, randomness, inference or arbitrary JavaScript effects. Purity is not an implemented sandbox; untrusted executable modules are not admitted by this decision.
+
+## Boundary, counterargument and falsification route
+
+The strongest counterargument is future application-specific atomic validation or independent cognitive-role authorship: ordinary JSON and package edits may not meet every downstream need. Advice or an off-transaction native validator is not the semantic commit gate and cannot itself guarantee atomic rejection of a required cross-field relation. A concrete mandatory relation could justify a narrow internal check first, then an external seam only for an actual independent consumer that cannot use the existing owner. None is demonstrated here. Missing evidence is not proof of impossibility. The current decision declines the new support/trust surface because no identified caller or invariant in this authorized task actually requires it, rather than assuming plugins are always bad. Do not create a dummy consumer or fourth plane to make the milestone look implemented.
+
+No expansion is warranted now, so there is no new registration signature, loader, plane-name namespace, manifest parser, module configuration, staging callback or root export to support. Existing public APIs retain their current contracts. Any future proposal must first name an actual unmet task/caller or invariant, the smallest failing case using existing facilities, and why an internal helper, data convention or current shared-runtime change is insufficient. Before any separately approved API implementation, it must settle trust/admission and versioning, collision behavior, acyclic ownership/dependencies, prompt order and wanted-selection stability, compatibility with retained stores and atomic failure. A new invariant's effect on formerly legal memory or stored formats needs an explicit compatibility decision, not silent rejection on reload.
+
+The conditional proof plan is deliberately not a parallel task list: demonstrate that failing case; compare the smallest internal/declarative/validation alternative; preserve existing mode/seven-choice/flat-multi/source/private/causal/publication witnesses; and test only the newly admitted boundary including malformed inputs and failure atomicity. No I/O, lifecycle control, publication, inference, arbitrary loading or hidden reaction is allowed as a future semantic contract without a separately reviewed requirement changing that boundary. Type-level claims alone cannot discharge those proof obligations. Real reasoning/quality/cost claims still need the separately authorized model evaluation.
+
+## M5 disposition
+
+M5.1 audits a real authorized handoff need against four alternatives; no unmet module-API need is established within this bounded evidence. That is grounds for explicit deferral, not a manufactured consumer to satisfy an expansion dependency. M5.2 adds no boundary to implement: its trust/versioning/collision/ownership/compatibility questions above remain proof obligations for any separately justified proposal, not an approved manifest or sandbox. M5.3 records the no-new-API/defer choice, costs, counterargument and falsifiers. This completes the bounded decision milestone without implementing or promising deferred capabilities; it does not claim that a universal no-demand proposition was proved.
+
+## Evidence and limits
+
+No production/source/test/dist/package contract changes or live evaluation are proposed. Reuse the accepted M3 execution and M4 ownership/prompt evidence at their original proof levels through finite unchanged-input binding, not newly executed Source1611/SDK/protocol/typecheck/build/compiled299/compat36 totals. The linked fixture is supplied data and mechanical acceptance, not a universal domain-schema or cognitive adequacy test. No new runnable API prototype or invariant test is needed for a decision adding no API or invariant.
+
+The independent source/demand author returned; its complete actual terminal report was consumed. It inspected the actual task, existing public exports/producers, ordinary-JSON representation and linked fixture without inspecting this draft, and recommends explicit no-new-API deferral. Its evidence is read-only inspection with zero source/SDK tests, not approval of this integrated decision. Its strongest atomic-cross-field counterargument is retained above. Pre-review coordinator documentation1/1, context0errors/20warnings, DAG0/25 and diff passed. Scripts-disabled package membership is131: all130 prior paths retained plus only this decision. A bounded probe admits the one actual JSON sketch through existing DIST DATA normalization and rejects the sole wrapper; this is not a new API/invariant/SDK/store or authority test. The pack predates final prose/status refinements; count/membership are audited, not a final future tarball hash/size. They cannot themselves establish semantic prose accuracy, absence of global market demand or purity of arbitrary JavaScript. The complete actual terminal integrated review approves this bounded deferral after source/prose inspection, including the atomic-relation countercase and the unmet-demand/valid-no-API dependency tension. It independently checked160/160 before/after, old150 at147/150 with exactly BACKLOG/CHANGELOG/docs-index deltas, ran the actual DATA example and diff check. Documentation1/1, context/DAG, package membership and changelog counts were inspected coordinator evidence, not new reviewer executions; no source/SDK/typecheck/protocol/full/build/package run was attributed to review. A finite certificate is not all workspace/vendor/provider files or unknown callers. Closure changes only decision/index/changelog/BACKLOG disposition prose and reconciles already accepted M2/M3 choices, not behavior. M5 is closed as explicit expansion deferral without a feature promise; remaining M0 retirement and authorized real-model gates stay in BACKLOG. No next API backlog or Grow Loop iteration is earned merely by hypothetical falsifiers.

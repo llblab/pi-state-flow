@@ -49,7 +49,8 @@ function applyOwnedArrayPatch(
 	return next;
 }
 
-function applyOwnedPatch(
+/** Internal path-copying step; callers must own the detached draft and collect failures privately. */
+export function applyOwnedPatch(
 	state: JsonObject, patch: JsonObject, missingDeletions?: MissingDeletion[], path = "", unavailablePath?: string,
 ): JsonObject {
 	let next = state;

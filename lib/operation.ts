@@ -31,8 +31,8 @@ export class OwnedOperationSlot<E extends OwnedOperation> {
 	/** Abort and forget the current owner; returns its operation for optional awaiting. */
 	cancel(): E["operation"] | undefined {
 		const entry = this.#current;
-		entry?.controller.abort();
 		this.#current = undefined;
+		entry?.controller.abort();
 		return entry?.operation;
 	}
 
@@ -66,8 +66,9 @@ export class RenewableLifetime {
 
 	/** Abort current holders and open a fresh lifetime. */
 	renew(reason?: unknown): void {
-		this.#controller.abort(reason);
+		const previous = this.#controller;
 		this.#controller = new AbortController();
+		previous.abort(reason);
 	}
 
 	/** Abort current holders without opening a new lifetime (shutdown). */

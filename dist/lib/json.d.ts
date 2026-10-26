@@ -7,6 +7,8 @@ export interface MissingDeletion {
     path: string;
     unavailablePath: string;
 }
+/** Internal path-copying step; callers must own the detached draft and collect failures privately. */
+export declare function applyOwnedPatch(state: JsonObject, patch: JsonObject, missingDeletions?: MissingDeletion[], path?: string, unavailablePath?: string): JsonObject;
 /** Remove empty object fields without removing array slots or mutating the input. */
 export declare function pruneEmptyObjects(value: JsonObject): JsonObject;
 export declare function pruneEmptyObjects(value: JsonValue): JsonValue;

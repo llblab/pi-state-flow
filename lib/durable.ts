@@ -19,8 +19,10 @@ import {
 	type ArtifactProvenanceRegistry,
 } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
+import { prepareSerializedScopeMigration } from "./migration.ts";
 import { canonicalJson, isJsonValue, isObject, type JsonObject } from "./json.ts";
 import { validateScopeStream, validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
+import { assertRetainedModules, validateRetainedModules } from "./semantic-module.ts";
 import { selectSemanticFields, type StateScope } from "./state.ts";
 
 const SESSION_KEY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
@@ -66,8 +68,8 @@ export function serializeScopeStream(stream: ScopeStream, scope: StateScope, cwd
 	if (scope === "cwd" && cwdIdentity === undefined) throw new Error("State Flow CWD scope serialization requires its canonical identity");
 	if (scope !== "cwd" && cwdIdentity !== undefined) throw new Error("Only State Flow CWD scope serialization accepts a CWD identity");
 	return {
-		checkpoint: `${canonicalJson(selectSemanticFields(stream.checkpoint.state))}\n`,
-		patches: stream.patches.map((record) => `${canonicalJson(selectSemanticFields(record.patch as JsonObject))}\n`).join(""),
+		checkpoint: `${canonicalJson(selectSemanticFields(stream.checkpoint.state, stream.modules))}\n`,
+		patches: stream.patches.map((record) => `${canonicalJson(selectSemanticFields(record.patch as JsonObject, stream.modules))}\n`).join(""),
 		temporal: {
 			revision: stream.revision,
 			checkpoint: structuredClone(stream.checkpoint.through),
@@ -79,6 +81,10 @@ export function serializeScopeStream(stream: ScopeStream, scope: StateScope, cwd
 export type ScopeStreamPresence =
 	| { kind: "absent" }
 	| { kind: "present"; stream: ScopeStream };
+
+function isSupportedScopeMetadataVersion(version: unknown): boolean {
+	return version === 1 || version === 2 || version === 3 || version === 4;
+}
 
 /** Distinguish a wholly absent semantic cohort from partial or malformed surviving authority. */
 export function classifyScopeStream(
@@ -93,46 +99,29 @@ export function classifyScopeStream(
 	if (checkpointSource === undefined || patchesSource === undefined) {
 		throw new Error(`State Flow ${scope} scope has an incomplete checkpoint/tail pair`);
 	}
-	let checkpoint: unknown;
-	try {
-		checkpoint = JSON.parse(checkpointSource);
-	} catch {
-		throw new Error(`State Flow ${scope} checkpoint contains invalid JSON`);
-	}
-	let meta: Record<string, unknown> | undefined;
-	if (metaSource !== undefined) {
-		try { meta = JSON.parse(metaSource) as Record<string, unknown>; }
-		catch { throw new Error(`State Flow ${scope} metadata contains invalid JSON`); }
-		if (!isObject(meta)) throw new Error(`Invalid State Flow ${scope} metadata`);
-	}
-	const patches: unknown[] = [];
-	for (const [index, line] of patchesSource.split(/\r?\n/).entries()) {
-		if (line.trim().length === 0) continue;
-		try {
-			patches.push(JSON.parse(line));
-		} catch {
-			throw new Error(`State Flow ${scope} tail contains invalid JSON at line ${index + 1}`);
+	if (metaSource === undefined) {
+		try { JSON.parse(checkpointSource); }
+		catch { throw new Error(`State Flow ${scope} checkpoint contains invalid JSON`); }
+		for (const [index, line] of patchesSource.split(/\r?\n/).entries()) {
+			if (line.trim().length === 0) continue;
+			try { JSON.parse(line); }
+			catch { throw new Error(`State Flow ${scope} tail contains invalid JSON at line ${index + 1}`); }
 		}
-	}
-	const temporal = meta?.temporal;
-	if (!isObject(temporal) || !Object.hasOwn(temporal, "checkpoint") || !Array.isArray(temporal.patches)) {
 		throw new Error(`Unsupported State Flow ${scope} storage format`);
 	}
-	const owner = meta?.owner;
-	if (scope === "cwd" && expectedCwd !== undefined
-		&& (!isObject(owner) || Object.keys(owner).join(",") !== "cwd" || owner.cwd !== resolve(expectedCwd))) {
-		throw new Error(owner === undefined ? "State Flow CWD scope identity is missing" : "State Flow CWD scope identity mismatch");
+	const metadata = parseMetadataDocument(metaSource, `State Flow ${scope} metadata`);
+	if (!isSupportedScopeMetadataVersion(metadata.version)) throw new Error(`Unsupported State Flow ${scope} metadata version`);
+	// In Unicode mode this range matches lone UTF-16 surrogates, not valid pairs or JSON escapes.
+	if ([checkpointSource, patchesSource, metaSource].some((source) => /[\uD800-\uDFFF]/u.test(source))) {
+		throw new Error(`State Flow ${scope} source is not lossless UTF-8 text`);
 	}
-	const boundaries = temporal.patches;
-	if (boundaries.length !== patches.length) throw new Error(`State Flow ${scope} temporal metadata does not match its semantic tail`);
+	const decoded = prepareSerializedScopeMigration({
+		checkpoint: Buffer.from(checkpointSource), patches: Buffer.from(patchesSource), meta: Buffer.from(metaSource),
+	}, scope, scope === "cwd" ? expectedCwd : undefined);
 	const stream = {
-		// 0.17.4 and earlier did not persist scope revisions. Credit only their still-retained
-		// semantic tail; discarded ancestry cannot be reconstructed without inventing history.
-		revision: temporal.revision === undefined ? patches.length : temporal.revision,
-		checkpoint: { through: temporal.checkpoint, state: isObject(checkpoint) ? selectSemanticFields(checkpoint) : checkpoint },
-		patches: patches.map((patch, index) => ({
-			transition: boundaries[index], patch: isObject(patch) ? selectSemanticFields(patch) : patch,
-		})),
+		...decoded.stream,
+		checkpoint: { ...decoded.stream.checkpoint, state: selectSemanticFields(decoded.stream.checkpoint.state, decoded.stream.modules) },
+		patches: decoded.stream.patches.map((record) => ({ ...record, patch: selectSemanticFields(record.patch as JsonObject, decoded.stream.modules) })),
 	};
 	validateScopeStream(stream, scope, MAX_HISTORY_LIMIT);
 	return { kind: "present", stream };
@@ -220,15 +209,17 @@ export function serializeScopeMetadata(
 	cwdIdentity?: string, existingSource?: string,
 ): string {
 	const existing = parseMetadataDocument(existingSource, `State Flow metadata`);
-	if (scope === "session") {
-		for (const key of ["identity", "lineage", "step", "specification", "validation", "bootstrap"]) delete existing[key];
+	if (Object.keys(existing).length > 0 && !isSupportedScopeMetadataVersion(existing.version)) {
+		throw new Error("Unsupported State Flow metadata version");
 	}
+	if (existing.version === 4) assertRetainedModules(existing.modules, stream.modules);
 	const sources = serializeScopeStream(stream, scope, cwdIdentity);
 	const value = {
 		...existing,
-		version: 2,
+		version: stream.modules === undefined ? 3 : 4,
+		...(stream.modules === undefined ? {} : { modules: structuredClone(stream.modules) }),
 		...(registry === undefined ? {} : { artifacts: serializeArtifactProvenanceRegistry(registry) }),
-		temporal: sources.temporal,
+		temporal: { ...(isObject(existing.temporal) ? existing.temporal : {}), ...sources.temporal },
 		...(scope === "cwd" ? { owner: { cwd: resolve(cwdIdentity!) } } : {}),
 	};
 	return `${canonicalJson(value)}\n`;
@@ -236,7 +227,7 @@ export function serializeScopeMetadata(
 
 /** Compatibility serializer retained for metadata-only callers. */
 export function serializeScopeProvenance(registry: Readonly<ArtifactProvenanceRegistry>): string {
-	return `${canonicalJson({ version: 2, artifacts: serializeArtifactProvenanceRegistry(registry) })}\n`;
+	return `${canonicalJson({ version: 3, artifacts: serializeArtifactProvenanceRegistry(registry) })}\n`;
 }
 
 function parseMetadataDocument(source: string | undefined, label: string): Record<string, unknown> {
@@ -252,7 +243,8 @@ function parseMetadataDocument(source: string | undefined, label: string): Recor
 export function parseScopeProvenance(source: string | undefined, path: string): ArtifactProvenanceRegistry {
 	const value = parseMetadataDocument(source, `State Flow provenance file: ${JSON.stringify(path)}`);
 	if (Object.keys(value).length === 0) return {};
-	if (value.version !== 1 && value.version !== 2) throw new Error(`Invalid State Flow provenance document: ${JSON.stringify(path)}`);
+	if (!isSupportedScopeMetadataVersion(value.version)) throw new Error(`Invalid State Flow provenance document: ${JSON.stringify(path)}`);
+	if (value.version === 4) validateRetainedModules(value.modules);
 	if (!Object.hasOwn(value, "artifacts")) return {};
 	return parseArtifactProvenanceRegistry(value.artifacts, `State Flow provenance at ${JSON.stringify(path)}`);
 }
@@ -403,7 +395,8 @@ function readRegularBytes(path: string, repositoryRoot: string): Buffer | undefi
 }
 
 function readRegularFile(path: string, repositoryRoot: string): string | undefined {
-	return readRegularBytes(path, repositoryRoot)?.toString("utf8");
+	const bytes = readRegularBytes(path, repositoryRoot);
+	return bytes === undefined ? undefined : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
 }
 
 function byteIdentity(bytes: Uint8Array | undefined): DurableFileBase["identity"] {
@@ -420,6 +413,22 @@ function assertCurrentBytes(path: string, root: string, expected: Uint8Array | u
 	if (byteIdentity(readRegularBytes(path, root)) !== byteIdentity(expected)) {
 		throw new Error(`State Flow file conflict at ${JSON.stringify(path)}; concurrent bytes preserved`);
 	}
+}
+
+export interface OwnedFilePresence { path: string; present: boolean }
+
+/** Presence-only private-origin/unsupported-layout evidence; never open or decode semantic bodies. */
+export function captureOwnedFilePresence(paths: readonly string[], repositoryRoot: string): OwnedFilePresence[] {
+	const root = resolve(repositoryRoot);
+	return paths.map((requested) => {
+		const path = resolve(requested);
+		const retiredLayout = basename(path) === STATE_FILE && isStateFlowOwnedPath(join(dirname(path), CHECKPOINT_FILE), root);
+		if (!isStateFlowOwnedPath(path, root) && !retiredLayout) throw new Error(`Cannot inspect a non-State Flow path: ${JSON.stringify(path)}`);
+		if (!assertDirectoryChain(root, dirname(path), false)) return { path, present: false };
+		const stat = lstatSync(path, { throwIfNoEntry: false });
+		if (stat && (!stat.isFile() || stat.isSymbolicLink())) throw new Error(`Durable State Flow path is not a regular file: ${JSON.stringify(path)}`);
+		return { path, present: stat !== undefined };
+	});
 }
 
 /** Capture exact owned bytes for one compare-and-swap publication cohort. */

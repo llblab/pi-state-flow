@@ -1,5 +1,6 @@
 import { type ArtifactInvalidationReason, type ArtifactInvalidationRequest, type ArtifactSourceIdentity, type ArtifactProvenanceRegistry } from "./artifact.ts";
-import type { AtomicScopePatches, ScopedSemanticStates, ScopedStates, StateScope } from "./state.ts";
+import { type AtomicScopePatches, type ScopeStateValues, type StateScope } from "./state.ts";
+import { type ScopeSelection } from "./selection.ts";
 /** Why the caller is considering source-body acquisition. */
 export type ArtifactAcquisitionIntent = "routine" | "new-session" | "relevant-gap" | "exact-source" | "exact-edit" | "contradiction-or-failure" | "explicit-request" | "maintenance";
 export type ArtifactAcquisitionReason = ArtifactInvalidationReason | "materialized-gap" | "exact-source" | "exact-edit" | "contradiction-or-failure" | "explicit-request" | "maintenance";
@@ -25,7 +26,7 @@ export interface SuccessfulArtifactRead extends ArtifactInvalidationRequest {
 export declare class ArtifactReadTracker {
     #private;
     readonly successful: Map<string, SuccessfulArtifactRead>;
-    setCandidates(candidates: Iterable<ArtifactInvalidationRequest>): void;
+    setCandidates(candidates: Iterable<ArtifactInvalidationRequest>, selection?: ScopeSelection): void;
     clear(): void;
     recordStart(toolCallId: string, toolName: string, args: unknown): void;
     recordCall(toolCallId: string, toolName: string, input: unknown): void;
@@ -54,9 +55,11 @@ export declare class ArtifactAcquisitionState {
     /** Forget plan and hints when no memory view is selected. */
     reset(): void;
     /** Re-observe exact registered sources for the selected scope artifacts. */
-    refresh(states: ScopedStates, provenance: (scope: StateScope) => ArtifactProvenanceRegistry): void;
+    refresh(states: ScopeStateValues, provenance: (scope: StateScope) => ArtifactProvenanceRegistry, selection?: ScopeSelection): void;
     /** Accepted compilations leave the plan; correlated read evidence is single-use. */
     acceptAcquired(paths?: ReadonlySet<string>): void;
 }
+/** Exact-path metadata revalidation only; callers acquire source bodies outside canonical exclusion. */
+export declare function validateArtifactReadEvidence(reads: Iterable<SuccessfulArtifactRead>, selection?: ScopeSelection): void;
 /** Deletion patches for registered artifacts whose exact source is observed missing, in every owning scope. */
-export declare function missingArtifactRemovals(states: ScopedSemanticStates): AtomicScopePatches;
+export declare function missingArtifactRemovals(states: ScopeStateValues, selection?: ScopeSelection): AtomicScopePatches;

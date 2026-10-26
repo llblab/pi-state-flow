@@ -1,5 +1,6 @@
 import { type ArtifactProvenance, type ArtifactRegistry } from "./artifact.ts";
-import type { StateScope } from "./state.ts";
+import { type ScopeSelection } from "./selection.ts";
+import type { AtomicScopePatches, StateScope } from "./state.ts";
 export declare const SKILL_ARTIFACT_COMPILER = "skill-artifact-v1";
 export declare function hasCompiledSkillArtifact(artifacts: ArtifactRegistry, provenance: ArtifactProvenance | undefined, source: string, expectedHash?: string): boolean;
 export type SkillSourceHasher = (source: string) => string;
@@ -29,7 +30,11 @@ export declare class SkillReadTracker {
     readonly successful: Map<string, SuccessfulSkillRead>;
     readonly hashSource: SkillSourceHasher;
     readonly resolveRegistered: RegisteredSkillResolver;
-    constructor(hashSource?: SkillSourceHasher, resolveRegistered?: RegisteredSkillResolver);
+    constructor(hashSource?: SkillSourceHasher, resolveRegistered?: RegisteredSkillResolver, selection?: ScopeSelection);
+    /** Selection changes revoke correlated reads; a disabled Skill still retains ownership-only volatile evidence. */
+    select(selection: ScopeSelection): void;
+    /** Rehash only attempted selected compilations; this body acquisition must run outside canonical exclusion. */
+    validateCompilations(patches: AtomicScopePatches): void;
     clear(): void;
     recordStart(toolCallId: string, toolName: string, args: unknown): void;
     recordCall(toolCallId: string, toolName: string, input: unknown): void;

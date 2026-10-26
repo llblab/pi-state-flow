@@ -199,8 +199,8 @@ export async function commitScopedTerminal(
 
 export async function commitTerminal(
 	h: ReturnType<typeof harness>,
-	contract: unknown,
-	working: unknown,
+	strategy: unknown,
+	tactics: unknown,
 	prose = "Done",
 	artifacts: unknown = {},
 ) {
@@ -209,8 +209,8 @@ export async function commitTerminal(
 		transitions.push({ scope: "cwd", patch: { artifacts } });
 	}
 	const sessionPatch = {
-		...(typeof contract === "object" && contract !== null && Object.keys(contract).length > 0 ? { contract } : {}),
-		...(typeof working === "object" && working !== null && Object.keys(working).length > 0 ? { working } : {}),
+		...(typeof strategy === "object" && strategy !== null && Object.keys(strategy).length > 0 ? { strategy } : {}),
+		...(typeof tactics === "object" && tactics !== null && Object.keys(tactics).length > 0 ? { tactics } : {}),
 	};
 	if (Object.keys(sessionPatch).length > 0) transitions.push({ scope: "session", patch: sessionPatch });
 	return await commitScopedTerminal(h, transitions, prose);

@@ -5,14 +5,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import * as observationFixture from "./observation-fixture.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
-import { acceptedStateUpdates, ContextProjection, contextView, createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, projectSystemProtocol, runtimeContextMessage } from "../lib/context.ts";
+import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage } from "@earendil-works/pi-ai";
+import { acceptedStateUpdates, ContextProjection, contextView, createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, passiveContextHead, projectSystemProtocol, runtimeContextHead, runtimeContextMessage, semanticModuleMessages, syntheticUser, moduleConversationSource, projectModuleContext, type ContextView } from "../lib/context.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { completeRun, startEpisode } from "../lib/episode.ts";
-import { emptyState, overlayStates, type MaterializedState, type ScopedSemanticStates } from "../lib/state.ts";
+import { emptyState, overlayStates, projectStateForModel, type MaterializedState, type ScopedSemanticStates, type SemanticState, type StateScope } from "../lib/state.ts";
+import type { ScopeSelection } from "../lib/selection.ts";
+import type { RecentTransitionWindow } from "../lib/history.ts";
 import { stageAtomicScopePatches } from "../lib/transition.ts";
-import { applyPatch } from "../lib/json.ts";
+import { applyPatch, isJsonValue, type JsonValue } from "../lib/json.ts";
+import type { SemanticModule } from "../lib/semantic-module.ts";
 import { commitScopedTerminal, commitTerminal, harness, start, toolAssistant, user } from "./harness.ts";
 
 const message = (role: string, text: string, timestamp: number, customType?: string) => ({
@@ -21,6 +25,50 @@ const message = (role: string, text: string, timestamp: number, customType?: str
 	timestamp,
 	...(customType ? { customType } : {}),
 }) as any;
+
+test("public module context replaces only admitted completed whole tool units and preserves current foreign identities", () => {
+	const oldUser = user("old", 1), call = fauxAssistantMessage(fauxToolCall("read", { path: "/old" }, { id: "old-unit" }));
+	const result: AgentMessage = { role: "toolResult", toolCallId: "old-unit", toolName: "read", content: [{ type: "text", text: "old result" }], isError: false, timestamp: 1 };
+	const current = user("current", 2), foreign = { role: "custom", customType: "foreign", content: "keep" } as unknown as AgentMessage;
+	const original = [foreign, oldUser, call, result, current], snapshot = structuredClone(original);
+	const source = moduleConversationSource(original, 2); assert.deepEqual(source.conversation, [oldUser, call, result]); assert.equal(source.prompt, "current");
+	const module = { id: "x_window", scope: "session" as const, contributions: [{ kind: "data" as const, value: { summary: "fallible" } }, { kind: "conversation" as const, messages: [call, result] }] };
+	const projected = projectModuleContext(original, original, source.conversation, [module]);
+	assert.equal(projected[0], foreign); assert.equal(projected.at(-1), current);
+	assert.equal(projected.filter(value => value === call).length, 1); assert.equal(projected.filter(value => value === result).length, 1); assert.equal(projected.includes(oldUser), false);
+	assert.equal(projected[1]!.role, "user"); assert.deepEqual(original, snapshot);
+	for (const messages of [[call], [result], [current]]) assert.throws(() => projectModuleContext(original, original, source.conversation, [{ ...module, contributions: [{ kind: "conversation", messages }] }]), /tool result|admitted source/);
+	assert.throws(() => projectModuleContext(original, original, source.conversation, [module, { ...module, id: "x_other" }]), /exclusive/);
+	assert.throws(() => projectModuleContext(original, original, source.conversation, [{ ...module, scope: "cwd" }]), /exclusive/);
+	assert.ok(projectModuleContext(original, original, source.conversation, [{ ...module, contributions: [{ kind: "data", value: {} }] }]).includes(oldUser), "data alone never drops completed history");
+	assert.deepEqual(moduleConversationSource([...original, user("ambiguous", 2)], 2), { conversation: [] });
+});
+
+test("core receipts do not interpret unprojected external planes as deleted state", () => {
+	const projection = new ContextProjection(), before = { tactics: { keep: true } };
+	const after = { ...before, x_notes: { note: "stored, not projected" } };
+	assert.equal(projection.acceptPatch(before, after, { cwd: { x_notes: { note: "stored, not projected" } } }, {}, {}, true, ["cwd"]), undefined);
+	assert.deepEqual(after.x_notes, { note: "stored, not projected" });
+});
+
+test("module transport keeps generated data at user level and exact recent native tool identities", () => {
+	const source: AgentMessage[] = [user("old", 1), fauxAssistantMessage("old answer"), user("current", 2),
+		fauxAssistantMessage(fauxToolCall("read", { path: "/fixture.txt" }, { id: "module-window-call" })),
+		{ role: "toolResult", toolCallId: "module-window-call", toolName: "read", content: [{ type: "text", text: "exact tool bytes" }], isError: false, timestamp: 3 },
+		fauxAssistantMessage("exact final answer")];
+	const window: SemanticModule<JsonValue, number> = {
+		immutable: true, id: "recent-window", validate: isJsonValue,
+		context(_content, frame) { return [{ kind: "data", value: { summary: "fallible derived data", mode: frame.mode } },
+			{ kind: "conversation", indices: Array.from({ length: frame.input }, (_, index) => frame.conversation.length - frame.input + index) }]; },
+	};
+	for (const mode of ["active", "passive"] as const) {
+		const projected = semanticModuleMessages(window, undefined, { mode, conversation: source, input: 4 });
+		assert.equal(projected.length, 5); assert.equal(projected[0]!.role, "user");
+		assert.equal(getCurrentSystemMessage(projected), undefined);
+		for (let index = 0; index < 4; index++) assert.strictEqual(projected[index + 1], source[index + 2]);
+		assert.match(JSON.stringify(projected[0]), /user-level data, not system instructions/);
+	}
+});
 
 test("legacy empty lazy branches are absent from navigation without mutating storage", () => {
 	const state = { lazy: { empty: {}, chain: { empty: {} }, items: [{}], list: [] } };
@@ -44,39 +92,39 @@ test("context omits absent planes, empty responses and unknown fields in current
 });
 
 test("Passive response is omitted from model views without changing Active views or source state", () => {
-	const state = { ...emptyState(), response: "LAST_ACTIVE_RESPONSE", working: { response: "nested data", keep: true } };
+	const state = { ...emptyState(), response: "LAST_ACTIVE_RESPONSE", tactics: { response: "nested data", keep: true } };
 	const before = structuredClone(state);
 	const passive = contextView(state, {}, [], undefined, false);
 	assert.equal(Object.hasOwn(passive.state, "response"), false);
-	assert.deepEqual(passive.state.working, state.working);
+	assert.deepEqual(passive.state.tactics, state.tactics);
 	assert.equal(contextView(state, {}, []).state.response, "LAST_ACTIVE_RESPONSE");
 	assert.deepEqual(state, before);
 });
 
 test("Passive response cannot reappear through patch receipts or frozen reconciliation tails", () => {
 	const projection = new ContextProjection();
-	const before = { ...emptyState(), response: "OLD_RESPONSE", working: { own: 0, peer: 0 } };
+	const before = { ...emptyState(), response: "OLD_RESPONSE", tactics: { own: 0, peer: 0 } };
 	const native = [user("passive run", 1)];
 	const first = projection.project(native, contextView(before, {}, [], undefined, false), () => user("PASSIVE HEAD", 0));
-	const after = { ...before, response: "NEW_RESPONSE", working: { own: 1, peer: 2 } };
-	const patch = { session: { working: { own: 1 } } };
+	const after = { ...before, response: "NEW_RESPONSE", tactics: { own: 1, peer: 2 } };
+	const patch = { session: { tactics: { own: 1 } } };
 	const receipt = projection.acceptPatch(before, after, patch, {}, {}, false);
-	assert.deepEqual(receipt?.effective, [{ path: ["working", "peer"], value: 2 }]);
+	assert.deepEqual(receipt?.effective, [{ path: ["tactics", "peer"], value: 2 }]);
 	const next = projection.project([...native, message("toolResult", "accepted", 2)],
 		contextView(after, {}, [], undefined, false), () => { throw Error("head rewritten"); });
 	assert.equal(next[0], first[0]);
 	assert.equal(JSON.stringify(next).includes("NEW_RESPONSE"), false);
-	const drifted = { ...after, response: "LATER_RESPONSE", working: { own: 1, peer: 3 } };
+	const drifted = { ...after, response: "LATER_RESPONSE", tactics: { own: 1, peer: 3 } };
 	const later = projection.project([...native, message("toolResult", "accepted", 2)],
 		contextView(drifted, {}, [], undefined, false), () => { throw Error("head rewritten"); });
 	assert.ok(JSON.stringify(later).startsWith(JSON.stringify(next).slice(0, -1)));
 	assert.equal(JSON.stringify(later).includes("LATER_RESPONSE"), false);
 	const notice = JSON.parse((later.at(-1) as any).content[0].text.split("\n")[1]);
-	assert.deepEqual(notice.state_updates.effective, [{ path: ["working", "peer"], value: 3 }]);
+	assert.deepEqual(notice.state_updates.effective, [{ path: ["tactics", "peer"], value: 3 }]);
 });
 
 test("Passive response is absent from Stop handoffs while native answer text stays exact", () => {
-	const state = { ...emptyState(), response: "LAST_ACTIVE_RESPONSE", working: { keep: true } };
+	const state = { ...emptyState(), response: "LAST_ACTIVE_RESPONSE", tactics: { keep: true } };
 	const before = structuredClone(state);
 	for (const preserveContext of [false, true]) {
 		const continuation = createPassiveContinuation(state, 20, 10, preserveContext);
@@ -96,7 +144,7 @@ test("frozen projection appends changing state and notices without moving earlie
 	let heads = 0;
 	const head = () => { heads++; return user(`HEAD-${heads}`, 0); };
 	const first = projection.project(native, contextView(initial, {}, [], "new-bootstrap"), head);
-	const changed = { ...initial, working: { external: true }, artifacts: { "/source": { description: "card" } } };
+	const changed = { ...initial, tactics: { external: true }, artifacts: { "/source": { description: "card" } } };
 	const result = message("toolResult", "evidence", 2);
 	const invalidations = [{ path: "/source", reason: "source-changed" as const }];
 	const second = projection.project([...native, result], contextView(changed, { "/source": "read again" }, invalidations, "resume-bootstrap"), head);
@@ -129,13 +177,13 @@ test("frozen projection appends changing state and notices without moving earlie
 
 test("patch receipts include all unseen drift and prevent duplicate synthetic state notices", () => {
 	const projection = new ContextProjection();
-	const start = { ...emptyState(), working: { shared: "head" } };
+	const start = { ...emptyState(), tactics: { shared: "head" } };
 	const messages = [user("run", 1)];
 	const first = projection.project(messages, contextView(start, {}, []), () => user("HEAD", 0));
-	const cache = { ...emptyState(), working: { shared: "adopted before patch" } };
-	const after = { ...cache, working: { ...cache.working, own: true } };
-	const updates = projection.acceptPatch(cache, after, { session: { working: { own: true } } }, {});
-	assert.deepEqual(updates?.effective, [{ path: ["working", "shared"], value: "adopted before patch" }]);
+	const cache = { ...emptyState(), tactics: { shared: "adopted before patch" } };
+	const after = { ...cache, tactics: { ...cache.tactics, own: true } };
+	const updates = projection.acceptPatch(cache, after, { session: { tactics: { own: true } } }, {});
+	assert.deepEqual(updates?.effective, [{ path: ["tactics", "shared"], value: "adopted before patch" }]);
 	const result = message("toolResult", JSON.stringify(updates), 2);
 	const next = projection.project([...messages, result], contextView(after, {}, []), () => { throw new Error("head rewritten"); });
 	assert.deepEqual(next, [...first, result]);
@@ -149,25 +197,25 @@ test("patch receipts include all unseen drift and prevent duplicate synthetic st
 test("predictable direct leaves need no receipt while masked values remain conservative", () => {
 	for (const scope of ["global", "cwd", "session"] as const) {
 		const projection = new ContextProjection();
-		const before = { ...emptyState(), working: { known: "old", sibling: 1 } };
+		const before = { ...emptyState(), tactics: { known: "old", sibling: 1 } };
 		projection.project([user("run", 1)], contextView(before, {}, []), () => user("HEAD", 0));
-		const after = { ...before, working: { known: "new", sibling: 1 } };
-		assert.equal(projection.acceptPatch(before, after, { [scope]: { working: { known: "new" } } }, {}), undefined);
-		assert.equal(projection.acceptPatch(after, after, { [scope]: { working: { known: "new" } } }, {}), undefined);
+		const after = { ...before, tactics: { known: "new", sibling: 1 } };
+		assert.equal(projection.acceptPatch(before, after, { [scope]: { tactics: { known: "new" } } }, {}), undefined);
+		assert.equal(projection.acceptPatch(after, after, { [scope]: { tactics: { known: "new" } } }, {}), undefined);
 		assert.deepEqual(projection.project([user("run", 1), message("toolResult", "accepted", 2)], contextView(after, {}, []), () => { throw Error("head changed"); }).length, 3);
 	}
 	const projection = new ContextProjection();
-	const before = { ...emptyState(), working: { known: "old" } };
+	const before = { ...emptyState(), tactics: { known: "old" } };
 	projection.project([user("run", 1)], contextView(before, {}, []), () => user("HEAD", 0));
-	const masked = { ...before, working: { known: "masked" } };
-	assert.deepEqual(projection.acceptPatch(before, masked, { global: { working: { known: "requested" } } }, {})?.effective,
-		[{ path: ["working", "known"], value: "masked" }]);
+	const masked = { ...before, tactics: { known: "masked" } };
+	assert.deepEqual(projection.acceptPatch(before, masked, { global: { tactics: { known: "requested" } } }, {})?.effective,
+		[{ path: ["tactics", "known"], value: "masked" }]);
 });
 
 test("coalesced object additions and replacements omit exact authored values but retain drift", () => {
-	const patch = { session: { working: { fresh: { nested: { a: 1 }, label: "new" } } } };
-	for (const working of [{}, { fresh: "old" }, { fresh: { nested: "old", label: "old" } }]) {
-		const before = { ...emptyState(), working } as MaterializedState;
+	const patch = { session: { tactics: { fresh: { nested: { a: 1 }, label: "new" } } } };
+	for (const tactics of [{}, { fresh: "old" }, { fresh: { nested: "old", label: "old" } }]) {
+		const before = { ...emptyState(), tactics } as MaterializedState;
 		const after = applyPatch(before, patch.session) as MaterializedState;
 		const projection = new ContextProjection();
 		const native = [user("object", 1)];
@@ -179,37 +227,37 @@ test("coalesced object additions and replacements omit exact authored values but
 	const before = emptyState();
 	const projection = new ContextProjection();
 	projection.project([user("object", 1)], contextView(before, {}, []), () => user("HEAD", 0));
-	const drifted = { ...before, working: { fresh: { ...patch.session.working.fresh, external: true } } };
+	const drifted = { ...before, tactics: { fresh: { ...patch.session.tactics.fresh, external: true } } };
 	assert.deepEqual(projection.acceptPatch(before, drifted, patch, {})?.effective,
-		[{ path: ["working", "fresh"], value: drifted.working.fresh }], "coalescing cannot hide a foreign sibling");
+		[{ path: ["tactics", "fresh"], value: drifted.tactics.fresh }], "coalescing cannot hide a foreign sibling");
 	const overlapping = new ContextProjection();
 	overlapping.project([user("object", 1)], contextView(before, {}, []), () => user("HEAD", 0));
 	assert.ok(overlapping.acceptPatch(before, applyPatch(before, patch.session) as MaterializedState,
-		{ ...patch, global: { working: { fresh: { label: "other" } } } }, {})?.effective.length,
+		{ ...patch, global: { tactics: { fresh: { label: "other" } } } }, {})?.effective.length,
 		"overlapping object writes remain conservative until scope precedence is proven");
 });
 
 test("indexed array writes use numeric paths only for a communicated array basis", () => {
-	const before = { ...emptyState(), working: { rows: [{ name: "old", keep: true }], literal: { "[0]": "old" } } };
-	const patch = { session: { working: { rows: { "[0]": { name: "new" } }, literal: { "[0]": "new" } } } };
-	const after = { ...before, working: { rows: [{ name: "new", keep: true }], literal: { "[0]": "new" } } };
+	const before = { ...emptyState(), tactics: { rows: [{ name: "old", keep: true }], literal: { "[0]": "old" } } };
+	const patch = { session: { tactics: { rows: { "[0]": { name: "new" } }, literal: { "[0]": "new" } } } };
+	const after = { ...before, tactics: { rows: [{ name: "new", keep: true }], literal: { "[0]": "new" } } };
 	const projection = new ContextProjection();
 	projection.project([user("index", 1)], contextView(before, {}, []), () => user("HEAD", 0));
 	assert.equal(projection.acceptPatch(before, after, patch, {}), undefined,
 		"array selector and literal object key both resolve to their known paths");
 	const stale = new ContextProjection();
 	stale.project([user("index", 1)], contextView(before, {}, []), () => user("HEAD", 0));
-	const masked = { ...before, working: { ...after.working, rows: [{ name: "masked", keep: true }] } };
+	const masked = { ...before, tactics: { ...after.tactics, rows: [{ name: "masked", keep: true }] } };
 	assert.deepEqual(stale.acceptPatch(before, masked, patch, {})?.effective,
-		[{ path: ["working", "rows", 0, "name"], value: "masked" }]);
+		[{ path: ["tactics", "rows", 0, "name"], value: "masked" }]);
 	const overlap = new ContextProjection();
 	overlap.project([user("index", 1)], contextView(before, {}, []), () => user("HEAD", 0));
 	assert.equal(overlap.acceptPatch(before, after, {
-		global: { working: { rows: { "[0]": { name: "other" } } } }, session: patch.session,
+		global: { tactics: { rows: { "[0]": { name: "other" } } } }, session: patch.session,
 	}, {}), undefined, "the explicit Session scalar wins over a lower-scope write at the known array path");
 	const noHead = new ContextProjection();
 	assert.deepEqual(noHead.acceptPatch(before, after, patch, {})?.effective,
-		[{ path: ["working", "rows", 0, "name"], value: "new" }], "unknown communicated array basis stays conservative");
+		[{ path: ["tactics", "rows", 0, "name"], value: "new" }], "unknown communicated array basis stays conservative");
 });
 
 test("lazy navigation omits only predictable key/kind additions, never hidden bodies", () => {
@@ -312,78 +360,78 @@ test("artifact card receipts distinguish exact semantic replacements from hint a
 test("explicit Session replacements dominate lower-scope overlap without hiding drift", () => {
 	for (const lower of [2, 3, null, { nested: true }]) {
 		for (const upper of [2, [1, 2]]) {
-			const before = { ...emptyState(), working: { x: 1, untouched: "old" } };
-			const after = { ...before, working: { x: upper, untouched: "old" } };
-			const patch = { global: { working: { x: lower } }, session: { working: { x: upper } } };
+			const before = { ...emptyState(), tactics: { x: 1, untouched: "old" } };
+			const after = { ...before, tactics: { x: upper, untouched: "old" } };
+			const patch = { global: { tactics: { x: lower } }, session: { tactics: { x: upper } } };
 			const projection = new ContextProjection();
 			projection.project([user("overlap", 1)], contextView(before, {}, []), () => user("HEAD", 0));
 			assert.equal(projection.acceptPatch(before, after, patch, {}), undefined);
-			const drifted = { ...after, working: { x: upper, untouched: "foreign" } };
+			const drifted = { ...after, tactics: { x: upper, untouched: "foreign" } };
 			assert.deepEqual(projection.acceptPatch(after, drifted, patch, {})?.effective,
-				[{ path: ["working", "untouched"], value: "foreign" }]);
+				[{ path: ["tactics", "untouched"], value: "foreign" }]);
 		}
 	}
-	const before = { ...emptyState(), working: { x: 1 } };
+	const before = { ...emptyState(), tactics: { x: 1 } };
 	const projection = new ContextProjection();
 	projection.project([user("overlap", 1)], contextView(before, {}, []), () => user("HEAD", 0));
-	assert.deepEqual(projection.acceptPatch(before, { ...before, working: { x: 4 } },
-		{ global: { working: { x: 2 } }, session: { working: { x: 3 } } }, {})?.effective,
-		[{ path: ["working", "x"], value: 4 }], "mismatching acceptance must still reconcile");
+	assert.deepEqual(projection.acceptPatch(before, { ...before, tactics: { x: 4 } },
+		{ global: { tactics: { x: 2 } }, session: { tactics: { x: 3 } } }, {})?.effective,
+		[{ path: ["tactics", "x"], value: 4 }], "mismatching acceptance must still reconcile");
 });
 
 test("multi-scope disjoint writes omit echoes while overlapping writes remain conservative", () => {
 	const projection = new ContextProjection();
-	const initial = { ...emptyState(), working: { shared: "old", project: "old", private: "old", collision: "old", masked: "old" } };
+	const initial = { ...emptyState(), tactics: { shared: "old", project: "old", private: "old", collision: "old", masked: "old" } };
 	projection.project([user("cohort", 1)], contextView(initial, {}, []), () => user("HEAD", 0));
 	const patches = {
-		global: { working: { shared: "new", collision: "global", masked: "requested" } },
-		cwd: { working: { project: "new", collision: "cwd" } },
-		session: { working: { private: "new", collision: null } },
+		global: { tactics: { shared: "new", collision: "global", masked: "requested" } },
+		cwd: { tactics: { project: "new", collision: "cwd" } },
+		session: { tactics: { private: "new", collision: null } },
 	};
-	const after = { ...initial, working: { shared: "new", project: "new", private: "new", collision: "cwd", masked: "unexpected", foreign: 2 } };
+	const after = { ...initial, tactics: { shared: "new", project: "new", private: "new", collision: "cwd", masked: "unexpected", foreign: 2 } };
 	assert.deepEqual(projection.acceptPatch(initial, after, patches, {})?.effective, [
-		{ path: ["working", "collision"], value: "cwd" },
-		{ path: ["working", "masked"], value: "unexpected" },
-		{ path: ["working", "foreign"], value: 2 },
+		{ path: ["tactics", "collision"], value: "cwd" },
+		{ path: ["tactics", "masked"], value: "unexpected" },
+		{ path: ["tactics", "foreign"], value: 2 },
 	]);
 	const isolated = new ContextProjection();
 	isolated.project([user("cohort", 1)], contextView(initial, {}, []), () => user("HEAD", 0));
-	assert.equal(isolated.acceptPatch(initial, { ...initial, working: { ...initial.working, shared: "new", project: "new", private: "new" } },
-		{ global: { working: { shared: "new", absent: null } }, cwd: { working: { project: "new" } }, session: { working: { private: "new" } } }, {}), undefined);
+	assert.equal(isolated.acceptPatch(initial, { ...initial, tactics: { ...initial.tactics, shared: "new", project: "new", private: "new" } },
+		{ global: { tactics: { shared: "new", absent: null } }, cwd: { tactics: { project: "new" } }, session: { tactics: { private: "new" } } }, {}), undefined);
 });
 
 test("deletion receipts omit only unchanged effective values, not unknown fallback or independent removals", () => {
 	for (const scope of ["global", "cwd", "session"] as const) {
 		const projection = new ContextProjection();
-		const visible = { ...emptyState(), working: { retained: "same", other: "before" } };
+		const visible = { ...emptyState(), tactics: { retained: "same", other: "before" } };
 		projection.project([user("delete", 1)], contextView(visible, {}, []), () => user("HEAD", 0));
-		const patch = { [scope]: { working: { absent: null, retained: null } } };
+		const patch = { [scope]: { tactics: { absent: null, retained: null } } };
 		assert.equal(projection.acceptPatch(visible, visible, patch, {}), undefined,
 			"masked/no-op deletion reveals no new effective information");
-		const changed = { ...visible, working: { retained: "unexpected fallback" } };
+		const changed = { ...visible, tactics: { retained: "unexpected fallback" } };
 		assert.deepEqual(projection.acceptPatch(visible, changed, patch, {})?.effective, [
-			{ path: ["working", "retained"], value: "unexpected fallback" },
-			{ path: ["working", "other"], deleted: true },
+			{ path: ["tactics", "retained"], value: "unexpected fallback" },
+			{ path: ["tactics", "other"], deleted: true },
 		]);
 	}
 	const projection = new ContextProjection();
-	const visible = { ...emptyState(), working: { owned: "visible" } };
+	const visible = { ...emptyState(), tactics: { owned: "visible" } };
 	projection.project([user("delete", 1)], contextView(visible, {}, []), () => user("HEAD", 0));
 	const removed = emptyState();
-	assert.deepEqual(projection.acceptPatch(visible, removed, { session: { working: { owned: null } } }, {})?.effective,
-		[{ path: ["working"], deleted: true }], "effective-only head cannot prove the deleted key's scope owner");
+	assert.deepEqual(projection.acceptPatch(visible, removed, { session: { tactics: { owned: null } } }, {})?.effective,
+		[{ path: ["tactics"], deleted: true }], "effective-only head cannot prove the deleted key's scope owner");
 });
 
 test("intent ownership cascades reach the receipt as deletions without rewriting the frozen head", () => {
 	for (const scope of ["global", "cwd", "session"] as const) {
 		const scopes = { global: emptyState(), cwd: emptyState(), session: emptyState() } as ScopedSemanticStates;
 		scopes[scope] = { ...emptyState(),
-			intents: { task: { owns: [{ $ref: `${scope}.working.step` }, { $ref: `${scope}.lazy.plan` }, { $ref: `${scope}.lazy.plans.x` }] } },
-			working: { step: "draft", kept: "shared" }, lazy: { plan: { body: "HIDDEN" }, plans: { x: "HIDDEN-NESTED", y: "kept" }, notes: "kept" } };
+			intents: { task: { owns: [{ $ref: `${scope}.tactics.step` }, { $ref: `${scope}.lazy.plan` }, { $ref: `${scope}.lazy.plans.x` }] } },
+			tactics: { step: "draft", kept: "shared" }, lazy: { plan: { body: "HIDDEN" }, plans: { x: "HIDDEN-NESTED", y: "kept" }, notes: "kept" } };
 		const before = overlayStates(scopes.global, scopes.cwd, scopes.session);
 		const projection = new ContextProjection();
 		const native = [user("close", 1)];
-		const first = projection.project(native, contextView(before, {}, []), () => user(JSON.stringify(before.working), 0));
+		const first = projection.project(native, contextView(before, {}, []), () => user(JSON.stringify(before.tactics), 0));
 		const head = JSON.stringify(first[0]);
 		const patch = { [scope]: { intents: { task: null } } };
 		const stage = stageAtomicScopePatches(scopes, patch, [], "origin");
@@ -391,9 +439,9 @@ test("intent ownership cascades reach the receipt as deletions without rewriting
 		const after = overlayStates(next.global, next.cwd, next.session);
 		const updates = projection.acceptPatch(before, after, patch, {}, stage.cascades);
 		assert.ok(updates, scope);
-		assert.deepEqual(updates.effective.filter(({ path }) => path[0] === "working"), [{ path: ["working", "step"], deleted: true }], scope);
+		assert.deepEqual(updates.effective.filter(({ path }) => path[0] === "tactics"), [{ path: ["tactics", "step"], deleted: true }], scope);
 		assert.deepEqual(updates.lazy_navigation?.keys, { plans: "object", notes: "string" }, scope);
-		assert.deepEqual(updates.cascaded, [`${scope}.lazy.plan`, `${scope}.lazy.plans.x`, `${scope}.working.step`], scope);
+		assert.deepEqual(updates.cascaded, [`${scope}.lazy.plan`, `${scope}.lazy.plans.x`, `${scope}.tactics.step`], scope);
 		assert.deepEqual(next[scope].lazy, { plans: { y: "kept" }, notes: "kept" });
 		assert.doesNotMatch(JSON.stringify(updates), /HIDDEN|draft/);
 		const later = projection.project([...native, message("toolResult", JSON.stringify(updates), 2)], contextView(after, {}, []),
@@ -426,8 +474,8 @@ test("nested lazy cascade-only receipts survive predictable-write omission in de
 
 test("cascade receipts describe the owner even when effective state reveals a fallback", () => {
 	const scopes: ScopedSemanticStates = {
-		global: { ...emptyState(), working: { draft: "global fallback" } }, cwd: emptyState(),
-		session: { ...emptyState(), intents: { task: { $ref: "session.working.draft" } }, working: { draft: "private" } },
+		global: { ...emptyState(), tactics: { draft: "global fallback" } }, cwd: emptyState(),
+		session: { ...emptyState(), intents: { task: { $ref: "session.tactics.draft" } }, tactics: { draft: "private" } },
 	};
 	const before = overlayStates(scopes.global, scopes.cwd, scopes.session);
 	const projection = new ContextProjection();
@@ -436,9 +484,9 @@ test("cascade receipts describe the owner even when effective state reveals a fa
 	const stage = stageAtomicScopePatches(scopes, patch, [], "origin");
 	const after = overlayStates(stage.nextStates.global, stage.nextStates.cwd, stage.nextStates.session);
 	const receipt = projection.acceptPatch(before, after, patch, {}, stage.cascades);
-	assert.deepEqual(receipt?.cascaded, ["session.working.draft"]);
-	assert.ok(receipt?.effective.some((entry) => JSON.stringify(entry) === JSON.stringify({ path: ["working", "draft"], value: "global fallback" })));
-	const noCascade = projection.acceptPatch(after, { ...after, working: { draft: "foreign drift" } }, {}, {});
+	assert.deepEqual(receipt?.cascaded, ["session.tactics.draft"]);
+	assert.ok(receipt?.effective.some((entry) => JSON.stringify(entry) === JSON.stringify({ path: ["tactics", "draft"], value: "global fallback" })));
+	const noCascade = projection.acceptPatch(after, { ...after, tactics: { draft: "foreign drift" } }, {}, {});
 	assert.ok(noCascade);
 	assert.equal(Object.hasOwn(noCascade, "cascaded"), false);
 });
@@ -446,47 +494,47 @@ test("cascade receipts describe the owner even when effective state reveals a fa
 test("a frozen Stop handoff receives changes made before its first projection", () => {
 	const projection = new ContextProjection();
 	const initial = contextView(emptyState(), {}, []);
-	const current = contextView({ ...emptyState(), working: { afterStop: true } }, {}, []);
+	const current = contextView({ ...emptyState(), tactics: { afterStop: true } }, {}, []);
 	const result = projection.project([user("continue", 1)], current, () => user("FROZEN HANDOFF", 0), initial);
 	assert.match(JSON.stringify(result.at(-1)), /afterStop/);
 });
 
 test("accepted updates project effective touched values, deletions and adopted drift without unrelated state", () => {
-	const global = { ...emptyState(), working: { fallback: "global", masked: "global", other: "unchanged", removed: true } };
-	const session = { ...emptyState(), working: { fallback: "session", masked: "private", rows: [{ name: "old", keep: true }] } };
+	const global = { ...emptyState(), tactics: { fallback: "global", masked: "global", other: "unchanged", removed: true } };
+	const session = { ...emptyState(), tactics: { fallback: "session", masked: "private", rows: [{ name: "old", keep: true }] } };
 	const before = overlayStates(global, session);
-	const patches = { session: { working: { fallback: null, rows: { "[0]": { name: "new" } }, absent: null } }, global: { working: { masked: "accepted-shared" } } };
-	const nextGlobal = applyPatch(global, { working: { foreign: "adopted", masked: "accepted-shared", removed: null } }) as MaterializedState;
+	const patches = { session: { tactics: { fallback: null, rows: { "[0]": { name: "new" } }, absent: null } }, global: { tactics: { masked: "accepted-shared" } } };
+	const nextGlobal = applyPatch(global, { tactics: { foreign: "adopted", masked: "accepted-shared", removed: null } }) as MaterializedState;
 	const nextSession = applyPatch(session, patches.session) as MaterializedState;
 	const after = overlayStates(nextGlobal, nextSession);
 	const result = acceptedStateUpdates(before, after, patches);
 	assert.deepEqual(result, { effective: [
-		{ path: ["working", "fallback"], value: "global" },
-		{ path: ["working", "removed"], deleted: true },
-		{ path: ["working", "rows", 0, "name"], value: "new" },
-		{ path: ["working", "foreign"], value: "adopted" },
-		{ path: ["working", "absent"], deleted: true },
-		{ path: ["working", "masked"], value: "private" },
+		{ path: ["tactics", "fallback"], value: "global" },
+		{ path: ["tactics", "removed"], deleted: true },
+		{ path: ["tactics", "rows", 0, "name"], value: "new" },
+		{ path: ["tactics", "foreign"], value: "adopted" },
+		{ path: ["tactics", "absent"], deleted: true },
+		{ path: ["tactics", "masked"], value: "private" },
 	] });
 	assert.doesNotMatch(JSON.stringify(result), /unchanged|accepted-shared|"keep"/);
 });
 
 test("accepted updates coalesce replacements, preserve key identity and detach values", () => {
-	const before = { ...emptyState(), working: { rows: [1, 2], shape: { old: true } } };
-	const patch = JSON.parse('{"working":{"rows":[{"next":true}],"shape":"scalar","__proto__":{"safe":true},"a.b":{"[0]":"literal"}}}');
+	const before = { ...emptyState(), tactics: { rows: [1, 2], shape: { old: true } } };
+	const patch = JSON.parse('{"tactics":{"rows":[{"next":true}],"shape":"scalar","__proto__":{"safe":true},"a.b":{"[0]":"literal"}}}');
 	const after = applyPatch(before, patch) as MaterializedState;
 	const result = acceptedStateUpdates(before, after, { session: patch });
 	assert.deepEqual(result.effective, [
-		{ path: ["working", "rows"], value: [{ next: true }] },
-		{ path: ["working", "shape"], value: "scalar" },
-		{ path: ["working", "__proto__"], value: { safe: true } },
-		{ path: ["working", "a.b"], value: { "[0]": "literal" } },
+		{ path: ["tactics", "rows"], value: [{ next: true }] },
+		{ path: ["tactics", "shape"], value: "scalar" },
+		{ path: ["tactics", "__proto__"], value: { safe: true } },
+		{ path: ["tactics", "a.b"], value: { "[0]": "literal" } },
 	]);
 	(result.effective[0] as { value: any }).value[0].next = false;
-	assert.deepEqual(after.working.rows, [{ next: true }]);
-	assert.deepEqual(patch.working.rows, [{ next: true }]);
-	assert.deepEqual(acceptedStateUpdates(after, after, { session: { working: { shape: "scalar", absent: null } } }).effective, [
-		{ path: ["working", "shape"], value: "scalar" }, { path: ["working", "absent"], deleted: true },
+	assert.deepEqual(after.tactics.rows, [{ next: true }]);
+	assert.deepEqual(patch.tactics.rows, [{ next: true }]);
+	assert.deepEqual(acceptedStateUpdates(after, after, { session: { tactics: { shape: "scalar", absent: null } } }).effective, [
+		{ path: ["tactics", "shape"], value: "scalar" }, { path: ["tactics", "absent"], deleted: true },
 	]);
 });
 
@@ -546,8 +594,8 @@ test("ordinary context derives compact lineage from cached runtime without Git q
 			const text = projected.messages[0].content[0].text;
 			assert.match(text, /recent_transitions/);
 			assert.match(text, /"verified":true/);
-			assert.equal(h.readState().working.verified, true);
-			assert.equal(h.readState(1).working.verified, true);
+			assert.equal(h.readState().tactics.verified, true);
+			assert.equal(h.readState(1).tactics.verified, true);
 		}
 	} finally {
 		childProcess.spawnSync = spawn;
@@ -562,10 +610,10 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		if (bootstrap) h.entries.push({ type: "message", message: user("Existing request", 1) });
 		await start(h, "Current request");
 		await h.tools.get("patch_state")!.execute("seed-context", {
-			global: { contract: { globalContext: true } },
-			cwd: { contract: { cwdContext: true } },
+			global: { strategy: { globalContext: true } },
+			cwd: { strategy: { cwdContext: true } },
 			session: {
-				working: { contextPayload: "x".repeat(bytes) },
+				tactics: { contextPayload: "x".repeat(bytes) },
 				intents: { current: { action: "Continue accepted work", detail: { $ref: "session.lazy.plan" } } },
 				lazy: { plan: { steps: ["hidden until read"] } },
 				artifacts: { "/context/source": { description: "Retained route", compilation: { decision: "Keep semantic metadata" } } },
@@ -585,8 +633,8 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		let copies = 0;
 		const observedClone = t.mock.method(globalThis, "structuredClone", <T>(value: T, options?: Parameters<typeof clone>[1]): T => {
 			const candidate = value as Partial<MaterializedState> | null | undefined;
-			if (candidate?.contract?.globalContext === true && candidate.contract.cwdContext === true
-				&& typeof candidate.working?.contextPayload === "string") copies++;
+			if (candidate?.strategy?.globalContext === true && candidate.strategy.cwdContext === true
+				&& typeof candidate.tactics?.contextPayload === "string") copies++;
 			return clone(value, options);
 		});
 		let projected;
@@ -595,14 +643,14 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		const text = projected.messages[0].content[0].text as string;
 		const serialized = text.slice(text.indexOf("\n") + 1);
 		const context = JSON.parse(serialized);
-		assert.match(serialized, /"state":\{"intents":.*,"contract":.*,"working":.*,"artifacts":/);
+		assert.match(serialized, /"state":\{"intents":.*,"strategy":.*,"tactics":.*,"artifacts":/);
 		const { response: _emptyResponse, ...visibleState } = state;
 		if (Object.keys(visibleState.artifacts).length === 0) delete (visibleState as Partial<typeof visibleState>).artifacts;
 		assert.deepEqual(context.state, visibleState);
 		assert.deepEqual(context.state.intents.current, { action: "Continue accepted work", detail: { $ref: "session.lazy.plan" } });
 		assert.equal(Object.hasOwn(context.state, "lazy"), false);
 		assert.deepEqual(projected.messages.slice(1), bootstrap ? [persistent, old, current] : [persistent, current]);
-		context.state.working.contextPayload = "caller mutation";
+		context.state.tactics.contextPayload = "caller mutation";
 		assert.deepEqual(h.readState(), state);
 		assert.deepEqual(h.resolveSnapshot(), snapshot);
 		assert.deepEqual(h.entries, entries);
@@ -714,9 +762,9 @@ for (const scope of ["global", "cwd", "session"] as const) test(`automatic histo
 	const body = "LAZY-BODY-ONLY".repeat(4096);
 	const state = { ...emptyState(), lazy: { releasePlan: body } };
 	const recent = [
-		{ id: "mixed", at: 11, transitions: [{ scope, patch: { lazy: { releasePlan: body }, working: { keep: "HOT" }, artifacts: { "/source": { description: "Keep card", hash: "hidden-evidence", compiler: "hidden-compiler" } } } }] },
+		{ id: "mixed", at: 11, transitions: [{ scope, patch: { lazy: { releasePlan: body }, tactics: { keep: "HOT" }, artifacts: { "/source": { description: "Keep card", hash: "hidden-evidence", compiler: "hidden-compiler" } } } }] },
 		{ id: "replacement", at: 9, transitions: [{ scope, patch: { lazy: { releasePlan: [body] } } }] },
-		{ id: "deletion", at: 7, transitions: [{ scope, patch: { lazy: { releasePlan: null } } }, { scope: "session" as const, patch: { contract: { keep: true } } }] },
+		{ id: "deletion", at: 7, transitions: [{ scope, patch: { lazy: { releasePlan: null } } }, { scope: "session" as const, patch: { strategy: { keep: true } } }] },
 		{ id: "lazy-only-deletion", at: 5, transitions: [{ scope, patch: { lazy: { releasePlan: null } } }] },
 	];
 	const before = structuredClone({ state, recent });
@@ -725,8 +773,8 @@ for (const scope of ["global", "cwd", "session"] as const) test(`automatic histo
 	const text = (context.content as any[])[0].text;
 	const projected = JSON.parse(text.slice(text.indexOf("\n") + 1));
 	assert.deepEqual(projected.recent_transitions, [
-		{ id: "mixed", at: 11, transitions: [{ scope, patch: { working: { keep: "HOT" }, artifacts: { "/source": { description: "Keep card" } } } }] },
-		{ id: "deletion", at: 7, transitions: [{ scope: "session", patch: { contract: { keep: true } } }] },
+		{ id: "mixed", at: 11, transitions: [{ scope, patch: { tactics: { keep: "HOT" }, artifacts: { "/source": { description: "Keep card" } } } }] },
+		{ id: "deletion", at: 7, transitions: [{ scope: "session", patch: { strategy: { keep: true } } }] },
 	]);
 	assert.deepEqual(projected.lazy_navigation, { available: true, path: "effective.lazy", keys: { releasePlan: "string" } });
 	assert.doesNotMatch(text, /LAZY-BODY-ONLY|hidden-evidence|hidden-compiler/);
@@ -754,14 +802,14 @@ test("projects accepted memory without resurrecting a completed specification fo
 	const snapshot = startEpisode(false);
 	snapshot.meta.specification = "Completed original task";
 	completeRun(snapshot);
-	const state = { ...emptyState(), working: { accepted: true }, response: "Accepted answer", lazy: { detail: "not projected" } };
+	const state = { ...emptyState(), tactics: { accepted: true }, response: "Accepted answer", lazy: { detail: "not projected" } };
 	const before = structuredClone({ snapshot, state });
 	const context = runtimeContextMessage(snapshot, state);
 	assert.equal(context.role, "user");
 	const text = (context.content as any[])[0].text as string;
 	const projected = JSON.parse(text.slice(text.indexOf("\n") + 1));
 	assert.equal(Object.hasOwn(projected, "specification"), false);
-	assert.equal(projected.state.working.accepted, true);
+	assert.equal(projected.state.tactics.accepted, true);
 	assert.equal(projected.state.response, "Accepted answer");
 	assert.equal(Object.hasOwn(projected.state, "lazy"), false);
 	assert.doesNotMatch(text, /Completed original task|not projected/);
@@ -911,8 +959,8 @@ test("keeps existing context for one bootstrap run and commits its terminal hand
 	assert.equal(Object.hasOwn(snapshot, "state"), false);
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), {
 		artifacts: {},
-		contract: { goal: "Existing goal" },
-		working: { next: "continue" },
+		strategy: { goal: "Existing goal" },
+		tactics: { next: "continue" },
 		intents: {},
 		response: "Done",
 		lazy: {},
@@ -932,8 +980,8 @@ test("rotates the user-authority turn specification while retaining committed st
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), {
 		artifacts: {},
-		contract: { mode: "stable" },
-		working: { phase: "one" },
+		strategy: { mode: "stable" },
+		tactics: { phase: "one" },
 		intents: {},
 		response: "Done",
 		lazy: {},
@@ -1017,7 +1065,7 @@ test("projects only the latest seven compact accepted transitions", async () => 
 	const runtime = JSON.parse(text.slice(text.indexOf("\n") + 1));
 	assert.equal(runtime.recent_transitions.length, 7);
 	assert.deepEqual(
-		runtime.recent_transitions.map((transition: any) => transition.transitions[0].patch.working.index),
+		runtime.recent_transitions.map((transition: any) => transition.transitions[0].patch.tactics.index),
 		[3, 4, 5, 6, 7, 8, 9],
 	);
 	assert.equal(runtime.recent_transitions.some((transition: any) => Object.hasOwn(transition, "state")), false);
@@ -1029,7 +1077,7 @@ test("new sessions project durable causality without old conversation trajectori
 	const cwd = join(repositoryRoot, "project");
 	const first = harness({ cwd, repositoryRoot });
 	await start(first, "Persist project decision");
-	await commitScopedTerminal(first, [{ scope: "cwd", patch: { contract: { decision: "durable" } } }], "Saved.");
+	await commitScopedTerminal(first, [{ scope: "cwd", patch: { strategy: { decision: "durable" } } }], "Saved.");
 
 	const second = harness({ cwd, repositoryRoot, sessionId: "second-session", mode: "active" });
 	await second.handlers.get("session_start")!({ reason: "new" }, second.ctx);
@@ -1046,9 +1094,9 @@ test("tree navigation keeps current memory; native steps never rewind any scope"
 	const h = harness();
 	await start(h, "Branch task");
 	const commitAll = (value: string) => commitScopedTerminal(h, [
-		{ scope: "global", patch: { contract: { globalBranch: value } } },
-		{ scope: "cwd", patch: { contract: { cwdBranch: value } } },
-		{ scope: "session", patch: { working: { sessionBranch: value } } },
+		{ scope: "global", patch: { strategy: { globalBranch: value } } },
+		{ scope: "cwd", patch: { strategy: { cwdBranch: value } } },
+		{ scope: "session", patch: { tactics: { sessionBranch: value } } },
 	]);
 	await commitAll("base");
 	const base = structuredClone(h.entries);
@@ -1072,3 +1120,268 @@ test("tree navigation keeps current memory; native steps never rewind any scope"
 	assert.match(adoptedText, /"cwdBranch":"abandoned-future"/);
 	assert.match(adoptedText, /"sessionBranch":"restored-next"/);
 });
+
+{
+	const { scopes, selections, fixture, withoutFileIO, body } = observationFixture;
+
+	test("accepted selected cascade receipts need no context API expansion and reveal only current owner paths", async t => {
+		for (const selection of selections) {
+			const f = await fixture(t, selection);
+			await f.patch(Object.fromEntries(selection.map(scope => [scope, { intents: { own: { $ref: `${scope}.lazy.plan` } }, lazy: { plan: { hidden: `SECRET-${scope}` } } }])));
+			const projection = new ContextProjection(), before = f.runtime.readView(), view = contextView(before, {}, []);
+			projection.project([], view, () => runtimeContextHead(f.snapshot(), view));
+			const patches = Object.fromEntries(selection.map(scope => [scope, { intents: { own: null } }]));
+			const stage = await f.patch(patches), accepted = f.runtime.selectedView(), after = f.runtime.readView();
+			const updates = withoutFileIO(() => projection.acceptPatch(before, after, patches, {}, stage.cascades));
+			const text = JSON.stringify(updates);
+			assert.doesNotMatch(text, /SECRET-/);
+			for (const scope of scopes) assert.equal(text.includes(`${scope}.lazy.plan`), selection.includes(scope));
+			assert.deepEqual(f.runtime.selectedView(), accepted);
+		}
+	});
+
+	test("selection reduction resets owned projection using newly accepted values; ordinary handoff uses model-projected data", async t => {
+		const f = await fixture(t, ["global", "cwd", "session"]);
+		await f.patch(Object.fromEntries(scopes.map(scope => [scope, { strategy: { [scope]: `${scope}-owned` }, lazy: { [scope]: { hidden: true } } }])));
+		const projection = new ContextProjection(), first = contextView(f.runtime.readView(), {}, []);
+		const oldHead = projection.project([], first, () => runtimeContextHead(f.snapshot(), first))[0]!;
+		await f.runtime.withSelectedCurrentTransaction(["cwd"], (_snapshot, publish) => publish(), () => {});
+		projection.reset();
+		withoutFileIO(() => {
+			const current = contextView(f.runtime.readView(), {}, []);
+			const nextHead = projection.project([], current, () => runtimeContextHead(f.snapshot(), current))[0]!;
+			assert.notEqual(nextHead, oldHead); assert.match(body(nextHead), /cwd-owned/); assert.doesNotMatch(body(nextHead), /global-owned|session-owned|"hidden"/);
+			const handoff = createPassiveContinuation(projectStateForModel(f.runtime.readView()));
+			assert.doesNotMatch(body(handoff.handoff), /global-owned|session-owned|"hidden"/);
+		});
+	});
+}
+
+{
+	const owners: StateScope[] = ["global", "cwd", "session"];
+	const choices = Array.from({ length: 7 }, (_, index) => owners.filter((_, bit) => (index + 1) & (1 << bit)) as unknown as ScopeSelection);
+	const snapshot = startEpisode(false);
+	function payload(message: AgentMessage) {
+		assert.ok("content" in message && Array.isArray(message.content));
+		const block = message.content[0];
+		assert.ok(block?.type === "text");
+		return JSON.parse(block.text.slice(block.text.indexOf("\n") + 1));
+	}
+	function view(state: SemanticState, scopes?: ScopeSelection) {
+		return contextView(state, {}, [], undefined, true, scopes);
+	}
+
+	for (const scopes of choices) test(`body and recent presentation for ${scopes.join("+")}`, () => {
+		const owner = scopes[0];
+		const cross = owners.find(scope => scope !== owner)!;
+		const refs = {
+			current: { $ref: `${owner}.tactics.target` },
+			historical: { $ref: `${owner}[1].tactics.target` },
+			cross: { $ref: `${cross}.tactics.target` },
+			effective: { $ref: "effective.tactics.target" },
+			resource: { $ref: "/source.md" },
+			text: `$${owner}.tactics.target`,
+		};
+		const state = { tactics: refs, lazy: { secret: "NEVER_AUTOMATIC" }, artifacts: { "/source": { description: "card", hash: "PRIVATE_HASH" } } };
+		const before = structuredClone(state);
+		const recent: RecentTransitionWindow = [{ id: "causal-id", at: 123, transitions: owners.map(scope => ({ scope, patch: { tactics: refs, lazy: { secret: "NEVER_AUTOMATIC" }, artifacts: state.artifacts } })) }];
+		const captured = view(state, scopes);
+		const active = payload(runtimeContextHead(snapshot, captured, recent));
+		const passive = payload(passiveContextHead(captured));
+		const expected = { ...refs, current: { $ref: scopes.length === 1 ? "tactics.target" : `${owner}.tactics.target` } };
+		assert.deepEqual(active.state.tactics, expected);
+		assert.deepEqual(passive.state.tactics, expected);
+		assert.equal(active.lazy_navigation.path, scopes.length === 1 ? "lazy" : "effective.lazy");
+		assert.deepEqual(passive.lazy_navigation, active.lazy_navigation);
+		assert.equal(JSON.stringify(active).includes("NEVER_AUTOMATIC"), false);
+		assert.equal(JSON.stringify(active).includes("PRIVATE_HASH"), false);
+		const record = active.recent_transitions[0];
+		assert.equal(record.id, "causal-id");
+		assert.equal(record.at, 123);
+		if (scopes.length === 1) {
+			assert.deepEqual(Object.keys(record).sort(), ["at", "id", "patch"]);
+			assert.deepEqual(record.patch.tactics, expected);
+		} else {
+			assert.deepEqual(record.transitions.map((entry: { scope: string }) => entry.scope), scopes);
+			for (const transition of record.transitions) assert.deepEqual(transition.patch.tactics, refs);
+		}
+		assert.deepEqual(state, before);
+		assert.equal(captured.state.tactics?.current && (captured.state.tactics.current as { $ref: string }).$ref, `${owner}.tactics.target`);
+	});
+
+	test("excluded recent owners are filtered before their patch getters; lazy-only records disappear", () => {
+		let reads = 0;
+		const excluded = { scope: "cwd" as const, get patch(): SemanticState { reads++; throw Error("excluded payload"); } };
+		const recent: RecentTransitionWindow = [
+			{ id: "keep", at: 4, transitions: [excluded, { scope: "session", patch: { tactics: { keep: 1 } } }] },
+			{ id: "hidden", at: 5, transitions: [{ scope: "session", patch: { lazy: { body: "secret" } } }] },
+		];
+		const output = payload(runtimeContextHead(snapshot, view({}, ["session"]), recent));
+		assert.deepEqual(output.recent_transitions, [{ id: "keep", at: 4, patch: { tactics: { keep: 1 } } }]);
+		assert.equal(reads, 0);
+	});
+
+	test("omitted selection preserves all-owner presentation", () => {
+		const state = { tactics: { ref: { $ref: "session.tactics.x" } }, lazy: { x: 1 } };
+		assert.deepEqual(payload(runtimeContextHead(snapshot, view(state))), payload(runtimeContextHead(snapshot, view(state, ["global", "cwd", "session"]))));
+	});
+
+	test("canonical drift projects both scalar ref leaves and replacement object values at the edge", () => {
+		for (const scopes of choices) {
+			const owner = scopes[0];
+			const projection = new ContextProjection();
+			const before = { tactics: { link: { $ref: `${owner}.tactics.old` } } };
+			projection.project([], view(before, scopes), () => syntheticUser("head"));
+			const after = { tactics: { link: { $ref: `${owner}.tactics.new` }, added: [{ $ref: `${owner}.lazy.x` }] } };
+			const output = projection.project([], view(after, scopes), () => { throw Error("unexpected head"); });
+			const updates = payload(output.at(-1)!).state_updates.effective;
+			const prefix = scopes.length === 1 ? "" : `${owner}.`;
+			assert.deepEqual(updates, [
+				{ path: ["tactics", "link", "$ref"], value: `${prefix}tactics.new` },
+				{ path: ["tactics", "added"], value: [{ $ref: `${prefix}lazy.x` }] },
+			]);
+			assert.equal(projection.project([], view(after, scopes), () => { throw Error("unexpected head"); }).length, output.length);
+		}
+	});
+
+	test("predictable writes compare canonical values and cascades use selected owner arity", () => {
+		for (const scopes of choices) {
+			const owner = scopes[0];
+			const projection = new ContextProjection();
+			const before = { tactics: { link: { $ref: `${owner}.tactics.old` } } };
+			projection.project([], view(before, scopes), () => syntheticUser("head"));
+			const after = { tactics: { link: { $ref: `${owner}.tactics.new` } } };
+			assert.equal(projection.acceptPatch(before, after, { [owner]: after }, {}, {}, true, scopes), undefined);
+			const cascades = Object.fromEntries(owners.map(scope => [scope, [{ plane: "lazy" as const, keys: ["gone"] }]]));
+			const receipt = projection.acceptPatch(after, after, {}, {}, cascades, true, scopes);
+			assert.deepEqual(receipt?.effective, []);
+			assert.deepEqual(receipt?.cascaded, scopes.map(scope => scopes.length === 1 ? "lazy.gone" : `${scope}.lazy.gone`));
+			assert.equal(projection.project([], view(after, scopes), () => { throw Error("unexpected head"); }).length, 1);
+		}
+	});
+
+	test("special field keys stay exact path segments while reference values are translated", () => {
+		const projection = new ContextProjection();
+		projection.project([], view({}, ["session"]), () => syntheticUser("head"));
+		const keys = ["a.b", "[0]", "$ref", "__proto__", "constructor"];
+		const tactics = Object.fromEntries(keys.map(key => [key, [{ $ref: "session.lazy.target" }]]));
+		const output = projection.project([], view({ tactics }, ["session"]), () => { throw Error("unexpected head"); });
+		assert.deepEqual(payload(output.at(-1)!).state_updates.effective, keys.map(key => ({ path: ["tactics", key], value: [{ $ref: "lazy.target" }] })));
+	});
+
+	test("equal wanted choices preserve head identity; owner and arity changes refresh only projection", () => {
+		const projection = new ContextProjection();
+		const native = [syntheticUser("native history")];
+		const saved = structuredClone(native);
+		const project = (scopes: ScopeSelection) => projection.project(native, view({}, scopes), () => syntheticUser("head"));
+		const first = project(["global", "session"]);
+		assert.equal(project(["session", "global"])[0], first[0]);
+		const single = project(["session"]);
+		assert.notEqual(single[0], first[0]);
+		const changedOwner = project(["cwd"]);
+		assert.notEqual(changedOwner[0], single[0]);
+		for (const result of [first, single, changedOwner]) assert.equal(result.at(-1), native[0]);
+		const identities = [first, single, changedOwner].map(result => JSON.stringify(result[0]).match(/State Flow projection: ([a-f0-9-]+)/)![1]);
+		assert.equal(new Set(identities).size, 3);
+		assert.deepEqual(native, saved);
+	});
+
+	test("malformed present wanted selection rejects before semantic body access", () => {
+		for (const malformed of [undefined, null, [], ["session", "session"], ["unknown"]]) {
+			let reads = 0;
+			const state = { get tactics(): never { reads++; throw Error("body accessed"); } };
+			const invalid = { modelScopes: malformed, get state() { reads++; throw Error("view accessed"); }, artifact_invalidations: [], knowledge_rehydration: null } as unknown as ContextView;
+			assert.throws(() => runtimeContextHead(snapshot, invalid), /scopes must/);
+			assert.throws(() => passiveContextHead(invalid), /scopes must/);
+			assert.throws(() => new ContextProjection().project([], invalid, () => syntheticUser("head")), /scopes must/);
+			if (malformed !== undefined) assert.throws(() => contextView(state, {}, [], undefined, true, malformed as unknown as ScopeSelection), /scopes must/);
+			assert.equal(reads, 0);
+		}
+	});
+}
+
+{
+	const owners: StateScope[] = ["global", "cwd", "session"];
+	const choices = Array.from({ length: 7 }, (_, mask) => owners.filter((_, bit) => (mask + 1) & (1 << bit)) as unknown as ScopeSelection);
+	const malformed: unknown[] = [null, [], ["session", "session"], ["foreign"], ["global", "cwd", "session", "global"], new Array(1), "session", {}];
+	function body(message: AgentMessage) {
+		assert.ok("content" in message && Array.isArray(message.content));
+		const first = message.content[0];
+		assert.ok(first?.type === "text");
+		return JSON.parse(first.text.slice(first.text.indexOf("\n") + 1));
+	}
+	function native(text: string, timestamp: number): AgentMessage {
+		return { role: "user", content: [{ type: "text", text }], timestamp };
+	}
+
+	for (const scopes of choices) {
+		test(`handoff projection and canonical clone: ${scopes.join("+")}`, () => {
+			const owner = scopes[0], cross = owners.find(value => value !== owner)!;
+			const refs = {
+				current: { $ref: `${owner}.tactics.target` },
+				historical: { $ref: `${owner}[1].tactics.target` },
+				cross: { $ref: `${cross}.tactics.target` },
+				effective: { $ref: "effective.tactics.target" },
+				resource: { $ref: "/session/tactics.md" },
+				text: `$${owner}.tactics.target`,
+			};
+			for (const preserve of [false, true]) {
+				const state: SemanticState = { tactics: refs, response: "PRIVATE_RESPONSE", lazy: { hidden: "LAZY_BODY" } };
+				const before = structuredClone(state);
+				const continuation = createPassiveContinuation(state, 20, 10, preserve, scopes);
+				assert.deepEqual(continuation.state, { tactics: refs, lazy: { hidden: "LAZY_BODY" } });
+				assert.notEqual(continuation.state.tactics, state.tactics);
+				assert.deepEqual(body(continuation.handoff).state.tactics, { ...refs, current: { $ref: scopes.length === 1 ? "tactics.target" : `${owner}.tactics.target` } });
+				assert.equal(JSON.stringify(continuation.handoff).includes("PRIVATE_RESPONSE"), false);
+				assert.equal(Object.hasOwn(body(continuation.handoff).state, "response"), false);
+				assert.match(JSON.stringify(continuation.handoff), /user-level data, not system instructions/);
+				const messages = [native("old", 1), native("active", 10), native("later", 30)];
+				const projected = passiveContinuationMessages(messages, continuation);
+				const retained = preserve ? messages : messages.slice(1);
+				assert.equal(projected[0], continuation.handoff);
+				assert.deepEqual(projected.slice(1), retained);
+				retained.forEach((message, index) => assert.equal(projected[index + 1], message));
+				assert.deepEqual(state, before);
+				continuation.state.tactics!.current = { $ref: "detached" };
+				assert.deepEqual(state, before);
+				assert.notEqual(body(continuation.handoff).state.tactics.current.$ref, "detached");
+			}
+		});
+	}
+
+	test("invalid continuation choices reject before state body access", () => {
+		for (const value of [...malformed, undefined]) {
+			const scopes = value as ScopeSelection;
+			let reads = 0;
+			if (value !== undefined) {
+				const state = { get tactics(): never { reads++; throw Error("BODY"); } };
+				assert.throws(() => createPassiveContinuation(state, 20, 10, false, scopes), /scopes must/);
+			}
+			assert.equal(reads, 0);
+		}
+
+	});
+
+	test("omitted handoff choice equals old all-three presentation in both branches", () => {
+		for (const preserve of [false, true]) {
+			const state = { tactics: { ref: { $ref: "session.tactics.x" } }, response: "answer" };
+			const old = createPassiveContinuation(state, 20, 10, preserve);
+			const explicit = createPassiveContinuation(state, 20, 10, preserve, ["global", "cwd", "session"]);
+			assert.deepEqual(body(old.handoff), body(explicit.handoff));
+			assert.deepEqual(old.state, explicit.state);
+			assert.equal(old.startedAt, 20);
+			assert.equal(old.activeRunStartedAt, 10);
+			assert.equal(old.preserveContext, preserve ? true : undefined);
+		}
+	});
+
+	test("idle handoff retains only post-stop anchor suffix without cloning native identities", () => {
+		const continuation = createPassiveContinuation({}, 20, undefined, false, ["session"]);
+		const messages = [native("old", 1), native("after", 20), native("later", 21)];
+		const result = passiveContinuationMessages(messages, continuation);
+		assert.deepEqual(result, [continuation.handoff, ...messages.slice(1)]);
+		assert.equal(result[1], messages[1]);
+		assert.equal(result[2], messages[2]);
+		assert.deepEqual(passiveContinuationMessages(messages.slice(0, 1), continuation), [continuation.handoff]);
+	});
+}

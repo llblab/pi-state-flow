@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import * as sourceFacilityFixture from "./source-facility-fixture.ts";
+import { stageSelectedScopePatches } from "../lib/transition.ts";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -69,11 +72,11 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 	assert.match(memory.description, /Not for routine turns, automatic phase-boundary audits, usage help, or background maintenance/);
 	const memoryBody = readFileSync(memory.filePath, "utf8");
 	assert.match(memoryBody, /Never give an assistant conclusion user authority/);
-	assert.match(memoryBody, /Deleting a fulfilled, abandoned, superseded, or impossible intent deletes owned keys no remaining same-scope intent references/);
+	assert.match(memoryBody, /Final remaining\/new same-scope intents protect direct, ancestor and descendant targets/);
 	for (const body of [guideBody, memoryBody]) {
 		assert.match(body, /Work from intents/);
 		assert.match(body, /a textual `\$path` mention only uses it/);
-		assert.match(body, /reasons for abandoned work to `contract` as rejected approaches/);
+		assert.match(body, /reasons for abandoned work to `strategy` as rejected approaches/);
 		assert.match(body, /[Uu]nowned entries remain legal/);
 		assert.match(body, /only intent ownership.* has a deletion consequence/);
 	}
@@ -96,30 +99,30 @@ test("requested curation compiles an acquired Skill with one atomic scope move",
 	const patchState = h.tools.get("patch_state")!;
 	const readState = h.tools.get("read_state")!;
 	await patchState.execute("seed", {
-		global: { contract: { projectRule: "project-only" } },
+		global: { strategy: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
 	const source = skillFile("curation-sequence");
 	recordRead(h, source);
 	await patchState.execute("independent", {
-		session: { working: { unrelated: true } },
+		session: { tactics: { unrelated: true } },
 	}, undefined, undefined, h.ctx);
-	assert.equal(h.readState().working.unrelated, true);
+	assert.equal(h.readState().tactics.unrelated, true);
 	await patchState.execute("compile-and-move", {
-		global: { contract: { projectRule: null } },
-		cwd: { contract: { projectRule: "project-only" }, artifacts: { [source]: compilerOutput("Curate one requested cohort") } },
+		global: { strategy: { projectRule: null } },
+		cwd: { strategy: { projectRule: "project-only" }, artifacts: { [source]: compilerOutput("Curate one requested cohort") } },
 	}, undefined, undefined, h.ctx);
 	const owners = await readState.execute("verify-owners", {
-		paths: ["global.contract", "cwd.contract"],
+		paths: ["global.strategy", "cwd.strategy"],
 	}, undefined, undefined, h.ctx);
 	assert.deepEqual(JSON.parse(owners.content[0].text).value, [null, { projectRule: "project-only" }]);
-	assert.equal(h.readState(1, "global").contract.projectRule, "project-only");
-	assert.equal(h.readState(1, "cwd").contract.projectRule, undefined);
+	assert.equal(h.readState(1, "global").strategy.projectRule, "project-only");
+	assert.equal(h.readState(1, "cwd").strategy.projectRule, undefined);
 	assert.deepEqual(h.readState(0, "cwd").artifacts[source], compilerOutput("Curate one requested cohort"));
 	const effective = await readState.execute("verify-effective", {
-		path: "contract.projectRule",
+		path: "strategy.projectRule",
 	}, undefined, undefined, h.ctx);
 	assert.equal(JSON.parse(effective.content[0].text).value, "project-only");
-	assert.equal(h.readState(0, "global").contract.projectRule, undefined);
+	assert.equal(h.readState(0, "global").strategy.projectRule, undefined);
 	const terminal = await commitTerminal(h, {}, {}, "Curation verified.");
 	assert.equal(terminal.message.content[0].text, "Curation verified.");
 });
@@ -128,15 +131,15 @@ test("memory curation can narrow an established value without retaining two auth
 	const h = harness();
 	await start(h);
 	await h.tools.get("patch_state")!.execute("retain-global", {
-		global: { contract: { projectRule: "project-only" } },
+		global: { strategy: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
 	await h.tools.get("patch_state")!.execute("narrow", {
-		global: { contract: { projectRule: null } },
-		cwd: { contract: { projectRule: "project-only" } },
+		global: { strategy: { projectRule: null } },
+		cwd: { strategy: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
-	assert.equal(h.readState(0, "global").contract.projectRule, undefined);
-	assert.equal(h.readState(0, "cwd").contract.projectRule, "project-only");
-	assert.equal(h.readState().contract.projectRule, "project-only");
+	assert.equal(h.readState(0, "global").strategy.projectRule, undefined);
+	assert.equal(h.readState(0, "cwd").strategy.projectRule, "project-only");
+	assert.equal(h.readState().strategy.projectRule, "project-only");
 });
 
 test("requires source-identified non-empty Skill artifact compilations", () => {
@@ -211,8 +214,8 @@ test("registered Skill acquisition does not block an independent patch and valid
 	const source = skillFile("required");
 	recordRead(h, source);
 
-	await h.tools.get("patch_state")!.execute("independent", { session: { working: { accepted: true } } }, undefined, undefined, h.ctx);
-	assert.equal(h.readState(0, "session").working.accepted, true);
+	await h.tools.get("patch_state")!.execute("independent", { session: { tactics: { accepted: true } } }, undefined, undefined, h.ctx);
+	assert.equal(h.readState(0, "session").tactics.accepted, true);
 	await assert.rejects(patchCwdArtifacts(h, { [source]: {} }), (error: unknown) => {
 		return error instanceof Error
 			&& error.message.includes(`cwd.artifacts[${JSON.stringify(source)}]`)
@@ -263,7 +266,7 @@ for (const [sourceScope, stateScope] of [["user", "global"], ["project", "cwd"],
 		}, undefined, undefined, h.ctx);
 		assert.deepEqual(h.readState(0, stateScope).artifacts[source], compilerOutput(`${sourceScope} guidance`));
 		assert.equal(h.handlers.get("tool_result")!(event, h.ctx), undefined, "matching source hash needs no new compilation hint");
-		await h.tools.get("patch_state")!.execute(`independent-${sourceScope}`, { session: { working: { [sourceScope]: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("patch_state")!.execute(`independent-${sourceScope}`, { session: { tactics: { [sourceScope]: true } } }, undefined, undefined, h.ctx);
 	});
 }
 
@@ -294,8 +297,8 @@ test("an unregistered SKILL.md read has no acquisition semantics", async () => {
 	const source = skillFile("unregistered");
 	const result = h.handlers.get("tool_result")!({ toolCallId: "plain", toolName: "read", input: { path: source }, content: [{ type: "text", text: "Ordinary source" }], isError: false }, h.ctx);
 	assert.equal(result, undefined);
-	await h.tools.get("patch_state")!.execute("unrelated", { session: { working: { accepted: true } } }, undefined, undefined, h.ctx);
-	assert.equal(h.readState(0, "session").working.accepted, true);
+	await h.tools.get("patch_state")!.execute("unrelated", { session: { tactics: { accepted: true } } }, undefined, undefined, h.ctx);
+	assert.equal(h.readState(0, "session").tactics.accepted, true);
 });
 
 test("ordinary answers may retain a registered Skill read as volatile context", async () => {
@@ -402,3 +405,62 @@ test("rejects model attempts to forge runtime-owned Skill provenance fields", as
 	const forged = { ...compilerOutput(), hash: hashArtifactSource("forged") };
 	await assert.rejects(patchCwdArtifacts(h, { [source]: forged }), /cannot set runtime-owned field/);
 });
+
+{
+	const { scopes, selections, fixture } = sourceFacilityFixture;
+
+	test("registered Skill ownership survives disabled reads without hashing or compilation obligation; selection changes revoke pending and successful evidence", (t) => {
+		const f = fixture(t);
+		const resolver = registeredSkillResolver(f.directory, scopes.map(scope => ({ source: "skill", sourceInfo: { path: f.paths[scope], scope: scope === "global" ? "user" : scope === "cwd" ? "project" : "temporary" } })));
+		for (const selection of selections) {
+			const hashed: string[] = [];
+			const tracker = new SkillReadTracker(path => { hashed.push(path); return hashSkillSource(path); }, resolver, selection);
+			for (const scope of scopes) {
+				const read = tracker.recordResult("read", { path: f.paths[scope] }, false)!;
+				assert.equal(read.scope, scope);
+				assert.equal(read.hash, selection.includes(scope) ? hashArtifactSource(readFileSync(f.paths[scope])) : undefined);
+				assert.equal(read.error, undefined);
+			}
+			assert.deepEqual(hashed.sort(), selection.map(scope => f.paths[scope]).sort());
+			const disabled = scopes.find(scope => !selection.includes(scope));
+			if (disabled) {
+				const values = { selection, states: Object.fromEntries(selection.map(scope => [scope, {}])) };
+				stageSelectedScopePatches(values, {}, tracker.successful.values(), "owned");
+				const owner = selection[0];
+				assert.throws(() => stageSelectedScopePatches(values, { [owner]: { artifacts: { [f.paths[disabled]]: { description: "Relocation", kind: "skill", compilation: { rule: "forged owner" } } } } }, tracker.successful.values(), "owned"), /belongs at/);
+			}
+		}
+		const tracker = new SkillReadTracker(hashSkillSource, resolver, ["cwd"]);
+		tracker.recordStart("old", "read", { path: f.paths.cwd }); tracker.select(["global"]); tracker.select(["cwd"]);
+		tracker.recordEnd("old", "read", false); assert.equal(tracker.successful.size, 0);
+		tracker.recordResult("read", { path: f.paths.cwd }, false); tracker.select(["session"]); assert.equal(tracker.successful.size, 0);
+		assert.throws(() => tracker.select([] as any), /scopes/);
+		tracker.select(["cwd"]); tracker.recordResult("read", { path: f.paths.cwd }, false);
+		const compilation = { cwd: { artifacts: { [f.paths.cwd]: { description: "Compile Skill", compilation: { rule: "fixture" } } } } };
+		tracker.validateCompilations(compilation);
+		writeFileSync(f.paths.cwd, "source changed after successful read");
+		tracker.validateCompilations({});
+		assert.throws(() => tracker.validateCompilations(compilation), /changed after acquisition/);
+		const disabledPatch = Object.defineProperty({}, "global", { enumerable: true, get: () => assert.fail("disabled compiler body") });
+		assert.throws(() => tracker.validateCompilations(disabledPatch), /compilation owner is excluded/);
+	});
+
+	test("Skill hashing admits regular stable source bytes only; unavailable/symlink/changed identities become failed selected evidence, never deletion", (t) => {
+		const f = fixture(t), link = join(f.sources, "skill-link.txt"); symlinkSync(f.paths.cwd, link);
+		assert.equal(hashSkillSource(f.paths.cwd), hashArtifactSource(readFileSync(f.paths.cwd)));
+		assert.throws(() => hashSkillSource(link), /regular non-symlink/);
+		assert.throws(() => hashSkillSource(f.sources), /regular non-symlink/);
+		const read = fs.readFileSync; let changed = false;
+		fs.readFileSync = ((path: fs.PathOrFileDescriptor, ...args: any[]) => {
+			const result = (read as any)(path, ...args);
+			if (typeof path === "number" && !changed) { changed = true; writeFileSync(f.paths.cwd, "source changed during hashing"); }
+			return result;
+		}) as typeof fs.readFileSync; syncBuiltinESMExports();
+		try { assert.throws(() => hashSkillSource(f.paths.cwd), /changed during identity capture/); }
+		finally { fs.readFileSync = read; syncBuiltinESMExports(); }
+		assert.equal(changed, true);
+		const tracker = new SkillReadTracker(hashSkillSource, () => ({ path: link, scope: "cwd" }), ["cwd"]);
+		const failed = tracker.recordResult("read", { path: link }, false)!;
+		assert.equal(failed.hash, undefined); assert.ok(failed.error);
+	});
+}

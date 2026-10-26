@@ -3,13 +3,35 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { classifyScopeStream, hasCwdMaterialization, parseScopeProvenance, parseScopeStream, sessionRuntimePaths, temporalScopePaths } from "./durable.js";
 import { pruneArtifactProvenance } from "./artifact.js";
-import { assertTemporalFileBase, captureTemporalFileBase, initializeFileStore, publishTemporalStateToFiles, withStorageTransaction } from "./storage.js";
+import { assertTemporalFileBase, captureSelectedModuleAdditions, captureSelectedProvenanceUpdates, captureTemporalFileBase, temporalFileContents, initializeFileStore, publishTemporalStateToFiles, withStorageTransaction } from "./storage.js";
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.js";
-import { hashJson, sameJson } from "./json.js";
-import { RevisionUnavailableError, createSessionRuntime, parseSessionRuntime, preRuntimeCheckpoint, retainedBoundaryCheckpoint } from "./snapshot.js";
-import { adoptTemporalStreams, advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalScopes, readTemporalState, readTemporalView, validateScopeLineage } from "./temporal.js";
+import { hashJson, isObject, sameJson } from "./json.js";
+import { RevisionUnavailableError, createSessionRuntime, parseSessionRuntime, preRuntimeCheckpoint, retainedBoundaryCheckpoint, captureLifecycleSnapshot } from "./snapshot.js";
+import { adoptTemporalStreams, advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalScopes, readTemporalState, readTemporalView, selectTemporalState, validateScopeLineage } from "./temporal.js";
+import { captureScopeSelection } from "./selection.js";
 const SCOPES = ["global", "cwd", "session"];
 const SHARED_SCOPES = ["global", "cwd"];
+function selectedModules(view) {
+    return Object.fromEntries(view.selection.filter(scope => view.scopes[scope]?.modules !== undefined)
+        .map(scope => [scope, structuredClone(view.scopes[scope].modules)]));
+}
+function selectedRunSnapshot(cohort) {
+    const source = cohort.lifecycle.runtime;
+    const meta = { step: source.meta.step, ...Object.fromEntries(["specification", "bootstrap", "validation"]
+            .filter((key) => Object.hasOwn(source.meta, key)).map((key) => [key, source.meta[key]])) };
+    return captureLifecycleSnapshot({ config: { mode: source.config.mode }, meta });
+}
+/** Detached replay inputs; excluded patch bodies must not be touched even for a rejected raw replay. */
+function captureSelectedReplay(accepted, selection) {
+    if (accepted === undefined)
+        return undefined;
+    if (!isObject(accepted) || !Array.isArray(accepted.transitions))
+        throw new Error("Invalid selected runtime replay");
+    for (const item of accepted.transitions)
+        if (!isObject(item) || !selection.includes(item.scope))
+            throw new Error("Selected runtime replay contains an excluded owner");
+    return structuredClone(accepted);
+}
 function emptyProvenance() {
     return { global: {}, cwd: {}, session: {} };
 }
@@ -45,10 +67,22 @@ function freshEmptyScopeStream(scope, origin, historyLimit) {
 }
 /** Cached branch-selected temporal state and publication basis; excludes Pi event policy. */
 export class TemporalRuntime {
-    view;
+    memory;
+    /** Compatibility access to the legacy cache only; selected memory never masquerades as three owners. */
+    get view() { return this.memory?.kind === "legacy" ? this.memory.view : undefined; }
+    set view(value) {
+        if (value !== undefined)
+            this.assertLegacyAdmission();
+        this.memory = value === undefined ? undefined : { kind: "legacy", view: value };
+    }
     base;
     semanticRevision;
     savedRuntime;
+    /** Backend choice survives cache clearing but grants no origin, private acquisition or publication authority. */
+    selectedBackendChosen = false;
+    selectedOriginAccepted = false;
+    observedSessionAuthority = false;
+    observedPrivateSemantics = false;
     transaction;
     provenanceByScope = emptyProvenance();
     /** Shared scopes whose wholly absent live basis was accepted after one stale-target refusal. */
@@ -67,18 +101,209 @@ export class TemporalRuntime {
     }
     get sessionId() { return this.session.id; }
     get sessionKey() { return this.session.key; }
+    rememberSessionAuthority(base) {
+        const privatePaths = temporalScopePaths(this.cwd, this.sessionId, "session", this.root, this.sessionKey);
+        const paths = sessionRuntimePaths(this.cwd, this.sessionId, this.root, this.sessionKey);
+        const privateFiles = new Set([privatePaths.checkpoint, privatePaths.patches, privatePaths.meta]);
+        for (const file of base?.files ?? [])
+            if (file.identity !== "missing") {
+                if (privateFiles.has(file.path))
+                    this.observedPrivateSemantics = true;
+                if (privateFiles.has(file.path) || file.path === paths.config || file.path === paths.runtime)
+                    this.observedSessionAuthority = true;
+            }
+    }
+    assertLegacyAdmission() {
+        if (this.selectedBackendChosen)
+            throw new Error("Selected State Flow memory requires selected runtime operations");
+    }
+    /** Only owned durable acceptance calls this; returned receipts and read-only candidates are not installers. */
+    installSelected(cohort) {
+        this.memory = { kind: "selected", cohort: structuredClone(cohort) };
+        this.selectedBackendChosen = true;
+        this.clearLegacyBasis();
+    }
+    clearLegacyBasis() {
+        this.base = undefined;
+        this.savedRuntime = undefined;
+        this.semanticRevision = undefined;
+        this.provenanceByScope = emptyProvenance();
+        this.absentSharedScopes.clear();
+    }
+    installObserved(observation) {
+        this.memory = { kind: "observed", observation: structuredClone(observation) };
+        this.selectedBackendChosen = true;
+        this.clearLegacyBasis();
+    }
+    observationGuard(revalidateNativePolicy, signal) {
+        const memory = this.memory;
+        return () => {
+            signal?.throwIfAborted();
+            if (this.selectedOriginAccepted || this.semanticRevision || this.savedRuntime)
+                throw new Error("Accepted State Flow memory requires current acceptance, not observation");
+            if (this.memory !== memory)
+                throw new Error("Selected State Flow runtime selection or acceptance changed concurrently");
+            if (typeof revalidateNativePolicy !== "function")
+                throw new Error("Selected observation requires independent native policy authority");
+            revalidateNativePolicy();
+        };
+    }
+    selectedReadCache() {
+        if (this.memory?.kind === "selected")
+            return this.memory.cohort;
+        if (this.memory?.kind === "observed")
+            return this.memory.observation;
+        return undefined;
+    }
+    /** Detached read-only selected values; never accepted run fields or a publication/acquisition basis. */
+    observedSelectedView() {
+        return this.memory?.kind === "observed" ? structuredClone(this.memory.observation.view) : undefined;
+    }
+    /** Explicit shared inspection before acquisition; missing owners stay unavailable rather than becoming empty streams. */
+    async refreshSelectedShared(selection, revalidateNativePolicy, signal) {
+        const wanted = captureScopeSelection(selection);
+        if (wanted.includes("session"))
+            throw new Error("Shared State Flow observation cannot select Session");
+        const assertAuthority = this.observationGuard(revalidateNativePolicy, signal);
+        const install = (observation) => {
+            assertAuthority();
+            this.installObserved(observation);
+            return observation.view !== undefined;
+        };
+        assertAuthority();
+        if (!lstatSync(this.root, { throwIfNoEntry: false }))
+            return install({ selection: wanted, provenance: {} });
+        return withStorageTransaction(this.root, storage => {
+            assertAuthority();
+            return install(storage.observeSelectedShared(this.cwd, wanted, this.root));
+        }, signal);
+    }
+    /** Header-only disposition data; never semantic observation, acceptance, or acquisition permission. */
+    async inspectSelectedLifecycle(selection, revalidateNativePolicy, signal) {
+        const wanted = captureScopeSelection(selection);
+        const memory = this.memory;
+        const check = () => {
+            signal?.throwIfAborted();
+            if (this.memory !== memory)
+                throw new Error("State Flow attachment selection changed");
+            revalidateNativePolicy();
+        };
+        check();
+        if (!lstatSync(this.root, { throwIfNoEntry: false })) {
+            if (this.observedSessionAuthority)
+                throw new RevisionUnavailableError("Known selected session authority is unavailable");
+            return undefined;
+        }
+        return withStorageTransaction(this.root, storage => {
+            check();
+            const lifecycle = storage.inspectSelectedLifecycle(this.cwd, this.sessionId, wanted, this.root, this.sessionKey);
+            check();
+            if (!lifecycle) {
+                if (this.observedSessionAuthority)
+                    throw new RevisionUnavailableError("Known selected session authority is unavailable");
+                return undefined;
+            }
+            if (this.observedPrivateSemantics && lifecycle.runtime.meta.privateAcquisition !== "acquired")
+                throw new Error("Known acquired State Flow private authority cannot be downgraded");
+            this.observedSessionAuthority = true;
+            if (lifecycle.runtime.meta.privateAcquisition === "acquired")
+                this.observedPrivateSemantics = true;
+            return { selection: captureScopeSelection(lifecycle.runtime.config.scopes), privateAcquisition: lifecycle.runtime.meta.privateAcquisition,
+                snapshot: selectedRunSnapshot({ lifecycle }) };
+        }, signal);
+    }
+    /** Native bookmarks never decide whether current canonical authority exists. */
+    async hasSelectedCurrentAuthority(selection, revalidateNativePolicy, signal) {
+        return await this.inspectSelectedLifecycle(selection, revalidateNativePolicy, signal) !== undefined;
+    }
+    /** Fenced inactive restoration/operator inspection: source proof only, without conversion or durable acceptance. */
+    async refreshSelectedCurrent(selection, revalidateNativePolicy, signal) {
+        const wanted = captureScopeSelection(selection);
+        const assertAuthority = this.observationGuard(revalidateNativePolicy, signal);
+        assertAuthority();
+        if (!lstatSync(this.root, { throwIfNoEntry: false }))
+            throw new RevisionUnavailableError("Selected current session storage is unavailable");
+        return withStorageTransaction(this.root, storage => {
+            assertAuthority();
+            const current = storage.prepareSelectedCurrent(this.cwd, this.sessionId, wanted, this.historyLimit, this.root, this.sessionKey);
+            if (this.observedPrivateSemantics && current.lifecycle.runtime.meta.privateAcquisition !== "acquired")
+                throw new Error("Known acquired State Flow private authority cannot be downgraded");
+            // Current acceptance can plan absent shared owners; observation must not expose those planned empty streams.
+            const present = wanted.filter(scope => {
+                const path = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey).checkpoint;
+                return current.basis.files.some(file => file.path === path && file.identity !== "missing");
+            });
+            const observation = { selection: wanted,
+                provenance: Object.fromEntries(present.map(scope => [scope, current.provenance[scope]])),
+                ...(present.length === 0 ? {} : { view: selectTemporalState(current.view, captureScopeSelection(present), this.historyLimit) }), };
+            const snapshot = selectedRunSnapshot(current);
+            assertAuthority();
+            this.rememberSessionAuthority(current.basis);
+            if (current.lifecycle.runtime.meta.privateAcquisition === "acquired")
+                this.observedPrivateSemantics = true;
+            this.installObserved(observation);
+            return snapshot;
+        }, signal);
+    }
+    /** Detached accepted selected values only, never a file receipt or publication capability. */
+    selectedView() {
+        return this.memory?.kind === "selected" ? structuredClone(this.memory.cohort.view) : undefined;
+    }
+    /** Accepted run fields only; local policy and pending native prompts remain the adapter's responsibility. */
+    selectedSnapshot() {
+        if (this.memory?.kind !== "selected")
+            throw new Error("Selected State Flow runtime is unavailable");
+        return selectedRunSnapshot(this.memory.cohort);
+    }
+    /** Native bookkeeping may change mode, never invent accepted run fields or a semantic boundary. */
+    retainedSelectedCheckpoint(mode) {
+        const memory = this.memory;
+        if (memory?.kind !== "selected")
+            throw new Error("Selected State Flow runtime is unavailable");
+        const snapshot = selectedRunSnapshot(memory.cohort);
+        if (mode !== undefined)
+            snapshot.config.mode = mode;
+        return { ...retainedBoundaryCheckpoint(snapshot, memory.cohort.view.lineage.at(-1).id), version: 2, scopes: captureScopeSelection(memory.cohort.view.selection) };
+    }
+    /** Read-only cache identity lease; no source acquisition, storage receipt or publication authority. */
+    captureSelectedReadBasis() {
+        const memory = this.memory;
+        if (!this.selectedReadCache()?.view)
+            throw new Error("Selected State Flow runtime is unavailable");
+        return () => { if (this.memory !== memory)
+            throw new Error("State Flow module context content basis changed"); };
+    }
+    /** Exact present owners for the existing selected staging engine; no defaulted disabled scopes. */
+    selectedStates(offset = 0) {
+        const view = this.selectedReadCache()?.view;
+        if (!view)
+            throw new Error("Selected State Flow runtime is unavailable");
+        return { selection: captureScopeSelection(view.selection), states: readTemporalScopes(view, offset, this.historyLimit) };
+    }
     /** Runtime-owned artifact compilation evidence for one scope; never model-visible state. */
     artifactProvenance(scope) {
+        const selected = this.selectedReadCache();
+        if (selected) {
+            if (!selected.view)
+                throw new Error(`State Flow ${scope} scope is excluded or unavailable`);
+            if (!selected.view.selection.includes(scope))
+                throw new Error(`State Flow ${scope} scope is excluded`);
+            return structuredClone(selected.provenance[scope]);
+        }
+        this.assertLegacyAdmission();
         return structuredClone(this.provenanceByScope[scope]);
     }
     /** Read canonical shared memory without creating, migrating, or publishing storage. */
     loadPassive() {
+        this.assertLegacyAdmission();
         if (!lstatSync(this.root, { throwIfNoEntry: false }))
             return false;
         return this.loadPassiveBase(captureTemporalFileBase(this.cwd, this.sessionId, this.root, this.sessionKey));
     }
     loadPassiveBase(base) {
-        const files = new Map(base.files.map((file) => [file.path, file.content]));
+        this.rememberSessionAuthority(this.base);
+        this.rememberSessionAuthority(base);
+        const files = temporalFileContents(base);
         const shared = Object.fromEntries(SHARED_SCOPES.map((scope) => {
             const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
             return [scope, parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope, scope === "cwd" ? this.cwd : undefined, files.get(paths.meta))];
@@ -112,25 +337,30 @@ export class TemporalRuntime {
         this.prepareCanonical();
     }
     read(offset = 0, scope) {
-        if (!this.view)
+        const view = this.selectedReadCache()?.view ?? this.view;
+        if (!view)
             throw new Error("State Flow temporal runtime is unavailable");
-        return readTemporalState(this.view, offset, scope, this.historyLimit);
+        return readTemporalState(view, offset, scope, this.historyLimit);
     }
     readView(offset = 0, scope) {
-        if (!this.view)
+        const view = this.selectedReadCache()?.view ?? this.view;
+        if (!view)
             throw new Error("State Flow temporal runtime is unavailable");
-        return readTemporalView(this.view, offset, scope, this.historyLimit);
+        return readTemporalView(view, offset, scope, this.historyLimit);
     }
     states() {
+        this.assertLegacyAdmission();
         return { global: this.read(0, "global"), cwd: this.read(0, "cwd"), session: this.read(0, "session") };
     }
     causalBasis() {
-        if (!this.view)
+        const view = this.selectedReadCache()?.view ?? this.view;
+        if (!view)
             throw new Error("State Flow temporal runtime is unavailable");
-        return this.view.lineage.at(-1).id;
+        return view.lineage.at(-1).id;
     }
     /** Encode Pi lifecycle state against the current retained semantic boundary. */
     retainedCheckpoint(snapshot) {
+        this.assertLegacyAdmission();
         if (!this.view)
             return preRuntimeCheckpoint(snapshot.config.mode);
         return retainedBoundaryCheckpoint(snapshot, this.causalBasis());
@@ -140,9 +370,11 @@ export class TemporalRuntime {
     }
     recent() {
         const result = [];
-        for (const boundary of this.view?.lineage.slice(1) ?? []) {
-            const transitions = SCOPES.flatMap((scope) => {
-                const record = this.view.scopes[scope].patches.find(({ transition }) => transition.id === boundary.id);
+        const selected = this.selectedReadCache()?.view;
+        const view = selected ?? this.view;
+        for (const boundary of view?.lineage.slice(1) ?? []) {
+            const transitions = (selected?.selection ?? SCOPES).flatMap((scope) => {
+                const record = view.scopes[scope].patches.find(({ transition }) => transition.id === boundary.id);
                 return record ? [{ scope, patch: structuredClone(record.patch) }] : [];
             });
             if (transitions.length)
@@ -153,6 +385,7 @@ export class TemporalRuntime {
     /** Await a coherent read-only recovery view; this neither activates policy nor accepts publication authority. */
     async refreshCurrentMemory(signal) {
         signal?.throwIfAborted();
+        this.assertLegacyAdmission();
         if (!lstatSync(this.root, { throwIfNoEntry: false }))
             return undefined;
         return withStorageTransaction(this.root, (storage) => {
@@ -162,11 +395,12 @@ export class TemporalRuntime {
         }, signal);
     }
     loadCurrentMemoryBase(base) {
-        const files = new Map(base.files.map((file) => [file.path, file.content]));
+        const files = temporalFileContents(base);
         const paths = sessionRuntimePaths(this.cwd, this.sessionId, this.root, this.sessionKey);
         const session = temporalScopePaths(this.cwd, this.sessionId, "session", this.root, this.sessionKey);
         if ([paths.config, paths.runtime, session.checkpoint, session.patches, session.meta].every((path) => files.get(path) === undefined))
             return undefined;
+        this.rememberSessionAuthority(base);
         const document = parseSessionRuntime(files.get(paths.config), files.get(paths.runtime), this.cwd, this.sessionId);
         if (!document)
             throw new RevisionUnavailableError("Current State Flow session runtime is unavailable");
@@ -208,6 +442,8 @@ export class TemporalRuntime {
         return this.initializeOrigin(snapshot, { allowCreateCwd, expectedShared, newSessionOrigin });
     }
     initializeOrigin(snapshot, options) {
+        if (this.selectedBackendChosen)
+            throw new Error("Selected State Flow origin requires selected runtime integration");
         const { allowCreateCwd, expectedShared, newSessionOrigin = false, copy } = options;
         const hasCwd = hasCwdMaterialization(this.cwd, this.root);
         if (!allowCreateCwd && !hasCwd)
@@ -215,7 +451,7 @@ export class TemporalRuntime {
         if (!copy && allowCreateCwd)
             initializeFileStore(this.root);
         const base = captureTemporalFileBase(this.cwd, this.sessionId, this.root, this.sessionKey);
-        const files = new Map(base.files.map((file) => [file.path, file.content]));
+        const files = temporalFileContents(base);
         if (copy) {
             const session = temporalScopePaths(this.cwd, this.sessionId, "session", this.root, this.sessionKey);
             const owned = [session.checkpoint, session.patches, session.meta, join(session.directory, "config.json"), join(session.directory, "runtime.json"), join(session.directory, "state.json")];
@@ -361,6 +597,7 @@ export class TemporalRuntime {
     /** Await coherent shared inspection, lazily loading an empty private view only when none is selected. */
     async refreshShared(signal) {
         signal?.throwIfAborted();
+        this.assertLegacyAdmission();
         if (!this.view && !lstatSync(this.root, { throwIfNoEntry: false }))
             return false;
         return withStorageTransaction(this.root, (storage) => {
@@ -392,7 +629,7 @@ export class TemporalRuntime {
             candidate.provenanceByScope = reconciled.provenance;
             return candidate;
         }
-        const files = new Map(current.files.map((file) => [file.path, file.content]));
+        const files = temporalFileContents(current);
         const paths = sessionRuntimePaths(this.cwd, this.sessionId, this.root, this.sessionKey);
         const session = temporalScopePaths(this.cwd, this.sessionId, "session", this.root, this.sessionKey);
         if ([paths.config, paths.runtime, session.checkpoint, session.patches, session.meta].some((path) => files.get(path) !== undefined)) {
@@ -426,9 +663,314 @@ export class TemporalRuntime {
             publish,
         }), { kind: "patch" }, signal);
     }
+    /** Authored under exclusion against validated live selected values; use the existing selected staging/commit engine. */
+    async withSelectedPatchTransaction(action, revalidateNativePolicy, signal, capturedTargets = []) {
+        return this.withSelectedPublicationTransaction(action, "current", revalidateNativePolicy, signal, capturedTargets);
+    }
+    /** Mode-only Passive persistence: exact accepted sources, no current-origin adoption or caller-authored run fields. */
+    async persistSelectedPassive(revalidateNativePolicy, signal) {
+        const memory = this.memory;
+        if (memory?.kind !== "selected")
+            throw new Error("Selected State Flow runtime is unavailable");
+        const assertAuthority = () => {
+            signal?.throwIfAborted();
+            if (this.memory !== memory)
+                throw new Error("Selected State Flow runtime selection or acceptance changed concurrently");
+            if (typeof revalidateNativePolicy !== "function")
+                throw new Error("Selected Passive persistence requires independent native policy authority");
+            revalidateNativePolicy();
+        };
+        assertAuthority();
+        return withStorageTransaction(this.root, storage => {
+            assertAuthority();
+            const publication = storage.persistSelectedPassive(this.cwd, this.sessionId, memory.cohort, this.root, this.sessionKey);
+            if (publication.changed)
+                this.installSelected(publication.cohort);
+            return publication;
+        }, signal);
+    }
+    /** Precomputed replay remains tied to its accepted cache; changed selected shared targets conflict before publication. */
+    async publishSelected(snapshot, accepted, revalidateNativePolicy, options = {}) {
+        if (this.memory?.kind !== "selected")
+            throw new Error("Selected State Flow runtime is unavailable");
+        const provenance = captureSelectedProvenanceUpdates(options.provenance, this.memory.cohort.view.selection);
+        const replay = captureSelectedReplay(accepted, this.memory.cohort.view.selection);
+        const additions = captureSelectedModuleAdditions(options.moduleAdditions, this.memory.cohort.view.selection);
+        const lifecycle = captureLifecycleSnapshot(snapshot);
+        return this.withSelectedPublicationTransaction(transaction => transaction.publish(lifecycle, replay, provenance, additions), "replay", revalidateNativePolicy, options.signal);
+    }
+    async withSelectedPublicationTransaction(action, kind, revalidateNativePolicy, signal, capturedTargets = []) {
+        const memory = this.memory;
+        if (memory?.kind !== "selected")
+            throw new Error("Selected State Flow runtime is unavailable");
+        const selection = captureScopeSelection(memory.cohort.view.selection);
+        const targets = capturedTargets.length ? captureScopeSelection(capturedTargets) : undefined;
+        if (targets?.some(scope => !selection.includes(scope)))
+            throw new Error("Captured State Flow write target is excluded");
+        const assertAuthority = () => {
+            signal?.throwIfAborted();
+            if (this.memory !== memory)
+                throw new Error("Selected State Flow runtime selection or acceptance changed concurrently");
+            if (typeof revalidateNativePolicy !== "function")
+                throw new Error("Selected semantic transaction requires independent native policy authority");
+            revalidateNativePolicy();
+        };
+        assertAuthority();
+        return withStorageTransaction(this.root, storage => {
+            assertAuthority();
+            const current = storage.prepareSelectedCurrent(this.cwd, this.sessionId, selection, this.historyLimit, this.root, this.sessionKey);
+            const sharedPaths = new Set(selection.filter(scope => scope !== "session").flatMap(scope => {
+                const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
+                return [paths.checkpoint, paths.patches, paths.meta];
+            }));
+            assertTemporalFileBase({ files: memory.cohort.basis.files.filter(file => !sharedPaths.has(file.path)) }, { files: current.basis.files.filter(file => !sharedPaths.has(file.path)) });
+            if (!sameJson(memory.cohort.presence, current.presence))
+                throw new Error("Selected State Flow presence dependencies changed concurrently");
+            if (targets)
+                this.assertSelectedReplayTargets(memory.cohort, current, undefined, undefined, undefined, targets);
+            let consumed = false;
+            let published = false;
+            const result = action(Object.freeze({
+                selection, states: readTemporalScopes(current.view, 0, this.historyLimit), modules: selectedModules(current.view), snapshot: selectedRunSnapshot(current),
+                causalBasis: current.view.lineage.at(-1).id, provenance: structuredClone(current.provenance),
+                publish: (snapshot, accepted, requestedProvenance, requestedModules) => {
+                    if (consumed)
+                        throw new Error("Selected semantic transaction publication was already consumed");
+                    consumed = true;
+                    assertAuthority();
+                    const provenance = captureSelectedProvenanceUpdates(requestedProvenance, selection);
+                    const transition = captureSelectedReplay(accepted, selection);
+                    const moduleAdditions = captureSelectedModuleAdditions(requestedModules, selection);
+                    if (kind === "replay")
+                        this.assertSelectedReplayTargets(memory.cohort, current, transition, provenance, moduleAdditions);
+                    const publication = storage.acceptSelectedCurrent(this.cwd, this.sessionId, { selection, historyLimit: this.historyLimit, lifecycle: captureLifecycleSnapshot(snapshot), transition, provenance, moduleAdditions }, current, this.root, this.sessionKey);
+                    this.installSelected(publication.cohort);
+                    published = true;
+                    return publication;
+                },
+            }));
+            if (!published)
+                throw new Error("Selected semantic transaction requires one synchronous publication");
+            return result;
+        }, signal);
+    }
+    assertSelectedReplayTargets(base, current, transition, provenance, additions, capturedTargets = []) {
+        const targets = new Set([...capturedTargets, ...(transition?.transitions.map(item => item.scope) ?? []), ...Object.keys(provenance ?? {}), ...Object.keys(additions ?? {})]);
+        const files = temporalFileContents(current.basis);
+        const changed = [], removed = [];
+        for (const scope of base.view.selection.filter(scope => scope !== "session" && targets.has(scope))) {
+            const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
+            const live = classifyScopeStream(files.get(paths.checkpoint), files.get(paths.patches), scope, scope === "cwd" ? this.cwd : undefined, files.get(paths.meta));
+            if (live.kind === "absent") {
+                removed.push(scope);
+                continue;
+            }
+            if (!sameJson(live.stream, base.view.scopes[scope]) || !sameJson(current.provenance[scope], base.provenance[scope]))
+                changed.push(scope);
+        }
+        if (removed.length > 0)
+            throw removedTargetScopeConflict(removed);
+        if (changed.length > 0)
+            throw targetScopeConflict(changed);
+    }
     /** Activate current owned memory; the caller must authorize a wholly absent private origin after waiting. */
     async withStartTransaction(action, signal, allowCreateOrigin = false) {
         return this.withPublicationTransaction((_candidate, publish, current) => action(current, (snapshot) => publish(snapshot)), { kind: "start", allowCreateOrigin }, signal);
+    }
+    /** New-session shared-only acceptance; caller rechecks native origin authority after waiting. */
+    async withSelectedSharedOriginTransaction(selection, snapshot, action, signal, allowCreateOrigin = false) {
+        return this.withSelectedOriginAcceptance({ kind: "shared-new", selection, snapshot, historyLimit: this.historyLimit }, action, signal, allowCreateOrigin);
+    }
+    /** Child-owned deferred marker only; no parent locator or parent memory is acquired here. */
+    async withSelectedDeferredForkTransaction(selection, lifecycle, action, signal, allowDeferFork = false, modeAtPublication) {
+        if (!lifecycle || Object.keys(lifecycle).some((key) => key !== "mode" && key !== "bootstrap")
+            || (lifecycle.bootstrap !== undefined && lifecycle.bootstrap !== true))
+            throw new Error("Invalid selected fork lifecycle");
+        if (modeAtPublication !== undefined && typeof modeAtPublication !== "function")
+            throw new Error("Invalid selected fork mode sampler");
+        const snapshot = { config: { mode: lifecycle.mode }, meta: { step: 0, ...(lifecycle.bootstrap ? { bootstrap: true } : {}) } };
+        // Sample mode only; callers cannot replace the fresh child run fields through this hook.
+        const author = modeAtPublication ? (basis, publish) => {
+            const mode = modeAtPublication();
+            signal?.throwIfAborted();
+            publish({ config: { mode }, meta: basis.snapshot.meta });
+        } : undefined;
+        return this.withSelectedOriginAcceptance({ kind: "shared-deferred", selection, snapshot, historyLimit: this.historyLimit, author }, action, signal, allowDeferFork);
+    }
+    /** Explicit first private acquisition, never deferred-parent recovery or repair of lost acquired state. */
+    async withSelectedSessionAcquisitionTransaction(request, action, signal, allowAcquirePrivate = false) {
+        return this.withSelectedOriginAcceptance(request, action, signal, allowAcquirePrivate);
+    }
+    /** Stage first lifecycle/semantic authoring into one origin acceptance, never an empty publication followed by a patch. */
+    async withSelectedFirstPatchTransaction(selection, snapshot, action, revalidateNativePolicy, signal, allowCreateOrigin = false) {
+        const memory = this.memory;
+        const check = () => {
+            signal?.throwIfAborted();
+            if (!allowCreateOrigin)
+                throw new Error("Selected first authoring requires explicit native origin authority");
+            if (this.memory !== memory)
+                throw new Error("Selected first authoring selection changed concurrently");
+            revalidateNativePolicy();
+        };
+        check();
+        const wanted = captureScopeSelection(selection);
+        let result;
+        const author = (basis, publish) => {
+            check();
+            result = action(Object.freeze({
+                selection: captureScopeSelection(basis.view.selection), states: readTemporalScopes(basis.view, 0, this.historyLimit), modules: selectedModules(basis.view),
+                snapshot: basis.snapshot, causalBasis: basis.view.lineage.at(-1).id, provenance: basis.provenance,
+                publish: (next, transition, provenance, moduleAdditions) => {
+                    check();
+                    return publish(next, transition, provenance, captureSelectedModuleAdditions(moduleAdditions, wanted));
+                },
+            }));
+        };
+        await this.withSelectedOriginAcceptance({ kind: wanted.includes("session") ? "new" : "shared-new", selection: wanted, snapshot, historyLimit: this.historyLimit, author }, publish => { check(); publish(); }, signal, allowCreateOrigin);
+        return result;
+    }
+    /** Same-session current acceptance/authoring; native policy checks are synchronous under exclusion. */
+    async withSelectedCurrentTransaction(selection, action, revalidateNativePolicy, signal) {
+        const wanted = captureScopeSelection(selection);
+        const historyLimit = this.historyLimit;
+        const assertAuthority = () => {
+            signal?.throwIfAborted();
+            if (typeof revalidateNativePolicy !== "function")
+                throw new Error("Selected current acceptance requires independent native policy authority");
+            if (historyLimit !== this.historyLimit)
+                throw new Error("Selected current history policy changed concurrently");
+            revalidateNativePolicy();
+        };
+        assertAuthority();
+        if (!lstatSync(this.root, { throwIfNoEntry: false }))
+            throw new RevisionUnavailableError("Selected current session storage is unavailable");
+        return withStorageTransaction(this.root, (storage) => {
+            assertAuthority();
+            const base = storage.prepareSelectedCurrent(this.cwd, this.sessionId, wanted, historyLimit, this.root, this.sessionKey);
+            this.rememberSessionAuthority(base.basis);
+            if (this.observedPrivateSemantics && base.lifecycle.runtime.meta.privateAcquisition !== "acquired")
+                throw new Error("Known acquired State Flow private authority cannot be downgraded");
+            this.observedSessionAuthority = true;
+            if (base.lifecycle.runtime.meta.privateAcquisition === "acquired")
+                this.observedPrivateSemantics = true;
+            const current = selectedRunSnapshot(base);
+            let consumed = false, published = false, authorActive = true;
+            const publish = (snapshot, accepted, requestedProvenance, requestedModules) => {
+                if (!authorActive)
+                    throw new Error("Selected current authoring has ended");
+                if (consumed)
+                    throw new Error("Selected current acceptance publication was already consumed");
+                consumed = true;
+                assertAuthority();
+                const lifecycle = snapshot === undefined ? undefined : captureLifecycleSnapshot(snapshot);
+                const transition = captureSelectedReplay(accepted, wanted);
+                const provenance = captureSelectedProvenanceUpdates(requestedProvenance, wanted);
+                const moduleAdditions = captureSelectedModuleAdditions(requestedModules, wanted);
+                const publication = storage.acceptSelectedCurrent(this.cwd, this.sessionId, { selection: wanted, historyLimit, lifecycle, transition, provenance, moduleAdditions }, base, this.root, this.sessionKey);
+                this.selectedOriginAccepted = true;
+                this.installSelected(publication.cohort);
+                published = true;
+                return publication;
+            };
+            try {
+                const result = action(current, snapshot => publish(snapshot), Object.freeze({
+                    selection: wanted, states: readTemporalScopes(base.view, 0, historyLimit), modules: selectedModules(base.view), snapshot: structuredClone(current),
+                    causalBasis: base.view.lineage.at(-1).id, provenance: structuredClone(base.provenance), publish,
+                }));
+                if (!published)
+                    throw new Error("Selected current acceptance requires one synchronous publication");
+                return result;
+            }
+            finally {
+                authorActive = false;
+            }
+        }, signal);
+    }
+    /** Prepare may read persisted native identity outside exclusion; recheck must use in-memory native policy only. */
+    async withSelectedForkCopyTransaction(request, action, revalidateDirectParent, signal) {
+        return this.withSelectedOriginAcceptance(request, action, signal, true, revalidateDirectParent);
+    }
+    async withSelectedOriginAcceptance(request, action, signal, allowed, revalidateDirectParent) {
+        if (!["shared-new", "shared-deferred", "new", "unacquired", "fork-new", "fork-deferred"].includes(request.kind))
+            throw new Error("Invalid selected origin admission kind");
+        const kind = request.kind;
+        const historyLimit = request.historyLimit;
+        const wanted = captureScopeSelection(request.selection);
+        const lifecycle = captureLifecycleSnapshot(request.snapshot);
+        const requestedAuthor = request.author;
+        const base = kind === "unacquired" || kind === "fork-deferred" ? structuredClone(request.base) : undefined;
+        const copying = kind === "fork-new" || kind === "fork-deferred";
+        const source = copying ? Object.freeze({ ...request.source }) : undefined;
+        const acquiring = kind === "new" || kind === "unacquired" || copying;
+        const install = (accepted) => {
+            this.selectedOriginAccepted = true;
+            this.observedSessionAuthority = true;
+            if (acquiring)
+                this.observedPrivateSemantics = true;
+            this.installSelected(accepted.cohort);
+        };
+        const author = requestedAuthor ? (basis, publish) => requestedAuthor(basis, (snapshot, transition, provenance, moduleAdditions) => {
+            const accepted = publish(snapshot, transition, provenance, captureSelectedModuleAdditions(moduleAdditions, wanted));
+            install(accepted);
+            return accepted;
+        }) : undefined;
+        const assertAuthority = (phase = "recheck") => {
+            signal?.throwIfAborted();
+            if (!allowed)
+                throw new Error(acquiring ? "Selected private acquisition requires explicit native authority" : kind === "shared-deferred" ? "Selected fork deferral requires explicit native fork authority" : "Selected State Flow shared origin requires explicit new-session authority");
+            if (wanted.includes("session") !== acquiring)
+                throw new Error(acquiring ? "Selected private acquisition requires Session" : "Selected shared origin cannot acquire Session");
+            if (lifecycle.config.mode === "off")
+                throw new Error("Off cannot initialize State Flow memory");
+            if (historyLimit !== this.historyLimit)
+                throw new Error("Selected origin history policy does not match its runtime");
+            if (copying) {
+                if (!source || typeof source.id !== "string" || typeof source.key !== "string" || source.id === this.sessionId || source.key === this.sessionKey)
+                    throw new Error("Selected fork requires a distinct direct parent");
+                if (typeof revalidateDirectParent !== "function")
+                    throw new Error("Selected fork copy requires independent native direct-parent authority");
+                revalidateDirectParent(source, phase);
+            }
+            this.rememberSessionAuthority(this.base);
+            if (kind === "unacquired" || kind === "fork-deferred") {
+                if (this.observedPrivateSemantics)
+                    throw new Error("Known acquired State Flow private memory cannot become an empty origin");
+            }
+            else if (this.selectedOriginAccepted || this.observedSessionAuthority || this.semanticRevision || this.savedRuntime) {
+                throw new Error("Known State Flow session requires current-memory acceptance, not a new origin");
+            }
+        };
+        assertAuthority("prepare");
+        if (kind === "unacquired" || copying) {
+            if (!lstatSync(this.root, { throwIfNoEntry: false }))
+                throw new RevisionUnavailableError("Selected private acquisition source storage is unavailable");
+        }
+        else
+            initializeFileStore(this.root);
+        return withStorageTransaction(this.root, (storage) => {
+            assertAuthority();
+            let consumed = false;
+            let published = false;
+            const result = action(() => {
+                if (consumed)
+                    throw new Error("Selected State Flow origin publication was already consumed");
+                consumed = true;
+                assertAuthority();
+                const input = { selection: wanted, snapshot: lifecycle, historyLimit: this.historyLimit, ...(author ? { author } : {}) };
+                const accepted = kind === "shared-new"
+                    ? storage.initializeSelectedSharedOrigin(this.cwd, this.sessionId, input, this.root, this.sessionKey)
+                    : kind === "shared-deferred" ? storage.deferSelectedFork(this.cwd, this.sessionId, input, this.root, this.sessionKey)
+                        : copying ? storage.copySelectedFork(this.cwd, this.sessionId, kind === "fork-new" ? { ...input, kind, source: source } : { ...input, kind: "fork-deferred", source: source, base: base }, this.root, this.sessionKey)
+                            : storage.acquireSelectedSession(this.cwd, this.sessionId, kind === "new" ? { ...input, kind: "new" } : { ...input, kind: "unacquired", base: base }, this.root, this.sessionKey);
+                if (!author)
+                    install(accepted);
+                published = true;
+                return accepted;
+            });
+            if (!published)
+                throw new Error("Selected State Flow origin requires one synchronous publication");
+            return result;
+        }, signal);
     }
     /** Copy the parent's current session memory into an unoccupied child; the caller rechecks native selection after waiting. */
     async withForkTransaction(source, lifecycle, action, signal) {
@@ -441,7 +983,7 @@ export class TemporalRuntime {
         if (!parent.loadCurrentMemoryBase(sourceBase))
             throw new RevisionUnavailableError("State Flow fork parent memory is unavailable");
         const base = storage.capture(this.cwd, this.sessionId, this.root, this.sessionKey);
-        const files = new Map(base.files.map((file) => [file.path, file.content]));
+        const files = temporalFileContents(base);
         const paths = temporalScopePaths(this.cwd, this.sessionId, "session", this.root, this.sessionKey);
         if ([paths.checkpoint, paths.patches, paths.meta, join(paths.directory, "config.json"), join(paths.directory, "runtime.json")].some((path) => files.get(path) !== undefined)) {
             throw new Error("State Flow fork target already has session storage");
@@ -473,6 +1015,8 @@ export class TemporalRuntime {
         const allowCreateOrigin = selection.kind === "start" && selection.allowCreateOrigin;
         const semantic = kind !== "lifecycle";
         const assertAuthority = () => {
+            if (this.selectedBackendChosen)
+                throw new Error("Selected State Flow origin requires selected runtime integration");
             if (selection.kind === "fork") {
                 if (selection.source.id === this.sessionId || selection.source.key === this.sessionKey)
                     throw new Error("State Flow fork requires a distinct session identity and key");
@@ -573,7 +1117,13 @@ export class TemporalRuntime {
                 for (const [path, entry] of Object.entries(updates))
                     nextProvenance[scope][path] = structuredClone(entry);
         }
-        if (!runtimeOnly)
+        const legacyBasis = SCOPES.some((scope) => {
+            const meta = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey).meta;
+            const content = base.files.find((file) => file.path === meta)?.content;
+            return content !== undefined && JSON.parse(content).version < 3;
+        });
+        // A representation-only activation must not turn provenance normalization into migration side effects.
+        if (!runtimeOnly && (!legacyBasis || accepted !== undefined || provenanceScopes.length > 0))
             for (const scope of SCOPES) {
                 nextProvenance[scope] = pruneArtifactProvenance(nextProvenance[scope], readTemporalState(next, 0, scope, this.historyLimit).artifacts);
             }

@@ -73,6 +73,12 @@ Memory-enabled native fork adoption and Start's fork retry use this transaction 
 - A child inherits neither its parent's write fence nor its passive projection. Parent current memory must be valid, and copying must pass CAS; ordinary activation policy is not overridden.
 - Nested forks copy each direct parent's current memory. Ancestry is not recursively reconstructed.
 
+## Internal selected-scope copy boundary
+
+The [selected-scope contract](scope-selection-contract.md#selected-parent-current-private-copy) now implements shared-only child deferral and eager/deferred private copy over selected streams. The native adapter must validate persisted direct-parent identity before exclusion and recheck current in-memory child/parent/policy ownership after waiting. The storage owner verifies only parent-current private files/lineage/provenance plus selected live shared inputs, never recursive ancestry or unrelated disabled owners. Parent bytes stay read-only; occupied, malformed, lost-acquired or already-acquired child evidence cannot become empty memory or authorize recopy.
+
+These internal APIs return file receipts/sticky authority facts and install the [accepted selected cache](scope-selection-contract.md#accepted-selected-runtime-cache-and-reads) after durable acceptance. They do not yet replace the native all-owner `withForkTransaction` route described above, expose scope settings, or implement native pending-marker/selection-epoch attachment. Isolated selected-copy fixtures are local backend proof, not completed native selected-fork delivery.
+
 ## Support boundary
 
 Supported copying requires a persisted regular parent session file, matching header UUID/CWD, current canonical scope/runtime files, and an available retained boundary. Arbitrary session search, UUID aliases, cross-CWD imports, in-memory-only parent locators, conversion of unsupported storage formats, unlimited history, and Git recovery are unsupported.

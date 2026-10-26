@@ -1,24 +1,27 @@
 import type { StateFlowMode } from "./snapshot.ts";
 import type { ScopeRevisions } from "./temporal.ts";
+import { type ScopeSelection } from "./selection.ts";
 export declare const STATE_FLOW_TELEGRAM_ID = "@llblab/pi-state-flow";
 /** Resolve the package export or the compiled sibling-extension layout used in local development. */
 export declare function stateFlowTelegramSectionSpecifiers(moduleUrl?: string): string[];
 export interface StateFlowTelegramSnapshot {
     /** The current session's selected mode. */
     mode: StateFlowMode;
+    /** Wanted participating owners, not currently available bodies; omitted legacy ports retain all three. */
+    scopes?: ScopeSelection;
     /** Failed Active restoration fences inference without silently selecting an inactive mode. */
     inferenceBlocked?: boolean;
     /** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
     step: number;
-    revisions?: ScopeRevisions;
+    revisions?: Partial<ScopeRevisions>;
     bootstrap: boolean;
     startPending: boolean;
 }
 export type StateFlowTelegramScope = "global" | "cwd" | "session" | "effective";
 export interface StateFlowTelegramState {
     artifacts?: Record<string, unknown>;
-    contract?: Record<string, unknown>;
-    working?: Record<string, unknown>;
+    strategy?: Record<string, unknown>;
+    tactics?: Record<string, unknown>;
     intents?: Record<string, unknown>;
     response?: string;
     lazy?: unknown;
@@ -87,7 +90,7 @@ export interface StateFlowTelegramControlResult {
 }
 export interface StateFlowTelegramInspection {
     state: StateFlowTelegramState;
-    revisions: ScopeRevisions;
+    revisions: Partial<ScopeRevisions>;
     /** A selection can revoke a completed observation before the adapter presents it. */
     signal?: AbortSignal;
 }
@@ -95,7 +98,7 @@ export interface StateFlowTelegramPort {
     snapshot(): StateFlowTelegramSnapshot;
     state(scope: StateFlowTelegramScope): StateFlowTelegramState;
     /** Optional additive capability; absent legacy ports retain their branch-step presentation. */
-    revisions?(): ScopeRevisions;
+    revisions?(): Partial<ScopeRevisions>;
     /** Active may need a settled native boundary; inactive modes apply immediately. */
     canStartNow(): boolean;
     /** Select the current session's mode through the same lifecycle owners as the terminal commands. */
@@ -114,9 +117,9 @@ export interface StateFlowTelegramAdapter {
 /** Main-menu section label shows only the current session mode. */
 export declare function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string;
 export declare const STATE_FLOW_MODES: readonly ["off", "passive", "active"];
-/** One radio-style mode row followed directly by read-only scope actions. */
+/** One radio-style mode row followed by the current participating owners' read-only actions. */
 export declare function buildStateFlowSectionView(snapshot: StateFlowTelegramSnapshot, callbackData: (action: string, payload?: string) => string): StateFlowTelegramView;
-export declare function renderStateFlowRichState(scope: StateFlowTelegramScope, revisions: ScopeRevisions, state: StateFlowTelegramState): StateFlowTelegramRichMessage;
+export declare function renderStateFlowRichState(scope: StateFlowTelegramScope, revisions: Partial<ScopeRevisions>, state: StateFlowTelegramState): StateFlowTelegramRichMessage;
 /** Default loader; injectable so tests and embedded hosts can control transport presence. */
 export declare function loadStateFlowTelegramModules(): Promise<StateFlowTelegramModules>;
 export declare function createStateFlowTelegramAdapter(options: {

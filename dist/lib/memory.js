@@ -1,10 +1,10 @@
+import { assertScopeStateValues } from "./state.js";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "./selection.js";
 function hasSemanticMemory(state) {
-    return Object.keys(state.contract).length > 0 || Object.keys(state.working).length > 0;
+    return Object.keys(state.strategy ?? {}).length > 0 || Object.keys(state.tactics ?? {}).length > 0;
 }
-export function retainedMemoryScopes(states) {
-    return {
-        global: hasSemanticMemory(states.global),
-        cwd: hasSemanticMemory(states.cwd),
-        session: hasSemanticMemory(states.session),
-    };
+export function retainedMemoryScopes(states, selection = DEFAULT_SCOPE_SELECTION) {
+    const selected = captureScopeSelection(selection);
+    assertScopeStateValues(states, selected);
+    return Object.fromEntries(selected.map(scope => [scope, hasSemanticMemory(states[scope])]));
 }

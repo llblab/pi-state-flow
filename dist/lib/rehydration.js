@@ -1,13 +1,22 @@
 import { decideArtifactAcquisition, } from "./acquisition.js";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "./selection.js";
 /** Plan visible reads only; this function never reads, compiles, mutates, or publishes sources. */
 export function planKnowledgeRehydration(phase, routes, options = {}) {
+    const selection = captureScopeSelection(options.selection ?? DEFAULT_SCOPE_SELECTION);
+    const selected = routes.filter(route => {
+        if (!DEFAULT_SCOPE_SELECTION.includes(route.scope))
+            throw new Error("Unknown State Flow rehydration owner");
+        return selection.includes(route.scope);
+    });
     const maxReads = Math.max(0, Math.floor(options.maxReads ?? 1));
     const maxSourceBytes = Math.max(0, Math.floor(options.maxSourceBytes ?? 64 * 1024));
     const reads = [];
     const materialized = [];
     const deferred = [];
     let sourceBytes = 0;
-    for (const route of [...routes].sort((left, right) => left.source.path.localeCompare(right.source.path))) {
+    for (const route of [...selected].sort((left, right) => left.source.path.localeCompare(right.source.path))) {
+        if (route.source.scope !== undefined && route.source.scope !== route.scope)
+            throw new Error("State Flow rehydration source owner does not match its route");
         if (phase === "new-bootstrap" && route.scope === "session") {
             deferred.push({ path: route.source.path, reason: "new-session-scope" });
             continue;

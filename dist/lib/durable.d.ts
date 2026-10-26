@@ -78,6 +78,12 @@ export declare function cwdScopePaths(cwd: string, repositoryRoot?: string): Sco
 export declare function sessionScopePaths(cwd: string, sessionId: string, repositoryRoot?: string, sessionKey?: string): ScopePaths;
 /** Exact canonical semantic and runtime file shapes. */
 export declare function isStateFlowOwnedPath(candidate: string, repositoryRoot?: string): boolean;
+export interface OwnedFilePresence {
+    path: string;
+    present: boolean;
+}
+/** Presence-only private-origin/unsupported-layout evidence; never open or decode semantic bodies. */
+export declare function captureOwnedFilePresence(paths: readonly string[], repositoryRoot: string): OwnedFilePresence[];
 /** Capture exact owned bytes for one compare-and-swap publication cohort. */
 export declare function captureOwnedFileBases(paths: readonly string[], repositoryRoot: string): DurableFileBase[];
 export interface OwnedFileUpdate {

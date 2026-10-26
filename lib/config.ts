@@ -5,6 +5,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getDurableRepositoryRoot } from "./durable.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.ts";
 import { isObject } from "./json.ts";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION, type ScopeSelection } from "./selection.ts";
 import { isStateFlowMode, type InactiveMode, type StateFlowMode } from "./snapshot.ts";
 
 export interface StateFlowConfig {
@@ -12,6 +13,8 @@ export interface StateFlowConfig {
 	directory: string;
 	/** Default mode for genuinely new sessions only; each session owns its selected mode. */
 	mode: StateFlowMode;
+	/** Concrete default selection for genuinely new or not-yet-captured legacy sessions. */
+	scopes: ScopeSelection;
 	/** Non-active fallback for legacy `enabled:false` evidence and unavailable selections; never serialized. */
 	inactiveMode: InactiveMode;
 	/** Opt-in local capture of rejected patch attempts and unresolved terminal drafts. */
@@ -28,6 +31,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 	const defaults: StateFlowConfig = {
 		directory,
 		mode: "off",
+		scopes: DEFAULT_SCOPE_SELECTION,
 		inactiveMode: "off",
 		logging: false,
 		showSuccessfulPatches: true,
@@ -41,7 +45,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 		throw new Error(`Cannot read State Flow configuration: ${path}`, { cause: error });
 	}
 	// autoStart/passiveBootstrap/passiveTools are read-only compatibility inputs; explicit mode is authoritative.
-	const allowed = new Set(["mode", "autoStart", "passiveBootstrap", "passiveTools", "logging", "showSuccessfulPatches", "historyLimit"]);
+	const allowed = new Set(["scopes", "mode", "autoStart", "passiveBootstrap", "passiveTools", "logging", "showSuccessfulPatches", "historyLimit"]);
 	if (!isObject(value) || Object.keys(value).some((key) => !allowed.has(key))) {
 		throw new Error(`State Flow configuration contains unknown settings: ${path}`);
 	}
@@ -52,12 +56,21 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
 	if (Object.hasOwn(value, "logging") && typeof value.logging !== "boolean") throw new Error(`State Flow logging must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "showSuccessfulPatches") && typeof value.showSuccessfulPatches !== "boolean") throw new Error(`State Flow showSuccessfulPatches must be a boolean: ${path}`);
 	if (Object.hasOwn(value, "historyLimit") && (!Number.isSafeInteger(value.historyLimit) || (value.historyLimit as number) < 0 || (value.historyLimit as number) > MAX_HISTORY_LIMIT)) throw new Error(`State Flow historyLimit must be an integer from 0 to ${MAX_HISTORY_LIMIT}: ${path}`);
+	let scopes = DEFAULT_SCOPE_SELECTION;
+	if (Object.hasOwn(value, "scopes")) {
+		try {
+			scopes = captureScopeSelection(value.scopes);
+		} catch {
+			throw new Error(`Invalid State Flow scopes configuration: ${path}`);
+		}
+	}
 	const legacyInactive: InactiveMode = value.passiveBootstrap !== false || value.passiveTools !== false ? "passive" : "off";
 	const hasLegacyMode = Object.hasOwn(value, "autoStart") || Object.hasOwn(value, "passiveBootstrap") || Object.hasOwn(value, "passiveTools");
 	const mode = isStateFlowMode(value.mode) ? value.mode : value.autoStart === true ? "active" : hasLegacyMode ? legacyInactive : "off";
 	return {
 		directory,
 		mode,
+		scopes,
 		inactiveMode: isStateFlowMode(value.mode) ? inactiveModeFor(value.mode) : hasLegacyMode ? legacyInactive : "off",
 		logging: value.logging === true,
 		showSuccessfulPatches: value.showSuccessfulPatches !== false,

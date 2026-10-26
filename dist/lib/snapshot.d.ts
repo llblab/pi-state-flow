@@ -1,6 +1,7 @@
 import { type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { type JsonObject } from "./json.ts";
-import { type TransitionBoundary } from "./temporal.ts";
+import { type ExcludedTransitionWitness, type TransitionBoundary } from "./temporal.ts";
+import { type ScopeSelection } from "./selection.ts";
 /** Missing operational capability is not evidence that a checkpoint target is invalid. */
 export declare class RevisionUnavailableError extends Error {
 }
@@ -35,24 +36,47 @@ export interface StateFlowSnapshot {
     meta: SnapshotMeta;
 }
 export type Snapshot = StateFlowSnapshot;
+/** Capture closed caller-owned run fields, omitting only undefined optional in-memory fields. */
+export declare function captureLifecycleSnapshot(value: Snapshot): Snapshot;
 /** Failed Active selection retains its policy and fences inference until explicit recovery or an inactive choice. */
 export declare function isActiveRestorationBlocked(snapshot: Snapshot): boolean;
+interface LifecycleMetadata extends SnapshotMeta {
+    identity: {
+        cwd: string;
+        sessionId: string;
+    };
+    lineage: TransitionBoundary[];
+    [key: string]: unknown;
+}
+interface SessionRuntimeMetadata extends LifecycleMetadata {
+    /** Runtime-owned artifact compilation evidence; never projected as semantic state. */
+    artifacts?: ArtifactProvenanceRegistry;
+    temporal?: {
+        checkpoint: TransitionBoundary;
+        patches: TransitionBoundary[];
+    };
+}
 export interface SessionRuntime {
     config: SnapshotConfig;
-    meta: SnapshotMeta & {
+    meta: SessionRuntimeMetadata & {
         version: 1;
-        identity: {
-            cwd: string;
-            sessionId: string;
-        };
-        lineage: TransitionBoundary[];
-        /** Runtime-owned artifact compilation evidence; never projected as semantic state. */
-        artifacts?: ArtifactProvenanceRegistry;
-        temporal?: {
-            checkpoint: TransitionBoundary;
-            patches: TransitionBoundary[];
-        };
-        [key: string]: unknown;
+    };
+}
+export type PrivateAcquisition = "unacquired" | "deferred" | "acquired";
+export interface PrivateCausalBasis {
+    lineage: TransitionBoundary[];
+    causalWitnesses: ExcludedTransitionWitness[];
+}
+/** Retained private identity proof, never private values or acquisition permission. */
+export declare function capturePrivateCausalBasis(value: unknown): PrivateCausalBasis;
+export interface SelectedSessionRuntime {
+    config: SnapshotConfig & {
+        scopes: ScopeSelection;
+    };
+    meta: LifecycleMetadata & {
+        version: 2;
+        privateAcquisition: PrivateAcquisition;
+        privateCausalBasis?: PrivateCausalBasis;
     };
 }
 export declare function validateSessionRuntime(value: unknown, cwd: string, sessionId: string): asserts value is SessionRuntime;
@@ -63,6 +87,23 @@ export declare function serializeSessionRuntime(runtime: SessionRuntime, cwd: st
 };
 /** Legacy `enabled:false` decodes as non-active; native checkpoints, not this file, select branch policy. */
 export declare function parseSessionRuntime(config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string): SessionRuntime | undefined;
+export interface SessionPolicyMigrationCandidate {
+    sourceVersion: 1 | 2;
+    targetVersion: 2;
+    requiresConversion: boolean;
+    /** Original strings, not file observations or publication authority. */
+    source: {
+        config: string;
+        runtime: string;
+    };
+    runtime: SelectedSessionRuntime;
+    target: {
+        config: string;
+        runtime: string;
+    };
+}
+/** Detached lifecycle preflight only; current native readers/writers still admit version 1 exclusively. */
+export declare function prepareSessionPolicyMigration(config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string, legacySelection: ScopeSelection): SessionPolicyMigrationCandidate | undefined;
 export declare function emptySnapshot(mode?: StateFlowMode): Snapshot;
 export type RetainedBoundaryCheckpoint = {
     boundary: string;
@@ -84,5 +125,17 @@ export declare function retainedBoundaryCheckpoint(snapshot: Snapshot, boundary:
 export declare function preRuntimeCheckpoint(mode: StateFlowMode): PreRuntimeCheckpoint;
 /** Decode the retained-window checkpoint contract; legacy `enabled`/`{disabled:true}` markers map through `inactiveMode`. */
 export declare function parseRetainedPiCheckpoint(value: unknown, inactiveMode?: InactiveMode): RetainedPiCheckpoint;
+export type SelectedRetainedPiCheckpoint = RetainedPiCheckpoint & {
+    version: 2;
+    scopes: ScopeSelection;
+};
+export interface RetainedPolicyMigrationCandidate {
+    sourceVersion: "legacy" | 2;
+    targetVersion: 2;
+    requiresConversion: boolean;
+    checkpoint: SelectedRetainedPiCheckpoint;
+}
+/** Native policy value preflight; no retained boundary, fork or acquisition authority is created. */
+export declare function prepareRetainedPolicyMigration(value: unknown, legacySelection: ScopeSelection, inactiveMode?: InactiveMode): RetainedPolicyMigrationCandidate;
 export declare function migrationFailure(data: JsonObject, error: string, mode?: StateFlowMode): Snapshot;
 export {};

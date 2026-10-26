@@ -7,6 +7,7 @@ import { conciseDiagnostic, diagnosticText } from "./protocol.ts";
 import type { StateFlowMode } from "./snapshot.ts";
 import { formatScopeRevisionVector } from "./status.ts";
 import type { ScopeRevisions } from "./temporal.ts";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION, type ScopeSelection } from "./selection.ts";
 
 export const STATE_FLOW_TELEGRAM_ID = "@llblab/pi-state-flow";
 
@@ -21,11 +22,13 @@ export function stateFlowTelegramSectionSpecifiers(moduleUrl = import.meta.url):
 export interface StateFlowTelegramSnapshot {
 	/** The current session's selected mode. */
 	mode: StateFlowMode;
+	/** Wanted participating owners, not currently available bodies; omitted legacy ports retain all three. */
+	scopes?: ScopeSelection;
 	/** Failed Active restoration fences inference without silently selecting an inactive mode. */
 	inferenceBlocked?: boolean;
 	/** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
 	step: number;
-	revisions?: ScopeRevisions;
+	revisions?: Partial<ScopeRevisions>;
 	bootstrap: boolean;
 	startPending: boolean;
 }
@@ -34,8 +37,8 @@ export type StateFlowTelegramScope = "global" | "cwd" | "session" | "effective";
 
 export interface StateFlowTelegramState {
 	artifacts?: Record<string, unknown>;
-	contract?: Record<string, unknown>;
-	working?: Record<string, unknown>;
+	strategy?: Record<string, unknown>;
+	tactics?: Record<string, unknown>;
 	intents?: Record<string, unknown>;
 	response?: string;
 	lazy?: unknown;
@@ -104,7 +107,7 @@ export interface StateFlowTelegramControlResult {
 
 export interface StateFlowTelegramInspection {
 	state: StateFlowTelegramState;
-	revisions: ScopeRevisions;
+	revisions: Partial<ScopeRevisions>;
 	/** A selection can revoke a completed observation before the adapter presents it. */
 	signal?: AbortSignal;
 }
@@ -113,7 +116,7 @@ export interface StateFlowTelegramPort {
 	snapshot(): StateFlowTelegramSnapshot;
 	state(scope: StateFlowTelegramScope): StateFlowTelegramState;
 	/** Optional additive capability; absent legacy ports retain their branch-step presentation. */
-	revisions?(): ScopeRevisions;
+	revisions?(): Partial<ScopeRevisions>;
 	/** Active may need a settled native boundary; inactive modes apply immediately. */
 	canStartNow(): boolean;
 	/** Select the current session's mode through the same lifecycle owners as the terminal commands. */
@@ -150,11 +153,33 @@ function modeReceiptNotice(mode: StateFlowMode, result: StateFlowTelegramControl
 	return result.message;
 }
 
-/** One radio-style mode row followed directly by read-only scope actions. */
+function telegramScopes(snapshot: StateFlowTelegramSnapshot): ScopeSelection {
+	return captureScopeSelection(snapshot.scopes === undefined ? DEFAULT_SCOPE_SELECTION : snapshot.scopes);
+}
+
+function availableInspection(scope: StateFlowTelegramScope, scopes: ScopeSelection): boolean {
+	return scope === "effective" ? scopes.length > 1 : scopes.includes(scope);
+}
+
+const STATE_FLOW_SCOPE_DESCRIPTIONS = {
+	global: "memory shared across projects and sessions.",
+	cwd: "memory shared by sessions in this directory.",
+	session: "private memory for this session, kept on resume.",
+};
+
+/** One radio-style mode row followed by the current participating owners' read-only actions. */
 export function buildStateFlowSectionView(
 	snapshot: StateFlowTelegramSnapshot,
 	callbackData: (action: string, payload?: string) => string,
 ): StateFlowTelegramView {
+	const scopes = telegramScopes(snapshot);
+	const inspected: StateFlowTelegramScope[] = [...scopes, ...(scopes.length > 1 ? ["effective" as const] : [])];
+	const inspectionRows: StateFlowTelegramButton[][] = [];
+	for (const [index, scope] of inspected.entries()) {
+		if (index % 2 === 0) inspectionRows.push([]);
+		inspectionRows.at(-1)!.push({ text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope) });
+	}
+	const named = scopes.map(scope => `<code>${scope}</code>`).join(" → ");
 	const modes: StateFlowTelegramButton[] = STATE_FLOW_MODES.map((mode) => ({
 		text: `${mode === snapshot.mode ? STATE_FLOW_SELECTED_MARKERS[mode] : "⚫️"} ${STATE_FLOW_MODE_LABELS[mode]}`,
 		callback_data: callbackData(mode),
@@ -170,22 +195,23 @@ export function buildStateFlowSectionView(
 			"<b>Mode</b> — choose a workflow (switching modes never erases stored memory):",
 			"",
 			"<code>-</code> <code>off</code> (default): regular chat without State Flow memory tools or context.",
-			"<code>-</code> <code>passive</code>: regular chat with memory tools; available combined memory enters the agent's context.",
+			`<code>-</code> <code>passive</code>: regular chat with memory tools; available memory from the selected ${scopes.length === 1 ? "scope" : "scopes"} enters the agent's context.`,
 			"<code>-</code> <code>active</code>: same memory access; each completed answer closes a cycle, and the next request starts from saved state, not the full chat.",
 			"",
-			"<b>Inspect memory</b> — view stored state even in Off:",
+			`<b>Participating scopes:</b> ${named}`,
+			...(!scopes.includes("session") ? ["New answers are delivered, not stored: Session is excluded."] : []),
 			"",
-			"<code>-</code> <code>global</code>: memory shared across projects and sessions.",
-			"<code>-</code> <code>cwd</code>: memory shared by sessions in this directory.",
-			"<code>-</code> <code>session</code>: private memory for this session, kept on resume.",
-			"<code>-</code> <code>effective</code>: merged Global, CWD and Session state; the agent can use it when memory is enabled and available.",
+			"<b>Inspect participating memory</b> — view available stored state even in Off:",
+			"",
+			...scopes.map(scope => `<code>-</code> <code>${scope}</code>: ${STATE_FLOW_SCOPE_DESCRIPTIONS[scope]}`),
+			...(scopes.length > 1
+				? [`<code>-</code> <code>effective</code>: validated available ${named} overlay; excluded scopes do not contribute.`]
+				: ["This single scope is also the agent's effective state; no separate overlay is needed."]),
 		].join("\n"),
 		parseMode: "html",
 		replyMarkup: { inline_keyboard: [
 			modes,
-			...([["global", "cwd"], ["session", "effective"]] as const).map((row) => row.map((scope) => ({
-				text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope),
-			}))),
+			...inspectionRows,
 		] },
 	};
 }
@@ -224,12 +250,12 @@ function renderStateFlowTelegramField(value: unknown): StateFlowTelegramRichBloc
 	];
 }
 
-export function renderStateFlowRichState(scope: StateFlowTelegramScope, revisions: ScopeRevisions, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
+export function renderStateFlowRichState(scope: StateFlowTelegramScope, revisions: Partial<ScopeRevisions>, state: StateFlowTelegramState): StateFlowTelegramRichMessage {
 	const fields: Array<keyof StateFlowTelegramState> = scope === "global" || scope === "cwd"
-		? ["intents", "contract", "working", "artifacts", "lazy"]
-		: ["intents", "contract", "working", "artifacts", "response", "lazy"];
+		? ["intents", "strategy", "tactics", "artifacts", "lazy"]
+		: ["intents", "strategy", "tactics", "artifacts", "response", "lazy"];
 	const revision = scope === "effective"
-		? formatScopeRevisionVector(revisions)
+		? formatScopeRevisionVector(revisions, captureScopeSelection(Object.keys(revisions)))
 		: `#${revisions[scope]}`;
 	return {
 		blocks: [
@@ -270,10 +296,18 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort | StateFlowTe
 			try {
 				if (ctx.action === "inspect") {
 					if (!isStateFlowTelegramScope(ctx.payload)) throw new Error("Unknown State Flow scope");
+					const scopes = telegramScopes(port.snapshot());
+					if (!availableInspection(ctx.payload, scopes)) throw new Error(ctx.payload === "effective"
+						? "Effective requires at least two participating scopes; inspect the single owner instead"
+						: `State Flow ${ctx.payload} scope is excluded from this menu`);
+					const checkSelection = () => {
+						if (telegramScopes(port.snapshot()).join(" ") !== scopes.join(" ")) throw new Error("State Flow inspection selection changed; select the scope again");
+					};
 					let observation: StateFlowTelegramInspection;
 					if ("inspect" in port) {
 						await ctx.answerCallback("Reading State Flow memory");
 						acknowledged = true;
+						checkSelection();
 						observation = await port.inspect(ctx.payload);
 					} else {
 						const state = port.state(ctx.payload);
@@ -281,8 +315,12 @@ function buildStateFlowTelegramSection(port: StateFlowTelegramPort | StateFlowTe
 						observation = { state, revisions: port.revisions?.() ?? live.revisions ?? { global: live.step, cwd: live.step, session: live.step } };
 					}
 					observation.signal?.throwIfAborted();
+					checkSelection();
 					if (request !== interaction || !isActive()) return "handled" as const;
-					await ctx.openRich(renderStateFlowRichState(ctx.payload, observation.revisions, observation.state));
+					const revisions = ctx.payload === "effective"
+						? Object.fromEntries(scopes.filter(scope => Object.hasOwn(observation.revisions, scope)).map(scope => [scope, observation.revisions[scope]]))
+						: observation.revisions;
+					await ctx.openRich(renderStateFlowRichState(ctx.payload, revisions, observation.state));
 					if (!acknowledged) await ctx.answerCallback();
 					return "handled" as const;
 				}

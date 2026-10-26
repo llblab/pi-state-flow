@@ -1,4 +1,5 @@
-import { parseRetainedPiCheckpoint, migrationFailure } from "./snapshot.js";
+import { DEFAULT_SCOPE_SELECTION } from "./selection.js";
+import { prepareRetainedPolicyMigration, parseRetainedPiCheckpoint, migrationFailure } from "./snapshot.js";
 /** Select the newest supported retained-boundary checkpoint or pre-runtime mode; unsupported pointers fail closed. */
 export function selectRetainedCheckpoint(candidates, inactiveMode = "passive") {
     const skipped = [];
@@ -8,7 +9,9 @@ export function selectRetainedCheckpoint(candidates, inactiveMode = "passive") {
             if (typeof candidate === "object" && candidate !== null && Object.hasOwn(candidate, "revision")) {
                 return { kind: "unavailable", snapshot: migrationFailure({}, "Snapshot restoration failed: revision-pointer checkpoints are unsupported", inactiveMode), skipped };
             }
-            retained = parseRetainedPiCheckpoint(candidate, inactiveMode);
+            retained = typeof candidate === "object" && candidate !== null && Object.hasOwn(candidate, "version")
+                ? prepareRetainedPolicyMigration(candidate, DEFAULT_SCOPE_SELECTION, inactiveMode).checkpoint
+                : parseRetainedPiCheckpoint(candidate, inactiveMode);
         }
         catch (error) {
             skipped.push(`Snapshot restoration failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -3,7 +3,7 @@ import { isJsonValue, isObject, sameJson, validatePatch } from "./json.js";
 export const DEFAULT_HISTORY_LIMIT = 7;
 export const MAX_HISTORY_LIMIT = 100;
 const SCOPES = new Set(["global", "cwd", "session"]);
-const PATCH_KEYS = new Set(["artifacts", "contract", "working", "intents", "response", "lazy"]);
+const PATCH_KEYS = new Set(["artifacts", "strategy", "tactics", "intents", "response", "lazy"]);
 /** Normalize accepted replacements into recursive-merge replay, including removals. */
 function replayPatch(before, after) {
     const entries = [];
@@ -28,6 +28,8 @@ function validateScopedPatch(value) {
         throw new Error(`Recent State Flow transition has an unknown scope: ${String(value.scope)}`);
     }
     validatePatch(value.patch);
+    if (Object.hasOwn(value.patch, "contract") || Object.hasOwn(value.patch, "working"))
+        throw new Error("Retired State Flow semantic plane in target patch");
     for (const [key, field] of Object.entries(value.patch)) {
         const valid = key === "response"
             ? value.scope === "session" && (field === null || typeof field === "string")
@@ -54,10 +56,20 @@ export function validateRecentTransition(value) {
     }
 }
 export function createAcceptedTransition(currentStates, nextStates, id) {
+    const owners = Object.keys(currentStates);
+    if (owners.length === 0 || owners.some((scope) => !SCOPES.has(scope))
+        || Object.keys(nextStates).length !== owners.length || owners.some((scope) => !Object.hasOwn(nextStates, scope))) {
+        throw new Error("Accepted State Flow replay requires matching nonempty owner sets");
+    }
     const transitions = [];
     for (const scope of SCOPES) {
-        const patch = replayPatch(currentStates[scope], nextStates[scope]);
-        if ((currentStates[scope].response ?? "") === (nextStates[scope].response ?? ""))
+        if (!Object.hasOwn(currentStates, scope))
+            continue;
+        const before = currentStates[scope], after = nextStates[scope];
+        if (!isObject(before) || !isObject(after))
+            throw new Error("Accepted State Flow replay requires present owner values");
+        const patch = replayPatch(before, after);
+        if ((before.response ?? "") === (after.response ?? ""))
             delete patch.response;
         if (Object.keys(patch).length > 0)
             transitions.push({ scope, patch });

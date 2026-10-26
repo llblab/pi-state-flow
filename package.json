@@ -1,6 +1,6 @@
 {
   "name": "@llblab/pi-state-flow",
-  "version": "0.26.5",
+  "version": "0.27.0",
   "license": "MIT",
   "private": false,
   "description": "Incremental scoped state/context/memory compiler for Pi, inspired by SKILL.state",
@@ -20,6 +20,7 @@
   "type": "module",
   "files": [
     "index.ts",
+    "api",
     "lib",
     "dist",
     "skills",
@@ -43,6 +44,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./modules": {
+      "types": "./dist/api/modules.d.ts",
+      "default": "./dist/api/modules.js"
     }
   },
   "pi": {

@@ -1,7 +1,29 @@
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.js";
 import { isObject, sameJson } from "./json.js";
 import { emptyState, projectSemanticPatch, projectStateForRead } from "./state.js";
-import { readTemporalView } from "./temporal.js";
+import { readTemporalView, validateSelectedTemporalState } from "./temporal.js";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "./selection.js";
+function retainedQueryModules(view, scope) {
+    const modules = Object.assign({}, ...(scope ? [scope] : queryOwners(view)).map(owner => view.scopes[owner]?.modules ?? {}));
+    return Object.keys(modules).length ? modules : undefined;
+}
+function queryOwners(view) {
+    return Object.hasOwn(view, "selection") || Object.hasOwn(view, "causalBasis")
+        ? captureScopeSelection(view.selection) : DEFAULT_SCOPE_SELECTION;
+}
+function assertQueryScope(view, scope) {
+    if (scope !== undefined && !queryOwners(view).includes(scope))
+        throw new Error(`State Flow ${scope} scope is excluded`);
+}
+function queryStream(view, scope, historyLimit) {
+    assertQueryScope(view, scope);
+    if (Object.hasOwn(view, "selection") || Object.hasOwn(view, "causalBasis"))
+        validateSelectedTemporalState(view, historyLimit);
+    const stream = view.scopes[scope];
+    if (!stream)
+        throw new Error(`State Flow ${scope} scope is excluded or unavailable`);
+    return stream;
+}
 const MAX_REFERENCE_SOURCES = 3;
 const MAX_REFERENCE_SCAN_NODES = 10_000;
 const PATH_PATTERN = /^(effective|global|cwd|session)(?:\[(\d+)\])?(?:\.patches(?:\[(\d+)\])?)?$/;
@@ -28,20 +50,22 @@ export function parseStateReadPath(path, historyLimit = DEFAULT_HISTORY_LIMIT) {
 }
 export function readStatePath(view, path, historyLimit = DEFAULT_HISTORY_LIMIT) {
     const query = parseStateReadPath(path, historyLimit);
+    assertQueryScope(view, query.scope);
     if (query.kind === "state") {
         const boundary = view.lineage[view.lineage.length - 1 - query.offset];
         if (!boundary)
             throw new Error("Requested history predates the proven temporal origin");
-        return { path, boundary: structuredClone(boundary), state: projectStateForRead(readTemporalView(view, query.offset, query.scope, historyLimit)) };
+        return { path, boundary: structuredClone(boundary), state: projectStateForRead(readTemporalView(view, query.offset, query.scope, historyLimit), {}, retainedQueryModules(view, query.scope)) };
     }
-    const record = view.scopes[query.scope].patches.at(-1 - query.offset);
+    const record = queryStream(view, query.scope, historyLimit).patches.at(-1 - query.offset);
     if (!record)
         throw new Error(`Requested ${query.scope} patch predates retained hot history`);
-    return { path, boundary: structuredClone(record.transition), patch: projectSemanticPatch(record.patch) };
+    return { path, boundary: structuredClone(record.transition), patch: projectSemanticPatch(record.patch, retainedQueryModules(view, query.scope)) };
 }
-function parseValuePath(path) {
+/** Parse semantic locator syntax without resolving values, authority or target existence. */
+export function parseValuePath(path) {
     const explicitRoot = /^(?:effective|global|cwd|session)(?:\[\d+\])?(?=\.|$)/.exec(path)?.[0];
-    const implicitRoot = /^(?:artifacts|contract|working|intents|response|lazy)(?=\.|\[|$)/.exec(path)?.[0];
+    const implicitRoot = /^(?:artifacts|strategy|tactics|intents|response|lazy|x_[a-z][a-z0-9_]*)(?=\.|\[|$)/.exec(path)?.[0];
     if (explicitRoot === undefined && implicitRoot === undefined) {
         throw new Error("State Flow read path requires a semantic path or an effective, global, cwd, or session root");
     }
@@ -102,7 +126,7 @@ function valueKind(value) {
     return typeof value;
 }
 function referenceCandidates(path) {
-    if (/^(?:artifacts|contract|working|intents|response|lazy)(?=\.|\[|$)/.test(path))
+    if (/^(?:artifacts|strategy|tactics|intents|response|lazy|x_[a-z][a-z0-9_]*)(?=\.|\[|$)/.test(path))
         return [path, `effective.${path}`];
     return [path];
 }
@@ -112,6 +136,8 @@ function inlineReferencePattern(path) {
 }
 /** Reactively locate exact durable sources for one failed state-path resolution. */
 export function findStateReferenceSources(view, path, historyLimit = DEFAULT_HISTORY_LIMIT) {
+    const owner = /^(global|cwd|session)(?:\[\d+\])?(?=\.|$)/.exec(path)?.[1];
+    assertQueryScope(view, owner);
     const candidates = referenceCandidates(path);
     const patterns = candidates.map(inlineReferencePattern);
     const sources = [];
@@ -150,9 +176,9 @@ export function findStateReferenceSources(view, path, historyLimit = DEFAULT_HIS
                 return;
         }
     };
-    for (const scope of ["global", "cwd", "session"]) {
+    for (const scope of queryOwners(view)) {
         const state = readTemporalView(view, 0, scope, historyLimit);
-        for (const plane of ["artifacts", "contract", "working", "intents", "lazy"]) {
+        for (const plane of ["artifacts", "strategy", "tactics", "intents", "lazy", ...Object.keys(view.scopes[scope]?.modules ?? {})]) {
             const value = state[plane];
             if (value !== undefined)
                 visit(value, scope, `${scope}.${plane}`);
@@ -196,15 +222,28 @@ function patchAtPath(view, root, selectors, path, historyLimit) {
     const rootQuery = parseStateReadPath(root, historyLimit);
     if (rootQuery.kind !== "state")
         throw new Error("Patch projection requires a state path");
+    assertQueryScope(view, rootQuery.scope);
+    if (Object.hasOwn(view, "selection") || Object.hasOwn(view, "causalBasis"))
+        validateSelectedTemporalState(view, historyLimit);
     const boundary = view.lineage.at(-1 - rootQuery.offset);
     if (!boundary)
         throw new Error("Requested history predates the proven temporal origin");
     let patch = {};
     if (rootQuery.scope) {
-        patch = projectSemanticPatch((view.scopes[rootQuery.scope].patches.find((record) => record.transition.id === boundary.id)?.patch ?? {}));
+        const stream = queryStream(view, rootQuery.scope, historyLimit);
+        const record = stream.patches.find((record) => record.transition.id === boundary.id);
+        if (Object.hasOwn(view, "selection") && !record && stream.checkpoint.through.id === boundary.id && boundary.parent !== null) {
+            throw new Error(`Requested ${rootQuery.scope} patch predates retained hot history`);
+        }
+        patch = projectSemanticPatch((record?.patch ?? {}), retainedQueryModules(view, rootQuery.scope));
     }
     else {
         const before = view.lineage.at(-2 - rootQuery.offset);
+        if (Object.hasOwn(view, "selection") && !before && boundary.parent !== null && queryOwners(view).some(scope => {
+            const stream = view.scopes[scope];
+            return stream.checkpoint.through.position >= boundary.position || stream.patches.some(record => record.transition.id === boundary.id);
+        }))
+            throw new Error("Requested effective patch predates retained hot history");
         if (before) {
             const current = readTemporalView(view, rootQuery.offset, undefined, historyLimit);
             const previous = readTemporalView(view, rootQuery.offset + 1, undefined, historyLimit);
@@ -241,7 +280,7 @@ function patchAtPath(view, root, selectors, path, historyLimit) {
 function diffObjects(previous, current) {
     if (!isObject(previous) || !isObject(current))
         return structuredClone(current);
-    const patch = {};
+    const patch = Object.create(null);
     for (const key of new Set([...Object.keys(previous), ...Object.keys(current)])) {
         if (!Object.hasOwn(current, key))
             patch[key] = null;
@@ -256,6 +295,7 @@ function diffObjects(previous, current) {
 export function readProjectedState(view, paths, projection = "value", historyLimit = DEFAULT_HISTORY_LIMIT) {
     if (paths.length === 0)
         throw new Error("read_state requires at least one path");
+    queryOwners(view);
     if (projection === "patch") {
         const patches = paths.map((path) => {
             const { root, selectors } = parseValuePath(path);
@@ -271,9 +311,9 @@ export function readProjectedState(view, paths, projection = "value", historyLim
                 throw new Error("Value and keys projections require a state path");
             const readsLazy = selectors[0]?.kind === "key" && selectors[0].key === "lazy";
             const raw = readTemporalView(view, query.offset, query.scope, historyLimit);
-            const state = readsLazy ? raw : projectStateForRead(raw);
+            const state = readsLazy ? raw : projectStateForRead(raw, {}, retainedQueryModules(view, query.scope));
             const field = selectors.length === 1 && selectors[0]?.kind === "key" ? selectors[0].key : undefined;
-            if (projection === "value" && field !== undefined && Object.hasOwn(emptyState(), field) && !Object.hasOwn(state, field))
+            if (projection === "value" && field !== undefined && (Object.hasOwn(emptyState(), field) || /^x_[a-z][a-z0-9_]*$/.test(field)) && !Object.hasOwn(state, field))
                 return { value: null };
             return projectValue(selectValue(state, selectors, path), projection);
         }

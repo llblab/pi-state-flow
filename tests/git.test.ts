@@ -300,7 +300,7 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 	const publish = (generation: number) => {
 		const before = a.states();
 		const next = structuredClone(before);
-		for (const scope of ["global", "cwd", "session"] as const) next[scope].working.generation = generation;
+		for (const scope of ["global", "cwd", "session"] as const) next[scope].tactics.generation = generation;
 		snapshot.meta.step++;
 		a.publish(snapshot, true, createAcceptedTransition(before, next));
 	};
@@ -363,7 +363,7 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 	const result = messages.at(-1);
 	assert.equal(result.phase, "complete");
 	assert.deepEqual(result.lockedCommands, [], "no Git command may execute under the backup's canonical lock");
-	assert.equal(a.read().working.generation, 2);
+	assert.equal(a.read().tactics.generation, 2);
 	for (const file of capturedAfter) if (file.bytes) assert.deepEqual(readFileSync(file.path), file.bytes);
 	assert.equal(git(root, "ls-files", "--stage", "-z", "--", "notes.txt"), callerIndex);
 	assert.equal(readFileSync(join(root, "notes.txt"), "utf8"), "unstaged caller version\n");
@@ -435,8 +435,8 @@ for (const outcome of ["accept", "cancel"] as const) test(`backup awaits a parti
 		syncBuiltinESMExports();
 		await new TemporalRuntime(cwd, "foreign", root).withPatchTransaction((tx) => {
 			const stage = stageAtomicScopePatches(tx.states, {
-				global: { working: { cohort: "foreign" } }, cwd: { working: { cohort: "new-cwd" } },
-				session: { working: { cohort: "new-session" } },
+				global: { tactics: { cohort: "foreign" } }, cwd: { tactics: { cohort: "new-cwd" } },
+				session: { tactics: { cohort: "new-session" } },
 			}, [], tx.causalBasis);
 			commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
 		});

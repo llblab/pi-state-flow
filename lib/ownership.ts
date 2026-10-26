@@ -2,7 +2,7 @@ import { isObject, type JsonObject, type JsonValue } from "./json.ts";
 import type { SemanticState, StateScope } from "./state.ts";
 
 /** Planes whose object keys an intent may own by structured reference. */
-export type OwnedPlane = "working" | "lazy";
+export type OwnedPlane = "strategy" | "tactics" | "lazy";
 
 /** One same-scope object-key target of an intent ownership reference. */
 export interface OwnedPath {
@@ -10,14 +10,14 @@ export interface OwnedPath {
 	keys: string[];
 }
 
-const OWNED_PLANES = new Set<string>(["working", "lazy"]);
+const OWNED_PLANES = new Set<string>(["strategy", "tactics", "lazy"]);
 // Same key grammar as read_state value paths; array selectors never parse.
 const OBJECT_KEY = /^[A-Za-z_$][A-Za-z0-9_$-]*$/;
 
 /**
  * Parse one structured `$ref` target as an ownership path of `scope`.
  * Cross-scope, unscoped, `effective`, historical, plane-root, array-element
- * and non-`working`/`lazy` targets are not ownership targets.
+ * and non-`strategy`/`tactics`/`lazy` targets are not ownership targets.
  */
 export function parseOwnedPath(scope: StateScope, ref: string): OwnedPath | undefined {
 	const parts = ref.split(".");
@@ -68,7 +68,7 @@ function exists(state: SemanticState, path: OwnedPath): boolean {
 
 /**
  * Compute the same-scope ownership cascade for intent keys removed between
- * `before` and `after` (the state after authored operations). A target is
+ * `before` and `after` (the normalized intent-phase view, before other writes). A target is
  * kept while any remaining intent references it, an ancestor or a descendant;
  * missing targets are skipped. The result is minimal (no target below
  * another) and deterministically ordered.
@@ -111,9 +111,9 @@ export function formatOwnedPath(scope: StateScope, path: OwnedPath): string {
 	return [scope, path.plane, ...path.keys].join(".");
 }
 
-/** Top-level `working`/`lazy` keys that at least one current intent of `scope` owns. */
+/** Top-level ownership-eligible keys referenced by current intents of `scope`. */
 export function ownedTopLevelKeys(scope: StateScope, state: SemanticState): Record<OwnedPlane, Set<string>> {
-	const owned: Record<OwnedPlane, Set<string>> = { working: new Set(), lazy: new Set() };
+	const owned: Record<OwnedPlane, Set<string>> = { strategy: new Set(), tactics: new Set(), lazy: new Set() };
 	const intents = isObject(state.intents) ? state.intents : {};
 	for (const value of Object.values(intents)) for (const path of extractOwnedPaths(scope, value)) owned[path.plane].add(path.keys[0]!);
 	return owned;

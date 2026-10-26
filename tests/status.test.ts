@@ -3,9 +3,13 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import test from "node:test";
-import { compactStatus, detailedStatus, STATUS_KEY, type StatusDiagnostics } from "../lib/status.ts";
+import * as observationFixture from "./observation-fixture.ts";
+import { retainedMemoryScopes } from "../lib/memory.ts";
+import { emptySnapshot } from "../lib/snapshot.ts";
+import { compactStatus, detailedStatus, formatScopeRevisionVector, scopeMemoryLines, STATUS_KEY, type StatusDiagnostics } from "../lib/status.ts";
 import { emptyState } from "../lib/state.ts";
 import { harness, start } from "./harness.ts";
+import { nativePolicyMarker } from "./temporal-fixture.ts";
 
 const snapshot = {
 	config: { mode: "active" as const },
@@ -19,8 +23,8 @@ function diagnostics(overrides: Partial<StatusDiagnostics> = {}): StatusDiagnost
 		cwdScopeKey: "--tmp-project--hash",
 		sessionScopeKey: "session-hash",
 		scopeStates: {
-			global: { ...emptyState(), contract: { shared: true } },
-			cwd: { ...emptyState(), working: { project: true } },
+			global: { ...emptyState(), strategy: { shared: true } },
+			cwd: { ...emptyState(), tactics: { project: true } },
 			session: sessionState,
 		},
 		recent: [],
@@ -58,7 +62,8 @@ test("failed Active is visibly blocked while inactive policies never claim an in
 
 test("a passive patch keeps the compact mode stable and exposes revisions only in detailed status", async () => {
 	const h = harness({ mode: "passive" });
-	await h.tools.get("patch_state")!.execute("passive", { global: { working: { passiveCounter: true } } }, undefined, undefined, h.ctx);
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.tools.get("patch_state")!.execute("passive", { global: { tactics: { passiveCounter: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.resolveSnapshot().config.mode, "passive");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
@@ -83,8 +88,8 @@ test("distinguishes branch diagnostics and renders only effective memory as JSON
 	assert.equal(json.split(",\n\n  \"").length, Object.keys(memory).length, "one blank line between every top-level plane");
 	assert.deepEqual(memory, {
 		artifacts: {},
-		contract: { shared: true },
-		working: { project: true },
+		strategy: { shared: true },
+		tactics: { project: true },
 		intents: {},
 		response: "Done",
 		lazy: {},
@@ -97,17 +102,17 @@ test("distinguishes branch diagnostics and renders only effective memory as JSON
 test("blank lines separate only top-level planes, leaving nested JSON intact", () => {
 	const output = detailedStatus(snapshot, diagnostics({ effectiveState: {
 		intents: { task: { first: 1, second: 2 } },
-		working: { items: [{ a: 1, b: 2 }] },
+		tactics: { items: [{ a: 1, b: 2 }] },
 	} }));
 	const json = output.split("Effective memory:\n\n")[1];
-	assert.equal(json, '{\n  "intents": {\n    "task": {\n      "first": 1,\n      "second": 2\n    }\n  },\n\n  "working": {\n    "items": [\n      {\n        "a": 1,\n        "b": 2\n      }\n    ]\n  }\n}');
-	assert.deepEqual(JSON.parse(json), { intents: { task: { first: 1, second: 2 } }, working: { items: [{ a: 1, b: 2 }] } });
+	assert.equal(json, '{\n  "intents": {\n    "task": {\n      "first": 1,\n      "second": 2\n    }\n  },\n\n  "tactics": {\n    "items": [\n      {\n        "a": 1,\n        "b": 2\n      }\n    ]\n  }\n}');
+	assert.deepEqual(JSON.parse(json), { intents: { task: { first: 1, second: 2 } }, tactics: { items: [{ a: 1, b: 2 }] } });
 });
 
 test("omits ownership boilerplate without interpreting promotion-shaped user data", () => {
 	const output = detailedStatus(snapshot, diagnostics({
 		scopeStates: {
-			global: { ...emptyState(), working: { memory_promotions: { ordinaryUserData: true } } },
+			global: { ...emptyState(), tactics: { memory_promotions: { ordinaryUserData: true } } },
 			cwd: emptyState(),
 			session: sessionState,
 		},
@@ -167,9 +172,9 @@ test("unavailable temporal state is not represented as empty materialization or 
 	assert.doesNotMatch(output, /cold Git|offsets beyond 7/);
 	assert.match(output, /Effective memory: unavailable/);
 	assert.doesNotMatch(output, /Retained patch tails:|Artifacts:|Scope revisions:/);
-	assert.doesNotMatch(output, /"artifacts"|"working"|Hot history: offsets/);
+	assert.doesNotMatch(output, /"artifacts"|"tactics"|Hot history: offsets/);
 	assert.equal(execFileSync("git", ["-C", h.repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }), before);
-	assert.deepEqual(h.entries.map(({ data }) => data), [{ mode: "off" }]);
+	assert.deepEqual(h.entries.map(({ data }) => data), [nativePolicyMarker("harness-session", "off")]);
 });
 
 test("status keeps live shared tails and full hot history after old-step tree navigation", async () => {
@@ -177,7 +182,7 @@ test("status keeps live shared tails and full hot history after old-step tree na
 	await start(h);
 	let oldEntries: any[] = [];
 	for (let n = 1; n <= 8; n++) {
-		await h.tools.get("patch_state").execute("global", { global: { working: { n } } }, undefined, undefined, h.ctx);
+		await h.tools.get("patch_state").execute("global", { global: { tactics: { n } } }, undefined, undefined, h.ctx);
 		if (n === 1) oldEntries = structuredClone(h.entries);
 	}
 	await h.commands.get("state-flow-status").handler("", h.ctx);
@@ -213,24 +218,131 @@ test("the status command neither discovers unregistered files nor reads source b
 test("detailed status reports per-scope plane sizes and intent-owned working/lazy shares without model-facing state", () => {
 	const output = detailedStatus(snapshot, diagnostics({
 		scopeStates: {
-			global: { ...emptyState(), contract: { shared: true } },
+			global: { ...emptyState(), strategy: { shared: true } },
 			cwd: { ...emptyState(),
-				intents: { task: { owns: [{ $ref: "cwd.working.draft.part" }, { $ref: "cwd.lazy.plan" }, { $ref: "session.working.free" }], uses: "$cwd.working.free" } },
-				working: { draft: { part: 1 }, free: "é" }, lazy: { plan: [1], other: 2 } },
-			session: { ...emptyState(), working: { free: true }, response: "Done" },
+				intents: { task: { owns: [{ $ref: "cwd.tactics.draft.part" }, { $ref: "cwd.lazy.plan" }, { $ref: "session.tactics.free" }], uses: "$cwd.tactics.free" } },
+				tactics: { draft: { part: 1 }, free: "é" }, lazy: { plan: [1], other: 2 } },
+			session: { ...emptyState(), tactics: { free: true }, response: "Done" },
 		},
 	}));
 	const lines = output.split("\n");
 	assert.equal('{"draft":{"part":1},"free":"é"}'.length, 31, "sizes count UTF-8 bytes, not UTF-16 units");
 	const start = lines.indexOf("Scope memory:");
 	assert.ok(start > 0 && start < lines.indexOf("Effective memory:"));
-	const cwdState = '{"task":{"owns":[{"$ref":"cwd.working.draft.part"},{"$ref":"cwd.lazy.plan"},{"$ref":"session.working.free"}],"uses":"$cwd.working.free"}}';
+	const cwdState = '{"task":{"owns":[{"$ref":"cwd.tactics.draft.part"},{"$ref":"cwd.lazy.plan"},{"$ref":"session.tactics.free"}],"uses":"$cwd.tactics.free"}}';
 	assert.deepEqual(lines.slice(start + 1, start + 4), [
-		"- global: contract 15 B",
-		`- cwd: intents ${cwdState.length} B, working 32 B, lazy 22 B; intent-owned working 1/2, lazy 1/2`,
-		"- session: working 13 B, response 6 B; intent-owned working 0/1",
+		"- global: strategy 15 B",
+		`- cwd: intents ${cwdState.length} B, tactics 32 B, lazy 22 B; intent-owned tactics 1/2, lazy 1/2`,
+		"- session: tactics 13 B, response 6 B; intent-owned tactics 0/1",
 	]);
 	assert.doesNotMatch(detailedStatus(snapshot, diagnostics({ temporal: undefined, durableStateError: "unavailable" })), /Scope memory:/);
 	const empty = { ...emptyState() };
 	assert.doesNotMatch(detailedStatus(snapshot, diagnostics({ scopeStates: { global: empty, cwd: empty, session: empty } })), /Scope memory:/);
 });
+
+{
+	const { scopes, selections, forbidden, diagnostics, memoryJson, withoutFileIO, fixture } = observationFixture;
+
+	test("selected status renders exact sparse owners/revisions across all subsets and modes, with no fabricated defaults", () => {
+		for (const selection of selections) for (const mode of ["active", "passive", "off"] as const) {
+			const input = diagnostics(selection), before = structuredClone(input);
+			const output = withoutFileIO(() => detailedStatus(emptySnapshot(mode), input));
+			assert.match(output, new RegExp(`^Selected scopes: ${selection.join(", ")}$`, "m"));
+			assert.match(output, new RegExp(`^Scope revisions: ${selection.map(scope => `${scope[0]}4`).join("")}$`, "m"));
+			assert.deepEqual(memoryJson(output), { strategy: Object.fromEntries(selection.map(scope => [scope, true])) });
+			assert.doesNotMatch(output, /undefined|artifacts|"intents"|"response"|"lazy"/);
+			for (const excluded of scopes.filter(scope => !selection.includes(scope))) {
+				assert.equal(Object.hasOwn(retainedMemoryScopes(input.scopeStates, selection), excluded), false);
+				assert.doesNotMatch(output, new RegExp(`^- ${excluded}:`, "m"));
+				if (excluded === "cwd") assert.doesNotMatch(output, /cwd-key/);
+				if (excluded === "session") assert.doesNotMatch(output, /session-key/);
+			}
+			assert.deepEqual(input, before);
+			assert.deepEqual(retainedMemoryScopes(input.scopeStates, selection), Object.fromEntries(selection.map(scope => [scope, true])));
+			const empty = diagnostics(selection, Object.fromEntries(selection.map(scope => [scope, {}])));
+			assert.deepEqual(memoryJson(detailedStatus(emptySnapshot(mode), empty)), {});
+			assert.deepEqual(retainedMemoryScopes(empty.scopeStates, selection), Object.fromEntries(selection.map(scope => [scope, false])));
+		}
+	});
+
+	test("selected status ignores stale full-owner effective overrides and disabled key/notice payload getters", () => {
+		for (const selection of selections) {
+			const input = diagnostics(selection);
+			Object.defineProperty(input, "effectiveState", { get: forbidden });
+			if (!selection.includes("cwd")) Object.defineProperty(input, "cwdScopeKey", { get: forbidden });
+			if (!selection.includes("session")) Object.defineProperty(input, "sessionScopeKey", { get: forbidden });
+			const selected = selection[0];
+			input.scopeStates[selected]!.artifacts = { "/selected-source": { description: "Registered only; no body read" } };
+			input.staleArtifacts = scopes.map(scope => selection.includes(scope)
+				? { scope, path: `/source-${scope}`, reason: "new" }
+				: { scope, get path(): never { return forbidden(); }, get reason(): never { return forbidden(); } });
+			const output = withoutFileIO(() => detailedStatus(emptySnapshot("active"), input));
+			assert.match(output, new RegExp(`Artifacts: .*pending invalidations ${selection.length}`));
+			for (const scope of scopes) assert.equal(output.includes(`[${scope}] /source-${scope} — new`), selection.includes(scope));
+		}
+	});
+
+	test("selected diagnostics refuse missing/extra owners and invalid numbers before any excluded payload is observed", () => {
+		const states = { cwd: {}, get global(): never { return forbidden(); } };
+		for (const invoke of [() => scopeMemoryLines(states, ["cwd"]), () => retainedMemoryScopes(states, ["cwd"]),
+			() => detailedStatus(emptySnapshot("active"), diagnostics(["cwd"], states))]) assert.throws(invoke, /values must match their owners exactly/);
+		assert.throws(() => retainedMemoryScopes({ cwd: {} } as any), /values must match/);
+		assert.throws(() => scopeMemoryLines({ cwd: {} }), /values must match/);
+		assert.throws(() => detailedStatus(emptySnapshot("active"), { ...diagnostics(["cwd"]), selection: undefined }), /values must match/);
+		assert.throws(() => retainedMemoryScopes({ cwd: { strategy: null } } as any, ["cwd"]), /Invalid selected/);
+		for (const invalid of [{}, { cwd: undefined }, { cwd: -1 }, { cwd: 1.5 }, { cwd: Infinity }, { cwd: NaN }, { cwd: Number.MAX_SAFE_INTEGER + 1 },
+			{ cwd: 4, get global(): never { return forbidden(); } }]) {
+			assert.throws(() => formatScopeRevisionVector(invalid as any, ["cwd"]), /Invalid State Flow selected revision vector/);
+			const input = diagnostics(["cwd"]); input.temporal!.tailCounts = invalid as any;
+			assert.throws(() => detailedStatus(emptySnapshot("active"), input), /Invalid State Flow selected tail counts/);
+		}
+		for (const invalid of [null, [], ["cwd", "cwd"], "cwd"]) assert.throws(() => detailedStatus(emptySnapshot("active"), { ...diagnostics(["global", "cwd", "session"]), selection: invalid as any }), /scopes must be/);
+		assert.equal(formatScopeRevisionVector({ cwd: 0 }, ["cwd"]), "c0");
+		assert.equal(formatScopeRevisionVector({ global: 7, session: 4 }, ["session", "global"]), "g7s4");
+		assert.equal(formatScopeRevisionVector({ global: 1, cwd: 2, session: 3 }), "g1c2s3");
+	});
+
+	test("unavailable diagnostics do not observe any semantic/vector/notice body or invent zero history", () => {
+		const input = diagnostics(["global"]);
+		Object.defineProperties(input, {
+			scopeStates: { get: forbidden }, effectiveState: { get: forbidden }, staleArtifacts: { get: forbidden }, recent: { get: forbidden },
+			cwdScopeKey: { get: forbidden }, sessionScopeKey: { get: forbidden },
+		});
+		input.temporal = { get head(): never { return forbidden(); }, get tailCounts(): never { return forbidden(); }, get revisions(): never { return forbidden(); }, get historyDepth(): never { return forbidden(); } };
+		input.durableStateError = "Current memory unavailable\nCause retained";
+		input.publicationError = "Write fence\nRemains";
+		const output = withoutFileIO(() => detailedStatus(emptySnapshot("active"), input));
+		assert.match(output, /^Temporal materialization unavailable: Current memory unavailable Cause retained$/m);
+		assert.match(output, /^Memory writes paused after mode change: Write fence Remains$/m);
+		assert.match(output, /Hot history: unavailable/); assert.match(output, /Effective memory: unavailable/);
+		assert.doesNotMatch(output, /Scope revisions:|Artifacts:|Scope memory:|offsets 0/);
+	});
+
+	test("compact Off and enabled mode labels remain independent of vector/state observation", () => {
+		const unreadable = new Proxy({}, { get: forbidden, ownKeys: forbidden });
+		withoutFileIO(() => {
+			assert.equal(compactStatus({ config: { mode: "off" }, get meta(): never { return forbidden(); } }, unreadable, forbidden), undefined);
+			for (const mode of ["active", "passive"] as const) assert.equal(compactStatus(emptySnapshot(mode), unreadable, (_color, text) => text), `state-flow ${mode}`);
+		});
+	});
+
+	test("footprints count only selected present planes and same-owner intent targets, preserving shared response compatibility data", () => {
+		const states = { cwd: { strategy: { chosen: true }, intents: { task: { $ref: "cwd.lazy.plan" }, foreign: { $ref: "session.lazy.foreign" } },
+			tactics: { free: "é" }, lazy: { plan: [1], free: 2 }, response: "retained old shared value" } };
+		const output = detailedStatus(emptySnapshot("active"), diagnostics(["cwd"], states));
+		assert.match(output, /intent-owned tactics 0\/1, lazy 1\/2/);
+		assert.match(output, /tactics 13 B/);
+		assert.equal(memoryJson(output).response, "retained old shared value", "observation does not delete/relocate old shared response data or imply new shared authorship");
+		assert.deepEqual(retainedMemoryScopes({ cwd: { intents: { only: true }, artifacts: {} } }, ["cwd"]), { cwd: false }, "existing strategy/tactics memory-bearing meaning is unchanged");
+	});
+
+	test("diagnostic history uses actual selected lineage, not the number of visible selected recent patches", async t => {
+		const f = await fixture(t, ["global", "session"]);
+		await f.patch({ global: { strategy: { onlyExcludedLater: true } } });
+		await f.runtime.withSelectedCurrentTransaction(["session"], (_snapshot, publish) => publish(), () => {});
+		assert.deepEqual(f.runtime.recent(), []);
+		const output = withoutFileIO(() => detailedStatus(f.snapshot(), f.observe()));
+		assert.match(output, /^Scope revisions: s0$/m); assert.match(output, /Hot history: offsets 0\.\.1/);
+		assert.deepEqual(memoryJson(output), {});
+	});
+}

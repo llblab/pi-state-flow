@@ -46,7 +46,7 @@ async function acceptRun(h: ReturnType<typeof harness>, label: string): Promise<
 	const request = { role: "user", content: [{ type: "text", text: label }], timestamp };
 	h.handlers.get("message_end")!({ message: request }, h.ctx);
 	h.entries.push({ type: "message", message: request });
-	await h.tools.get("patch_state").execute(`terminal-${label}`, { session: { working: { [label]: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state").execute(`terminal-${label}`, { session: { tactics: { [label]: true } } }, undefined, undefined, h.ctx);
 	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `Accepted ${label}` }], timestamp: timestamp + 1 };
 	h.handlers.get("message_end")!({ message }, h.ctx);
 	h.entries.push({ type: "message", message });
@@ -158,7 +158,7 @@ test("requests one owned compaction only after token-ready accepted non-bootstra
 	const requestMessage = { role: "user", content: [{ type: "text", text: "Latest request" }], timestamp };
 	h.handlers.get("message_end")!({ message: requestMessage }, h.ctx);
 	h.entries.push({ type: "message", message: requestMessage });
-	await h.tools.get("patch_state").execute("terminal", { session: { working: { compacted: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("patch_state").execute("terminal", { session: { tactics: { compacted: true } } }, undefined, undefined, h.ctx);
 	const message = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Accepted" }], timestamp: timestamp + 1 };
 	h.handlers.get("message_end")!({ message }, h.ctx);
 	h.entries.push({ type: "message", message }); // Native persistence occurs after message_end and before turn_end.
@@ -177,7 +177,7 @@ test("requests one owned compaction only after token-ready accepted non-bootstra
 	assert.equal(result.compaction.details.owner, "state-flow");
 	assert.equal(typeof result.compaction.details.boundary, "string");
 	assert.ok(result.compaction.details.boundary.length > 0);
-	assert.equal(h.readState().working.compacted, true);
+	assert.equal(h.readState().tactics.compacted, true);
 	request.onComplete({});
 	h.handlers.get("agent_settled")!({}, h.ctx);
 	assert.equal(h.compactRequests.length, 1, "settlement cannot compact the same accepted run twice");

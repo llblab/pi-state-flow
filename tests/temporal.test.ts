@@ -7,6 +7,14 @@ import { createAcceptedTransition } from "../lib/history.ts";
 import {
 	advanceTemporalState,
 	adoptTemporalStreams,
+	adoptSelectedTemporalStreams,
+	createSelectedTemporalState,
+	selectTemporalState,
+	restoreSelectedTemporalState,
+	temporalCausalWitnesses,
+	validateSelectedTemporalState,
+	readTemporalScopes,
+	type SelectedTemporalState,
 	constrainTemporalState,
 	createTemporalState,
 	readTemporalState,
@@ -17,13 +25,197 @@ import {
 	type TemporalState,
 } from "../lib/temporal.ts";
 import type { RecentScopePatch } from "../lib/history.ts";
+import { captureScopeSelection } from "../lib/selection.ts";
+
+function selectionFixture(): TemporalState {
+	let view = createTemporalState({
+		global: { strategy: { inherited: "global" }, tactics: { marker: "global-value-only" } },
+		cwd: { strategy: { inherited: "cwd" }, tactics: { marker: "cwd-value-only" } },
+		session: { strategy: { inherited: "session" }, tactics: { marker: "session-value-only" } },
+	}, "selected-origin", 100);
+	for (let index = 1; index <= 11; index++) {
+		const scope = (["global", "cwd", "session"] as const)[index % 3]!;
+		view = advanceTemporalState(view, [{ scope, patch: { tactics: { progress: index } } }], `selected-T${index}`, 100);
+	}
+	return advanceTemporalState(view, [
+		{ scope: "global", patch: { strategy: { inherited: "global-new" } } },
+		{ scope: "session", patch: { tactics: { final: true } } },
+	], "selected-atomic", 100);
+}
+
+test("all seven selected cohorts preserve exact retained overlays and revisions without excluded values or streams", () => {
+	const full = selectionFixture();
+	const order = ["global", "cwd", "session"] as const;
+	for (const limit of [0, 1, 7, 100]) for (let mask = 1; mask < 8; mask++) {
+		const source = constrainTemporalState(full, limit);
+		const before = structuredClone(source);
+		const selection = captureScopeSelection(order.filter((_, bit) => mask & (1 << bit)));
+		const view = selectTemporalState(source, selection, limit);
+		assert.deepEqual(view.lineage, source.lineage);
+		assert.deepEqual(Object.keys(view.scopes), selection);
+		assert.equal(Object.isFrozen(view.selection), true);
+		assert.deepEqual(temporalScopeRevisions(view), Object.fromEntries(selection.map((scope) => [scope, source.scopes[scope].revision])));
+		for (let offset = 0; offset < source.lineage.length; offset++) {
+			let expected: JsonObject = {};
+			for (const scope of selection) {
+				const exact = readTemporalView(source, offset, scope, limit);
+				assert.deepEqual(readTemporalView(view, offset, scope, limit), exact);
+				expected = applyPatch(expected, exact);
+			}
+			assert.deepEqual(readTemporalView(view, offset, undefined, limit), expected);
+			assert.deepEqual(Object.keys(readTemporalScopes(view, offset, limit)), selection);
+		}
+		for (const scope of order.filter((scope) => !selection.includes(scope))) {
+			assert.equal(JSON.stringify(view).includes(`${scope}-value-only`), false);
+			assert.throws(() => readTemporalView(view, 0, scope, limit), /excluded/);
+			assert.throws(() => readTemporalView(view, Math.min(1, limit), scope, limit), /excluded/);
+		}
+		assert.throws(() => validateTemporalState(view as any, limit), /selected-cohort admission/);
+		assert.deepEqual(source, before);
+	}
+});
+
+test("excluded-only steps retain their causal positions via metadata witnesses, not fake private patches", () => {
+	let full = createTemporalState({ global: {}, cwd: {}, session: {} }, "ghost-origin");
+	full = advanceTemporalState(full, [patch("global", 1)], "ghost-global");
+	full = advanceTemporalState(full, [patch("cwd", 2)], "ghost-cwd");
+	const view = selectTemporalState(full, ["session"]);
+	assert.deepEqual(view.causalBasis, [
+		{ transition: full.lineage[1], owners: ["global"] }, { transition: full.lineage[2], owners: ["cwd"] },
+	]);
+	assert.deepEqual(view.scopes.session!.patches, []);
+	assert.deepEqual(temporalScopeRevisions(view), { session: 0 });
+	for (const offset of [0, 1, 2]) assert.deepEqual(readTemporalView(view, offset), {});
+	const narrowed = constrainTemporalState(view, 1);
+	assert.deepEqual(narrowed.lineage, full.lineage.slice(-2));
+	assert.deepEqual(narrowed.causalBasis, [view.causalBasis[1]]);
+	assert.deepEqual(constrainTemporalState(view, 0).causalBasis, []);
+	assert.deepEqual(temporalScopeRevisions(narrowed), { session: 0 });
+	assert.throws(() => readTemporalView(narrowed, 2, undefined, 1), /integer from 0 to 1/);
+});
+
+test("selected witnesses fail closed on missing, forged-position, selected-owner, mixed or redundant evidence", () => {
+	const source = selectionFixture();
+	const view = selectTemporalState(source, ["session"], 100);
+	assert.ok(view.causalBasis.length > 1);
+	const mutations: ((draft: SelectedTemporalState) => void)[] = [
+		(draft) => { draft.causalBasis.shift(); },
+		(draft) => { draft.causalBasis[0]!.transition.parent = "wrong"; },
+		(draft) => { draft.causalBasis[0]!.transition.position += 1; },
+		(draft) => { draft.causalBasis[0]!.owners = ["session"]; },
+		(draft) => { draft.causalBasis[0]!.owners = ["cwd", "global"]; },
+		(draft) => { draft.causalBasis.push(structuredClone(draft.causalBasis[0]!)); },
+		(draft) => { (draft.causalBasis[0] as any).patch = { tactics: { hidden: true } }; },
+		(draft) => { delete draft.scopes.session; },
+		(draft) => { draft.scopes.global = source.scopes.global; },
+		(draft) => { draft.selection = ["session", "global"]; },
+		(draft) => { (draft as any).projectionId = "not-authority"; },
+	];
+	for (const mutate of mutations) {
+		const draft = structuredClone(view);
+		mutate(draft);
+		assert.throws(() => validateSelectedTemporalState(draft, 100));
+	}
+	const redundant = structuredClone(view);
+	redundant.causalBasis.push({ transition: structuredClone(source.lineage.at(-1)!), owners: ["global"] });
+	assert.throws(() => validateSelectedTemporalState(redundant, 100), /duplicates a selected patch/);
+	const mixed = selectTemporalState(source, ["global", "cwd"], 100);
+	const restricted = selectTemporalState(mixed, ["global"], 100);
+	assert.deepEqual(readTemporalView(restricted, 0, undefined, 100), readTemporalView(source, 0, "global", 100));
+	assert.throws(() => selectTemporalState(view, ["global"], 100), /unacquired/);
+});
+
+test("selected advancement rejects the entire disabled-owner cohort, including no-op patches, and folds only selected streams", () => {
+	let view = selectTemporalState(selectionFixture(), ["global"], 100);
+	const before = structuredClone(view);
+	assert.throws(() => advanceTemporalState(view, [patch("global", 40), { scope: "session", patch: { tactics: { absent: null } } }], "rejected", 100), /excluded/);
+	assert.deepEqual(view, before);
+	assert.throws(() => advanceTemporalState(view, [patch("global", 40)], view.lineage.at(-1)!.id, 100), /already been used/);
+	const revision = view.scopes.global!.revision;
+	view = constrainTemporalState(view, 3);
+	for (let index = 0; index < 10; index++) {
+		view = advanceTemporalState(view, [patch("global", index)], `new-selected-${index}`, 3);
+		assert.deepEqual(Object.keys(view.scopes), ["global"]);
+		assert.equal(Object.isFrozen(view.selection), true);
+		validateSelectedTemporalState(view, 3);
+	}
+	assert.equal(view.scopes.global!.revision, revision + 10);
+	assert.deepEqual(view.causalBasis, []);
+	assert.equal(advanceTemporalState(view, [patch("global", 9)], "noop", 3), view);
+	assert.deepEqual(readTemporalView(view).tactics, { marker: "global-value-only", progress: 9, value: 9 });
+	const exhausted = structuredClone(view);
+	exhausted.scopes.global!.revision = Number.MAX_SAFE_INTEGER;
+	assert.throws(() => advanceTemporalState(exhausted, [patch("global", 99)], "overflow", 3), /exhausted/);
+	assert.equal(exhausted.scopes.global!.revision, Number.MAX_SAFE_INTEGER);
+});
+
+test("selected origin/adoption requires explicit exact owners and never invents excluded streams or old history", () => {
+	const source = selectionFixture();
+	const order = ["global", "cwd", "session"] as const;
+	for (let mask = 1; mask < 8; mask++) {
+		const selection = captureScopeSelection(order.filter((_, bit) => mask & (1 << bit)));
+		const states = Object.fromEntries(selection.map((scope) => [scope, readTemporalView(source, 0, scope, 100)]));
+		const fresh = createSelectedTemporalState(states, selection, `fresh-${mask}`);
+		assert.deepEqual(Object.keys(fresh.scopes), selection);
+		assert.deepEqual(fresh.causalBasis, []);
+		assert.deepEqual(temporalScopeRevisions(fresh), Object.fromEntries(selection.map((scope) => [scope, 0])));
+		const streams = Object.fromEntries(selection.map((scope) => [scope, source.scopes[scope]]));
+		const before = structuredClone(streams);
+		const adopted = adoptSelectedTemporalStreams(streams, selection, `adopt-${mask}`, 1);
+		assert.equal(adopted.lineage.length, 1);
+		assert.deepEqual(readTemporalView(adopted, 0, undefined, 1), readTemporalView(fresh));
+		assert.deepEqual(temporalScopeRevisions(adopted), Object.fromEntries(selection.map((scope) => [scope, source.scopes[scope].revision])));
+		assert.throws(() => readTemporalView(adopted, 1, undefined, 1), /predates/);
+		assert.deepEqual(streams, before);
+	}
+	assert.throws(() => createSelectedTemporalState({}, ["cwd"], "bad"), /match their owners/);
+	assert.throws(() => adoptSelectedTemporalStreams({}, ["cwd"], "bad"), /match their owners/);
+	const extra = { global: {}, get cwd(): never { throw new Error("Excluded value must not be read"); } };
+	assert.throws(() => createSelectedTemporalState(extra, ["global"], "bad"), /match their owners/);
+	const partial = createSelectedTemporalState({ cwd: { strategy: { lower: "cwd" } } }, ["cwd"], "one");
+	const deleted = advanceTemporalState(partial, [{ scope: "cwd", patch: { strategy: { lower: null } } }], "delete");
+	assert.deepEqual(readTemporalView(deleted), { strategy: {} }, "exact empty branches survive, but disabled lower owners cannot become an implicit fallback");
+});
+
+test("accepted witness skeleton restores all subsets exactly and remains detached metadata, not body data", () => {
+	const source = selectionFixture();
+	const witnesses = temporalCausalWitnesses(source, 100);
+	assert.equal(witnesses.length, source.lineage.length - 1);
+	assert.deepEqual(witnesses.at(-1)!.owners, ["global", "session"]);
+	const order = ["global", "cwd", "session"] as const;
+	for (let mask = 1; mask < 8; mask++) {
+		const selection = captureScopeSelection(order.filter((_, bit) => mask & (1 << bit)));
+		const streams = Object.fromEntries(selection.map((scope) => [scope, source.scopes[scope]]));
+		const restored = restoreSelectedTemporalState(streams, selection, source.lineage, witnesses, 100);
+		assert.deepEqual(restored, selectTemporalState(source, selection, 100));
+		assert.deepEqual(temporalCausalWitnesses(restored, 100).map(({ transition }) => transition), source.lineage.slice(1));
+		assert.equal(Object.isFrozen(restored.selection), true);
+		assert.notEqual(restored.scopes[selection[0]], streams[selection[0]]);
+	}
+	witnesses[0]!.transition.id = "mutated-local-metadata";
+	assert.equal(source.lineage[1]!.id, "selected-T1");
+});
+
+test("restoration never credits bare lineage or an absent selected-owner record to a fabricated witness", () => {
+	const source = selectionFixture();
+	const streams = { session: source.scopes.session };
+	assert.throws(() => restoreSelectedTemporalState(streams, ["session"], source.lineage, [], 100), /no accepted owner witness/);
+	const witnesses = temporalCausalWitnesses(source, 100);
+	witnesses[0]!.owners = ["session"];
+	assert.throws(() => restoreSelectedTemporalState(streams, ["session"], source.lineage, witnesses, 100), /missing its selected owner patch/);
+	assert.throws(() => restoreSelectedTemporalState(streams, ["session"], source.lineage, null, 100), /witness array/);
+	const repeated = temporalCausalWitnesses(source, 100);
+	repeated.push(repeated[0]!);
+	assert.throws(() => restoreSelectedTemporalState(streams, ["session"], source.lineage, repeated, 100), /match its lineage/);
+	assert.deepEqual(readTemporalView(restoreSelectedTemporalState(source.scopes, ["global", "cwd", "session"], source.lineage, [], 100), 0, undefined, 100), readTemporalView(source, 0, undefined, 100));
+});
 
 function initial(): ScopedStates {
 	return { global: emptyState(), cwd: emptyState(), session: emptyState() };
 }
 
 function patch(scope: StateScope, value: number): RecentScopePatch {
-	return { scope, patch: { working: { value } } };
+	return { scope, patch: { tactics: { value } } };
 }
 
 function expectHistory(view: TemporalState, snapshots: ScopedStates[]): void {
@@ -56,7 +248,7 @@ test("sparse scopes ignore empty responses and unknown fields without rewriting 
 		assert.deepEqual(readTemporalState(view, 0, undefined, historyLimit).lazy, { shared: 1, project: 2 });
 		assert.equal(readTemporalState(view, 0, undefined, historyLimit).extra, undefined);
 		assert.deepEqual(view.scopes.global.checkpoint.state.extra, { global: true });
-		view = advanceTemporalState(view, [{ scope: "session", patch: { working: { value: 1 } } }], "T3", historyLimit);
+		view = advanceTemporalState(view, [{ scope: "session", patch: { tactics: { value: 1 } } }], "T3", historyLimit);
 		assert.equal(Object.hasOwn(view.scopes.session.checkpoint.state, "intents"), false);
 		if (historyLimit > 0) {
 			assert.equal(readTemporalState(view, 2, undefined, historyLimit).response, "legacy lower answer");
@@ -67,26 +259,26 @@ test("sparse scopes ignore empty responses and unknown fields without rewriting 
 
 test("zero patches preserve the initial materialization without fabricating a past", () => {
 	const states = initial();
-	states.session.working = { retained: [1, 2], nested: { fact: true } };
+	states.session.tactics = { retained: [1, 2], nested: { fact: true } };
 	const view = createTemporalState(states, "migration-base");
 	expectHistory(view, [states]);
 	assert.equal(view.scopes.session.checkpoint.through.id, "migration-base");
 	assert.deepEqual(view.scopes.session.patches, []);
 	assert.throws(() => readTemporalState(view, 1), /proven temporal origin/);
-	states.session.working.retained = [];
-	assert.deepEqual(readTemporalState(view).working.retained, [1, 2]);
+	states.session.tactics.retained = [];
+	assert.deepEqual(readTemporalState(view).tactics.retained, [1, 2]);
 });
 
 test("one patch shifts current to history and reads return detached materializations", () => {
 	const view = createTemporalState(initial(), "base");
 	const next = advanceTemporalState(view, [patch("session", 1)], "T1");
 	assert.deepEqual(readTemporalState(next, 1), readTemporalState(view));
-	assert.deepEqual(readTemporalState(next).working, { value: 1 });
+	assert.deepEqual(readTemporalState(next).tactics, { value: 1 });
 	assert.equal(next.lineage.at(-1)!.parent, "base");
 	assert.deepEqual(view.scopes.session.patches, []);
 	const returned = readTemporalState(next);
-	returned.working.value = 99;
-	assert.equal(readTemporalState(next).working.value, 1);
+	returned.tactics.value = 99;
+	assert.equal(readTemporalState(next).tactics.value, 1);
 });
 
 test("a caller-supplied history limit controls folding, validation, and reads", () => {
@@ -98,13 +290,13 @@ test("a caller-supplied history limit controls folding, validation, and reads", 
 	assert.equal(view.lineage.length, historyLimit + 1);
 	assert.deepEqual(view.scopes.session.patches.map((record) => record.transition.id), ["T4", "T5", "T6"]);
 	assert.equal(view.scopes.session.checkpoint.through.id, "T3");
-	assert.equal(readTemporalState(view, historyLimit, "session", historyLimit).working.value, 3);
+	assert.equal(readTemporalState(view, historyLimit, "session", historyLimit).tactics.value, 3);
 	assert.throws(() => readTemporalState(view, historyLimit + 1, undefined, historyLimit), /integer from 0 to 3/);
 	assert.throws(() => validateTemporalState(view, 2), /configured history limit 2|between one and 3 boundaries/);
 	const reduced = constrainTemporalState(view, 2);
 	assert.equal(reduced.lineage.length, 3);
 	assert.equal(reduced.scopes.session.patches.length, 2);
-	assert.equal(readTemporalState(reduced, 2, "session", 2).working.value, 4);
+	assert.equal(readTemporalState(reduced, 2, "session", 2).tactics.value, 4);
 });
 
 test("zero history folds every accepted transition directly into the checkpoint", () => {
@@ -116,8 +308,8 @@ test("zero history folds every accepted transition directly into the checkpoint"
 	assert.deepEqual(view.scopes.session.patches, []);
 	assert.deepEqual(view.scopes.cwd.patches, []);
 	assert.deepEqual(temporalScopeRevisions(view), { global: 0, cwd: 1, session: 1 });
-	assert.equal(readTemporalState(view, 0, "session", 0).working.value, 1);
-	assert.equal(readTemporalState(view, 0, "cwd", 0).working.value, 2);
+	assert.equal(readTemporalState(view, 0, "session", 0).tactics.value, 1);
+	assert.equal(readTemporalState(view, 0, "cwd", 0).tactics.value, 2);
 	assert.throws(() => readTemporalState(view, 1, undefined, 0), /integer from 0 to 0/);
 	assert.doesNotThrow(() => validateTemporalState(view, 0));
 });
@@ -128,7 +320,7 @@ test("seven patches and repeated eighth-patch folding preserve every hot state e
 	for (let index = 1; index <= 40; index++) {
 		view = advanceTemporalState(view, [patch("session", index)], `T${index}`);
 		const states = structuredClone(snapshots.at(-1)!);
-		states.session.working.value = index;
+		states.session.tactics.value = index;
 		snapshots.push(states);
 		expectHistory(view, snapshots);
 		const stream = view.scopes.session;
@@ -138,7 +330,7 @@ test("seven patches and repeated eighth-patch folding preserve every hot state e
 		if (index === 7) assert.deepEqual(stream.checkpoint.state, initial().session);
 		if (index === 8) {
 			assert.equal(stream.checkpoint.through.id, "T1");
-			assert.deepEqual(stream.checkpoint.state.working, { value: 1 });
+			assert.deepEqual(stream.checkpoint.state.tactics, { value: 1 });
 			assert.deepEqual(stream.patches.map((record) => record.transition.id), ["T2", "T3", "T4", "T5", "T6", "T7", "T8"]);
 		}
 	}
@@ -146,26 +338,26 @@ test("seven patches and repeated eighth-patch folding preserve every hot state e
 
 test("sparse scope patches use effective boundaries, not each scope's mutation count", () => {
 	const states = initial();
-	states.global.working = { global: "G" };
-	states.cwd.working = { cwd: "C" };
-	states.session.working = { session: "S" };
+	states.global.tactics = { global: "G" };
+	states.cwd.tactics = { cwd: "C" };
+	states.session.tactics = { session: "S" };
 	let view = createTemporalState(states, "T181");
 	view = advanceTemporalState(view, [
-		{ scope: "cwd", patch: { working: { cwd: "C'" } } },
-		{ scope: "session", patch: { working: { session: "S'" } } },
+		{ scope: "cwd", patch: { tactics: { cwd: "C'" } } },
+		{ scope: "session", patch: { tactics: { session: "S'" } } },
 	], "T182");
 	view = advanceTemporalState(view, [
-		{ scope: "global", patch: { working: { global: "G'" } } },
-		{ scope: "session", patch: { working: { session: "S''" } } },
+		{ scope: "global", patch: { tactics: { global: "G'" } } },
+		{ scope: "session", patch: { tactics: { session: "S''" } } },
 	], "T183");
 	view = advanceTemporalState(view, [
-		{ scope: "cwd", patch: { working: { cwd: "C''" } } },
-		{ scope: "session", patch: { working: { session: "S'''" } } },
+		{ scope: "cwd", patch: { tactics: { cwd: "C''" } } },
+		{ scope: "session", patch: { tactics: { session: "S'''" } } },
 	], "T184");
-	assert.deepEqual(readTemporalState(view, 1).working, { global: "G'", cwd: "C'", session: "S''" });
-	assert.deepEqual(readTemporalState(view, 1, "global").working, { global: "G'" });
-	assert.deepEqual(readTemporalState(view, 1, "cwd").working, { cwd: "C'" });
-	assert.deepEqual(readTemporalState(view, 2, "cwd").working, { cwd: "C'" });
+	assert.deepEqual(readTemporalState(view, 1).tactics, { global: "G'", cwd: "C'", session: "S''" });
+	assert.deepEqual(readTemporalState(view, 1, "global").tactics, { global: "G'" });
+	assert.deepEqual(readTemporalState(view, 1, "cwd").tactics, { cwd: "C'" });
+	assert.deepEqual(readTemporalState(view, 2, "cwd").tactics, { cwd: "C'" });
 	assert.deepEqual(view.scopes.cwd.patches.at(-1)!.transition, view.scopes.session.patches.at(-1)!.transition);
 	assert.equal(view.scopes.global.patches.at(-1)!.transition.id, "T183");
 	assert.deepEqual(temporalScopeRevisions(view), { global: 1, cwd: 2, session: 3 });
@@ -173,26 +365,26 @@ test("sparse scope patches use effective boundaries, not each scope's mutation c
 
 test("mixed sparse changes and deletion overlays match an independent snapshot oracle through compaction", () => {
 	const states = initial();
-	states.global.working = { inherited: { value: "global", stable: true } };
-	states.cwd.working = { inherited: { value: "cwd" } };
-	states.session.working = { inherited: { value: "session" } };
+	states.global.tactics = { inherited: { value: "global", stable: true } };
+	states.cwd.tactics = { inherited: { value: "cwd" } };
+	states.session.tactics = { inherited: { value: "session" } };
 	let view = createTemporalState(states, "base");
 	const snapshots = [states];
 	for (let index = 1; index <= 50; index++) {
 		const changes: RecentScopePatch[] = [patch("session", index)];
 		if (index % 3 === 0) changes.push(patch("cwd", index));
 		if (index % 11 === 0) changes.push(patch("global", index));
-		if (index === 1) changes[0]!.patch.working!.inherited = { value: null };
-		if (index === 3) changes[1]!.patch.working!.inherited = { value: null };
+		if (index === 1) changes[0]!.patch.tactics!.inherited = { value: null };
+		if (index === 3) changes[1]!.patch.tactics!.inherited = { value: null };
 		const expected = structuredClone(snapshots.at(-1)!);
 		for (const change of changes) expected[change.scope] = applyPatch(expected[change.scope], change.patch as JsonObject) as ScopedStates[StateScope];
 		snapshots.push(expected);
 		view = advanceTemporalState(view, changes, `T${index}`);
 		expectHistory(view, snapshots);
 		if (index === 3) {
-			assert.deepEqual(readTemporalState(view).working.inherited, { value: "global", stable: true });
-			assert.deepEqual(readTemporalState(view, 1).working.inherited, { value: "cwd", stable: true });
-			assert.deepEqual(readTemporalState(view, 3).working.inherited, { value: "session", stable: true });
+			assert.deepEqual(readTemporalState(view).tactics.inherited, { value: "global", stable: true });
+			assert.deepEqual(readTemporalState(view, 1).tactics.inherited, { value: "cwd", stable: true });
+			assert.deepEqual(readTemporalState(view, 3).tactics.inherited, { value: "session", stable: true });
 		}
 	}
 	assert.ok(view.scopes.global.checkpoint.through.position < view.lineage[0]!.position);
@@ -227,8 +419,8 @@ test("fork identity and explicit parent links prevent equal-position branch subs
 	const right = advanceTemporalState(base, [patch("cwd", 2)], "right");
 	assert.equal(left.lineage.at(-1)!.position, right.lineage.at(-1)!.position);
 	assert.notEqual(left.lineage.at(-1)!.id, right.lineage.at(-1)!.id);
-	assert.equal(readTemporalState(left).working.value, 1);
-	assert.equal(readTemporalState(right).working.value, 2);
+	assert.equal(readTemporalState(left).tactics.value, 1);
+	assert.equal(readTemporalState(right).tactics.value, 2);
 	const mixed = structuredClone(left);
 	mixed.scopes.cwd = right.scopes.cwd;
 	assert.throws(() => readTemporalState(mixed), /Conflicting.*lineage/);
@@ -277,7 +469,7 @@ test("scope lineage refuses contradictory checkpoint or tail identities before s
 test("invalid semantic tails fail closed rather than being truncated or mutating the basis", () => {
 	const base = createTemporalState(initial(), "base");
 	assert.throws(() => advanceTemporalState(base, [patch("cwd", 1), patch("cwd", 2)], "duplicate"), /Duplicate/);
-	assert.throws(() => advanceTemporalState(base, [{ scope: "session", patch: { working: { invalid: [null] } } }], "null"), /semantic state/);
+	assert.throws(() => advanceTemporalState(base, [{ scope: "session", patch: { tactics: { invalid: [null] } } }], "null"), /semantic state/);
 	assert.throws(() => advanceTemporalState(base, [{ scope: "global", patch: { response: "forged" } }], "response"), /session response/);
 	assert.deepEqual(readTemporalState(base), emptyState());
 	const next = advanceTemporalState(base, [patch("cwd", 1)], "T1");
@@ -292,7 +484,7 @@ test("invalid semantic tails fail closed rather than being truncated or mutating
 test("intent ownership cascades replay from stored explicit deletions through hot history and folding", () => {
 	for (const historyLimit of [0, 2]) {
 		const base: ScopedStates = initial();
-		base.cwd = { ...emptyState(), working: { step: 1, keep: 2 }, lazy: { plan: { a: 1 } } };
+		base.cwd = { ...emptyState(), tactics: { step: 1, keep: 2 }, lazy: { plan: { a: 1 } } };
 		let view = createTemporalState(base, "origin", historyLimit);
 		let states = base as ScopedSemanticStates;
 		const snapshots: ScopedSemanticStates[] = [structuredClone(states)];
@@ -304,19 +496,19 @@ test("intent ownership cascades replay from stored explicit deletions through ho
 			snapshots.push(structuredClone(states));
 			return accepted;
 		};
-		accept({ cwd: { intents: { task: { owns: [{ $ref: "cwd.working.step" }, { $ref: "cwd.lazy.plan" }] } } } }, "T1");
+		accept({ cwd: { intents: { task: { owns: [{ $ref: "cwd.tactics.step" }, { $ref: "cwd.lazy.plan" }] } } } }, "T1");
 		const closed = accept({ cwd: { intents: { task: null } } }, "T2");
-		assert.deepEqual(closed.transitions, [{ scope: "cwd", patch: { intents: null, working: { step: null }, lazy: null } }]);
+		assert.deepEqual(closed.transitions, [{ scope: "cwd", patch: { intents: null, tactics: { step: null }, lazy: null } }]);
 		assert.deepEqual(readTemporalState(view, 0, "cwd", historyLimit), overlayStates(snapshots.at(-1)!.cwd));
-		assert.deepEqual(readTemporalView(view, 0, "cwd", historyLimit).working, { keep: 2 });
+		assert.deepEqual(readTemporalView(view, 0, "cwd", historyLimit).tactics, { keep: 2 });
 		if (historyLimit > 0) {
 			assert.deepEqual(readTemporalState(view, 1, "cwd", historyLimit), overlayStates(snapshots.at(-2)!.cwd));
 			assert.deepEqual(view.scopes.cwd.patches.at(-1)!.patch, closed.transitions[0]!.patch);
 		}
 		// Replay applies stored deletions verbatim; it never re-derives ownership from references.
 		const stored = closed.transitions[0]!.patch as JsonObject;
-		const unrelated = { intents: { other: { $ref: "cwd.working.step" } }, working: { step: "foreign" }, lazy: { plan: "foreign" } };
-		assert.deepEqual(applyPatch(unrelated, stored), { working: {} }, "accepted plane deletions replay verbatim, not as newly authored intent ownership");
+		const unrelated = { intents: { other: { $ref: "cwd.tactics.step" } }, tactics: { step: "foreign" }, lazy: { plan: "foreign" } };
+		assert.deepEqual(applyPatch(unrelated, stored), { tactics: {} }, "accepted plane deletions replay verbatim, not as newly authored intent ownership");
 		const reloaded = createTemporalState(snapshots.at(-1)! as ScopedStates, "reload", historyLimit);
 		assert.deepEqual(readTemporalView(reloaded, 0, "cwd", historyLimit), readTemporalView(view, 0, "cwd", historyLimit));
 	}

@@ -76,3 +76,16 @@ test("step-level rehydration is deterministic, bounded, and performs no source I
 	assert.deepEqual(plan.deferred, [{ path: "/b.md", reason: "source-byte-limit" }]);
 	assert.deepEqual(routes, before);
 });
+
+test("rehydration filters disabled routes before sorting or metadata/hash/budget reads and keeps selected source ownership and bootstrap deferrals", () => {
+	const disabled = { scope: "global", compiler: "artifact-v1", intent: "routine", get source(): never { return assert.fail("excluded rehydration source"); }, get metadata(): never { return assert.fail("excluded metadata"); }, get sourceBytes(): never { return assert.fail("excluded source bytes"); } } as RehydrationRoute;
+	const current: RehydrationRoute = { scope: "cwd", source: { path: "/selected.txt", scope: "cwd", sourceFingerprint: { size: 1, mtimeNs: "1" } }, metadata: { description: "Selected" }, compiler: "artifact-v1", intent: "routine", sourceBytes: 1 };
+	const plan = planKnowledgeRehydration("step", [disabled, current], { selection: ["cwd"], maxReads: 1 });
+	assert.deepEqual(plan.reads.map(read => [read.path, read.scope]), [["/selected.txt", "cwd"]]);
+	assert.deepEqual(plan.materialized, []); assert.deepEqual(plan.deferred, []);
+	const session = { ...current, scope: "session", source: { path: "/selected-session.txt", scope: "session" }, get metadata(): never { return assert.fail("new bootstrap Session metadata"); } } as RehydrationRoute;
+	assert.deepEqual(planKnowledgeRehydration("new-bootstrap", [disabled, session], { selection: ["session"] }).deferred, [{ path: "/selected-session.txt", reason: "new-session-scope" }]);
+	assert.throws(() => planKnowledgeRehydration("step", [{ ...current, source: { path: "/foreign", scope: "global" } }], { selection: ["cwd"] }), /owner does not match/);
+	assert.throws(() => planKnowledgeRehydration("step", [disabled], { selection: [] as any }), /scopes/);
+	assert.deepEqual(planKnowledgeRehydration("step", [disabled], { selection: ["cwd"] }), { reads: [], materialized: [], deferred: [] });
+});

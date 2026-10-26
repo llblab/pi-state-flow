@@ -34,4 +34,26 @@ BENCH_PREFIX=1 BENCH_REPORT_PATH=/tmp/state-flow-prefix.json node --experimental
 
 Its v3 `trajectory` entries cover active mode, ordinary passive memory and the passive Stop handoff. Each entry's `promptPrefixRuns` records six exact native reads before the first patch and two more before the second, using a 20 KiB source body. Inferences include their next `action`, `contextBytes`, `sharedPrefixBytes` and `retainedReadBytes`; completed read and accepted barrier counts are checked outside the provider. Each run's `reconciliationTailBytes` records zero for a predictable session patch and the minimal nonzero tail after an independently injected Global change; both keep the native prefix intact. No prefix-ratio threshold asserts correctness or provider cache hits. Without `BENCH_PREFIX=1` this extra workload is skipped.
 
+## Semantic-memory trial calibration
+
+`semantic-memory.mjs` is a separate, opt-in M0 evaluation runner. It uses unmodified State Flow source, isolated temporary stores, and controlled in-memory task tools. It does not modify the normal tests, load production memory, expose filesystem/shell tools to the trial model, or discover credentials. See the [trial specification](../docs/semantic-memory-evaluation.md) for the fixed four-run corpus, rubric, and execution gate.
+
+Run offline scripted calibration from the repository root:
+
+```bash
+PI_OFFLINE=1 PI_TELEMETRY=0 node --experimental-strip-types benchmarks/semantic-memory.mjs --calibrate
+```
+
+Optional `--report /absolute/new-file.json` writes an exclusive new report file; existing files are never overwritten. Default calibration uses eight stream admissions per user run, a 2,048-token output limit per request, and a 20-second per-run timeout. It asserts 11 native and 15 each Passive/Active admissions, real task-tool completion, actual current response isolation, intent-owned closure, context boundaries, and temporary-directory cleanup. All 41 provider calls are faux/scripted, not live behavioral observations or provider billing evidence.
+
+The negative budget witness must exit nonzero while returning an `incomplete` report and cleaning its temporary stores:
+
+```bash
+PI_OFFLINE=1 PI_TELEMETRY=0 node --experimental-strip-types benchmarks/semantic-memory.mjs --calibrate --request-limit 1
+```
+
+There is no live CLI switch. An explicitly authorized SDK caller can import `runSemanticTrial` and supply `modelRuntime`, `model`, `thinkingLevel`, positive `limits: { requestsPerRun, outputTokensPerRequest, timeoutMs }`, and `allowLive: true`. This opt-in library function never obtains credentials itself. Pin and authorize that route and its limits before M0.4b execution; the calibration command cannot establish readiness. The returned report contains fixture checks and evidence for review, not automatically judged plan quality; `rubricStatus` stays `unreviewed` until the separate semantic rubric is assessed.
+
+## Performance report strategy
+
 These workloads use the source-bound default `historyLimit`. `BENCH_PHASE` and the final `BENCH_RESULT` JSON are emitted on stdout. Set `BENCH_REPORT_PATH` to also write the final JSON report to that exact file (its parent directory must exist); use this file for machine consumption because test runners can split long stdout lines. The report file is overwritten, including for failed workloads that reach final reporting. Version 3 lifecycle entries contain non-overlapping `promptPrefixRuns` for every completed user run up to that checkpoint; post-resume entries contain one per isolated probe. Each run records serialized model-message bytes for every inference, its longest common UTF-8 byte prefix with the preceding inference (`null` for the first), successful `patch_state` barriers, and the JSON-value byte sizes of the current native user text and matching State Flow `specification` (`null` for native Pi). This is a request-shape proxy, not provider cache or token accounting. See the [performance guide](../docs/performance.md) for metric definitions, the current cost model and evidence limits. Workload fingerprints include source paths, so moving files changes their identity; compare reports only when their recorded inputs match.

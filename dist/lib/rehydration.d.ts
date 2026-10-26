@@ -1,6 +1,7 @@
 import { type ArtifactAcquisitionIntent, type ArtifactAcquisitionReason } from "./acquisition.ts";
 import type { ArtifactSourceIdentity } from "./artifact.ts";
 import type { StateScope } from "./state.ts";
+import { type ScopeSelection } from "./selection.ts";
 export type RehydrationPhase = "resume-bootstrap" | "new-bootstrap" | "step";
 export interface RehydrationRoute {
     scope: StateScope;
@@ -27,6 +28,8 @@ export interface RehydrationPlan {
     }>;
 }
 export interface RehydrationOptions {
+    /** Legacy callers default to all owners; selected callers must pass their captured concrete policy. */
+    selection?: ScopeSelection;
     maxReads?: number;
     maxSourceBytes?: number;
 }

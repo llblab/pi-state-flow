@@ -4,24 +4,31 @@
 
 State Flow is a Pi extension that materializes compact, scoped semantic state across agent runs while preserving Pi's native session trace and tool loop. It is inspired by SKILL.state but uses its own temporal model, storage plane, artifact compiler and publication lifecycle.
 
-The extension owns durable memory while enabled. Global semantic memory is always available; there are no ownership or global-memory feature switches.
+The extension owns durable memory while enabled. The native bridge admits all seven nonempty captured selections through one selected runtime; missing configured scopes retains all three. Scope participation is neither an authority ranking nor an acquisition grant. Native policy DATA, accepted storage, model requests and independently owned controls retain distinct proof boundaries. Existing mode commands bind optional scope tokens to these same owners; mode-only Telegram actions preserve the captured choice. See [public command boundary](scope-selection-contract.md#public-mode-command-scope-overrides) and [retained native integration](scope-selection-contract.md#retained-native-seven-selection-integration).
 
 ## Composition
 
 `index.ts` is the minimal public export boundary. `lib/extension.ts` is the Pi lifecycle composition root: it wires configuration and domain capabilities into commands, tools, event subscriptions and handlers, and delegates imperative mechanics to their owning modules. Each independent module under `lib/` owns one concern and is mirrored by tests:
 
 - `state`, `json`: semantic shape, validation, recursive overlay and deletion.
-- `temporal`, `history`: causal boundaries, checkpoint/tail folding and hot history.
-- `durable`, `storage`, `git`: exact canonical files, file-cohort CAS, and optional settled-turn backup, including its due/permitted/cancellation state (`SettledTurnBackup`).
-- `snapshot`, `session`, `runtime`, `recovery`, `episode`: Pi branch/runtime lifecycle, branch traversal, and passive-boundary interpretation.
-- `transition`, `ownership`, `context`: inference barriers, turn resolution, intent-ownership cascades, passive projection, and response reconciliation.
+- `config`: read-only load-time repository defaults, including immutable configured scope data. [Native capture](scope-selection-contract.md#configured-scope-defaults-and-native-capture) freezes defaults once into branch policy, without itself granting memory authority.
+- `selection`: pure immutable nonempty owner selections and command-token parsing. Value capture grants no mode, lifecycle authority, I/O or storage participation by itself; see the [selection boundary](scope-selection-contract.md#internal-value-boundary-and-lifecycle-encoding-direction).
+- `temporal`, `history`: causal boundaries, checkpoint/tail folding and hot history. Internal [selected temporal algebra](scope-selection-contract.md#selected-temporal-value-algebra) retains only participating streams and metadata-only excluded-step witnesses; algebra alone grants no native storage/runtime admission.
+- `migration`: temporary pure legacy-to-target conversion, root-name guards, reference translation and serialized preflight. `durable` consumes it before known-field filtering; `storage` alone owns backup and guarded conversion publication. It does not own I/O or lifecycle; see the [migration boundary](semantic-compatibility-decision.md#serialized-owner-cohort-preflight).
+- `durable`, `storage`, `git`: exact canonical files, file-cohort CAS, and optional settled-turn backup, including its due/permitted/cancellation state (`SettledTurnBackup`). Internal [selected admission](scope-selection-contract.md#read-only-selected-cohort-durable-admission) binds v2 owner witnesses and separates exact byte dependencies from private/layout presence. [Selected publication](scope-selection-contract.md#guarded-selected-cohort-publication) derives replay/witnesses and backs up lifecycle upgrades; the [explicit origin boundary](scope-selection-contract.md#explicit-new-shared-only-origins) and [first Session acquisition](scope-selection-contract.md#explicit-first-session-acquisition) can create/adopt selected storage; [child-owned fork deferral](scope-selection-contract.md#child-owned-selected-fork-deferral) avoids parent reads while Session is excluded. The [selected parent-current copy boundary](scope-selection-contract.md#selected-parent-current-private-copy) accepts independently proven eager/deferred copies; [selected current-session acceptance](scope-selection-contract.md#selected-current-session-acceptance) preserves aligned history or admits current shared drift. The [private reselection basis](scope-selection-contract.md#acquired-private-reselection-proof-boundary) retains acquired Session authority independently across shared-only origins without opening excluded private bodies; missing/false proof never becomes empty or foreign memory. [Accepted selected cache/reads](scope-selection-contract.md#accepted-selected-runtime-cache-and-reads) now use one discriminated memory slot. [Selected semantic transactions](scope-selection-contract.md#selected-semantic-transactions-and-provenance-publication) reuse one staging/commit and successor planner with guarded targets and opaque-preserving metadata deltas. [First authoring](scope-selection-contract.md#selected-first-authoring-origin-routing) captures the selection before waiting and chooses the existing shared/private origin path without an intermediate empty publication. [Selected source-facility admission](scope-selection-contract.md#selected-source-facility-admission) now filters acquisition/maintenance/rehydration and Skill evidence before disabled-source observation. [Complete native policy/marker admission](scope-selection-contract.md#complete-native-policy-and-marker-admission) now resolves scoped branch choices independently from fences/pending copy. [Default-all-three native turn/tool/answer correlation](scope-selection-contract.md#native-turn-and-tool-batch-request-correlation) is now installed using SDK turn/finalized-ID evidence, not provider payloads. [Native context/preparation leases](scope-selection-contract.md#native-context-and-preparation-request-admission) now gate store waits and available pre-provider checkpoints through public Abort, without coupling independent control work to model cancellation. The [default-all-three native bridge](scope-selection-contract.md#default-all-three-native-bridge) composes these owners and passes aggregate integration. [Nonfork policy binding](scope-selection-contract.md#guarded-nonfork-native-selection-binding) forwards captured scopes and shares atomic first authoring; [header-only fork disposition](scope-selection-contract.md#canonical-fork-disposition-before-native-copy) distinguishes deferred acquisition from acquired child-current without semantic observation. [Explicit first-Session Start](scope-selection-contract.md#explicit-native-first-session-activation) separately grants exact-base unacquired acceptance without losing known private denial; ordinary resume cannot. [First mutation over unacquired source](scope-selection-contract.md#native-first-mutation-over-an-unacquired-source) composes the same staging/commit engine under live physical-owner receipts. [Fresh shared-fork deferral](scope-selection-contract.md#guarded-fresh-shared-only-fork-deferral) uses a mode-only late sampler and child pending retention; [Native scope-only lifetime evidence](scope-selection-contract.md#native-scope-only-lifetime-evidence-and-future-control-duty) validates existing request epochs/operation slots without another holder. [Native seven-selection integration](scope-selection-contract.md#retained-native-seven-selection-integration) exercises these same ports, not a second engine; public scope overrides now compose the same restoration/Start/Off owners without another runtime.
+- `snapshot`, `session`, `runtime`, `recovery`, `episode`: Pi branch/runtime lifecycle, branch traversal, and passive-boundary interpretation. Snapshot/session also provide detached [lifecycle-v2 candidate preflight](scope-selection-contract.md#detached-policy-and-lifecycle-preflight) and [selected policy-bound request lifetimes](scope-selection-contract.md#selected-policy-bound-request-lifetime), reusing renewable cancellation and synchronous native rechecks without storage/acquisition authority. Lower policy candidates do not confer canonical admission/publication. [Accepted selected lifecycle ports](scope-selection-contract.md#accepted-selected-lifecycle-ports) capture accepted run/v2 checkpoints without I/O and persist strictly Passive mode changes without current-origin adoption, semantic conversion or run resets; they do not themselves install native selected attachment. [Read-only observation ports](scope-selection-contract.md#selected-read-only-observation-ports) share that same runtime slot without accepted/publication authority: shared inspection never reads Session/lifecycle, while owned current observation retains required epoch/private proof and omits planned absent owners. The same policy lifetime binds selected native requests/context/preparation/tools/answers across all seven selections, including withdrawal before held exclusion releases; native policy selection alone still confers no publication permission.
+- `transition`, `ownership`, `context`: inference barriers, turn resolution, intent-ownership cascades, passive projection, and response reconciliation. Internal [selected semantic staging/commit](scope-selection-contract.md#selected-semantic-staging-and-commit) reuses the same engine without disabled owners; native response/policy composition uses the same seven-selection bridge. Session-excluded completion finalizes lifecycle without a semantic response transition or hidden private owner.
+- `query`: current/historical value projection and shared semantic-locator syntax; parsing alone resolves no target and confers no authority.
+- `model-interface`: Detached flat/canonical locator/ref and typed target/pointer presentation, consuming existing query/selection/JSON contracts, never storage/native authority. Actual native sole-flat/multi-explicit read/patch callers use it after original M2 admission. Arity-only schema refresh and fresh SDK definitions preserve old wrapper identity; the [deterministic functional interface](single-scope-interface-contract.md#deterministic-m3-checkpoint) is accepted, not live-model quality.
 - `compaction`: completed-history compaction planning and per-request marker state (`StateFlowCompactionRequests`).
-- `operation`: `OwnedOperationSlot`, the single-owner cancellation slot used by Start, inactive-mode persistence, branch restoration, inference preparation and response reconciliation; identity-guarded release keeps late completions from clearing newer work. `RenewableLifetime` owns the shared-inspection and memory-tool cancellation lifetimes.
+- `operation`: `OwnedOperationSlot`, the single-owner cancellation slot used by Start, inactive-mode persistence, branch restoration, inference preparation and response reconciliation; identity-guarded release keeps late completions from clearing newer work. `RenewableLifetime` owns the shared-inspection and memory-tool cancellation lifetimes and underpins internal selected policy requests. Slot cancellation/lifetime renewal expose replacement ownership before synchronous abort dispatch so reentrant listeners cannot erase newer work.
 - `artifact`, `acquisition`, `skills`, `rehydration`: source routing and compilation; `ArtifactAcquisitionState` owns the selected branch's invalidation plan, model hints and correlated read candidates.
-- `memory`: generic memory-bearing scope diagnostics.
+- `memory`: memory-bearing scope diagnostics; explicit selection returns only present selected flags while the legacy no-selection signature retains all-three behavior.
 - `continuation`: native-header discovery, runtime-provenance inspection, deterministic recommendation, and host startup precedence.
-- `protocol`, `logging`: model/tool presentation and bounded diagnostic persistence.
-- `status`, `telegram`, `extension`: operator projection, the optional fail-open pi-telegram presentation adapter, and high-level Pi adapter wiring.
+- `protocol`, `logging`: Model/tool presentation and bounded diagnostic persistence. Existing trusted plain renderers/private snippets and their context/extension trust boundaries are evaluated in the [protocol composition decision](protocol-composition-decision.md), without moving semantic execution into prompt hooks.
+- `status`, `telegram`, `extension`: operator projection, the optional fail-open pi-telegram presentation adapter, and high-level Pi adapter wiring. Internal [selected observational diagnostics](scope-selection-contract.md#selected-observational-diagnostics-and-projector-admission) render exact sparse owners/revisions without disabled values or fabricated zeros. Existing context/cascade/handoff projectors need no second selection API when fed accepted selected read projections; native presentation uses the selected bridge. Status separates captured requested policy from exact available materialization, including an unacquired Session requested alongside observable shared owners. Neither status nor Off invents an owner/revision or performs acquisition; command scopes use the existing native policy/mode owners.
+
+Test placement is checked in both directions by `tests/invariants.test.ts`: LIB modules have same-named mirrors, and every suite has an exact production owner or a reasoned cross-domain exception. The benchmark suites mirror `benchmarks/benchmark.ts` and `benchmarks/benchmark-session.ts` rather than being exceptions. The four exception reasons live in the invariant itself. Shared fixture modules may set up, read and assert, but cannot be hidden suites: the source-hygiene check erases TypeScript types before checking literal test-runner/suite dependencies and direct registration forms. This is not an arbitrary-code sandbox or a proof of semantic case ownership; independent organization review remains necessary.
 
 ## Semantic state
 
@@ -30,17 +37,17 @@ Runtime views select these documented semantic planes when present. Stored scope
 ```json
 {
   "intents": {},
-  "contract": {},
-  "working": {},
+  "strategy": {},
+  "tactics": {},
   "artifacts": {},
   "response": "",
   "lazy": {}
 }
 ```
 
-- `intents` is the queue of chosen actions, not a planner, scheduler, task manager or execution loop. An intent may own same-scope `working`/`lazy` keys by structured reference; see [model tools](#model-tools).
-- `contract` retains durable requirements, decisions, interfaces and rejected approaches.
-- `working` is the temporary working context of those actions: verified current facts, results and uncertainties.
+- `intents` is the queue of chosen actions, not a planner, scheduler, task manager or execution loop. An intent may own same-scope `tactics`/`lazy` keys by structured reference; see [model tools](#model-tools).
+- `strategy` retains binding requirements, accepted approaches/plans, decisions, interfaces and rejected alternatives. Proposals remain distinguishable from commitments; operational contradiction does not silently cancel a binding requirement.
+- `tactics` is the temporary working context of those actions: verified current facts, results and uncertainties.
 - `artifacts` maps exact source paths to compiled routing metadata.
 - `response` is owned only by the session scope and stores the exact latest accepted assistant answer, including the empty string. Global/CWD do not receive newly accepted answers, and stored scopes may omit response entirely. An explicit nonempty Session answer overrides inherited values; an empty or absent response contributes nothing to Active projection. Automatic Passive context omits the response plane, including frozen Stop handoffs and state-update receipts. Canonical storage, explicit reads and native answer text are unchanged.
 - `lazy` is an optional stored object root for ordinary JSON detail. It defaults to `{}` only in internal compatibility views, is omitted from baseline model state and is read explicitly.
@@ -58,7 +65,7 @@ Later scopes win. A scope-local `null` deletion removes only that scope's key an
 
 **Sparse state.** Missing planes are valid sparse semantics, not incomplete storage.
 
-- Checkpoint/tail codecs select only known top-level fields on read and write; unknown fields are neither kept in runtime streams nor carried into later writes. Nested data within known planes stays intact.
+- Checkpoint/tail codecs admit declared versions before interpreting fields. Legacy v1/v2 cohorts normalize to target v3 through raw collision-checked conversion; target retired roots reject. Candidate metadata4 adds retained external-plane descriptors outside semantic content: declared object values and still-retained history survive missing definitions, unrelated core writes, folding and fork. Legacy unknown roots are not silently adopted; explicit conversion to4 checks raw external-namespace collisions before filtering. Owned conversion first backs up exact original bytes outside canonical authority. Public external tool/context activation remains separate from codec retention.
 - Retained record identities and positions survive even when filtering leaves an empty patch.
 - `readTemporalView` selects present known fields at the requested boundary, then overlays scopes without inventing fields.
 - Empty and absent responses mean the same for Active projection; clearing a nonempty response projects as a deletion. Passive omits the plane regardless of its value.
@@ -116,7 +123,7 @@ checkpoint.json + patches.jsonl
 `patch_state` is the sole mutation tool:
 
 1. It acquires store exclusion before selecting current Global/CWD.
-2. It stages the authored operations while preserving private Session ownership.
+2. Preserving private Session ownership, it applies intents only, clears deleted intents' eligible same-scope strategy/tactics/lazy object-key targets protected by no final remaining/new intent (including ancestor/descendant references), then applies remaining authored planes before existing compilation/normalization. These phases ignore JSON insertion order; rewriting a cleared target creates fresh knowledge without old fields. Unowned entries remain legal.
 3. It validates and publishes one atomic cohort. Replay, history and revisions use that actual basis; correct repeats create no semantic transition.
 4. It then acts as an inference barrier: Pi executes no sibling tools from the same assistant response, and the next inference sees the rematerialized current effective state.
 
@@ -131,10 +138,10 @@ A successful native tool result may include a `state_updates` block, separate fr
 - Indexed-array patch selectors become numeric update paths only against a communicated in-bounds array basis. Object keys with the same spelling are literal.
 - Artifact cards use the normal metadata filter, and touched cards replace their whole projected entry.
 - Lazy bodies never enter this block; a changed bounded `lazy_navigation` may accompany it.
-- An optional `cascaded` array lists owner-scoped paths removed by intent deletion, including nested lazy targets that do not change the top-level navigation. It contains paths only, never values, and is absent when no target cascaded.
+- An optional `cascaded` array lists owner-scoped paths cleared in the intermediate ownership phase, even if remaining authored planes recreate them, including nested lazy targets that do not change the top-level navigation. It contains paths only, never values, and is absent when no target cascaded.
 - Unrelated unchanged branches are omitted. A result with nothing left to reconcile and no cascade has only the acknowledgement.
 
-**What is always included.** Entries conservatively cover changed scope fallbacks, masked or overlapping multi-scope touches, and projected changes since the last communicated view, including shared refreshes before or during the transaction. `cascaded` lists every target computed during accepted staging, in deterministic per-scope order across Global, CWD and Session. It is never elided as predictable: a receipt with only `cascaded` and an empty `effective` array still reaches the model. The owner path does not imply effective absence; `effective` entries still describe any revealed fallback.
+**What is always included.** Entries conservatively cover changed scope fallbacks, masked or overlapping multi-scope touches, and projected changes since the last communicated view, including shared refreshes before or during the transaction. `cascaded` lists every target computed during accepted staging, in deterministic per-scope order across Global, CWD and Session. It is never elided as predictable: a receipt with only `cascaded` and an empty `effective` array still reaches the model. The owner path does not imply final absence; `effective` entries describe actual final values, including authored recreation or revealed fallback. Accepted history stores explicit net patches and never reruns cascade; existing strategy references affect future accepted intent deletions without rewriting history.
 
 **What may be omitted as predictable:**
 
@@ -193,7 +200,7 @@ The cache owns no persistence, publication authority or continuation scheduler, 
 ## Lifecycle planes
 
 ```text
-SEMANTIC STATE       intents + contract + working + artifacts + response + lazy
+SEMANTIC STATE       intents + strategy + tactics + artifacts + response + lazy
 MUTATION BARRIER     patch_state(scope patches) → rematerialized next inference
 CONTEXT PROJECTION   Active state | Passive memory/handoff | Off: no injection
 ```
@@ -375,7 +382,7 @@ meta.json
 - Predecessor combined session metadata is unsupported; session `meta.json`, `config.json` and `runtime.json` must already satisfy their canonical ownership contracts.
 - Metadata writers replace only their owned leaves and preserve JSON-safe unknown siblings.
 - A scope without a revision counter initializes it from the still-retained semantic tail and persists that baseline on its next owned write; folded ancestry is not guessed.
-- Revision-aware writes emit scope metadata version 2 and still read version 1. The version fence makes an older writer refuse a scope after its first revision-aware write instead of silently dropping the counter; all cooperating instances should still upgrade together.
+- Scope metadata v3 declares Strategy/Tactics; candidate v4 additionally carries retained module descriptors, including unavailable/deleted-content slots. Legacy1/2 and explicit upgrades to4 use the same complete-cohort backup/exclusion/CAS boundary; raw external namespace collisions reject. Core-only streams keep v3 output, while v4 writes cannot drop or alter retained schema/policy descriptors. Representation alone changes no revision or causal identity; runtime-only persistence and inspection never upgrade. Quiesce old writers: version refusal cannot retrofit unsafe deployed callers.
 - Supported flag-based settings and native `{disabled:true}` markers decode read-only. Mixed session `mode`/`enabled` representations are rejected, and no eager migration runs.
 - Revision-pointer checkpoints are unsupported and fail closed without Git restoration.
 
@@ -594,7 +601,7 @@ A model-visible artifact entry requires only a non-empty description:
 - At artifact-entry level, every model scope patch rejects authored `hash`, `compiler`, `compiled_at`, `sourceHash`, `sourceFingerprint`, `compilerRevision`, `compiledAt`, `source_hash_verified` and `hint` fields, including field-deletion markers, even without a preceding read.
 - Retained embedded evidence stays readable, but its embedded `hash`/`compiler`/`compiled_at` fields are omitted from model projection. Ordinary semantic edits and whole-artifact deletion stay valid.
 - Compiler output may add other finite non-null JSON metadata. Known optional semantic fields include `kind`, `tags` and `compilation`. Tags are unique trimmed non-empty strings that support deterministic candidate filtering, but never authorize reading.
-- The `contract.compiled_skills` location is rejected. Skill compilations belong only in source-addressed artifacts, with no fabricated source hashes.
+- The `strategy.compiled_skills` location is rejected. Skill compilations belong only in source-addressed artifacts, with no fabricated source hashes.
 
 **Deciding whether to compile.** The public `classifyArtifactCompilationNeed` owns acquisition/rehydration and ordinary-artifact Pi decisions.
 
@@ -634,14 +641,14 @@ Curation may persist reusable guidance from a registered Skill at its provenance
 **Terminal state is a decision-relevant handoff, not a progress transcript:**
 
 - operational knowledge → source-addressed artifacts;
-- confirmed constraints/decisions and rejected approaches → contract;
-- observations/failures/uncertainties and exact continuation → working;
+- binding requirements, accepted plans/decisions and rejected approaches → strategy;
+- observations/failures/uncertainties and exact continuation → tactics;
 - only chosen active commitments → intents.
 
 Distinguish user requirements from assistant conclusions and hypotheses, and keep consequential negative evidence and reconsideration conditions. Do not:
 
 - silently overwrite established constraints when evidence conflicts;
-- treat working observations as live external facts;
+- treat tactical observations as live external facts;
 - infer success or absence of external effects from restored memory. After an interruption, inspect the relevant effects before repeating.
 
 These are model stewardship duties, not deterministic semantic gates.
@@ -689,27 +696,35 @@ The package exposes read-only host contracts that:
 
 ### Model tools
 
-**`patch_state` grammar.** It accepts one or more fixed `global`, `cwd` and `session` semantic patches.
+**`patch_state` grammar.** Captured WANTED participation, not the number of supplied targets or currently available owners, selects the model interface. One owner takes direct semantic planes without an owner wrapper; two/three owners take explicit participating `global`, `cwd` or `session` patches. See the [accepted interface boundary](single-scope-interface-contract.md#deterministic-m3-checkpoint); schema/selection DATA never grants source/private/publication authority.
 
-- Supplied scopes contain object-valued `artifacts`, `contract`, `working` and `intents`, plus object-valued `lazy` whose nested values are ordinary JSON.
+- Each supplied canonical owner patch contains object-valued `artifacts`, `strategy`, `tactics`, `intents` and `lazy`; in one-owner model arguments these planes are top-level. Nested values are ordinary JSON.
 - Recursive object merge updates fields, arrays/primitives replace, and nested object-key `null` deletes, including inside newly created objects. Deletion-only patches through absent ancestors create no empty parents. Accepted supplied scopes recursively omit empty object fields and empty planes: deleting the last child removes its empty ancestors, and explicit `{}` is not a retained value. Nonempty omitted fields persist; an object patch that turns a scalar/array into an empty object removes that field. Cleanup is scope-local and can reveal inherited values; it stops at the scope root and never removes array slots.
 - Against an existing array, a nonempty object containing only canonical `"[N]"` keys recursively patches those existing elements (zero-based). Out-of-bounds indices and indexed `null` deletions are rejected atomically; adding/removing elements requires replacing the whole array. Against objects, those keys remain literal object keys.
-- Missing authored object-key deletions succeed with nonfatal hints in the acknowledgement, for both unchanged and mixed patches. Each hint gives the owner-scoped target and first unavailable component as escaped JSON Pointers; a non-object ancestor is also unavailable. These hints are presentation-only: no state fields, revisions, history records, automatic path correction or cascade warnings.
-- Rejected: materialized null within documented semantic planes, empty supplied scopes, unknown top-level fields, model-authored `response`, and finalization or `{scope, patch}` / `unchanged` grammars. The semantic null rule does not apply to runtime envelopes such as an origin's null parent.
+- Missing authored object-key deletions succeed with nonfatal hints in the acknowledgement, for both unchanged and mixed patches. Each hint gives the target and first unavailable component as escaped JSON Pointers: relative to the sole owner in text, owner-qualified for multi; result details retain canonical owner-qualified pointers; a non-object ancestor is also unavailable. These hints are presentation-only: no state fields, revisions, history records, automatic path correction or cascade warnings.
+- Rejected: materialized null within documented semantic planes, empty patches/supplied scopes, wrong flat/scoped root family, unknown top-level fields, model-authored `response`, and finalization or `{scope, patch}` / `unchanged` grammars. The semantic null rule does not apply to runtime envelopes such as an origin's null parent.
 - Correct repeated results succeed as `State already current.` without another semantic revision or history record; avoid gratuitous acknowledgment patches.
 - Global/CWD overlap follows successful acceptance order, and unmentioned current fields survive. Session ownership is not a shared-memory merge.
+
+For exactly one wanted owner (for example Session):
+
+```json
+{"intents":{"next":"Verify the corrected behavior"}}
+```
+
+For multiple wanted owners including Session (for example Global+Session), an explicit selected target remains required even when only one is changed:
 
 ```json
 {"session":{"intents":{"next":"Verify the corrected behavior"}}}
 ```
 
-**Intents and ownership.** `intents` is the hot plane for active commitments, not requirements, observations, alternatives or completed plans. Removing an intent does not remove its consequences; it removes only the state it owns. Intent ownership is the one reference with runtime meaning:
+**Intents and ownership.** `intents` is the hot plane for active commitments, not requirements, observations, alternatives or completed plans. Removing an intent does not remove its consequences; it removes only the state it owns. Intent ownership is the one reference with runtime meaning. Eligible flat current refs are anchored to their captured canonical sole owner before this algorithm; unscoped-target exclusions below describe canonical inputs, not a reason to add a model owner wrapper:
 
-- When a patch deletes an intent key, structured `{"$ref"}` targets found anywhere inside the deleted value, naming an existing object key under `working` or `lazy` of the intent's own scope, are deleted after the authored operations, in the same atomic cohort and revision.
-- A target survives while a remaining intent in that scope references it, an ancestor or a descendant, so one patch can supersede an intent by deleting it and re-referencing the same targets.
-- Writes to an owned target in the deleting patch are discarded with it. Editing an intent to drop a reference leaves its target unowned.
-- Cross-scope, plane-root, array-element, unscoped, `effective`, historical and non-`working`/`lazy` targets, missing targets and textual `$path` mentions are skipped silently. Ownership never rejects, warns about or delays a patch.
-- The `ownership` domain computes the cascade by reading only that scope's `intents` plane. The accepted record stores the cascade as explicit deletions, so replay never re-derives it.
+- When a patch deletes an intent key, structured `{"$ref"}` targets found anywhere inside the deleted value, naming an existing object key under `strategy`, `tactics` or `lazy` of the intent's own scope, are cleared after intents and before remaining authored planes, in the same atomic cohort and revision.
+- A target survives while a final remaining/new intent in that scope references it, an ancestor or a descendant, so one patch can supersede an intent by deleting it and re-referencing the same targets.
+- Writes after cleanup recreate a cleared target as fresh knowledge without old fields. Editing an intent to drop a reference leaves its target unowned; unowned entries remain legal.
+- Cross-scope, plane-root, array-element, unscoped, `effective`, historical and non-`strategy`/`tactics`/`lazy` targets, missing targets and textual `$path` mentions are skipped silently. Ownership never rejects, warns about or delays a patch.
+- The `ownership` domain computes the cascade by reading only that scope's `intents` plane. The accepted record stores explicit net patches, so replay never reruns cascade; existing strategy refs apply to future accepted intent deletions without rewriting history.
 - Deleted targets are not archived beyond ordinary retained history.
 
 Full details: [intent ownership](lazy-state.md#intent-ownership).
@@ -729,24 +744,42 @@ Full details: [intent ownership](lazy-state.md#intent-ownership).
 
 **History is task-driven.** Missing paths or hints alone do not require historical search. The agent may independently choose targeted historical reading when a previous value is useful to the current task; no separate user permission is required. Historical values are evidence, not automatically current state or a reason to restore deleted memory. Runtime never scans history for reference owners, triggers repair inference or hydrates lazy bodies. Effective absence does not establish ownership, and unavailable history, external inaccessibility or a transient read failure does not prove a broken reference.
 
-**`read_state` addressing.** It accepts one unified path.
+**`read_state` addressing.** It accepts exactly one of scalar `path` or ordered semantic `paths`, with `value`, `keys` or `patch` projection; batches stay all-or-error. One wanted owner's ordinary flat paths bind that owner; multi-owner flat paths use the effective overlay, even when the available view has only one owner.
 
+- Explicit owner roots/examples below require that owner to participate and its requested current/historical authority to be available. Selection or an address alone does not acquire missing private memory.
 - `effective == effective[0]` is the current effective materialization; `global == global[0]` (and the CWD/session equivalents) selects that scope at the same composed causal boundary.
-- `global.patches == global.patches[0]` reads the latest accepted retained global patch; higher patch indices walk only that scope's retained accepted patches.
+- For selected/available Global, `global.patches == global.patches[0]` reads its latest retained accepted patch; higher patch indices walk only that owner's retained accepted patches. Exactly one wanted owner also admits a single-locator `patches[N]` alias. Scope-patch reads are value-only, not mixed semantic/patch-history batches.
+- `effective[N]` selects a retained causal boundary; ordinary nested array `[N]` still indexes an array, not history.
 - Indices are bounded by the configured `historyLimit`; unavailable pre-origin or pre-tail history is an error.
 - Resolver aliases are not literal JSON containers.
 - Object keys in paths must match `[A-Za-z_$][A-Za-z0-9_$-]*`. Both tool descriptions and the Skills ask the model to name keys in ASCII (values may use any language), and a non-ASCII key in a read path fails with that grammar in the error.
 - Reads stay cached and create no Git query, publication, checkpoint append or semantic step.
 
+When CWD participates and its older boundary is retained:
+
 ```json
 {"path":"cwd[1].intents"}
 ```
+
+When Global participates and its owner patch is retained:
 
 ```json
 {"path":"global.patches[0]"}
 ```
 
-Unscoped semantic paths such as `intents.next` alias the current effective overlay. `value`, `keys` and `patch` projections plus ordered `paths` batches stay all-or-error.
+For exactly one wanted owner with retained patch history:
+
+```json
+{"path":"patches[0]"}
+```
+
+Ordered semantic reads use the same wanted-owner/effective rule:
+
+```json
+{"paths":["strategy","tactics"]}
+```
+
+Current same-owner structured refs can render flat for one owner while storage retains canonical owners. Historical/cross-owner/effective/resource/text refs keep their identities; no read or projection ID is a publication capability.
 
 **Availability and responsibilities:**
 
@@ -784,7 +817,7 @@ The pure `readTemporalState(view, offset, scope?)` accessor is exported separate
 
 See the [fork contract](fork-contract.md) and [operating limits](usage.md#fork-support-and-limits).
 
-**Configuration.** Agent configuration is read once per extension load; session runtime configuration stays branch-selected. See [configuration](usage.md#configuration) for settings and path precedence. Memory ownership while enabled and global availability are invariants, not configuration switches.
+**Configuration.** Agent configuration is read once per extension load; session runtime configuration stays branch-selected. See [configuration](usage.md#configuration) for settings and path precedence. Ownership meanings and relative precedence are stable, but participation is a captured validated nonempty subset of Global/CWD/Session; omission defaults to all three, Global is not mandatory. Global defaults and explicit native scope choices remain separate from mode and current/private/source admission; see the [functional scope boundary](scope-selection-contract.md#m2-functional-acceptance-boundary).
 
 ## Observability
 
@@ -811,18 +844,18 @@ Status is a projection of the selected runtime and semantic view, not a second s
 **Telegram menu layout.** The optional Telegram leaf adapter shows, in order:
 
 1. the current mode as a monospace value in the submenu heading;
-2. matching Mode and Inspect memory headings (a long-dash-separated description ending in a colon), each separated by a blank line from its settings-style monospaced-key list;
-3. one radio row `Off | Passive | Active`, where selected Off uses 🟡, Passive 🟣 or Active 🟢, and inactive choices use ⚫️;
-4. four direct scope-inspection buttons. Inspection stays available in all three modes.
+2. matching Mode and Inspect participating memory headings (a long-dash-separated description ending in a colon), with a captured Participating scopes line and selection-aware settings-style descriptions;
+3. one radio row `Off | Passive | Active`, where selected Off uses 🟣, Passive 🟡 or Active 🟢, and inactive choices use ⚫️;
+4. only captured participating owner-inspection buttons, plus Effective for two or three owners. A sole owner is already effective. Inspection stays explicit and available in all three modes; unavailable memory is not invented.
 
 ### Inspection reads
 
 - Inspection may refresh live Global/CWD streams in memory so foreign accepted revisions become visible, but never publishes or increments a revision.
 - Memory-enabled inspection keeps its accepted-private/shared-refresh and failed-Passive cache rules.
-- Off inspection uses a fresh disposable `TemporalRuntime`. Global/CWD use coherent shared reads; Session/Effective use `refreshCurrentMemory` and reject absent, incomplete or malformed same-session private evidence, rather than manufacturing an empty layer/revision or borrowing foreign private data.
+- Off inspection uses a fresh disposable `TemporalRuntime`. A single selected Global/CWD or selected shared-only Effective uses `refreshSelectedShared`; inspections requiring selected Session use `refreshSelectedCurrent` under existing private proof. Effective never widens to excluded owners. Missing/invalid private evidence cannot become an empty layer/revision or foreign private data; legacy lifecycle admission retains its documented full-proof dependency.
 - No reader installs the extension runtime/cache, changes native policy or canonical bytes, clears a carried write fence, acquires an unaccepted fork parent or replaces the selected historical target.
 - Branch steps never select a past memory revision; inspection and acquisition always use current stored memory.
-- The awaited `StateFlowTelegramInspectionPort` returns a `StateFlowTelegramInspection` containing state and matching revisions, plus an optional revocation signal. A result checks its revocation lifetime and physical owner immediately before presentation.
+- `StateFlowTelegramSnapshot.scopes` supplies detached wanted selection DATA to rendering; omission preserves all-three legacy embedding behavior, while malformed explicit values reject. Buttons/help do not infer scope choice from available revisions or confer memory authority. The awaited `StateFlowTelegramInspectionPort` returns coherent state/revisions and an optional revocation signal. Target eligibility is checked before reader calls, selection is rechecked after acknowledgement/observation, and native inspection also revalidates its lifetime and physical owner before presentation.
 - Stop, selection changes and shutdown cancel obsolete reads without altering newer memory or clearing write fences.
 
 Local diagnostics stay outside semantic state and cannot change accepted state. Operator-facing fields and privacy boundaries are in [usage](usage.md#status-and-controls).

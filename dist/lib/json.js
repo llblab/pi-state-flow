@@ -34,7 +34,8 @@ function applyOwnedArrayPatch(state, patch, missingDeletions, path, unavailableP
     }
     return next;
 }
-function applyOwnedPatch(state, patch, missingDeletions, path = "", unavailablePath) {
+/** Internal path-copying step; callers must own the detached draft and collect failures privately. */
+export function applyOwnedPatch(state, patch, missingDeletions, path = "", unavailablePath) {
     let next = state;
     for (const [key, value] of Object.entries(patch)) {
         const owns = Object.hasOwn(next, key);

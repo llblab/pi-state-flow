@@ -12,6 +12,14 @@ State Flow requires matching `pi-coding-agent`, `pi-agent-core`, `pi-ai` and `pi
 
 Detailed behavioral witnesses live in [temporal acceptance](temporal-acceptance.md); benchmark methodology and source-bound results live in [performance](performance.md).
 
+## Canonical scope format admission
+
+Core-only canonical scope metadata remains **version 3**, with `strategy` and `tactics` fields. The candidate **version 4** codec additionally retains external object-plane descriptors and opaque values independently of loaded definitions; absent internal `modules` metadata keeps existing v3 output. Declared legacy versions **1/2** translate before known-field filtering. Target-format `contract`/`working` roots reject; nested domain keys remain ordinary JSON. Unsupported versions fail closed. These scope versions are distinct from the unchanged Session lifecycle format and public module API version1. Public seventh-plane tool/context/producer activation remains separate open work; see the [public module boundary](public-module-contract.md).
+
+Legacy inspection is observational. Owned semantic acceptance may convert only admitted owner scopes, after complete target-cohort/identity validation, exact source CAS and a verified private backup outside canonical authority. Missing legacy revisions credit retained records only; conversion itself adds no learning transition. Opaque capture/rollback preserves arbitrary original bytes while semantic interpretation requires valid UTF-8. See [migration proof and support limits](semantic-compatibility-decision.md#guarded-publication-and-support-boundary) and [backup/recovery guidance](usage.md#moving-a-store-and-supported-formats).
+
+This is a locally implemented, unreleased breaking semantic API/storage change. Existing exported names remain where applicable but their fields, callbacks, schemas and paths use Strategy/Tactics; no permanent old-field aliases are provided. Upgrade/quiesce old consumers before deployment: already-deployed unsafe low-level callers cannot be universally fenced. No active store was operated on during development.
+
 ## Public host seams
 
 State Flow relies on:
@@ -53,7 +61,7 @@ On the tested SDK, `before_agent_start` precedes the low-level agent's `prompt`;
 2. The active `context` hook supplies the operation signal and awaits preparation/maintenance before provider inference.
 3. If preparation fails, State Flow calls public `ctx.abort()`. Pi catches context-hook errors and may otherwise continue inference, so a thrown error alone is not a fence.
 
-Native tests prove no provider call before coherent acceptance, cancellation while an independent writer remains held, rollback without draft installation and preservation of uncompiled native input. Unreadable current Active memory also aborts live inference before the provider; native witnesses cover contradictory private lineage and malformed runtime files without changing canonical bytes, while old-step tree selection/reload is not a failure. Failed attachment retains Active policy and exposes `active (blocked)` in terminal/Telegram; the fence is derived from selected mode plus unavailable-memory validation. Active controls retry current-memory acceptance rather than claiming it is already active. Explicit Passive accepts validated current memory and releases both fences; explicit Off releases only the inference fence.
+Native tests prove no provider call before coherent acceptance, cancellation while an independent writer remains held, rollback without draft installation and preservation of uncompiled native input. Unreadable current Active memory also aborts live inference before the provider; native witnesses cover contradictory private lineage and malformed runtime files without changing canonical bytes, while old-step tree selection/reload is not a failure. Pending or failed Active attachment retains Active policy and exposes `active (blocked)` in terminal/Telegram; the fence is derived from selected mode plus unavailable-memory validation. Active controls retry current-memory acceptance rather than claiming it is already active. Explicit Passive accepts validated current memory and releases both fences; explicit Off releases only the inference fence.
 
 **Signals are not universal.** Idle commands and session events can lack them. Do not infer native Abort cancellation from an extension-owned shutdown signal or generalize active-run tests to idle waits.
 

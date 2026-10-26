@@ -3,7 +3,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import test, { type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
@@ -19,7 +21,9 @@ import {
 	type ContinuationProjectIdentity,
 	type ContinuationSessionCandidate,
 } from "../lib/continuation.ts";
-import { captureTemporalFileBases, resolveSessionAddress, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
+import { captureOwnedFileBases, captureTemporalFileBases, resolveSessionAddress, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "../lib/selection.ts";
+import { withStorageTransaction } from "../lib/storage.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import { createSessionRuntime, emptySnapshot } from "../lib/snapshot.ts";
@@ -207,7 +211,7 @@ test("inspects exact canonical provenance and fails malformed runtime closed", a
 	other.initialize(snapshot, true);
 	const before = other.states();
 	const next = structuredClone(before);
-	next.session.working.owner = "other";
+	next.session.tactics.owner = "other";
 	snapshot.meta.step++;
 	other.publish(snapshot, true, createAcceptedTransition(before, next));
 	const ownPaths = temporalScopePaths(header.cwd, header.id, "session", f.repositoryRoot, address.key);
@@ -226,6 +230,78 @@ test("inspects exact canonical provenance and fails malformed runtime closed", a
 	assert.deepEqual(readFileSync(meta), brokenBytes);
 });
 
+test("selected continuation inspection uses persisted owners without excluded bodies, writes or private acquisition", async (t) => {
+	const f = fixture(t);
+	const scopes = ["global", "cwd", "session"] as const;
+	for (let mask = 1; mask < 8; mask++) for (const mode of ["active", "passive"] as const) {
+		const selection = captureScopeSelection(scopes.filter((_, bit) => (mask & (1 << bit)) !== 0));
+		const root = join(f.root, `${mask}-${mode}`), id = `s${mask}`;
+		const file = join(f.sessions, `${id}.jsonl`); writeSession(file, id, f.root);
+		const header = readNativeSessionHeader(file);
+		const runtime = new TemporalRuntime(f.root, resolveSessionAddress(file, id, header.timestamp), root);
+		const snapshot = emptySnapshot(mode);
+		if (selection.includes("session")) await runtime.withSelectedSessionAcquisitionTransaction({ kind: "new", selection, snapshot, historyLimit: 7 }, publish => publish(), undefined, true);
+		else await runtime.withSelectedSharedOriginTransaction(selection, snapshot, publish => publish(), undefined, true);
+		const forbidden = new Set<string>([file]);
+		for (const scope of scopes.filter(scope => !selection.includes(scope))) {
+			const paths = temporalScopePaths(f.root, id, scope, root);
+			for (const key of ["checkpoint", "patches", "meta"] as const) forbidden.add(paths[key]);
+			if (scope === "session") continue; // Unacquired private presence must remain absent.
+			mkdirSync(paths.directory, { recursive: true });
+			for (const key of ["checkpoint", "patches", "meta"] as const) writeFileSync(paths[key], "corrupt disabled body");
+		}
+		const before = captureTemporalFileBases(f.root, id, root);
+		const original = fs.openSync;
+		const spy = t.mock.method(fs, "openSync", ((path: fs.PathLike, ...args: any[]) => {
+			assert.equal(forbidden.has(String(path)), false, `excluded/native body opened: ${String(path)}`);
+			return Reflect.apply(original, fs, [path, ...args]);
+		}) as typeof fs.openSync);
+		syncBuiltinESMExports();
+		let inspected: Awaited<ReturnType<typeof inspectStateFlowContinuationProvenance>>;
+		try { inspected = await inspectStateFlowContinuationProvenance(header, root); }
+		finally { spy.mock.restore(); syncBuiltinESMExports(); }
+		assert.deepEqual(inspected.stateFlow, { enabled: mode === "active", restorable: true }, inspected.reason);
+		assert.deepEqual(captureTemporalFileBases(f.root, id, root), before);
+		if (!selection.includes("session")) assert.equal(existsSync(temporalScopePaths(f.root, id, "session", root).checkpoint), false);
+		assert.deepEqual(readdirSync(dirname(root)).filter(name => name.endsWith("-migration-backups")), []);
+	}
+});
+
+test("selected inspection keeps acquired private presence mandatory while excluding its body; changed lifecycle refuses before widened reads", async (t) => {
+	const f = fixture(t), root = join(f.root, "store"), file = join(f.sessions, "selected.jsonl"), id = "selected";
+	writeSession(file, id, f.root); const header = readNativeSessionHeader(file);
+	const runtime = new TemporalRuntime(f.root, resolveSessionAddress(file, id, header.timestamp), root);
+	await runtime.withSelectedSessionAcquisitionTransaction({ kind: "new", selection: DEFAULT_SCOPE_SELECTION, snapshot: emptySnapshot("active"), historyLimit: 7 }, publish => publish(), undefined, true);
+	const paths = sessionRuntimePaths(f.root, id, root), privatePaths = temporalScopePaths(f.root, id, "session", root);
+	const config = JSON.parse(readFileSync(paths.config, "utf8")); config.scopes = ["cwd"];
+	writeFileSync(paths.config, JSON.stringify(config));
+	writeFileSync(privatePaths.checkpoint, "corrupt excluded private body");
+	const forbidden = new Set(["global", "session"].flatMap(scope => {
+		const owned = temporalScopePaths(f.root, id, scope as "global" | "session", root);
+		return [owned.checkpoint, owned.patches, owned.meta];
+	}));
+	const original = fs.openSync;
+	const spy = t.mock.method(fs, "openSync", ((path: fs.PathLike, ...args: any[]) => {
+		assert.equal(forbidden.has(String(path)), false, `excluded body opened: ${String(path)}`);
+		return Reflect.apply(original, fs, [path, ...args]);
+	}) as typeof fs.openSync);
+	syncBuiltinESMExports();
+	try {
+		assert.deepEqual((await inspectStateFlowContinuationProvenance(header, root)).stateFlow, { enabled: true, restorable: true });
+		rmSync(privatePaths.patches);
+		const lost = await inspectStateFlowContinuationProvenance(header, root);
+		assert.deepEqual(lost.stateFlow, { enabled: true, restorable: false }); assert.match(lost.reason, /Acquired.*incomplete/);
+		writeFileSync(privatePaths.patches, "");
+		await withStorageTransaction(root, tx => {
+			const basis = { files: captureOwnedFileBases([paths.config, paths.runtime], root) };
+			const source = JSON.parse(readFileSync(paths.runtime, "utf8"));
+			writeFileSync(paths.config, JSON.stringify({ mode: "active" }));
+			writeFileSync(paths.runtime, JSON.stringify({ version: 1, identity: source.identity, lineage: source.lineage, step: source.step }));
+			assert.throws(() => tx.prepareSelectedCurrent(f.root, id, ["cwd"], 7, root, id, basis), /changed concurrently|conflict/);
+		});
+	} finally { spy.mock.restore(); syncBuiltinESMExports(); }
+});
+
 for (const scope of ["global", "cwd"] as const) for (const limit of [0, 7]) {
 	test(`continuation accepts independent ${scope} drift beside session lineage at limit ${limit}`, async (t) => {
 		const f = fixture(t);
@@ -235,12 +311,12 @@ for (const scope of ["global", "cwd"] as const) for (const limit of [0, 7]) {
 		a.initialize(snapshot, true);
 		let before = a.states();
 		let next = structuredClone(before);
-		next.session.working.owner = "A";
+		next.session.tactics.owner = "A";
 		snapshot.meta.step++;
 		a.publish(snapshot, true, createAcceptedTransition(before, next));
 		before = a.states();
 		next = structuredClone(before);
-		next[scope].working.shared = "A";
+		next[scope].tactics.shared = "A";
 		snapshot.meta.step++;
 		a.publish(snapshot, true, createAcceptedTransition(before, next));
 		const checkpoint = a.retainedCheckpoint(snapshot);
@@ -250,7 +326,7 @@ for (const scope of ["global", "cwd"] as const) for (const limit of [0, 7]) {
 		b.initialize(other, true);
 		before = b.states();
 		next = structuredClone(before);
-		next[scope].working.shared = "B";
+		next[scope].tactics.shared = "B";
 		other.meta.step++;
 		b.publish(other, true, createAcceptedTransition(before, next));
 		const file = join(f.sessions, "a.jsonl");
@@ -262,8 +338,8 @@ for (const scope of ["global", "cwd"] as const) for (const limit of [0, 7]) {
 		assert.deepEqual(inspected.stateFlow, { enabled: true, restorable: true }, inspected.reason);
 		const restored = new TemporalRuntime(f.root, "a", root, undefined, limit);
 		await restored.refreshCurrentMemory();
-		assert.deepEqual(restored.read(0, "session").working, { owner: "A" });
-		assert.deepEqual(restored.read(0, scope).working, { shared: "B" });
+		assert.deepEqual(restored.read(0, "session").tactics, { owner: "A" });
+		assert.deepEqual(restored.read(0, scope).tactics, { shared: "B" });
 	});
 }
 
@@ -294,7 +370,7 @@ test("continuation waits through a partial independent publication and propagate
 	writeSession(file, "a", parent);
 	const native = readFileSync(file);
 	const header = readNativeSessionHeader(file);
-	const view = advanceTemporalState(local.view!, (["global", "cwd", "session"] as const).map((scope) => ({ scope, patch: { working: { cohort: scope } } })), "current-cohort");
+	const view = advanceTemporalState(local.view!, (["global", "cwd", "session"] as const).map((scope) => ({ scope, patch: { tactics: { cohort: scope } } })), "current-cohort");
 	snapshot.meta.step++;
 	const runtime = createSessionRuntime(snapshot, parent, "a", view.lineage);
 	child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
@@ -382,7 +458,7 @@ for (const mode of ["absent", "empty", "stopped", "orphaned", "malformed", "inva
 	assert.deepEqual(captureTemporalFileBases(f.root, "a", actual), before);
 	if (mode === "absent") assert.equal(existsSync(root), false);
 	if (mode === "empty") assert.deepEqual(readdirSync(root), []);
-	if (mode === "orphaned") assert.match(result.reason, /incomplete canonical session runtime/);
+	if (mode === "orphaned") assert.match(result.reason, /Orphan State Flow private semantics without lifecycle authority/);
 	if (mode === "invalid-lock") {
 		assert.match(result.reason, /lock is unavailable.*EEXIST/);
 		assert.equal(readFileSync(join(root, ".state-flow-publication.lock"), "utf8"), "interrupted owner\n");

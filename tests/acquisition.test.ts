@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import * as sourceFacilityFixture from "./source-facility-fixture.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ArtifactAcquisitionState, ArtifactReadTracker, decideArtifactAcquisition, missingArtifactRemovals, SOURCE_CHANGED_HINT } from "../lib/acquisition.ts";
+import { ArtifactAcquisitionState, ArtifactReadTracker, decideArtifactAcquisition, missingArtifactRemovals, validateArtifactReadEvidence, SOURCE_CHANGED_HINT } from "../lib/acquisition.ts";
 import { compileArtifact, hashArtifactSource, inspectRegisteredArtifactPaths, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
 import { emptyState } from "../lib/state.ts";
 
@@ -177,3 +179,85 @@ test("acquisition state owns invalidations, hints and read candidates for the se
 	assert.deepEqual(acquisition.hints, {});
 	assert.deepEqual(missingArtifactRemovals(states), { cwd: { artifacts: { [missing]: null } } });
 });
+
+{
+	const { scopes, selections, fixture, selectedStates } = sourceFacilityFixture;
+
+	test("acquisition and missing-source maintenance observe only exact selected owners for every subset, with no fallback or excluded body access", (t) => {
+		for (const selection of selections) {
+			const f = fixture(t), acquisition = new ArtifactAcquisitionState();
+			const states = selectedStates(selection, f.paths);
+			const stat = fs.lstatSync; const observed: string[] = [], registries: string[] = [];
+			fs.lstatSync = ((path: fs.PathLike, ...args: any[]) => { observed.push(String(path)); return (stat as any)(path, ...args); }) as typeof fs.lstatSync; syncBuiltinESMExports();
+			try {
+				acquisition.refresh(states, scope => { assert.ok(selection.includes(scope)); registries.push(scope); return {}; }, selection);
+				assert.deepEqual(observed.sort(), selection.map(scope => f.paths[scope]).sort());
+				assert.deepEqual(registries.sort(), [...selection].sort());
+				assert.deepEqual(acquisition.invalidations.map(item => item.scope).sort(), [...selection].sort());
+				observed.length = 0;
+				assert.deepEqual(missingArtifactRemovals(states, selection), {});
+				assert.deepEqual(observed.sort(), selection.map(scope => f.paths[scope]).sort());
+			} finally { fs.lstatSync = stat; syncBuiltinESMExports(); }
+			for (const excluded of scopes.filter(scope => !selection.includes(scope))) {
+				const extra = Object.defineProperty({ ...states }, excluded, { enumerable: true, get: () => assert.fail("excluded state getter") });
+				assert.throws(() => acquisition.refresh(extra, () => assert.fail(), selection), /match their owners exactly/);
+				assert.throws(() => missingArtifactRemovals(extra, selection), /match their owners exactly/);
+			}
+			const missing = join(f.sources, "registered-missing.txt");
+			const absent = Object.fromEntries(selection.map(scope => [scope, { artifacts: { [missing]: { description: "missing" } } }]));
+			assert.deepEqual(missingArtifactRemovals(absent, selection), Object.fromEntries(selection.map(scope => [scope, { artifacts: { [missing]: null } }])));
+			const link = join(f.sources, "registered-symlink.txt"); symlinkSync(f.paths.global, link);
+			const unavailable = Object.fromEntries(selection.map(scope => [scope, { artifacts: { [link]: { description: "unavailable" } } }]));
+			assert.deepEqual(missingArtifactRemovals(unavailable, selection), {});
+		}
+		for (const policy of [[], ["cwd", "cwd"], ["unknown"]]) assert.throws(() => missingArtifactRemovals({}, policy as any), /scopes/);
+		assert.throws(() => new ArtifactAcquisitionState().refresh({ cwd: {} }, () => ({})), /match their owners exactly/, "legacy omission is all-three, not inferred subset");
+	});
+
+	test("effective selected ownership masks broader ordinary artifacts before observation; Skill-only paths trigger no automatic source observation", (t) => {
+		const f = fixture(t), acquisition = new ArtifactAcquisitionState();
+		const states = { global: { artifacts: { [f.paths.global]: { description: "broad" } } }, cwd: { artifacts: { [f.paths.global]: { description: "Skill", kind: "skill" } } } };
+		const stat = fs.lstatSync;
+		fs.lstatSync = (() => { throw new Error("masked/Skill source must not be observed"); }) as typeof fs.lstatSync; syncBuiltinESMExports();
+		try {
+			acquisition.refresh(states, () => assert.fail("no effective ordinary owner"), ["global", "cwd"]);
+			assert.deepEqual(acquisition.invalidations, []); assert.deepEqual(acquisition.hints, {});
+		} finally { fs.lstatSync = stat; syncBuiltinESMExports(); }
+		const ordinary = new ArtifactAcquisitionState();
+		ordinary.refresh({ cwd: { artifacts: { [f.paths.global]: { description: "narrow" } } } }, scope => { assert.equal(scope, "cwd"); return {}; }, ["cwd"]);
+		assert.equal(ordinary.invalidations[0]!.scope, "cwd");
+	});
+
+	test("ordinary read correlation excludes disabled candidates before getters and refuses stale owner, executed-path and fingerprint correlations", (t) => {
+		const f = fixture(t), tracker = new ArtifactReadTracker();
+		const excluded = { scope: "global" as const, reason: "source-changed" as const, get path(): string { return assert.fail("disabled candidate path"); }, get sourceFingerprint(): never { return assert.fail("disabled candidate fingerprint"); } };
+		const candidate = { path: f.paths.cwd, scope: "cwd" as const, reason: "source-changed" as const };
+		tracker.setCandidates([excluded, candidate], ["cwd"]);
+		tracker.setCandidates([{ ...candidate, hash: undefined, sourceFingerprint: undefined }], ["cwd"]);
+		tracker.recordStart("stable", "read", { path: f.paths.cwd }); tracker.recordEnd("stable", "read", false);
+		assert.equal(tracker.successful.get(f.paths.cwd)!.scope, "cwd");
+		tracker.setCandidates([{ ...candidate, reason: "explicit-refresh" }], ["cwd"]); assert.equal(tracker.successful.size, 0);
+		tracker.setCandidates([candidate], ["cwd"]);
+		tracker.recordStart("old", "read", { path: f.paths.cwd });
+		tracker.setCandidates([], ["session"]); tracker.setCandidates([candidate], ["cwd"]);
+		tracker.recordEnd("old", "read", false); assert.equal(tracker.successful.size, 0);
+		tracker.recordStart("plan-aba", "read", { path: f.paths.cwd });
+		tracker.setCandidates([], ["cwd"]); tracker.setCandidates([candidate], ["cwd"]);
+		tracker.recordEnd("plan-aba", "read", false); assert.equal(tracker.successful.size, 0);
+		tracker.setCandidates([], ["cwd"]); tracker.recordStart("unregistered-start", "read", { path: f.paths.cwd });
+		tracker.setCandidates([candidate], ["cwd"]); tracker.recordEnd("unregistered-start", "read", false); assert.equal(tracker.successful.size, 0);
+		tracker.setCandidates([{ ...candidate, scope: "global" }]); tracker.recordStart("rescope", "read", { path: f.paths.cwd });
+		tracker.setCandidates([candidate]); tracker.recordEnd("rescope", "read", false); assert.equal(tracker.successful.size, 0);
+		tracker.recordStart("changed", "read", { path: f.paths.cwd }); writeFileSync(f.paths.cwd, "changed to a much longer source");
+		tracker.recordEnd("changed", "read", false); assert.equal(tracker.successful.size, 0);
+		tracker.setCandidates([candidate, { ...candidate, path: f.paths.session }], ["cwd"]);
+		const args = { path: f.paths.cwd }; tracker.recordCall("mutated", "read", args); args.path = f.paths.session;
+		tracker.recordEnd("mutated", "read", false); assert.equal(tracker.successful.size, 0);
+		tracker.recordStart("actual", "read", { path: f.paths.session }); tracker.recordEnd("actual", "read", false);
+		assert.ok(tracker.successful.has(f.paths.session));
+		validateArtifactReadEvidence(tracker.successful.values(), ["cwd"]);
+		writeFileSync(f.paths.session, "changed again after read completion");
+		assert.throws(() => validateArtifactReadEvidence(tracker.successful.values(), ["cwd"]), /changed after acquisition/);
+		validateArtifactReadEvidence([{ scope: "global", reason: "source-changed", get path(): never { return assert.fail("disabled validation path"); } }], ["cwd"]);
+	});
+}

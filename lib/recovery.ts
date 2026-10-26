@@ -1,4 +1,5 @@
-import { parseRetainedPiCheckpoint, migrationFailure, type InactiveMode, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot, type StateFlowMode } from "./snapshot.ts";
+import { DEFAULT_SCOPE_SELECTION } from "./selection.ts";
+import { prepareRetainedPolicyMigration, parseRetainedPiCheckpoint, migrationFailure, type InactiveMode, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot, type StateFlowMode } from "./snapshot.ts";
 
 export type RetainedCheckpointSelection =
 	| { kind: "boundary"; checkpoint: RetainedBoundaryCheckpoint; skipped: string[] }
@@ -14,7 +15,9 @@ export function selectRetainedCheckpoint(candidates: readonly unknown[], inactiv
 			if (typeof candidate === "object" && candidate !== null && Object.hasOwn(candidate, "revision")) {
 				return { kind: "unavailable", snapshot: migrationFailure({}, "Snapshot restoration failed: revision-pointer checkpoints are unsupported", inactiveMode), skipped };
 			}
-			retained = parseRetainedPiCheckpoint(candidate, inactiveMode);
+			retained = typeof candidate === "object" && candidate !== null && Object.hasOwn(candidate, "version")
+				? prepareRetainedPolicyMigration(candidate, DEFAULT_SCOPE_SELECTION, inactiveMode).checkpoint
+				: parseRetainedPiCheckpoint(candidate, inactiveMode);
 		} catch (error) {
 			skipped.push(`Snapshot restoration failed: ${error instanceof Error ? error.message : String(error)}`);
 			continue;

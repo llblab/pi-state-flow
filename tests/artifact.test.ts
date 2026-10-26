@@ -9,6 +9,7 @@ import {
 	hashArtifactSource,
 	inspectRegisteredArtifactPaths,
 	isArtifactHash,
+	isInterpretableArtifactProvenance,
 	isArtifactMetadata,
 	isArtifactRegistry,
 	parseArtifactProvenanceRegistry,
@@ -33,6 +34,24 @@ function metadata(extra: Record<string, unknown> = {}) {
 		...extra,
 	};
 }
+
+test("revocation eligibility validates known evidence without changing permissive retained parsing", () => {
+	for (const value of [{ sourceHash: hash }, { compilerRevision: "v1" }, { compiledAt: "" }, { sourceFingerprint: { size: 0, mtimeNs: "-1" } }]) assert.equal(isInterpretableArtifactProvenance(value), true);
+	for (const value of [{}, 42, { malformed: true }, { futureShape: true }, { sourceHash: 42 }, { sourceFingerprint: { size: -1, mtimeNs: "1" } }, { compilerRevision: " " }, { compiledAt: 42 }, { sourceHash: hash, compilerRevision: false }]) assert.equal(isInterpretableArtifactProvenance(value), false);
+	assert.deepEqual(parseArtifactProvenanceRegistry({ "/bad": { sourceHash: 42 } }), { "/bad": { sourceHash: 42 } });
+});
+
+test("provenance parser and canonical serializer preserve special JSON keys as own data properties", () => {
+	const keys = ["__proto__", "constructor", "prototype"];
+	const raw = Object.fromEntries(keys.map(key => [key, { sourceHash: hash, compilerRevision: "v1" }]));
+	const parsed = parseArtifactProvenanceRegistry(raw);
+	for (const key of keys) { assert.equal(Object.hasOwn(parsed, key), true); assert.deepEqual(parsed[key], raw[key]); }
+	assert.equal(Object.getPrototypeOf(parsed), Object.prototype);
+	const serialized = serializeArtifactProvenanceRegistry(parsed);
+	assert.deepEqual(serialized, raw); assert.equal(Object.getPrototypeOf(serialized), Object.prototype);
+	const opaque = parseArtifactProvenanceRegistry(Object.fromEntries(keys.map(key => [key, { futureShape: true }])));
+	for (const key of keys) { assert.equal(Object.hasOwn(opaque, key), true); assert.deepEqual(opaque[key], { malformed: true }); }
+});
 
 test("creates and validates the canonical artifact hash representation", () => {
 	assert.equal(hashArtifactSource("artifact"), "sha256:c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c");

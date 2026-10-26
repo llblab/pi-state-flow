@@ -4,25 +4,37 @@ import { createAcceptedTransition, projectRecentTransitionsWithLimit, validateRe
 import { emptyState, type ScopedStates } from "../lib/state.ts";
 import { applyPatch, type JsonObject } from "../lib/json.ts";
 
+test("accepted replay has matching nonempty present owners and never invents disabled streams", () => {
+	const before = { session: {}, global: { strategy: { keep: true } } };
+	const after = { session: { response: "Done" }, global: { strategy: { keep: true, chosen: true } } };
+	const accepted = createAcceptedTransition(before, after, "selected");
+	assert.deepEqual(accepted!.transitions.map(({ scope }) => scope), ["global", "session"]);
+	assert.equal(createAcceptedTransition({ cwd: {} }, { cwd: {} }), undefined);
+	for (const [current, next] of [[{}, {}], [{ cwd: {} }, { cwd: {}, session: {} }], [{ cwd: {} }, { global: {} }],
+		[{ cwd: undefined }, { cwd: {} }], [{ cwd: {} }, Object.create({ cwd: {} })], [{ unknown: {} }, { unknown: {} }]]) {
+		assert.throws(() => createAcceptedTransition(current as any, next as any), /matching nonempty owner sets|present owner values/);
+	}
+});
+
 function recent(id: string, at: number, scope: "global" | "cwd" | "session" = "session"): RecentTransition {
-	return { id, at, transitions: [{ scope, patch: { working: { id } } }] };
+	return { id, at, transitions: [{ scope, patch: { tactics: { id } } }] };
 }
 
 test("accepted cohort is exact replay without a clock, full states, or identity for no-ops", () => {
 	const current: ScopedStates = { global: emptyState(), cwd: emptyState(), session: emptyState() };
-	current.session.working = { removed: true, nested: { keep: true, old: true } };
+	current.session.tactics = { removed: true, nested: { keep: true, old: true } };
 	const next = structuredClone(current);
-	next.session.working = { nested: { keep: true, added: 1 } };
+	next.session.tactics = { nested: { keep: true, added: 1 } };
 	next.session.response = "Done";
-	next.cwd.contract = { reusable: true };
+	next.cwd.strategy = { reusable: true };
 	const cohort = createAcceptedTransition(current, next, "accepted");
 	assert.deepEqual(Object.keys(cohort!).sort(), ["id", "transitions"]);
 	assert.equal(cohort!.id, "accepted");
 	assert.deepEqual(cohort!.transitions.map(({ scope }) => scope), ["cwd", "session"]);
 	for (const { scope, patch } of cohort!.transitions) assert.deepEqual(applyPatch(current[scope], patch as JsonObject), next[scope]);
 	assert.equal(createAcceptedTransition(current, current), undefined);
-	cohort!.transitions[0]!.patch.contract!.reusable = false;
-	assert.equal(next.cwd.contract.reusable, true);
+	cohort!.transitions[0]!.patch.strategy!.reusable = false;
+	assert.equal(next.cwd.strategy.reusable, true);
 });
 
 test("compact history preserves supplied lineage order and configured per-scope projection budget", () => {
@@ -36,8 +48,8 @@ test("compact history preserves supplied lineage order and configured per-scope 
 	const projected = projectRecentTransitionsWithLimit(1, [...lineage, cohort]);
 	assert.deepEqual(projected.map(({ id }) => id), ["y", "cohort"]);
 	assert.deepEqual(projected.at(-1)!.transitions.map(({ scope }) => scope), ["global", "session"]);
-	projected.at(-1)!.transitions[0]!.patch.working!.id = "mutated";
-	assert.equal(cohort.transitions[0]!.patch.working!.id, "unused");
+	projected.at(-1)!.transitions[0]!.patch.tactics!.id = "mutated";
+	assert.equal(cohort.transitions[0]!.patch.tactics!.id, "unused");
 });
 
 test("replay patch validation rejects invalid identities, envelopes, scopes, and fields", () => {
@@ -48,7 +60,7 @@ test("replay patch validation rejects invalid identities, envelopes, scopes, and
 		{ ...recent("valid", 0), at: -1 }, { ...recent("valid", 0), transitions: [] },
 		{ id: "bad", at: 0, transitions: [{ scope: "unknown", patch: {} }] },
 		{ id: "bad", at: 0, transitions: [{ scope: "cwd", patch: { response: "forbidden" } }] },
-		{ id: "bad", at: 0, transitions: [{ scope: "session", patch: { working: [] } }] },
+		{ id: "bad", at: 0, transitions: [{ scope: "session", patch: { tactics: [] } }] },
 		{ id: "bad", at: 0, transitions: [...recent("x", 0).transitions, ...recent("y", 1).transitions] },
 	]) assert.throws(() => validateRecentTransition(value));
 });

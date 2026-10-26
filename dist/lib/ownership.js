@@ -1,11 +1,11 @@
 import { isObject } from "./json.js";
-const OWNED_PLANES = new Set(["working", "lazy"]);
+const OWNED_PLANES = new Set(["strategy", "tactics", "lazy"]);
 // Same key grammar as read_state value paths; array selectors never parse.
 const OBJECT_KEY = /^[A-Za-z_$][A-Za-z0-9_$-]*$/;
 /**
  * Parse one structured `$ref` target as an ownership path of `scope`.
  * Cross-scope, unscoped, `effective`, historical, plane-root, array-element
- * and non-`working`/`lazy` targets are not ownership targets.
+ * and non-`strategy`/`tactics`/`lazy` targets are not ownership targets.
  */
 export function parseOwnedPath(scope, ref) {
     const parts = ref.split(".");
@@ -62,7 +62,7 @@ function exists(state, path) {
 }
 /**
  * Compute the same-scope ownership cascade for intent keys removed between
- * `before` and `after` (the state after authored operations). A target is
+ * `before` and `after` (the normalized intent-phase view, before other writes). A target is
  * kept while any remaining intent references it, an ancestor or a descendant;
  * missing targets are skipped. The result is minimal (no target below
  * another) and deterministically ordered.
@@ -106,9 +106,9 @@ export function cascadeDeletionPatch(paths) {
 export function formatOwnedPath(scope, path) {
     return [scope, path.plane, ...path.keys].join(".");
 }
-/** Top-level `working`/`lazy` keys that at least one current intent of `scope` owns. */
+/** Top-level ownership-eligible keys referenced by current intents of `scope`. */
 export function ownedTopLevelKeys(scope, state) {
-    const owned = { working: new Set(), lazy: new Set() };
+    const owned = { strategy: new Set(), tactics: new Set(), lazy: new Set() };
     const intents = isObject(state.intents) ? state.intents : {};
     for (const value of Object.values(intents))
         for (const path of extractOwnedPaths(scope, value))

@@ -100,20 +100,24 @@ Memory has three ownership scopes:
 - `cwd`: Knowledge shared by sessions in the same working directory.
 - `session`: State belonging to the current session and its selected branch.
 
-They compose recursively in **global → CWD → session** order:
+Participation is configured with a nonempty `scopes` array in [global configuration](docs/usage.md#configuration); omission selects all three. Each native branch captures that choice once, and forks inherit it. All seven nonempty selections use the same runtime. The existing mode commands accept optional whitespace-separated owners, for example `/state-flow-active session`, `/state-flow-passive cwd global`, or `/state-flow-off cwd`. Blank/mode-only commands and Telegram controls preserve the captured choice. Duplicate/unknown tokens reject before changing policy; Off records a new choice without canonical memory I/O. No settings chooser is required. Excluded owners receive no automatic memory contribution or semantic writes; new answers are stored only when Active and Session participates. Mode-only Telegram buttons retain that choice; explicit operator inspection is separate from model participation. See the [functional boundary and legacy proof dependencies](docs/scope-selection-contract.md#m2-functional-acceptance-boundary).
+
+Participating owners compose recursively in **global → CWD → session** order:
 
 - More-specific values override broader ones, while object fields merge.
 - Removing a local value can reveal an inherited value again.
 
 The agent receives the **effective view** of this composition, not three unrelated memory dumps. It can read that view, or inspect one scope when ownership matters. `effective` is a computed view, not a fourth storage scope. Scope precedence does not turn memory into system-level instructions.
 
+With one captured owner, current same-owner structured references in Active/Passive heads and projection-bound updates are relative, lazy navigation points to `lazy`, and Active recent context records use `{id,at,patch}` without an owner wrapper. Multi-owner records stay explicit. Canonical storage, internal comparisons and causal IDs remain scoped; provenance and historical/cross-owner/resource references retain their identities. Skill acquisition targets and deletion text also follow wanted arity; new Stop/reload/bootstrap handoffs render eligible refs relatively. Source keys and canonical provenance/compiler diagnostics retain their identities, not extra flat patch wrappers. These DTOs are data, not authoring permission. See the [context presentation boundary](docs/single-scope-interface-contract.md#runtime-context-presentation).
+
 ### Semantic planes
 
 Runtime views provide these documented planes:
 
-- `intents`: The queue of chosen actions. Work from intents: a structured `{"$ref"}` inside an intent owns a same-scope `working`/`lazy` key, and deleting the intent deletes what it owns unless another intent still references it. Textual `$path` mentions only use; unowned entries remain legal.
-- `contract`: Requirements, decisions, rejected approaches, constraints and interface commitments.
-- `working`: Temporary context of those actions: observations, results and uncertainties.
+- `intents`: The queue of chosen actions. Work from intents: a structured `{"$ref"}` inside an intent owns a same-scope `strategy`/`tactics`/`lazy` object key. Fixed phases ignore JSON insertion order: intents first, ownership cleanup with final remaining/new intents protecting direct and ancestor/descendant targets, then remaining authored planes and existing compilation/normalization/atomic publication. Rewrite survivors at the same/new path in that patch; cleared targets start fresh without old fields. Textual `$path` mentions only use; unowned entries remain legal.
+- `strategy`: Binding requirements, accepted approaches/plans, decisions, rejected alternatives and interface commitments. A proposal is not a commitment.
+- `tactics`: Temporary execution context: verified progress, consequential failures, blockers, uncertainties and next checks.
 - `artifacts`: Source-addressed descriptions and compiled knowledge.
 - `response`: The exact latest accepted answer, including an empty string. The runtime captures it only in Session; Global/CWD receive no newly accepted answers, and stored scopes may omit it entirely. Effective uses the highest-priority nonempty value. Active automatically projects it; Passive omits it from automatic context while keeping storage and explicit reads intact.
 - `lazy`: Supporting memory available through explicit reads; its body is omitted from baseline model context.
@@ -122,7 +126,7 @@ Every plane is optional on disk:
 
 - Stored checkpoints and patches may omit any documented plane, including `intents`, `lazy` or `response`.
 - Current and historical views assemble only the known fields actually present in the selected scopes; absent fields are not filled in. Empty `response` counts as absent.
-- Readers ignore unknown top-level fields, and writers emit only known fields. Nested data inside known planes is unrestricted.
+- Readers ignore unrelated unknown top-level fields, and writers emit only known fields. Retired `contract`/`working` roots explicitly reject in the target format; nested ordinary keys remain unrestricted.
 - Reading or starting never rewrites data just to normalize it, and a missing field is not a storage-format error.
 
 These planes organize ordinary JSON; there is no project-specific schema. The model updates every plane except `response`, which is runtime-owned.
@@ -130,7 +134,7 @@ These planes organize ordinary JSON; there is no project-specific schema. The mo
 Revisions:
 
 - Global and CWD revisions are shared by their canonical stores; Session has its own revision.
-- Effective has no single owner: its identity is the `g#c#s#` vector.
+- Effective combines participating owners: with multiple owners its identity is their revision vector (for example `g#c#s#` when all three participate), not one universal revision. Excluded owners do not become fabricated vector entries.
 - One atomic patch advances each materially changed scope once.
 
 Memory remains fallible: storing an observation does not make it current or correct.
@@ -139,7 +143,13 @@ Registered Pi Skills may be compiled into source-addressed artifacts when durabl
 
 ## Incremental updates and history
 
-`patch_state` updates one or more named scopes atomically:
+`patch_state` uses the captured wanted interface, not the number of currently available views. With **one participating owner**, supply semantic planes directly, without an owner wrapper:
+
+```json
+{ "strategy": { "verification": { "command": "npm test" } } }
+```
+
+With **multiple participating owners**, name the supplied owners explicitly; they commit atomically. Canonical ownership remains explicit internally in both cases:
 
 - It waits cancelably for the store lock, then applies authored Global/CWD patches to the current canonical values, so other writers' untouched fields survive.
 - Overlapping assignments follow successful acceptance order. Correct repeats succeed without new semantic revisions.
@@ -147,28 +157,32 @@ Registered Pi Skills may be compiled into source-addressed artifacts when durabl
 - Object patches merge recursively, and `null` deletes an object key instead of being stored.
 - Accepted supplied scopes recursively drop empty object fields and planes, including explicit `{}`; empty ancestors disappear. Array slots and empty arrays stay intact. Cleanup is scope-local and may reveal inherited values. Model context hides legacy empty branches, but reading never rewrites history. See [patch semantics](docs/architecture.md#model-tools).
 
+Multi-owner example, requiring CWD and Session to participate:
+
 ```json
 {
   "cwd": {
-    "contract": { "verification": { "command": "npm test" } }
+    "strategy": { "verification": { "command": "npm test" } }
   },
   "session": {
     "intents": { "verify": { "action": "Run the checks before publishing" } },
-    "working": { "checks": "Pending" }
+    "tactics": { "checks": "Pending" }
   }
 }
 ```
 
 During an active episode, a material patch is an inference barrier: sibling tool calls are blocked, and the next inference sees the accepted effective state. Ordinary completion needs no finalization patch or extra State Flow reasoning loop.
 
-`read_state` provides targeted current and historical access:
+`read_state` accepts flat ordinary paths with one owner (for example `{ "path": "tactics" }`); `effective[N]` selects that owner's retained temporal boundary and scalar `patches[N]` its retained patch. Current same-owner structured refs may use `{ "$ref": "lazy.plan" }`; persistence anchors them to the exact owner. Never reinterpret different-owner/historical/effective refs, resources or text as local permission.
+
+With multiple owners, unscoped reads use the effective overlay. This multi-owner example requires every explicit owner to participate:
 
 ```json
-{ "paths": ["effective.contract", "cwd.working", "session.intents"] }
+{ "paths": ["effective.strategy", "cwd.tactics", "session.intents"] }
 ```
 
-- `working`: Current effective working memory; unscoped paths are effective aliases.
-- `effective[1].working`: Working memory at the preceding accepted transition boundary, when retained.
+- `tactics`: Current sole-owner memory, or the effective overlay when multiple owners participate.
+- `effective[1].tactics`: Working memory at the preceding accepted transition boundary, when retained.
 - `cwd.patches[0]`: The latest retained CWD semantic patch.
 - `effective.lazy.memory[0..3]`: A bounded slice of a stored collection.
 
@@ -225,7 +239,7 @@ How mode changes interact with storage:
 - Explicit Off inspection may read current stored values through a disposable validated reader. It does not activate memory, install cache or change pending fork acquisition. Missing private authority stays unavailable.
 - Active waits for a coherent capture and acceptance; another mode or selection can withdraw its wait.
 
-State Flow accepts only the canonical store contract and provides no in-place format converter. Preserve existing data and check the [format boundary](docs/usage.md#moving-a-store-and-supported-formats) before changing versions or moving a store.
+Canonical scope metadata v3 uses `strategy` and `tactics`. Supported v1/v2 checkpoint/tail cohorts are read through a declared translation and converted once on an owned semantic acceptance, after a verified exact-byte backup outside the canonical store. Upgrade/quiesce all writers first; unsupported layouts are not repaired. See the [format and backup boundary](docs/usage.md#moving-a-store-and-supported-formats) before upgrading or moving a store.
 
 ## Operational boundaries
 
@@ -243,6 +257,8 @@ Treat state, diagnostic logs and backups as private data. Revalidate consequenti
 - [Performance](docs/performance.md) — Measurements, workload definitions and limits.
 - [Acceptance map](docs/temporal-acceptance.md) — Properties tied to concrete tests.
 - [Documentation index](docs/README.md) — All maintained guides.
+
+The six built-in planes use an [internal semantic-module contract](docs/semantic-module-contract.md) for authoring policy and mode-aware context. It also supplies isolated context/producer executors. The candidate [public module entry](docs/public-module-contract.md) adds native-host-scoped registration/lifetime binding; metadata4 opaque-retention codecs have bounded local acceptance, and registered mutable external roots now use the existing read/patch tools in the local candidate; captured inputs and Active/Passive module context now execute with source and native-identity fences, and Active async producers commit complete replacements through the same atomic engine. Ordinary public consumers now have SOURCE/built-SDK acceptance evidence for current-only forks and opaque retention across folding, reload, absence and re-registration. This remains an unpublished local candidate, not a new independent activation approval. Neither contract implies a new loader or automatic background reasoning.
 
 For development, run `npm install` and `npm run validate`. `npm run benchmark` is opt-in and separate from the normal suite; see `benchmarks/README.md` in a source checkout.
 

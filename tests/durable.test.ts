@@ -21,6 +21,68 @@ function temporalFixture(): TemporalState {
 	return createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
 }
 
+test("string codec entrypoints reject lossy UTF-8 source encoding but preserve escaped values and valid surrogate pairs", () => {
+	for (const version of [2, 3]) {
+		for (const literal of ["\ud800", "\udc00", "😀"]) {
+			const view = advanceTemporalState(createTemporalState({ global: { strategy: { literal } }, cwd: {}, session: {} }, "unicode"), [
+				{ scope: "global", patch: { tactics: { literal } } },
+			], "unicode-T1");
+			const stream = view.scopes.global;
+			const wire = serializeScopeStream(stream, "global");
+			const legacy = (text: string) => version === 2 ? text.replaceAll('"strategy":', '"contract":').replaceAll('"tactics":', '"working":') : text;
+			const metadata = JSON.parse(serializeScopeMetadata(undefined, stream, "global"));
+			const source = { checkpoint: legacy(wire.checkpoint), patches: legacy(wire.patches), meta: JSON.stringify({ ...metadata, version, opaque: literal }) };
+			const decoded = parseScopeStream(source.checkpoint, source.patches, "global", undefined, source.meta)!;
+			assert.deepEqual(decoded.checkpoint.state.strategy, { literal });
+			assert.deepEqual(decoded.patches[0].patch.tactics, { literal });
+			if (literal === "😀") continue;
+			for (const key of ["checkpoint", "patches", "meta"] as const) {
+				const invalid = { ...source, [key]: source[key].replaceAll(JSON.stringify(literal).slice(1, -1), literal) };
+				assert.notEqual(invalid[key], source[key]);
+				assert.throws(() => parseScopeStream(invalid.checkpoint, invalid.patches, "global", undefined, invalid.meta), /not lossless UTF-8 text/);
+			}
+		}
+	}
+});
+
+test("metadata4 new contract retains declared opaque external objects without definitions", () => {
+	const stream = temporalFixture().scopes.session;
+	const modules = { x_acme_archive: { schemaVersion: 1, immutable: true } };
+	const content = JSON.parse('{"empty":{},"array":[{},[]],"__proto__":{"constructor":{}},"a/b~c":{}}');
+	const meta = JSON.stringify({ version: 4, modules, temporal: { revision: 0, checkpoint: stream.checkpoint.through, patches: [] } });
+	const decoded = parseScopeStream(JSON.stringify({ x_acme_archive: content }), "", "session", undefined, meta)!;
+	assert.deepEqual(decoded.checkpoint.state.x_acme_archive, content);
+	assert.deepEqual(JSON.parse(serializeScopeMetadata(undefined, decoded, "session")).modules, modules);
+	assert.deepEqual(JSON.parse(serializeScopeStream(decoded, "session").checkpoint), { x_acme_archive: content });
+});
+
+test("metadata4 rejects malformed descriptors, undeclared roots and invalid external replay rather than sanitizing", () => {
+	const origin = temporalFixture().scopes.session.checkpoint.through;
+	const modules = { x_acme_archive: { schemaVersion: 1, immutable: false } };
+	const meta = (descriptor: unknown, revision = 0) => JSON.stringify({ version: 4, modules: descriptor,
+		temporal: { revision, checkpoint: origin, patches: revision ? [{ id: "external-T1", position: 1, parent: origin.id }] : [] } });
+	for (const invalid of [undefined, null, [], { strategy: { schemaVersion: 1, immutable: false } },
+		{ x_Bad: { schemaVersion: 1, immutable: true } }, ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "1"].map(schemaVersion => ({ x_acme_archive: { schemaVersion, immutable: false } })),
+		{ x_acme_archive: { schemaVersion: 1, immutable: 1 } }, { x_acme_archive: { schemaVersion: 1, immutable: false, ignored: true } }]) {
+		assert.throws(() => parseScopeStream("{}", "", "session", undefined, meta(invalid)));
+	}
+	for (const invalid of [{ x_missing: {} }, { x_bad_name: {} }, { x_acme_archive: [] }, { x_acme_archive: 1 },
+		{ x_acme_archive: null }, { x_acme_archive: { nested: [null] } }]) {
+		assert.throws(() => parseScopeStream(JSON.stringify(invalid), "", "session", undefined, meta(modules)));
+	}
+	for (const invalid of [{ x_missing: null }, { x_acme_archive: [] }, { x_acme_archive: false }, { x_acme_archive: { nested: [null] } }]) {
+		assert.throws(() => parseScopeStream('{"x_acme_archive":{}}', JSON.stringify(invalid), "session", undefined, meta(modules, 1)));
+	}
+	const decoded = parseScopeStream('{"x_acme_archive":{}}', '{"x_acme_archive":null}', "session", undefined, meta(modules, 1))!;
+	for (const changed of [undefined, {}, { x_acme_archive: { schemaVersion: 2, immutable: false } }, { x_acme_archive: { schemaVersion: 1, immutable: true } }] as Array<ScopeStream["modules"]>) {
+		assert.throws(() => serializeScopeMetadata(undefined, { ...decoded, modules: changed }, "session", undefined, meta(modules, 1)));
+	}
+	const nonfinite = structuredClone(decoded);
+	nonfinite.checkpoint.state.x_acme_archive = { number: Number.POSITIVE_INFINITY };
+	assert.throws(() => serializeScopeStream(nonfinite, "session"));
+	assert.throws(() => parseScopeStream('{"x_acme_archive":{"number":1e999}}', "", "session", undefined, meta(modules)));
+});
+
 test("default durable root follows Pi agent-dir resolution without Knowledge coupling", () => {
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	try {
@@ -79,7 +141,7 @@ test("readable CWD paths retain collision provenance only in metadata", () => {
 	assert.deepEqual(parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a-b/c", meta), stream);
 	assert.throws(() => parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a/b-c", meta), /identity mismatch/);
 	assert.throws(() => serializeScopeStream(stream, "cwd"), /requires its canonical identity/);
-	assert.throws(() => parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a-b/c", JSON.stringify({ temporal: owned.temporal })), /identity is missing/);
+	assert.throws(() => parseScopeStream(owned.checkpoint, owned.patches, "cwd", "/a-b/c", JSON.stringify({ version: 3, temporal: owned.temporal })), /identity is missing/);
 	assert.equal(Object.hasOwn(JSON.parse(owned.checkpoint), "owner"), false);
 });
 
@@ -106,7 +168,7 @@ test("canonical writer persists anchored pairs and readers replay only tails wit
 	assert.equal(JSON.parse(readFileSync(paths.checkpoint, "utf8")).response, "");
 	const loaded = loadScopeStream(cwd, session, "session", repository)!;
 	loaded.patches[0]!.transition.id = "mutated";
-	loaded.checkpoint.state.working = { mutated: true };
+	loaded.checkpoint.state.tactics = { mutated: true };
 	assert.deepEqual(loadScopeStream(cwd, session, "session", repository), view.scopes.session);
 	assert.equal(loadScopeStream(cwd, "other-session", "session", repository), undefined);
 	assert.throws(() => temporalStateFileUpdates(cwd, session, view, ["cwd", "cwd"], repository), /Duplicate temporal scope/);
@@ -145,8 +207,8 @@ test("temporal codec round-trips zero, seven, and repeatedly folded sparse tails
 	for (let index = 0; index <= 30; index++) {
 		if (index > 0) {
 			const changes: RecentScopePatch[] = [{ scope: "session", patch: { response: `answer ${index}` } }];
-			if (index % 3 === 0) changes.push({ scope: "cwd", patch: { working: { cwd: index } } });
-			if (index % 10 === 0) changes.push({ scope: "global", patch: { working: { global: index } } });
+			if (index % 3 === 0) changes.push({ scope: "cwd", patch: { tactics: { cwd: index } } });
+			if (index % 10 === 0) changes.push({ scope: "global", patch: { tactics: { global: index } } });
 			view = advanceTemporalState(view, changes, `T${index}`);
 		}
 		const restored = structuredClone(view);
@@ -175,7 +237,7 @@ test("scope codecs preserve tails above the default while runtime configuration 
 	const historyLimit = 12;
 	let view = temporalFixture();
 	for (let index = 1; index <= 10; index++) {
-		view = advanceTemporalState(view, [{ scope: "session", patch: { working: { index } } }], `L${index}`, historyLimit);
+		view = advanceTemporalState(view, [{ scope: "session", patch: { tactics: { index } } }], `L${index}`, historyLimit);
 	}
 	const sources = serializeScopeStream(view.scopes.session, "session");
 	const restored = parseScopeStream(sources.checkpoint, sources.patches, "session", undefined, serializeScopeMetadata({}, view.scopes.session, "session"));
@@ -186,17 +248,57 @@ test("scope codecs preserve tails above the default while runtime configuration 
 test("scope metadata revisions preserve legacy reads and reject unknown future writers", () => {
 	assert.deepEqual(parseScopeProvenance(JSON.stringify({ version: 1, artifacts: {} }), "/legacy/meta.json"), {});
 	assert.deepEqual(parseScopeProvenance(serializeScopeProvenance({}), "/current/meta.json"), {});
-	assert.equal(JSON.parse(serializeScopeProvenance({})).version, 2);
-	assert.throws(() => parseScopeProvenance(JSON.stringify({ version: 3, artifacts: {} }), "/future/meta.json"), /Invalid State Flow provenance document/);
+	assert.equal(JSON.parse(serializeScopeProvenance({})).version, 3);
+	assert.throws(() => parseScopeProvenance(JSON.stringify({ version: 4, artifacts: {} }), "/malformed4/meta.json"), /retained modules/);
+	assert.throws(() => parseScopeProvenance(JSON.stringify({ version: 5, artifacts: {} }), "/future/meta.json"), /Invalid State Flow provenance document/);
+});
+
+test("scope format admission rejects unsupported metadata before filtering or rewriting semantic data", (t) => {
+	const { repository, cleanup } = fixture();
+	t.after(cleanup);
+	const cwd = join(repository, "project");
+	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { tactics: { next: "check" } } }], "T1");
+	for (const scope of ["global", "cwd", "session"] as const) {
+		const stream = view.scopes[scope];
+		const identity = scope === "cwd" ? cwd : undefined;
+		const source = serializeScopeStream(stream, scope, identity);
+		const current = JSON.parse(serializeScopeMetadata({}, stream, scope, identity));
+		const paths = temporalScopePaths(cwd, "session", scope, repository);
+		mkdirSync(paths.directory, { recursive: true });
+		for (const version of [3]) {
+			const meta = JSON.stringify({ ...current, version, foreign: { keep: true } });
+			assert.deepEqual(parseScopeStream(source.checkpoint, source.patches, scope, identity, meta), stream);
+			const output = JSON.parse(serializeScopeMetadata({}, stream, scope, identity, meta));
+			assert.equal(output.version, 3);
+			assert.deepEqual(output.foreign, { keep: true });
+		}
+		for (const version of [undefined, null, 0, -1, 5, 3.5, "3", {}, []]) {
+			const meta = JSON.stringify({ ...current, version });
+			const checkpoint = JSON.stringify({ strategy: { requirement: "must not disappear" } });
+			const patches = stream.patches.map(() => JSON.stringify({ tactics: { progress: "must not disappear" } })).join("\n");
+			writeFileSync(paths.checkpoint, checkpoint);
+			writeFileSync(paths.patches, patches);
+			writeFileSync(paths.meta, meta);
+			assert.throws(() => classifyScopeStream(checkpoint, patches, scope, identity, meta), /Unsupported State Flow .* metadata version/);
+			assert.throws(() => parseScopeStream(checkpoint, patches, scope, identity, meta), /Unsupported State Flow .* metadata version/);
+			assert.throws(() => loadScopeStream(cwd, "session", scope, repository), /Unsupported State Flow .* metadata version/);
+			assert.throws(() => serializeScopeMetadata({}, stream, scope, identity, meta), /Unsupported State Flow metadata version/);
+			assert.equal(readFileSync(paths.checkpoint, "utf8"), checkpoint);
+			assert.equal(readFileSync(paths.patches, "utf8"), patches);
+			assert.equal(readFileSync(paths.meta, "utf8"), meta);
+		}
+	}
+	const stream = view.scopes.session;
+	assert.equal(JSON.parse(serializeScopeMetadata({}, stream, "session", undefined, "{}")).version, 3);
 });
 
 test("checkpoint codec uses deterministic bytes, anchored state, and no redundant current snapshot", () => {
-	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { working: { z: 1, a: 2 }, response: "Done" } }], "T1");
+	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { tactics: { z: 1, a: 2 }, response: "Done" } }], "T1");
 	const first = serializeScopeStream(view.scopes.session, "session");
 	const reordered = structuredClone(view.scopes.session);
-	reordered.patches[0]!.patch = { response: "Done", working: { a: 2, z: 1 } };
+	reordered.patches[0]!.patch = { response: "Done", tactics: { a: 2, z: 1 } };
 	assert.deepEqual(serializeScopeStream(reordered, "session"), first);
-	assert.deepEqual(Object.keys(JSON.parse(first.checkpoint)).sort(), ["artifacts", "contract", "intents", "lazy", "response", "working"]);
+	assert.deepEqual(Object.keys(JSON.parse(first.checkpoint)).sort(), ["artifacts", "intents", "lazy", "response", "strategy", "tactics"]);
 	assert.equal(JSON.parse(first.checkpoint).response, "");
 	assert.equal(JSON.parse(first.patches).response, "Done");
 	assert.equal(Object.hasOwn(JSON.parse(first.patches), "transition"), false);
@@ -236,7 +338,7 @@ test("temporal codec accepts every missing checkpoint field by scope without fil
 test("semantic codecs read and write only known top-level fields while retaining every history boundary", () => {
 	for (const scope of ["global", "cwd", "session"] as const) {
 		let view = createTemporalState({ global: {}, cwd: {}, session: {} }, "origin");
-		view = advanceTemporalState(view, [{ scope, patch: { working: { extra: "owned nested data" }, foreign: [null] } }], "known");
+		view = advanceTemporalState(view, [{ scope, patch: { tactics: { extra: "owned nested data" }, foreign: [null] } }], "known");
 		view = advanceTemporalState(view, [{ scope, patch: { foreign: "ignored-only record" } }], "ignored");
 		const stream = view.scopes[scope];
 		stream.checkpoint.state = { lazy: { foreign: "owned nested data" }, foreign: { opaque: null } };
@@ -245,7 +347,7 @@ test("semantic codecs read and write only known top-level fields while retaining
 		const loaded = parseScopeStream(JSON.stringify(stream.checkpoint.state),
 			stream.patches.map(({ patch }) => JSON.stringify(patch)).join("\n"), scope, cwd, meta)!;
 		assert.deepEqual(loaded.checkpoint.state, { lazy: { foreign: "owned nested data" } });
-		assert.deepEqual(loaded.patches.map(({ patch }) => patch), [{ working: { extra: "owned nested data" } }, {}]);
+		assert.deepEqual(loaded.patches.map(({ patch }) => patch), [{ tactics: { extra: "owned nested data" } }, {}]);
 		assert.deepEqual(loaded.patches.map(({ transition }) => transition), stream.patches.map(({ transition }) => transition));
 		assert.equal(loaded.revision, stream.revision);
 		const output = serializeScopeStream(stream, scope, cwd);
@@ -256,10 +358,10 @@ test("semantic codecs read and write only known top-level fields while retaining
 });
 
 test("invalid materialized replay identifies its scope and tail without treating null as a missing field", () => {
-	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { working: { count: 1 } } }], "T1");
+	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { tactics: { count: 1 } } }], "T1");
 	const source = serializeScopeStream(view.scopes.session, "session");
 	const meta = serializeScopeMetadata({}, view.scopes.session, "session");
-	assert.throws(() => parseScopeStream(source.checkpoint, JSON.stringify({ working: { invalid: [null] } }), "session", undefined, meta), {
+	assert.throws(() => parseScopeStream(source.checkpoint, JSON.stringify({ tactics: { invalid: [null] } }), "session", undefined, meta), {
 		message: "Invalid temporal materialized semantic state in session tail: null is not allowed",
 	});
 	const checkpoint = JSON.parse(source.checkpoint);
@@ -279,7 +381,8 @@ test("temporal codec rejects incomplete, legacy, malformed, oversized, and causa
 		checkpoint: view.scopes.session.checkpoint.through,
 		patches: view.scopes.session.patches.map((record) => record.transition),
 	} });
-	assert.equal(parseScopeStream(source.checkpoint, source.patches, "session", undefined, legacyMeta)!.revision, 1);
+	const legacyCheckpoint = JSON.stringify({ intents: {}, contract: {}, working: {}, artifacts: {}, response: "", lazy: {} });
+	assert.equal(parseScopeStream(legacyCheckpoint, source.patches, "session", undefined, legacyMeta)!.revision, 1);
 	assert.equal(parseScopeStream(undefined, undefined, "session"), undefined);
 	assert.throws(() => parseScopeStream(source.checkpoint, undefined, "session"), /incomplete checkpoint\/tail/);
 	assert.throws(() => parseScopeStream(undefined, source.patches, "session"), /incomplete checkpoint\/tail/);
@@ -290,18 +393,18 @@ test("temporal codec rejects incomplete, legacy, malformed, oversized, and causa
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches.repeat(2), "session", undefined, meta), /does not match/);
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "global", undefined, meta), /session response/);
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "session", undefined, JSON.stringify({
-		version: 1, artifacts: {}, temporal: { revision: "1", checkpoint: view.scopes.session.checkpoint.through, patches: view.scopes.session.patches.map((record) => record.transition) },
+		version: 3, artifacts: {}, temporal: { revision: "1", checkpoint: view.scopes.session.checkpoint.through, patches: view.scopes.session.patches.map((record) => record.transition) },
 	})), /Invalid temporal checkpoint/);
 	const broken = structuredClone(view.scopes.session);
 	broken.patches[0]!.transition.parent = "other-branch";
-	const brokenMeta = JSON.stringify({ version: 1, artifacts: {}, temporal: {
-		checkpoint: broken.checkpoint.through, patches: broken.patches.map((record) => record.transition),
+	const brokenMeta = JSON.stringify({ version: 3, artifacts: {}, temporal: {
+		revision: broken.revision, checkpoint: broken.checkpoint.through, patches: broken.patches.map((record) => record.transition),
 	} });
 	assert.throws(() => parseScopeStream(source.checkpoint, source.patches, "session", undefined, brokenMeta), /Disconnected/);
 });
 
 test("retained empty patches preserve their proven boundaries without blocking materialization", () => {
-	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { working: { count: 1 } } }], "T1");
+	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { tactics: { count: 1 } } }], "T1");
 	view.scopes.session.checkpoint.state = {};
 	view.scopes.session.patches[0]!.patch = {};
 	const sources = serializeScopeStream(view.scopes.session, "session");
@@ -313,10 +416,10 @@ test("retained empty patches preserve their proven boundaries without blocking m
 });
 
 test("temporal codec validates semantic replay instead of merely accepting valid JSON envelopes", () => {
-	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { working: { count: 1 } } }], "T1");
+	const view = advanceTemporalState(temporalFixture(), [{ scope: "session", patch: { tactics: { count: 1 } } }], "T1");
 	const malformed: Array<{ mutate: (stream: ScopeStream) => void; error: RegExp }> = [
-		{ mutate: (stream) => { stream.checkpoint.state.working = { invalid: null }; }, error: /semantic state/ },
-		{ mutate: (stream) => { stream.patches[0]!.patch = { working: { invalid: [null] } }; }, error: /semantic state/ },
+		{ mutate: (stream) => { stream.checkpoint.state.tactics = { invalid: null }; }, error: /semantic state/ },
+		{ mutate: (stream) => { stream.patches[0]!.patch = { tactics: { invalid: [null] } }; }, error: /semantic state/ },
 		{ mutate: (stream) => { stream.patches[0]!.patch = { artifacts: { source: { description: "" } } }; }, error: /semantic state/ },
 		{ mutate: (stream) => { stream.checkpoint.through.position = -1; }, error: /temporal boundary/ },
 	];
@@ -324,8 +427,8 @@ test("temporal codec validates semantic replay instead of merely accepting valid
 		const stream = structuredClone(view.scopes.session);
 		mutate(stream);
 		assert.throws(() => serializeScopeStream(stream, "session"), error);
-		const meta = JSON.stringify({ version: 1, artifacts: {}, temporal: {
-			checkpoint: stream.checkpoint.through, patches: stream.patches.map((record) => record.transition),
+		const meta = JSON.stringify({ version: 3, artifacts: {}, temporal: {
+			revision: stream.revision, checkpoint: stream.checkpoint.through, patches: stream.patches.map((record) => record.transition),
 		} });
 		assert.throws(() => parseScopeStream(JSON.stringify(stream.checkpoint.state), JSON.stringify(stream.patches[0]!.patch), "session", undefined, meta), error);
 	}

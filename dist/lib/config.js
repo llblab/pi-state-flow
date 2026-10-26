@@ -5,6 +5,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getDurableRepositoryRoot } from "./durable.js";
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.js";
 import { isObject } from "./json.js";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "./selection.js";
 import { isStateFlowMode } from "./snapshot.js";
 /** Read the repository-global config once at extension load/reload. Missing config uses defaults; invalid config never falls back. */
 export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = getDurableRepositoryRoot(agentDir)) {
@@ -13,6 +14,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
     const defaults = {
         directory,
         mode: "off",
+        scopes: DEFAULT_SCOPE_SELECTION,
         inactiveMode: "off",
         logging: false,
         showSuccessfulPatches: true,
@@ -28,7 +30,7 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
         throw new Error(`Cannot read State Flow configuration: ${path}`, { cause: error });
     }
     // autoStart/passiveBootstrap/passiveTools are read-only compatibility inputs; explicit mode is authoritative.
-    const allowed = new Set(["mode", "autoStart", "passiveBootstrap", "passiveTools", "logging", "showSuccessfulPatches", "historyLimit"]);
+    const allowed = new Set(["scopes", "mode", "autoStart", "passiveBootstrap", "passiveTools", "logging", "showSuccessfulPatches", "historyLimit"]);
     if (!isObject(value) || Object.keys(value).some((key) => !allowed.has(key))) {
         throw new Error(`State Flow configuration contains unknown settings: ${path}`);
     }
@@ -46,12 +48,22 @@ export function loadStateFlowConfig(agentDir = getAgentDir(), repositoryRoot = g
         throw new Error(`State Flow showSuccessfulPatches must be a boolean: ${path}`);
     if (Object.hasOwn(value, "historyLimit") && (!Number.isSafeInteger(value.historyLimit) || value.historyLimit < 0 || value.historyLimit > MAX_HISTORY_LIMIT))
         throw new Error(`State Flow historyLimit must be an integer from 0 to ${MAX_HISTORY_LIMIT}: ${path}`);
+    let scopes = DEFAULT_SCOPE_SELECTION;
+    if (Object.hasOwn(value, "scopes")) {
+        try {
+            scopes = captureScopeSelection(value.scopes);
+        }
+        catch {
+            throw new Error(`Invalid State Flow scopes configuration: ${path}`);
+        }
+    }
     const legacyInactive = value.passiveBootstrap !== false || value.passiveTools !== false ? "passive" : "off";
     const hasLegacyMode = Object.hasOwn(value, "autoStart") || Object.hasOwn(value, "passiveBootstrap") || Object.hasOwn(value, "passiveTools");
     const mode = isStateFlowMode(value.mode) ? value.mode : value.autoStart === true ? "active" : hasLegacyMode ? legacyInactive : "off";
     return {
         directory,
         mode,
+        scopes,
         inactiveMode: isStateFlowMode(value.mode) ? inactiveModeFor(value.mode) : hasLegacyMode ? legacyInactive : "off",
         logging: value.logging === true,
         showSuccessfulPatches: value.showSuccessfulPatches !== false,

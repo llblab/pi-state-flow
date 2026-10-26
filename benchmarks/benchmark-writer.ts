@@ -18,7 +18,7 @@ process.on("message", (message: { scope: "session" | "global"; round: number } |
 	try {
 		const states = runtime.states();
 		const next = structuredClone(states);
-		next[message.scope].working = { writer: id, round: message.round };
+		next[message.scope].tactics = { writer: id, round: message.round };
 		const accepted = createAcceptedTransition(states, next)!;
 		const candidate = structuredClone(snapshot);
 		candidate.meta.step += 1;
