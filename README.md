@@ -88,7 +88,7 @@ New sessions default to **Off**. Choose Passive for ordinary conversation with m
   - Choosing Passive or Active later acquires memory.
   - Stored memory and Pi's native trace stay intact.
 
-Modes select agent behavior; they do not change disk persistence or fork copying. Final consolidation needs no empty ceremonial patch, and context projection does not delete native history. See [mode semantics and bootstrap terminology](docs/usage.md#active-passive-and-configured-off).
+Modes select agent behavior, not different storage algorithms. Off defers memory acquisition; selected-scope policy independently determines whether a fork may copy private Session memory. Final consolidation needs no empty ceremonial patch, and context projection does not delete native history. See [mode semantics and bootstrap terminology](docs/usage.md#active-passive-and-configured-off).
 
 ## State model
 
@@ -100,7 +100,7 @@ Memory has three ownership scopes:
 - `cwd`: Knowledge shared by sessions in the same working directory.
 - `session`: State belonging to the current session and its selected branch.
 
-Participation is configured with a nonempty `scopes` array in [global configuration](docs/usage.md#configuration); omission selects all three. Each native branch captures that choice once, and forks inherit it. All seven nonempty selections use the same runtime. The existing mode commands accept optional whitespace-separated owners, for example `/state-flow-active session`, `/state-flow-passive cwd global`, or `/state-flow-off cwd`. Blank/mode-only commands and Telegram controls preserve the captured choice. Duplicate/unknown tokens reject before changing policy; Off records a new choice without canonical memory I/O. No settings chooser is required. Excluded owners receive no automatic memory contribution or semantic writes; new answers are stored only when Active and Session participates. Mode-only Telegram buttons retain that choice; explicit operator inspection is separate from model participation. See the [functional boundary and legacy proof dependencies](docs/scope-selection-contract.md#m2-functional-acceptance-boundary).
+Participation is configured with a nonempty `scopes` array in [global configuration](docs/usage.md#configuration); omission selects all three. Wanted means selected by captured policy, available means a validated read view exists, and excluded means outside that policy; [usage](docs/usage.md#lifecycle-operations) owns the distinctions and the `selected, unavailable` read diagnostic. Selection never moves data between owners. Each native branch captures that choice once, and forks inherit it. All seven nonempty selections use the same runtime. The existing mode commands accept optional whitespace-separated owners, for example `/state-flow-active session`, `/state-flow-passive cwd global`, or `/state-flow-off cwd`. Blank/mode-only commands and Telegram controls preserve the captured choice. Duplicate/unknown tokens reject before changing policy; Off records a new choice without canonical memory I/O. No settings chooser is required. Excluded owners receive no automatic memory contribution or semantic writes; new answers are stored only when Active and Session participates. Mode-only Telegram buttons retain that choice; explicit operator inspection is separate from model participation. See the [functional boundary and legacy proof dependencies](docs/scope-selection-contract.md#m2-functional-acceptance-boundary).
 
 Participating owners compose recursively in **global → CWD → session** order:
 
@@ -125,8 +125,8 @@ Runtime views provide these documented planes:
 Every plane is optional on disk:
 
 - Stored checkpoints and patches may omit any documented plane, including `intents`, `lazy` or `response`.
-- Current and historical views assemble only the known fields actually present in the selected scopes; absent fields are not filled in. Empty `response` counts as absent.
-- Readers ignore unrelated unknown top-level fields, and writers emit only known fields. Retired `contract`/`working` roots explicitly reject in the target format; nested ordinary keys remain unrestricted.
+- Current and historical views assemble present built-in fields and metadata v4-declared external roots from the selected scopes; absent fields are not filled in. Empty `response` counts as absent.
+- Declared external roots and retained history survive missing or incompatible definitions under the [public module contract](docs/public-module-contract.md). Unrelated unknown roots are not supported semantic fields. Retired `contract`/`working` roots explicitly reject in the target format; nested ordinary keys remain unrestricted.
 - Reading or starting never rewrites data just to normalize it, and a missing field is not a storage-format error.
 
 These planes organize ordinary JSON; there is no project-specific schema. The model updates every plane except `response`, which is runtime-owned.
@@ -220,8 +220,8 @@ The default store is `~/.pi/agent/state-flow/`, independent of registered source
 **Resume, tree navigation and forks:**
 
 - **State Flow does not depend on the Pi step.** Memory is the current JSON state of each scope and changes only through accepted `patch_state` calls and run lifecycle. Resume and tree navigation restore the branch's mode, never an older memory revision; Off defers acquisition. Past values stay readable through `read_state` offsets within retained history.
-- A new session gets its own session layer.
-- Supported native forks copy the parent's **current** session memory into a new owner without changing the parent's private data.
+- A new session gets its own private layer only when Session acquisition is admitted; shared-only selections create no hidden private semantics.
+- Supported native forks inherit captured policy and copy parent-**current** Session memory into a fresh child owner when admitted, without changing parent-private data. Off or Session-excluded forks defer private acquisition; an acquired child never recopies.
 - Explicit Active or Passive accepts the validated current memory of that same session; modes stay stable.
 - Missing, malformed or contradictory current files, unsafe fork copying and concurrent writes remain fenced and are never replaced by empty or foreign memory.
 
@@ -239,7 +239,7 @@ How mode changes interact with storage:
 - Explicit Off inspection may read current stored values through a disposable validated reader. It does not activate memory, install cache or change pending fork acquisition. Missing private authority stays unavailable.
 - Active waits for a coherent capture and acceptance; another mode or selection can withdraw its wait.
 
-Canonical scope metadata v3 uses `strategy` and `tactics`. Supported v1/v2 checkpoint/tail cohorts are read through a declared translation and converted once on an owned semantic acceptance, after a verified exact-byte backup outside the canonical store. Upgrade/quiesce all writers first; unsupported layouts are not repaired. See the [format and backup boundary](docs/usage.md#moving-a-store-and-supported-formats) before upgrading or moving a store.
+Core-only scope metadata v3 and external-module metadata v4 use `strategy` and `tactics`; v4 also retains declared external objects/descriptors independently of definition lifetimes. Supported v1/v2 cohorts read through declared translation; owned acceptance may convert supported formats only after a verified exact-byte backup outside canonical authority. Upgrade/quiesce all writers first; unsupported layouts are not repaired. See the [format and backup boundary](docs/usage.md#moving-a-store-and-supported-formats) before upgrading or moving a store.
 
 ## Operational boundaries
 
@@ -258,7 +258,7 @@ Treat state, diagnostic logs and backups as private data. Revalidate consequenti
 - [Acceptance map](docs/temporal-acceptance.md) — Properties tied to concrete tests.
 - [Documentation index](docs/README.md) — All maintained guides.
 
-The six built-in planes use an [internal semantic-module contract](docs/semantic-module-contract.md) for authoring policy and mode-aware context. It also supplies isolated context/producer executors. The candidate [public module entry](docs/public-module-contract.md) adds native-host-scoped registration/lifetime binding; metadata4 opaque-retention codecs have bounded local acceptance, and registered mutable external roots now use the existing read/patch tools in the local candidate; captured inputs and Active/Passive module context now execute with source and native-identity fences, and Active async producers commit complete replacements through the same atomic engine. Ordinary public consumers now have SOURCE/built-SDK acceptance evidence for current-only forks and opaque retention across folding, reload, absence and re-registration. This remains an unpublished local candidate, not a new independent activation approval. Neither contract implies a new loader or automatic background reasoning.
+The six built-in planes use an [internal semantic-module contract](docs/semantic-module-contract.md) for authoring policy, mode-aware context and isolated producer evaluation. Since 0.27.0, the published [`@llblab/pi-state-flow/modules` entry](docs/public-module-contract.md) also supports trusted companion-extension registration, retained metadata v4 external roots, existing read/patch tools, Active/Passive context and atomic Active producer replacements. Pi remains the loader; callbacks are trusted JavaScript, not sandboxed plugins or autonomous background reasoning. The public contract owns registration, retention and currentness requirements; [compatibility](docs/compatibility.md) separates deterministic integration evidence from installed-client and live-model claims.
 
 For development, run `npm install` and `npm run validate`. `npm run benchmark` is opt-in and separate from the normal suite; see `benchmarks/README.md` in a source checkout.
 

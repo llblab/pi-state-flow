@@ -4,9 +4,9 @@ This document describes the implemented lazy-state contract. [BACKLOG.md](../BAC
 
 ## Thesis
 
-State Flow provides `lazy` as an object-root semantic plane in every scope's runtime view.
+State Flow supports the optional object-root `lazy` plane in every participating scope.
 
-- It may be absent from stored state. Reads then use `{}` or values inherited through the effective overlay, without rewriting storage.
+- It may be absent from stored state. Exact reads preserve that absence; an absent top-level lazy value returns `null`, while effective reads can inherit a selected broader owner's value. Only default-bearing internal/library compatibility views supply `{}`; no read rewrites storage.
 - Nested lazy values are ordinary JSON. They are durable and versioned with the same causal lineage as hot state, but excluded from ordinary baseline hydration.
 
 The model-facing surface remains small:
@@ -37,7 +37,7 @@ The model-facing surface remains small:
 
 ## Semantic model
 
-Runtime views select present documented semantic planes in intent-first order, omitting absent fields, empty responses and unknown fields:
+Runtime views select present built-in planes in intent-first order, plus metadata v4-declared external roots under the [public module contract](public-module-contract.md), omitting absent fields and empty responses. The built-ins are:
 
 ```text
 global | CWD | session
@@ -45,14 +45,14 @@ global | CWD | session
 ├── strategy
 ├── tactics
 ├── artifacts
-├── response (session-owned; empty structural slot in Global/CWD)
+├── response (new answers are Session-owned; optional on disk)
 └── lazy
 ```
 
 Hot planes:
 
-- `intents`, `strategy`, `tactics` and `artifacts` stay hot in every scope.
-- Session-owned `response` is also hot. New Global and CWD states use an empty structural slot, and stored scopes may omit it. Effective uses the highest-priority present response, and each newly accepted answer is written only in Session.
+- Present `intents`, `strategy`, `tactics` and `artifacts` contribute hot memory from selected available owners.
+- Active projects the highest-priority present nonempty `response`; Passive omits it automatically. New answers are written only in Active participating Session. No stored structural slot is required, and readable legacy Global/CWD answers do not grant new shared authorship.
 - `intents` may keep compact active direction while referring to large supporting detail in `lazy`.
 
 `lazy` differs only in projection policy:
@@ -138,7 +138,7 @@ Ownership evaluates canonical references after model anchoring. A sole-CWD model
 - missing targets;
 - keys outside the `read_state` key grammar `[A-Za-z_$][A-Za-z0-9_$-]*`, for example keys with spaces, dots or non-Latin letters.
 
-**Receipt.** `state_updates.cascaded` lists all owner-scoped targets cleared in the intermediate ownership phase, even if later authored writes recreate them, for example `["session.lazy.plans.x", "session.tactics.draft"]`. Paths only, never lazy bodies or deleted values. The list is deterministic (Global, CWD, Session, then each scope's cascade order), absent when no target cascaded, and never omitted as a predictable write. Nested lazy deletions are reported even when the top-level `lazy_navigation` catalog is unchanged.
+**Receipt.** `state_updates.cascaded` lists targets cleared in the intermediate ownership phase, even if later authored writes recreate them. With multiple wanted owners paths stay scoped, for example `["session.lazy.plans.x", "session.tactics.draft"]`; with exactly one wanted owner they are relative, for example `["lazy.plans.x", "tactics.draft"]`. Canonical ownership and result details remain scoped. Paths only, never lazy bodies or deleted values. The list is deterministic (Global, CWD, Session, then each scope's cascade order), absent when no target cascaded, and never omitted as a predictable write. Nested lazy deletions are reported even when the top-level `lazy_navigation` catalog is unchanged.
 
 **Edge cases:**
 
@@ -151,7 +151,7 @@ Ownership evaluates canonical references after model anchoring. A sole-CWD model
 
 The explicit `effective.lazy` path recursively overlays `global.lazy → cwd.lazy → session.lazy` using the existing scope precedence and conflict semantics. It is read-only as an effective view and is not inserted into ordinary hot baseline state.
 
-Explicit paths such as `global.lazy`, `cwd.lazy`, and `session.lazy` preserve direct ownership access. Deleting a key from an upper scope reveals a lower-scope value exactly as ordinary scope-local deletion does. Hiding an inherited value without changing its owner is not a separate lazy feature.
+Explicit paths such as `global.lazy`, `cwd.lazy`, and `session.lazy` preserve direct ownership access only for wanted, available owners; excluded-owner access rejects without widening selection. Deleting a key from an upper scope reveals a lower-scope value exactly as ordinary scope-local deletion does. Hiding an inherited value without changing its owner is not a separate lazy feature.
 
 Active obligations, current constraints, unresolved next actions, and facts required for the next correct action remain hot.
 
@@ -295,8 +295,7 @@ A multi-path value response is positional:
 {
   "meta": {
     "type": "object",
-    "size": 3,
-    "sources": ["global", "cwd"]
+    "size": 3
   },
   "keys": {
     "memory": "array",
@@ -306,7 +305,7 @@ A multi-path value response is positional:
 }
 ```
 
-For an explicitly scoped object, redundant ownership is omitted:
+An explicitly scoped object uses the same structural-only metadata shape:
 
 ```json
 {
@@ -359,7 +358,6 @@ The read-level `meta` object is intentionally narrow and unrelated to persisted 
 - `type` always.
 - `size` for objects, meaning immediate named-key count.
 - `length` for arrays and strings.
-- `sources` only when an effective view actually combines or resolves scope ownership.
 
 It never exposes temporal boundaries, runtime identity, revisions, publication state, provenance registries, timestamps, encoded sizes, cache/index details, diagnostics, or arbitrary copied fields from `meta.json`. Adding a metadata field requires evidence that it changes the agent's next read decision; diagnostic convenience alone is insufficient.
 
@@ -520,7 +518,7 @@ Lazy mutations inherit existing guarantees:
 - One lock/CAS publication cohort.
 - Atomic hot-plus-lazy multi-scope changes.
 - Scope-local deletion and effective revelation semantics.
-- Exact retained-boundary selection on restore and branch navigation.
+- Exact retained boundaries for explicit historical reads; reload/resume/tree attach current same-session memory rather than rewinding it.
 - Read-only discovery with no commit, timestamp update, or transition.
 
 Lazy trees are co-located in canonical scope checkpoints/tails and use the same bounded lineage as hot state. The [performance guide](performance.md) owns current synthetic workloads and measurement limits. No separate lazy index or sharded authority exists; any future layout change requires measured need and must preserve canonical semantics, ownership, and one causal lineage.
@@ -536,7 +534,7 @@ Lazy trees are co-located in canonical scope checkpoints/tails and use the same 
 
 ## Normative invariants
 
-1. **Object root, ordinary JSON children**: Every runtime scope view has a lazy object, defaulting to `{}` when absent from stored semantics. Its nested values contain domain semantics, never mandatory State Flow record wrappers.
+1. **Object root, ordinary JSON children**: Present lazy content is an object with ordinary domain JSON children, never mandatory State Flow record wrappers. Sparse semantic/read views preserve absence; `{}` defaults belong only to internal/library compatibility views.
 2. **Semantic snapshots**: `value` contains only the selected state snapshot and `patch` only the selected semantic patch; `keys` alone adds closed structural `meta` before `keys`.
 3. **Exact success**: A successful read returns everything requested; it never truncates or paginates silently.
 4. **Runtime-owned concurrency**: Revisions, locks, and CAS remain internal unless explicitly needed for diagnostics.
@@ -566,7 +564,7 @@ Before release, implementation evidence must prove:
 - `effective.lazy` follows global → CWD → session overlay while explicit scope paths preserve ownership.
 - Reads create no semantic transition, Git commit, publication, freshness update, or future activation.
 - Whole-array replacement and indexed scalar, array, object, nested, multi-index, and stale-basis patches remain atomic.
-- Restore and fork select lazy state from the same retained canonical boundary as the rest of the owning session scope.
+- Reload/resume/tree attach current lazy state with the rest of the owning scope; a supported fork copies parent-current lazy content only when private acquisition is admitted. Historical reads select the same retained causal boundary as other planes.
 - Malformed canonical lazy data fails closed without rewriting the store; rejected queries and patches preserve accepted hot state.
 - Unsupported store formats and `read_state` inputs fail actionably without rewriting retained bytes.
 

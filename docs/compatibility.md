@@ -4,21 +4,23 @@
 
 State Flow requires matching `pi-coding-agent`, `pi-agent-core`, `pi-ai` and `pi-tui` packages at `>=1.0.0`. Keep all four on the same release line. The open-ended peer range permits newer SDK releases; it does not certify them.
 
-**Verified environment:** Linux/x64, Node 26.8.1, Git 2.55.0 and matching Pi SDK 1.0.0 packages.
+**Recorded published-baseline environment:** Linux/x64, Node 26.8.1, Git 2.55.0 and matching Pi SDK 1.0.0 packages.
+
+**0.27.2 local candidate checks:** Linux/x64, Node 22.19.0 and 24.21.0, Git 2.56.0 and matching Pi SDK 1.0.0 packages; see the [0.27.2 release record](../CHANGELOG.md). These are local deterministic checks, not new exact-tag release CI or installed-client certification.
 
 - Repository validation covers tests, typecheck, build, compiled imports and package dry-run. Results apply to the exact source and dependency identities validated.
-- The release workflow uses Node 24; its result is a separate verification gate.
+- The release workflow validates Node **22.19.0** and **24**, then publishes on Node 24. The recorded v0.27.1 release passed 1,696 tests per supported Node; this is baseline evidence, not a validation result for later edits.
 - Tests use isolated stores and scripted providers through the real Pi SDK. They do not certify installed Telegram/TUI reachability, live provider behavior, other operating systems, mixed SDK versions or untested newer SDK releases.
 
 Detailed behavioral witnesses live in [temporal acceptance](temporal-acceptance.md); benchmark methodology and source-bound results live in [performance](performance.md).
 
 ## Canonical scope format admission
 
-Core-only canonical scope metadata remains **version 3**, with `strategy` and `tactics` fields. The candidate **version 4** codec additionally retains external object-plane descriptors and opaque values independently of loaded definitions; absent internal `modules` metadata keeps existing v3 output. Declared legacy versions **1/2** translate before known-field filtering. Target-format `contract`/`working` roots reject; nested domain keys remain ordinary JSON. Unsupported versions fail closed. These scope versions are distinct from the unchanged Session lifecycle format and public module API version1. Public seventh-plane tool/context/producer activation remains separate open work; see the [public module boundary](public-module-contract.md).
+Core-only canonical scope metadata remains **version 3**, with `strategy` and `tactics` fields. The implemented **version 4** codec additionally retains external object-plane descriptors and opaque values independently of loaded definitions; absent internal `modules` metadata keeps existing v3 output. Declared legacy versions **1/2** translate before known-field filtering. Target-format `contract`/`working` roots reject; nested domain keys remain ordinary JSON. Unsupported versions fail closed. These scope versions are distinct from selection-aware Session lifecycle v2 and public module API v1; supported legacy lifecycle-v1 admission retains its complete-cohort proof requirements. External-root tools, captured Active/Passive context and Active producers shipped in 0.27.0; see the [public module boundary](public-module-contract.md).
 
 Legacy inspection is observational. Owned semantic acceptance may convert only admitted owner scopes, after complete target-cohort/identity validation, exact source CAS and a verified private backup outside canonical authority. Missing legacy revisions credit retained records only; conversion itself adds no learning transition. Opaque capture/rollback preserves arbitrary original bytes while semantic interpretation requires valid UTF-8. See [migration proof and support limits](semantic-compatibility-decision.md#guarded-publication-and-support-boundary) and [backup/recovery guidance](usage.md#moving-a-store-and-supported-formats).
 
-This is a locally implemented, unreleased breaking semantic API/storage change. Existing exported names remain where applicable but their fields, callbacks, schemas and paths use Strategy/Tactics; no permanent old-field aliases are provided. Upgrade/quiesce old consumers before deployment: already-deployed unsafe low-level callers cannot be universally fenced. No active store was operated on during development.
+This breaking semantic API/storage change shipped in **0.27.0** and is retained in **0.27.1**. Existing exported names remain where applicable but their fields, callbacks, schemas and paths use Strategy/Tactics; no permanent old-field aliases are provided. Upgrade/quiesce old consumers before deployment: already-deployed unsafe low-level callers cannot be universally fenced. No active store was operated on during development.
 
 ## Public host seams
 
@@ -69,11 +71,11 @@ Native tests prove no provider call before coherent acceptance, cancellation whi
 
 **Preferred representation:**
 
-- Global `config.json` accepts `mode: "active" | "passive" | "off"`. It defaults to Off when no mode policy is configured and supplies only the initial policy for new sessions.
-- Session `config.json` uses the same key for the concrete retained choice. Commands and Telegram never edit the global default.
-- Before semantic initialization, an inactive choice is retained in a native `{mode}` checkpoint instead.
+- Global `config.json` accepts `mode: "active" | "passive" | "off"`, defaulting to Off, and a nonempty unique `scopes` array, defaulting to all three owners. These are initial defaults, not overrides of captured branch policy.
+- Accepted Session lifecycle v2 configuration stores concrete `{mode, scopes}`. Before canonical acceptance, owner-bound native v2 policy records capture the same choice without semantic storage. Commands and Telegram do not edit global defaults; mode-only actions preserve captured scopes.
+- [Usage](usage.md#lifecycle-operations) defines wanted, available and excluded owners and the 0.27.1 diagnostic. A wanted unacquired Session is unavailable, not excluded; inspection/observation never acquires it. [Scope selection](scope-selection-contract.md#m2-functional-acceptance-boundary) owns legacy proof, deferred forks and request-lifetime requirements.
 
-**Other readable representations.** Decoding is read-only; ordinary writers emit only mode, with no eager migration or semantic normalization.
+**Legacy readable mode representations.** The following are compatibility inputs, not alternative current policy formats. Decoding is read-only; current accepted lifecycle writers use v2 concrete policy, without inspection-triggered conversion or semantic normalization. Malformed explicit scope evidence rejects rather than falling through to a wider mode-only fallback.
 
 - Without explicit global mode, absence of all flag-based mode settings means Off.
 - `autoStart: true` means Active. With any flag-based mode setting present, `passiveBootstrap: false` together with `passiveTools: false` means Off; otherwise the fallback is Passive.
@@ -84,7 +86,7 @@ Native tests prove no provider call before coherent acceptance, cancellation whi
 
 To use Passive, select it in the current session or set global `mode: "passive"` for new sessions.
 
-**SDK and Telegram controls.** The extension SDK accepts an optional `mode` default override. Both Telegram port variants use `snapshot.mode` plus `select(mode)`. The optional additive `snapshot.inferenceBlocked` diagnostic marks failed Active restoration; legacy ports may omit it. A stale callback keyboard may refresh the view without selecting a mode. Synchronous enum-based ports are supported; Start/Stop port signatures are not.
+**SDK and Telegram controls.** The extension SDK accepts an optional `mode` default override. Both Telegram port variants use `snapshot.mode` plus `select(mode)` and preserve captured scopes. Optional `snapshot.scopes` supplies participation; legacy omission means all three, while malformed explicit scopes reject. The optional additive `snapshot.inferenceBlocked` diagnostic marks failed Active restoration; legacy ports may omit it. A stale callback keyboard may refresh the view without selecting a mode. Synchronous enum-based ports are supported; Start/Stop port signatures are not.
 
 ## Mode selection and memory restoration
 
@@ -141,7 +143,7 @@ This optional-backup policy does not apply to required semantic publication or r
 
 ## Telegram adapter
 
-The optional adapter presents one Off | Passive | Active row and uses the same mode-selection and inspection owners as native commands.
+The optional adapter presents one Off | Passive | Active row and uses the same mode-selection and inspection owners as native commands. It is not a scope chooser: only wanted owners receive inspection buttons, and Effective is offered only for two or three wanted owners. Inspections read validated available memory without acquiring missing owners or clearing fences.
 
 - Inspection returns coherent state plus matching revisions, without publication.
 - Controls and inspections acknowledge callbacks before waiting, suppress revoked results and escape late failures in the current menu.

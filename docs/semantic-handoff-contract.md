@@ -2,11 +2,11 @@
 
 ## Status and authority
 
-**M1 semantic contract — locally implemented names and guidance, not a live-model quality claim.** Runtime fields, tools, ownership and callbacks now use `intents`, `strategy`, and `tactics`. Declared legacy `contract`/`working` data is translated under the [migration contract](semantic-compatibility-decision.md). Configurable scopes, flattening and module decisions remain in the [evolution backlog](../BACKLOG.md), which alone owns remaining tasks. The original M0 preservation evidence below remains bound to its old-name baseline.
+**Current semantic contract, shipped in 0.27.0; no live-model quality claim.** Runtime fields, tools, ownership and callbacks use `intents`, `strategy`, and `tactics`. Declared legacy `contract`/`working` data translates under the [migration contract](semantic-compatibility-decision.md). Scope selection and flat tools are delivered under their [scope](scope-selection-contract.md) and [model-interface](single-scope-interface-contract.md) contracts; internal/public modules have their own indexed boundaries. [BACKLOG.md](../BACKLOG.md) owns only outstanding work. The original M0 preservation evidence below remains bound to its old-name baseline.
 
-This contract makes the semantic handoff reviewable before implementation. It distinguishes model responsibilities from deterministic acceptance. It does not claim that any unconstrained model already follows these rules, or that new names improve task performance.
+This contract defines the semantic handoff responsibilities. It distinguishes model responsibilities from deterministic acceptance. It does not claim that any unconstrained model already follows these rules, or that new names improve task performance.
 
-Baseline for the evidence below: package 0.26.5, source commit `4494fee9da8258cdf5f02c42672a0eb9866a512a`, repository-local matching Pi SDK 1.0.0. No source or test changes were needed for this slice.
+Historical M0 baseline for the source-bound evidence below: package 0.26.5, source commit `4494fee9da8258cdf5f02c42672a0eb9866a512a`, repository-local matching Pi SDK 1.0.0. No source or test changes were needed for this slice.
 
 ## Purpose and reconstruction boundary
 
@@ -104,7 +104,7 @@ This does not confer dependency, hydration, existence, execution, completion, or
 - Lazy content can itself be temporary; no semantic plane is an automatic safe haven from ownership cleanup.
 - Consequential survivors can be saved at an unowned appropriate path in the same atomic patch. This is model-authored reconciliation, not runtime promotion, archiving, or movement between scopes.
 
-The current reference grammar is explicitly scoped. Single-scope normalization is M3 work, not permission for M0 to change how unscoped stored references acquire ownership.
+Canonical stored ownership references remain explicitly scoped. With exactly one wanted owner, the implemented [model boundary](single-scope-interface-contract.md) anchors eligible relative structured references to that captured owner before ownership/cascade processing, and projects them relatively on output. This translation grants no acquisition or publication authority.
 
 ## Patch, mode, and trust constraints
 
@@ -115,13 +115,13 @@ This contract inherits [model-tool semantics](architecture.md#model-tools); it d
 - No materialized semantic nulls, model-authored response/config/provenance, or empty acknowledgement-only scope patches.
 - One atomic cohort produces explicit accepted changes. No-op repeats produce no new semantic transition. An Active patch remains an inference barrier; Passive does not gain a new barrier by implication.
 - Active preserves necessary handoff memory before completed prior trajectory leaves normal projection. Passive can use the same semantic distinctions on demand without mandatory consolidation or a State Flow iteration reset. Off exposes no State Flow model context or tools.
-- Global, CWD, and Session can all carry the three core semantic functions. Later overlay precedence is composition, never evidence of greater truth or instruction authority. Configurable participation is not implemented by this contract.
+- Global, CWD, and Session can all carry the three core semantic functions. Later overlay precedence is composition, never evidence of greater truth or instruction authority. The [scope contract](scope-selection-contract.md) owns configurable participation, independently of these semantic meanings.
 - References and state values are data. Package-reviewed trusted protocol may explain the planes, but ordinary memory, artifact compilations, or lazy values cannot alter system instructions.
 - Runtime publication, source provenance, response capture, native lifecycle ownership, and frozen-head reconciliation retain their established independent owners. The semantic relationship is not a module callback or hidden event network.
 
 ## Acceptance map
 
-The IDs below name contracts/oracles, not new runtime record types. Existing tests witness the old-name preservation mechanism. New-name native and model-behavior acceptance belongs to later milestones; this table is not a claim those tests already exist.
+The IDs below name contracts/oracles, not new runtime record types. The table retains the original M0 evidence plan: its milestone/future references describe that checkpoint, not pending implementation. Current deterministic renamed/native witnesses are recorded in the [migration](semantic-compatibility-decision.md#source-bound-m1-validation), [scope](scope-selection-contract.md#m2-functional-acceptance-boundary) and [model-interface](single-scope-interface-contract.md#deterministic-m3-checkpoint) contracts. Live-model semantic acceptance remains unrun.
 
 | ID | Obligation and falsification scenario | Evidence owner |
 | --- | --- | --- |
@@ -133,9 +133,128 @@ The IDs below name contracts/oracles, not new runtime record types. Existing tes
 | SH-6 | Preserve sparse state, no-stored-null rules, detachment, explicit accepted cascade deletions, and exact retained replay. Fails if staging changes inputs, creates stored empty defaults, or replay needs to derive ownership again. | `tests/state.test.ts`, `tests/transition.test.ts`, `tests/temporal.test.ts`; future M1 codec/migration oracle. |
 | SH-7 | Preserve the frozen-prefix, trust, scope, response, and provenance boundaries while using the new semantic guidance. Fails if a memory patch changes system rules, relocates source ownership, or introduces a finalization inference. | Current `tests/protocol.test.ts`, `tests/context.test.ts`, response/Skill/native test families; M1–M4 integration checkpoints. |
 
+### Offline-bundle patch corpus
+
+The following are **M1 model-patch examples**, using the implemented target dialect and explicit Session ownership with the default three-owner selection. A sole-owner selection instead uses the flat interface described in the [model-interface contract](single-scope-interface-contract.md). Field names inside planes are illustrative domain data, not a required schema. The scenario is a release bundle that must remain usable offline; no external release is executed by these examples.
+
+**1. Open a chosen outcome linked to its temporary operational context.**
+
+```json
+{
+  "session": {
+    "intents": {
+      "release": {
+        "outcome": "Prepare an offline-verifiable release bundle",
+        "context": { "$ref": "session.tactics.release" }
+      }
+    },
+    "tactics": {
+      "release": { "progress": "Bundle prepared; offline validation pending" }
+    }
+  }
+}
+```
+
+**2. Preserve a hierarchical accepted strategy, including binding requirements and rejected alternatives.**
+
+```json
+{
+  "session": {
+    "strategy": {
+      "release": {
+        "acceptance": "Accepted approach for this release",
+        "requirement": "User requires offline verification without credentials",
+        "phases": {
+          "prepare": { "approach": "Bundle dependencies and a verifier" },
+          "validate": {
+            "after": "prepare",
+            "approach": "Run the bundled verifier in network isolation"
+          }
+        },
+        "decision": "Use bundled verifier v1",
+        "rationale": "It is already packaged and expected to be self-contained",
+        "rejected": {
+          "online_only": "Cannot satisfy the offline requirement"
+        },
+        "assumption": "Verifier v1 never requires network access",
+        "reconsider_if": "A network-isolated validation attempts a connection"
+      }
+    }
+  }
+}
+```
+
+**3. Record actual progress and validation evidence, not a transcript.**
+
+```json
+{
+  "session": {
+    "tactics": {
+      "release": {
+        "progress": "Preparation complete; validation blocked",
+        "validation": {
+          "check": "Network-isolated bundle verification",
+          "result": "Failed",
+          "evidence": "Verifier v1 attempted to fetch its trust index"
+        },
+        "uncertainty": "Whether an embedded trust index is sufficient",
+        "next": "Inspect the verifier's offline-index interface"
+      }
+    }
+  }
+}
+```
+
+**4. After inspection establishes the supported alternative, revise strategy with reasons.** The failure invalidates the assumption, not the user's offline requirement. Updating the existing `rejected` object merges rather than discarding `online_only`.
+
+```json
+{
+  "session": {
+    "strategy": {
+      "release": {
+        "decision": "Bundle an embedded trust index with verifier v1",
+        "rationale": "The supported local-index option removes the observed fetch",
+        "rejected": {
+          "default_v1": "Network-isolated validation proved its default index is remote"
+        },
+        "assumption": "The bundled index covers every bundle dependency",
+        "reconsider_if": "An index-coverage or network-isolation check fails",
+        "phases": {
+          "prepare": { "approach": "Bundle dependencies, verifier, and trust index" }
+        }
+      }
+    },
+    "tactics": {
+      "release": {
+        "observation": "Exact-source inspection confirmed a supported local-index option",
+        "uncertainty": null,
+        "next": "Rebuild the bundle; rerun coverage and isolation checks"
+      }
+    }
+  }
+}
+```
+
+**5. Only after both checks pass, close the intent and retain the durable conclusion.** In this example the intent owns only `session.tactics.release`, not `session.strategy.release`: acceptance records the tactical deletion while the unowned strategy fields receive an ordinary merge and survive. If the intent also owned strategy.release, cleanup would clear it first and the patch would need to explicitly rewrite every consequence that must remain. Empty `intents`/`tactics` planes disappear if they have no other entries.
+
+```json
+{
+  "session": {
+    "strategy": {
+      "release": {
+        "conclusion": "Coverage and isolation checks passed with the embedded index"
+      }
+    },
+    "intents": { "release": null }
+  }
+}
+```
+
+These conclusions survive intent closure in the same canonical owner; that does not make Session memory cross-session Global knowledge. A proven change of applicability still needs an explicit verified move, never an automatic promotion.
+
 ### Five-example review exercise and answer key
 
-The five JSON patches in [BACKLOG §5.2](../BACKLOG.md#52-coherent-target-examples) form one sequential example, not five unrelated snapshots. A reviewer should be able to reconstruct the following without the original design conversation:
+The five JSON patches in the [offline-bundle corpus above](#offline-bundle-patch-corpus), relocated from the published v0.27.1 backlog, form one sequential example, not five unrelated snapshots. A reviewer should be able to reconstruct the following without the original design conversation:
 
 1. **Open outcome:** Prepare an offline-verifiable release bundle. The intent owns `session.tactics.release` through a structured reference. No claim of final validation success exists.
 2. **Accepted strategy:** Offline verification without credentials remains the user's binding requirement. Preparation precedes network-isolated validation. Bundled verifier v1 is the accepted approach; its self-containment is an assumption. Online-only verification was rejected because it cannot satisfy the requirement.
@@ -149,7 +268,7 @@ The fifth precondition is a semantic claim supplied by the scenario. A determini
 
 M0.1 checked the example against existing mechanisms without implementing the rename:
 
-- Extracted the five JSON patches from the linked backlog section.
+- Extracted the five JSON patches from the then-current backlog section (the corpus is now retained above).
 - Mapped only the scope-root plane names `strategy → contract`, `tactics → working`, and corresponding scoped structured-reference plane segments. Did not rewrite arbitrary prose/domain keys, change source files, or persist a converter.
 - Staged and committed each mapped patch entirely in memory with `stageAtomicScopePatches` / `commitScopedTransition`, no acquired sources and no run finalization; replayed the actual accepted records with `advanceTemporalState`.
 - Asserted staging detachment, unchanged Global/CWD, binding-requirement retention, both rejection reasons, surviving phase dependency, retained failed-check evidence after revision, deletion of only resolved uncertainty, and absence of authored response.
@@ -162,13 +281,12 @@ Historical focused-source command (not validation of the current cascade contrac
 node --experimental-strip-types --test tests/state.test.ts tests/ownership.test.ts tests/transition.test.ts tests/temporal.test.ts tests/protocol.test.ts
 ```
 
-Result for the source identity above: **76 passed, 0 failed**. These tests cover current old-name semantics; they neither certify an unimplemented rename nor substitute for M0.4 real-model baseline evidence. The in-memory example probe did not exercise disk CAS, migration, provider schemas, new selection policy, or flat-reference conversion.
+Result for the source identity above: **76 passed, 0 failed**. These tests covered the then-current old-name semantics; that historical result neither certified the later rename nor substitutes for M0.4 real-model baseline evidence. The in-memory example probe did not exercise disk CAS, migration, provider schemas, new selection policy, or flat-reference conversion.
 
-## Remaining boundaries
+## Historical handoff and current limits
 
-The semantic meanings and preservation obligations above are the M0.1 handoff. The [canonical backlog](../BACKLOG.md#12-ordered-implementation-backlog) owns outstanding work:
+The original M0.1 handoff required M0.2 compatibility decisions and M0.3 selection/private/response/fork decisions before their dependent implementation. Those obligations were subsequently met under the linked migration and scope contracts; flat paths and internal/public modules also shipped in 0.27.0. They are not unresolved prerequisites.
 
-- M0.2 must settle the historical representation, collision/dialect fence, and public-API compatibility contract before M1 changes codecs.
-- M0.3 must settle selection metadata, disabled-stream authority, response-without-Session, and fork policy before M2.
-- M0.4 must obtain source/model-bound behavioral observations; no such evaluation was performed in this slice.
-- Schema adaptation, flat paths, module loading/hooks, and later milestone implementation remain excluded from M0.1. Nothing in this document enables them implicitly.
+Real-model evaluation remains separate and unrun; the [evaluation contract](semantic-memory-evaluation.md) owns its corpus, rubric and execution gate, while [BACKLOG.md](../BACKLOG.md) owns remaining action. Dynamic loading, background scheduling and new cognitive planes were not delivered by these milestones.
+
+The superseded development roadmap is preserved at [the published v0.27.1 source](https://github.com/llblab/pi-state-flow/blob/f9128d9eaa2b94133d992f51f80f16aec0d43653/BACKLOG.md). Its baseline observations, execution instructions and review statuses are historical evidence, not current normative policy. The corpus above and the indexed owning contracts retain the useful semantic rationale and acceptance counterexamples without keeping completed queues active.

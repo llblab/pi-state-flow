@@ -5,6 +5,8 @@ import test from "node:test";
 import { loadSkillsFromDir } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/skills.js";
 import { normalizeModelPatches, normalizeModelReadPath } from "../lib/model-interface.ts";
 import { stageAtomicScopePatches } from "../lib/transition.ts";
+import { readProjectedState } from "../lib/query.ts";
+import { createTemporalState } from "../lib/temporal.ts";
 
 const root = resolve(import.meta.dirname, "..");
 const sources = [
@@ -57,6 +59,17 @@ test("every relative markdown link and anchor in human and Skill documentation r
 		}
 	}
 	assert.deepEqual(broken, []);
+});
+
+test("documented effective lazy keys expose structural metadata, not source ownership", () => {
+	const section = readFileSync(join(root, "docs/lazy-state.md"), "utf8").split("### `keys`")[1]!;
+	const [request, expected] = [...section.matchAll(/```json\n([\s\S]*?)\n```/g)].slice(0, 2).map(match => JSON.parse(match[1]!));
+	const view = createTemporalState({
+		global: { lazy: { memory: ["entry"], rules: { ranges: "Half-open" } } },
+		cwd: { lazy: { soul: ["later"] } },
+		session: {},
+	}, "documentation-keys");
+	assert.deepEqual(readProjectedState(view, [request.path], request.projection), expected);
 });
 
 {

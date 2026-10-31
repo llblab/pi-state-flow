@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+## 0.27.2: Consistency & Simplification
+
+- `Documentation reconciliation`: Correct current release/public-module status to the published 0.27.0/0.27.1 behavior, including metadata v4 retention and external-root tools/context/producers. Distinguish the six-plane internal seam from public registration and mark M4/M5 deferrals as historical without upgrading their review verdicts. No production behavior or compatibility policy changed.
+- `Current work and history`: Replace the completed evolution roadmap with an outstanding-work backlog. Retain the exact five-patch offline-bundle corpus in its semantic contract, keep historical decisions and acceptance evidence traceable, and separate unrun live-model and installed-client gates from consolidation work.
+- `Operator and read contracts`: Reconcile wanted/available/excluded scopes, v2 policy records, v3/v4 storage, Session-excluded completion and deferred native forks. Correct the lazy `keys` example to structural-only metadata and guard it with an executable documentation regression. Replace duplicated architecture checkpoint narratives with existing contract references; clarify synchronous context and cancelable module production.
+- `Implementation simplification`: Remove the obsolete native scope-validation wrapper and a private plane-name alias, reusing existing owners directly. All three validation calls retain their original conditions and positions; public signatures, storage admission, publication and cancellation fences are unchanged. Active/bootstrap/Passive protocol renderings remain byte-identical across all seven selections.
+- `Packaged guidance`: Align Skills with explicit scope-command arguments, wanted-but-unavailable reads, single-owner relative cascade/deletion paths and the existing registered-mutable external-root boundary. Missing or incompatible definitions never permit discarding retained data or bypassing authoring restrictions.
+- `Compatibility`: No configuration, public API semantics or storage format changes. Legacy conversion and retired-root reservations remain supported throughout State Flow 0.x. Existing publication, source-provenance and cancellation guarantees are unchanged; deterministic validation does not establish live-model quality, installed-client compatibility or stronger storage durability.
+
 ## 0.27.1: Selected Scope Read Diagnostics
 
 - `Read availability`: Explicit reads now distinguish a selected owner with no available read view from an excluded owner. In pre-runtime Passive sessions, an unacquired Session no longer incorrectly reports itself excluded. Reads still do not create private memory, widen the selection or return partial multi-path results; normal accepted writes retain their acquisition rules.

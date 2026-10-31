@@ -5,7 +5,6 @@ import { DEFAULT_HISTORY_LIMIT } from "./history.js";
 import { parseStateReadPath, parseValuePath } from "./query.js";
 import { captureScopeSelection } from "./selection.js";
 import { MODEL_PLANE_NAMES } from "./planes.js";
-const PATCH_PLANES = MODEL_PLANE_NAMES;
 const SEMANTIC_ROOT = /^(?:intents|strategy|tactics|artifacts|response|lazy|x_[a-z][a-z0-9_]*)(?=\.|\[|$)/;
 const PATCH_PATH = /^(?:effective|global|cwd|session)\.patches(?:\[\d+\])?$/;
 function dense(value) {
@@ -66,7 +65,7 @@ function admitKeys(value, selected, external) {
     if (!keys.length)
         throw new Error("Model patch requires at least one supplied branch");
     if (selected.length === 1) {
-        if (keys.some(key => !PATCH_PLANES.includes(key) && !external.includes(key)))
+        if (keys.some(key => !MODEL_PLANE_NAMES.includes(key) && !external.includes(key)))
             throw new Error("Single-owner model patches require flat semantic planes");
     }
     else
@@ -79,7 +78,7 @@ function planePatch(value, external) {
     if (!isObject(value) || !Object.keys(value).length)
         throw new Error("Model scope patch must be a nonempty object");
     for (const key of Object.keys(value)) {
-        if (!PATCH_PLANES.includes(key) && !external.includes(key))
+        if (!MODEL_PLANE_NAMES.includes(key) && !external.includes(key))
             throw new Error(`Model patch does not accept semantic plane ${key}`);
         if (!isObject(value[key]))
             throw new Error(`Model patch plane ${key} must be a JSON object`);

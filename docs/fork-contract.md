@@ -4,34 +4,34 @@
 
 ## Contract
 
-A physical Pi fork creates a fresh child session from its direct parent's **current** canonical session memory. State Flow does not depend on the Pi step the fork starts from:
+A physical Pi fork creates a fresh child identity and inherits the source branch's captured mode and scopes. When Session participates and private acquisition is admitted, it copies its direct parent's **current** canonical Session memory. Off or Session-excluded forks defer private acquisition. State Flow does not depend on the Pi step the fork starts from:
 
 ```text
-child.global  = current live global
-child.cwd     = current live CWD
-child.session = parent session current head
+selected child.global/cwd = current live selected shared owners
+admitted child.session   = direct-parent Session current head
+excluded child.session   = no hidden private semantic stream
 ```
 
-The adapter reads Pi's persisted direct-parent header, requires matching CWD and session identity, reads the parent's current memory and uses its head as the copied boundary. It never consults Git, a storage receipt or an older checkpoint revision.
+At private acquisition, the adapter reads Pi's persisted direct-parent header, requires matching CWD and session identity, and admits the parent's current private stream. A Session-excluded child instead accepts selected shared access and child-owned deferred lifecycle proof without reading the parent header/private store. It never consults Git, a storage receipt or an older checkpoint revision.
 
 The child receives:
 
 - its own UUID, native session key, runtime metadata, and fresh lineage origin;
-- the parent's current session materialization and matching artifact provenance;
-- current live global/CWD values and provenance without rewinding them;
-- selected `mode` and bootstrap lifecycle state, with step reset to zero and no inherited unfinished specification or validation diagnostic.
+- the parent's current Session materialization, matching artifact provenance and retained module descriptors when private copying is admitted;
+- current live selected Global/CWD values and provenance without rewinding them;
+- captured `mode` and `scopes`, with fresh step-zero/bootstrap lifecycle and no inherited unfinished specification or validation diagnostic. A later deferred private copy preserves the child's already accepted lifecycle fields.
 
 **What stays unchanged:**
 
 - The parent's private files and native trace remain unchanged. Later child session writes cannot modify the parent's private layer.
-- Applying a smaller configured `historyLimit` may fold excess shared tails during child acceptance under file-cohort CAS, without changing current shared materialization or provenance. Without retention reduction, the shared files remain unchanged too.
+- Applying a smaller configured `historyLimit` may fold excess selected shared tails during child acceptance under file-cohort CAS, without changing current shared materialization or provenance. Without retention reduction, the shared files remain unchanged too.
 - Forking semantic memory does not clone or roll back project files or tool effects.
 
 **Artifact evidence is current-only, not a historical registry.** Because the child copies the parent's current head, current artifact semantics and their current provenance stay together; shared provenance remains live.
 
 ## Lifecycle and failure
 
-**Copying and acceptance.** `TemporalRuntime.withForkTransaction(source, lifecycle, action, signal?)`:
+**All-owner library copying and acceptance.** The supported `TemporalRuntime.withForkTransaction(source, lifecycle, action, signal?)` contract remains:
 
 1. Pins source identity and the parent's current head boundary before waiting.
 2. Selects exact parent authority plus an unoccupied child under one awaited exclusion.
@@ -43,10 +43,10 @@ Cancellation or rejection cannot initialize an empty child. Failure after accept
 **Forking while Off:**
 
 - Parent-header acquisition and canonical copying are deferred. Only a child-owned pending-fork marker is appended to the native trace; it carries no semantic authority.
-- The marker survives cold extension reload and permits later explicit Passive/Active acquisition, which copies the parent's then-current memory subject to the same identity and occupied-child checks.
+- The marker survives cold extension reload and permits later admitted Session acquisition under explicit Passive/Active policy, copying the parent's then-current private memory subject to the same identity and occupied-target checks. Shared-only enablement retains deferral rather than consuming private-copy authority.
 - Accepted initialization resets the marker.
 
-Memory-enabled native fork adoption and Start's fork retry use this transaction inside the extension's owned restoration lifetime. It publishes the fresh child origin before any runtime-only lifecycle write. Native evidence holds a publisher across fork adoption; it does not certify idle native Abort.
+The native adapter composes the selected-scope ports below inside its owned restoration lifetime, rather than routing every fork through the all-owner library transaction. Fresh shared-only deferral publishes child lifecycle plus selected shared access without private copying; eager/deferred private acceptance validates its corresponding source and target before installing memory. Neither route grants idle native Abort a signal the host does not supply.
 
 **Retry and cancellation:**
 
@@ -64,7 +64,7 @@ Memory-enabled native fork adoption and Start's fork retry use this transaction 
 - Navigating to an inherited parent step keeps current child-owned memory; it neither rewinds nor recopies parent data.
 - Child-owned checkpoints use ordinary current-memory reload/resume without rereading the parent header.
 
-**Before the first child-owned checkpoint:** cold recovery requires the explicit Off-deferred pending marker. Missing child files alone never authorize a parent recopy.
+**Before private acquisition:** cold recovery requires child-owned pending-fork authority; an accepted shared-only child additionally retains its validated deferred lifecycle proof. Missing child files alone never authorize a parent copy or recopy.
 
 **Mode and projection:**
 
@@ -75,13 +75,15 @@ Memory-enabled native fork adoption and Start's fork retry use this transaction 
 
 ## Internal selected-scope copy boundary
 
-The [selected-scope contract](scope-selection-contract.md#selected-parent-current-private-copy) now implements shared-only child deferral and eager/deferred private copy over selected streams. The native adapter must validate persisted direct-parent identity before exclusion and recheck current in-memory child/parent/policy ownership after waiting. The storage owner verifies only parent-current private files/lineage/provenance plus selected live shared inputs, never recursive ancestry or unrelated disabled owners. Parent bytes stay read-only; occupied, malformed, lost-acquired or already-acquired child evidence cannot become empty memory or authorize recopy.
+The native [selected-scope contract](scope-selection-contract.md#selected-parent-current-private-copy), shipped in 0.27.0, implements shared-only child deferral and eager/deferred private copy over selected streams. The native adapter must validate persisted direct-parent identity before exclusion and recheck current in-memory child/parent/policy ownership after waiting. The storage owner verifies only parent-current private files/lineage/provenance plus selected live shared inputs, never recursive ancestry or unrelated disabled owners. Parent bytes stay read-only; occupied, malformed, lost-acquired or already-acquired child evidence cannot become empty memory or authorize recopy.
 
-These internal APIs return file receipts/sticky authority facts and install the [accepted selected cache](scope-selection-contract.md#accepted-selected-runtime-cache-and-reads) after durable acceptance. They do not yet replace the native all-owner `withForkTransaction` route described above, expose scope settings, or implement native pending-marker/selection-epoch attachment. Isolated selected-copy fixtures are local backend proof, not completed native selected-fork delivery.
+Native `withSelectedDeferredForkTransaction` and `withSelectedForkCopyTransaction` compose the existing origin/current acceptance owner. They return file receipts/sticky authority facts and install the [accepted selected cache](scope-selection-contract.md#accepted-selected-runtime-cache-and-reads) only after durable acceptance; child classification precedes any parent lookup. Public mode-command scope overrides and native pending-marker/selection-lifetime attachment are implemented. The [M2 functional boundary](scope-selection-contract.md#m2-functional-acceptance-boundary) records actual native seven-selection/fork delivery separately from lower backend fixtures.
+
+Copying uses the parent-current materialization and starts one fresh child aligned origin. Retained per-owner tail records may still be copied subject to `historyLimit`; they do not create earlier aligned child materializations. Current-only copying is not a claim that every historical patch byte is absent from child storage.
 
 ## Support boundary
 
-Supported copying requires a persisted regular parent session file, matching header UUID/CWD, current canonical scope/runtime files, and an available retained boundary. Arbitrary session search, UUID aliases, cross-CWD imports, in-memory-only parent locators, conversion of unsupported storage formats, unlimited history, and Git recovery are unsupported.
+Private copying requires a persisted regular direct-parent session file, matching header UUID/CWD, current canonical private/runtime evidence, and an unoccupied child semantic target. A deferred lifecycle-only child must prove its own admitted pending authority; an acquired child uses child-current memory and never recopies. Arbitrary session search, UUID aliases, cross-CWD imports, in-memory-only parent locators, conversion of unsupported storage formats, unlimited history, and Git recovery are unsupported.
 
 ## Evidence
 

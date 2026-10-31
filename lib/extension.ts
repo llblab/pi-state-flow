@@ -243,16 +243,12 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			owner: ctx.sessionManager.getSessionId(), mode: snapshot.config.mode, scopes: nativeScopeSelection(ctx), ...value }));
 	}
 
-	function assertNativeMemoryScopes(scopes: readonly StateScope[]): void {
-		captureScopeSelection(scopes);
-	}
-
 	function branchPolicy(ctx: ExtensionContext, reason?: unknown, memoryRequired = true) {
 		const branch = ctx.sessionManager.getBranch();
 		const policy = prepareSelectedBranchPolicy(branch, { owner: ctx.sessionManager.getSessionId(), markerEntryType: PASSIVE_STOP_ENTRY_TYPE,
 			defaults: { mode: isNewSession(reason, branch) ? config.mode : config.inactiveMode, scopes: config.scopes },
 			inactiveMode: config.inactiveMode, fork: reason === "fork" });
-		if (memoryRequired) assertNativeMemoryScopes(policy.scopes);
+		if (memoryRequired) captureScopeSelection(policy.scopes);
 		return policy;
 	}
 
@@ -577,7 +573,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			// Freeze admitted policy before accepting any selected memory.
 			// Policy-only capture grants no acquisition or semantic-boundary authority.
 			if (nativePolicy.requiresCapture) pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, nativePolicy.capture);
-			if (nativePolicy.mode !== "off") assertNativeMemoryScopes(nativePolicy.scopes);
+			if (nativePolicy.mode !== "off") captureScopeSelection(nativePolicy.scopes);
 		} catch (error) {
 			runtime = undefined;
 			branchStartsWithoutRuntime = false;
@@ -1245,7 +1241,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			return { ok: false, message: active ? "State Flow activation was superseded" : "State Flow mode change was superseded", signal: pending.signal };
 		};
 		try {
-			assertNativeMemoryScopes(wanted);
+			captureScopeSelection(wanted);
 			const activation = createRuntime(ctx);
 			const deferred = deferredBranch;
 			if (deferred) {

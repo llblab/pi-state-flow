@@ -171,16 +171,13 @@ export default function stateFlowExtension(pi, options = {}) {
         pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, captureSelectedNativeMarker({ version: 2,
             owner: ctx.sessionManager.getSessionId(), mode: snapshot.config.mode, scopes: nativeScopeSelection(ctx), ...value }));
     }
-    function assertNativeMemoryScopes(scopes) {
-        captureScopeSelection(scopes);
-    }
     function branchPolicy(ctx, reason, memoryRequired = true) {
         const branch = ctx.sessionManager.getBranch();
         const policy = prepareSelectedBranchPolicy(branch, { owner: ctx.sessionManager.getSessionId(), markerEntryType: PASSIVE_STOP_ENTRY_TYPE,
             defaults: { mode: isNewSession(reason, branch) ? config.mode : config.inactiveMode, scopes: config.scopes },
             inactiveMode: config.inactiveMode, fork: reason === "fork" });
         if (memoryRequired)
-            assertNativeMemoryScopes(policy.scopes);
+            captureScopeSelection(policy.scopes);
         return policy;
     }
     /** Failure-only denial evidence, never policy admission: inspect own known-epoch headers without getters or memory I/O. */
@@ -525,7 +522,7 @@ export default function stateFlowExtension(pi, options = {}) {
             if (nativePolicy.requiresCapture)
                 pi.appendEntry(PASSIVE_STOP_ENTRY_TYPE, nativePolicy.capture);
             if (nativePolicy.mode !== "off")
-                assertNativeMemoryScopes(nativePolicy.scopes);
+                captureScopeSelection(nativePolicy.scopes);
         }
         catch (error) {
             runtime = undefined;
@@ -1285,7 +1282,7 @@ export default function stateFlowExtension(pi, options = {}) {
             return { ok: false, message: active ? "State Flow activation was superseded" : "State Flow mode change was superseded", signal: pending.signal };
         };
         try {
-            assertNativeMemoryScopes(wanted);
+            captureScopeSelection(wanted);
             const activation = createRuntime(ctx);
             const deferred = deferredBranch;
             if (deferred) {

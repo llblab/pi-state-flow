@@ -40,7 +40,7 @@ export interface StateFlowModuleInput<Input extends JsonValue = JsonValue> {
 	assertCurrent(): void;
 }
 
-/** Candidate public v1 contract; durable activation requires matching retained metadata. */
+/** Published public v1 contract; retained descriptors govern durable compatibility. */
 export interface StateFlowModule<Content extends JsonObject = JsonObject, Input extends JsonValue = JsonValue> {
 	readonly immutable: boolean;
 	readonly id: string;

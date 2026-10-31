@@ -27,7 +27,7 @@ One session-owned `mode` selects these behaviors; there are no separate passive-
 - an extra model turn;
 - a special finalization tool.
 
-Each `patch_state` is an inference barrier, not automatically the end of an iteration. The runtime separately persists the accepted ordinary answer as Session `response` and completes the run.
+In Active mode, `patch_state` is an inference barrier, not automatically the end of an iteration; Passive has no such barrier. The runtime separately completes the run and captures the accepted ordinary answer only in Active participating Session. With Session excluded, completion is lifecycle-only unless another semantic change is accepted; no answer is backfilled or relocated.
 
 **Two meanings of “bootstrap”:**
 
@@ -51,31 +51,39 @@ Active, Passive and Off select the session's workflow and model-facing access, n
 
 All three mode commands accept optional exact owner tokens, in any order: `/state-flow-active session`, `/state-flow-passive cwd global`, `/state-flow-off cwd session`. Any nonempty unique subset of `global cwd session` is valid; autocomplete offers only unused matching tokens and replaces the full argument prefix. Blank/whitespace-only arguments preserve the captured choice. Unknown/duplicate names, flags and comma-separated forms fail before policy or mode changes. Commands never edit global defaults. Off scope changes record native policy only, without reading or initializing canonical memory. Active explicitly owns acquisition where independently permitted; Passive observation alone cannot acquire missing Session or borrow pending fork permission.
 
-Selection is not materialization: all three scopes are selected by default, but a pre-runtime Passive session can have no private Session cohort yet. Read-only observation exposes existing shared owners without inventing empty Session state. An explicit read of a selected owner missing from that read view reports `selected, unavailable`, not `excluded`; an actually excluded owner is rejected by the selection guard. A legitimate first Session patch on an eligible non-fork branch can acquire private memory through normal atomic acceptance. Do not send an empty patch just to initialize it or bypass pending-fork authority.
+All seven nonempty owner sets are supported: `global`, `cwd`, `session`, `global cwd`, `global session`, `cwd session`, and `global cwd session`. Omission of global `scopes` defaults to all three; changing a current selection never moves or migrates data between owners.
+
+Selection is not materialization:
+
+- **Wanted:** The owner is selected by captured policy; wanted arity chooses flat versus explicit-owner grammar.
+- **Available:** A validated read view exists for that owner. A pre-runtime Passive session can observe shared owners while wanted Session remains unacquired.
+- **Excluded:** The owner is outside the wanted policy. Model reads/writes reject it rather than widening selection.
+
+In the 0.27.1 diagnostic, an explicit read of wanted but unavailable Session reports `State Flow session: selected, unavailable`, not exclusion. Reads never invent or acquire private memory, and a mixed available/unavailable batch returns no partial values. A legitimate first Session patch on an eligible non-fork branch can acquire private memory through normal atomic acceptance. Do not send an empty patch to initialize it or bypass pending-fork authority.
 
 How each lifecycle event behaves:
 
-- **New session:** Adopts the global `mode`, defaulting to Off.
-  - An inactive default is recorded once in Pi as `{mode:"off"}` or `{mode:"passive"}`, without creating semantic storage.
-  - An Active default initializes a distinct empty Session layer over global/CWD memory, never another session's private continuation.
+- **New session:** Captures global `mode` and `scopes`, defaulting to Off and all three owners.
+  - An inactive default is recorded once in an owner-bound native v2 policy record containing `{mode, scopes}`, without creating semantic storage.
+  - An Active default accepts the selected owners; if Session participates it initializes a distinct private layer, never another session's continuation. Shared-only choices create no hidden Session semantics.
 - **Resume:** Keeps the selected session's mode; later global default changes do not override it.
   - Passive/Active attach the current same-session memory and its retained history.
   - Off attaches native policy only, without probing semantic files or emitting recovery warnings.
-- **Tree navigation:** Restores the selected branch's mode, but never rewinds memory: State Flow does not depend on the Pi step. Passive/Active keep the current JSON state of every scope, which changes only through accepted patches. Off defers acquisition until a mode is explicitly selected.
-- **Fork:** The child copies its parent's current memory into its own session layer, independent of the step it forked from.
+- **Tree navigation:** Restores the selected branch's mode, but never rewinds memory: State Flow does not depend on the Pi step. Passive/Active acquire the current JSON state of the selected owners under their existing authority, never an old semantic revision. Off defers acquisition until a mode is explicitly selected.
+- **Fork:** The child inherits its parent's captured policy. With Session selected, admitted acquisition copies parent-current private memory into a fresh child owner, independent of the native step. Off or Session-excluded forks defer private copying; later admitted Session acquisition copies the parent's then-current state once.
 - **Abort inference:** Stops generation or an outstanding response-publication wait. Already accepted patches stay durable, so work and corrected direction can continue in the same session.
   - Cancellation before response acceptance keeps the previous response and the unfinished run.
   - Cancellation after acceptance never rolls it back.
   - Abort does not require immediate remote replication.
 - **Native boundary continuation:** A companion may continue through Pi's `turn_end` or `agent_before_settle` boundary without a new user prompt. State Flow keeps projecting current memory and the accepted response across those requests and later patches. It does not restore the completed specification or request another turn itself.
 - **Passive:** `/state-flow-passive` enables both memory tools and projection.
-  - A proven pre-runtime branch records only `{mode}` in Pi and loads shared memory read-only.
+  - A proven pre-runtime branch records native v2 `{mode, scopes}` policy in Pi and observes only selected existing shared memory read-only.
   - Accepted runtimes persist Passive and adopt unrelated shared drift without semantic/provenance writes or revision/step changes.
   - Pending repeats share one acceptance.
 - **Off:** `/state-flow-off` removes memory tools and context, and immediately clears semantic caches.
   - It cancels owned restoration/fork, activation, preparation, response, patch and Passive-persistence waits.
   - It saves only native policy and continuation/fork bookmarks. Existing canonical bytes, including the old stored runtime mode, stay untouched even when malformed or busy.
-  - Repeated Off is inert. Already accepted data is preserved, and a later explicit Passive/Active reacquires memory.
+  - Repeated mode-only Off with the same captured choice is inert; explicit different scopes change native policy only. Already accepted data is preserved, and a later explicit Passive/Active reacquires memory.
   - Global defaults and other sessions remain unchanged.
 - **If Passive cannot persist:** Off itself never attempts canonical persistence; this fallback concerns Passive.
   - The selected Passive policy stays applied. Accepted memory and the native conversation stay intact.
@@ -107,10 +115,11 @@ State Flow does not undo tool effects. After an interruption or a return to an o
 
 ### Fork support and limits
 
-**What a fork copies.** Memory-enabled native fork replacement copies the parent's **current** session checkpoint, retained patch tail and matching provenance into the new session's own storage, independent of the Pi step it forked from.
+**What a fork copies.** When Session participates and private acquisition is admitted, native fork replacement copies the parent's **current** Session stream and matching provenance into the child's own storage, independent of the Pi step it forked from.
 
-- Off records only a child-owned pending-fork policy. Header/store reads and copying wait until an explicit Passive/Active, including after a cold reload.
-- Global/CWD values and provenance stay current. Applying a smaller `historyLimit` may fold shared tails under CAS.
+- Off records only child-owned native pending-fork policy; parent-header/store reads and copying wait for admitted Passive/Active acquisition, including after cold reload.
+- With Session excluded, enabled modes accept selected shared owners plus child lifecycle metadata without reading/copying parent-private memory. Later explicit Session acquisition requires that child's deferred-copy proof and an absent private target; an acquired child never recopies.
+- Selected Global/CWD values and provenance stay current. Applying a smaller `historyLimit` may fold selected shared tails under CAS; excluded semantic files stay unchanged.
 - Parent-private data and history stay intact. The selected mode is kept, so an inactive source does not become Active automatically.
 
 **The child's own history.** The child starts at step zero with a new temporal origin.
@@ -119,12 +128,12 @@ State Flow does not undo tool effects. After an interruption or a return to an o
 - The child's own transitions build its hot window, and owned checkpoints support normal reload/resume.
 - Parent Stop projection is not inherited, including after a child reload.
 
-**Requirements for the initial copy:** a native fork start event, a regular canonical direct-parent session file, matching CWD/identity, a readable temporal source and an unused child namespace. Missing or unsafe evidence or a CAS conflict leaves the copy unavailable rather than importing unrelated private state. Explicit Start can retry an unaccepted copy in the same loaded fork once the cause is corrected.
+**Requirements for the initial copy:** a native fork start event, a regular canonical direct-parent session file, matching CWD/identity, a readable current temporal source and an unoccupied child semantic target. A lifecycle-only child must additionally prove its own deferred-copy authority before private acquisition. Missing or unsafe evidence or a CAS conflict leaves the copy unavailable rather than importing unrelated private state. Explicit Start can retry an unaccepted copy in the same loaded fork once the cause is corrected.
 
 **Limits:**
 
 - Selecting a copied parent step through the child's `/tree` keeps current child-owned memory; it neither rewinds nor recopies parent data.
-- Cold recovery before the first child checkpoint requires an Off-deferred pending-fork marker. Otherwise, it and startup paths lacking the fork event remain unsupported.
+- Cold recovery before first private acceptance requires child-owned pending-fork authority; an accepted shared-only child also retains its matching deferred lifecycle proof. Missing files alone and startup paths without valid fork authority cannot authorize copying.
 - In-memory parent locators and cross-CWD imports remain unsupported.
 - File-only copying requires an exact still-available source cohort.
 
@@ -137,6 +146,7 @@ An optional global `config.json` lives at the root of the State Flow repository,
 ```json
 {
   "mode": "off",
+  "scopes": ["global", "cwd", "session"],
   "logging": false,
   "showSuccessfulPatches": true,
   "historyLimit": 7
@@ -273,9 +283,9 @@ See the [storage contract](architecture.md#storage-and-identity) for the exact l
 **Missing fields are fine.** Missing documented fields inside a valid checkpoint or patch are supported.
 
 - Current and historical semantic views include only known fields present in the selected scope or overlay; absent fields and empty responses are omitted. Higher scopes contribute only present values.
-- Unknown top-level fields are ignored when reading checkpoints/patches and are not emitted on later writes; nested data within known planes stays intact.
+- Built-in fields and metadata v4-declared external roots are known semantic content. Declared external values/history survive missing or incompatible definitions; unrelated unknown roots remain outside the supported semantic view. Retired target-format roots explicitly reject rather than being silently ignored. Nested data within admitted planes stays intact.
 - An explicit `read_state` value query for an absent documented top-level field returns `null`, including an empty or absent `session.response`.
-- Reading and Start do not normalize files, advance revisions or require a migration.
+- Read-only inspection never normalizes or converts files. Start does not fill missing planes or create a semantic revision merely for normalization; independently authorized acceptance may perform the supported backed-up format conversion described below.
 - An empty semantic object is different from a missing file or missing ownership metadata.
 
 **Wholly absent shared files.** A checkpoint and its tail are one semantic pair. If both live files of a global or CWD scope disappear, State Flow treats that complete absence as current empty shared reality. An authored `patch_state` applies to that empty basis under exclusion, and normal file-cohort CAS creates the accepted pair without resurrecting cold values or orphaned compilation evidence. Raw precomputed replay still refuses a removed selected target rather than replaying stale normalized changes.
@@ -342,11 +352,11 @@ Commit or push failure is diagnostic-only; repeated push failures warn once per 
 **Supported formats.** State Flow accepts only canonical checkpoint/tail files, temporal metadata and the separate session config/runtime contract.
 
 - Scope metadata versions 1/2 remain readable through explicit `contract → strategy`, `working → tactics` translation before field filtering. Current/historical tools expose only the target dialect; retired root writes reject rather than becoming aliases. Legacy missing revisions credit only retained tail records.
-- New writes use scope metadata version 3. On an owned semantic acceptance, legacy cohorts convert with unchanged semantic revisions/causal identities, under the existing lock/CAS and rollback checks. Ordinary inspection and runtime-only mode persistence do not convert files. Upgrade/quiesce all writers before enabling the new code: already-deployed low-level readers cannot be universally fenced by a format number.
+- Core-only writes use scope metadata v3; retained external-module descriptors select v4. Both use Strategy/Tactics. On owned semantic acceptance, supported legacy/descriptor upgrades use the same backup, lock/CAS and rollback checks without advancing revisions/causal identities for representation alone. Ordinary inspection and runtime-only mode persistence do not convert files. Upgrade/quiesce all writers before enabling the new code: already-deployed low-level readers cannot be universally fenced by a format number.
 - Unsupported checkpoint envelopes, combined session metadata, `state.json`, hashed layouts and semantic Pi checkpoint envelopes fail as unsupported, without rewriting existing bytes.
 - Canonical semantic objects lacking optional fields, such as `intents` or `lazy`, are valid sparse state and do not cross this boundary.
-- Before any v1/v2-to-v3 canonical publication, the storage owner writes and verifies an exact-byte JSON backup at `<parent-of-store>/<store-name>-migration-backups/<sha256>.json` (created with directory mode 0700, file mode 0600 on the verified platform; existing non-private paths reject). It lists converted scopes and updated paths alongside the transaction's owned file basis, relative paths, identities, Base64 originals and explicit missing entries, including required Session config/runtime. It never discovers unrelated projects/sessions or source bodies. The returned publication exposes `migrationBackup`; completed backups survive rollback and exact retries reuse them. Backup failure blocks canonical writes.
-- This backup is recovery evidence outside canonical authority, not a Git commit, journal, automatic fallback or power-loss guarantee. Quiesce writers and request a reviewed complete-cohort recovery before downgrade/restoration; do not overwrite intervening foreign data or restore just one file. Retain backups privately. State Flow 0.x retains legacy conversion and retired-root reservations; the temporary support window ends at State Flow 1.0.0, with unsupported versions still explicitly rejected. The prepared0.27.0 candidate keeps its converter/reservations unchanged; no automatic removal, release or working-store migration follows. See the [settled support policy](semantic-compatibility-decision.md#implementation-direction-and-reserved-names).
+- Before a supported legacy or explicit metadata upgrade is canonically published, the storage owner writes and verifies an exact-byte JSON backup at `<parent-of-store>/<store-name>-migration-backups/<sha256>.json` (created with directory mode 0700, file mode 0600 on the verified platform; existing non-private paths reject). It lists converted scopes and updated paths alongside the transaction's owned file basis, relative paths, identities, Base64 originals and explicit missing entries, including required Session config/runtime. It never discovers unrelated projects/sessions or source bodies. The returned publication exposes `migrationBackup`; completed backups survive rollback and exact retries reuse them. Backup failure blocks canonical writes.
+- This backup is recovery evidence outside canonical authority, not a Git commit, journal, automatic fallback or power-loss guarantee. Quiesce writers and request a reviewed complete-cohort recovery before downgrade/restoration; do not overwrite intervening foreign data or restore just one file. Retain backups privately. State Flow 0.x retains legacy conversion and retired-root reservations; the temporary support window ends at State Flow 1.0.0, with unsupported versions still explicitly rejected. Released 0.27.0/0.27.1 retain their converter/reservations, and 0.27.2 preserves that policy; no automatic removal, release or working-store operation follows from consolidation. See the [settled support policy](semantic-compatibility-decision.md#implementation-direction-and-reserved-names).
 
 ### Conflicts and interrupted publication
 
@@ -359,7 +369,7 @@ Commit or push failure is diagnostic-only; repeated push failures warn once per 
 
 Do not repeat external actions while memory publication waits.
 
-**Final answers.** Final-answer reconciliation also waits cancelably, then saves the response and the completed-run lifecycle together over current shared memory. Stop, session/tree changes, shutdown and a superseding answer cancel obsolete waits without modifying newer work. A failed or canceled publication leaves the prior response and unfinished run intact; it never requests a repair inference.
+**Final answers.** Active final-answer reconciliation waits cancelably, then completes the run over current selected memory and saves the response only when Session participates. Session-excluded completion does not write a hidden private/shared answer. Stop, session/tree changes, shutdown and a superseding answer cancel obsolete waits without modifying newer work. A failed or canceled publication leaves the prior response and unfinished run intact; it never requests a repair inference.
 
 **Run preparation.** Run preparation and missing-artifact maintenance wait cancelably before the first enabled inference, accepting current shared memory and lifecycle together. If preparation fails, State Flow aborts that native operation rather than sending a rejected or stale draft to the provider; previously accepted memory stays available. Cancellation can leave the new request without a specification checkpoint, so its native conversation is conservatively preserved through idle Stop/reload. Boundary continuation never replays a completed specification.
 
@@ -420,7 +430,7 @@ The agent should use sufficient materialized knowledge before rereading files. I
 
 **Artifact maintenance:**
 
-- It inspects only exact paths already registered in global, CWD or session state, using `size + mtimeNs`, without directory traversal or generic content hashing.
+- It inspects only exact registered paths owned by selected scopes, using `size + mtimeNs`, without directory traversal or generic content hashing. Excluded owners receive no automatic source maintenance or relocation.
 - Proven-missing paths are pruned from their exact owning scopes. Unavailable, relative, directory and symlink paths are preserved.
 - Changed sources keep their artifact value and receive a runtime-only model `hint` until a stable read and same-path compilation update the hidden provenance.
 - Model patches cannot author or delete runtime provenance or hints.

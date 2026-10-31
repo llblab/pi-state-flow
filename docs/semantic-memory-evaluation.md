@@ -2,11 +2,11 @@
 
 ## Status and evidence boundary
 
-**Deferred post-implementation comparison — no live baseline executed.** Following the owner's 2026-10-24 implementation-first direction, this trial no longer gates M1–M5 implementation. Preserve the baseline source and fixed corpus for later comparison, disclose any model/provider drift, and never relabel calibration as model behavior. This run sheet specifies one small reproducible linked-task trial and its oracles. The opt-in [runner](../benchmarks/semantic-memory.mjs) now implements the isolated fixture/measurement mechanics and offline scripted calibration; it is not a live model result or evidence that the proposed semantic names improve quality. [BACKLOG.md](../BACKLOG.md#13-evaluation-and-acceptance-strategy) owns remaining execution and acceptance work.
+**Deferred post-implementation comparison — no live baseline executed.** Following the owner's 2026-10-24 implementation-first direction, this trial no longer gates M1–M5 implementation. Preserve the baseline source and fixed corpus for later comparison, disclose any model/provider drift, and never relabel calibration as model behavior. This run sheet specifies one small reproducible linked-task trial and its oracles. The opt-in [runner](../benchmarks/semantic-memory.mjs) now implements the isolated fixture/measurement mechanics and offline scripted calibration; it is not a live model result or evidence that the proposed semantic names improve quality. [BACKLOG.md](../BACKLOG.md#external-validation-and-evaluation) owns remaining execution and acceptance work.
 
 The existing [performance workloads](performance.md) and [benchmark guide](../benchmarks/README.md) are synthetic transport/performance evidence. The current [semantic handoff evidence](semantic-handoff-contract.md#source-bound-validation-evidence) is an old-name in-memory preservation probe. Neither is a replacement for the model observations defined here.
 
-### Local preflight result
+### Historical M0 local preflight result
 
 The preparation inspected only SDK/tool metadata and repository source, without live canonical-store access:
 
@@ -37,7 +37,7 @@ This is 12 user inputs, not necessarily 12 model requests: normal tool turns and
 
 Use the same pinned physical model/provider and reasoning level for all three conditions. Do not silently switch providers when one fails. A provider alias is not an immutable model snapshot: report any actual snapshot identity the provider exposes, or record that it is unavailable. Do not fabricate immutable version provenance from the catalogue name.
 
-The preserved M0 baseline source uses old semantic names with all three scopes. The current runner/calibration now follows the unreleased M1 Strategy/Tactics API; that does not retroactively produce an old-version live baseline. Later comparisons must bind each condition to its actual source/schema digest. Configurable scopes, flat references and module protocols remain future conditions until implemented.
+The preserved M0 baseline source uses old semantic names with all three scopes. The current runner/calibration follows the Strategy/Tactics API released in 0.27.0; that does not retroactively produce an old-version live baseline. Later comparisons must bind each condition to its actual source/schema digest. Seven-selection and flat-interface mechanics are implemented, but their real-model comparison is unrun. The runner's initial all-three conditions are not a substitute for that separate comparison.
 
 ## Isolation and native host setup
 
@@ -137,7 +137,7 @@ Score each applicable semantic obligation as **met / violated / not exercised / 
 - **Closure and survivors:** An actually completed commitment closes; durable conclusions survive. Record actual ownership usage separately from its correctness.
 - **Rediscovery/churn:** Repeated reads, repeated tests, no-op patches, needless full-plan replacement, and semantic growth are observations. A necessary revalidation after artifact change is not needless repetition.
 
-Flattened one-scope operation and disabled-owner writes cannot be scored against the preserved4494fee/0.26.5 baseline as if implemented there; their installed target mechanics are covered by the later M2/M3 checkpoints, not by this historical baseline. Reserve those cases for M3's comparison, with actual schemas and excluded-owner byte hashes. M4 adds only a protocol-composition comparison once M1–M3 are stable.
+Flattened one-scope operation and disabled-owner writes cannot be scored against the preserved4494fee/0.26.5 baseline as if implemented there; their installed target mechanics are covered by the later M2/M3 checkpoints, not by this historical baseline. Reserve those cases for M3's comparison, with actual schemas and excluded-owner byte hashes. The historical roadmap also proposed a protocol-composition comparison. M4 ultimately retained existing renderers without changing protocol output, so that decision creates no new experimental treatment or requirement to invent one. Any later cognitive-benefit claim needs separately authorized comparable conditions.
 
 ## Compact report shape and interpretation
 
@@ -163,4 +163,4 @@ Calibration on the M0 source/SDK stack exercised four native user runs per condi
 
 These observations validate harness mechanics only. They are not behavioral rubric scores, live token charges, physical network-isolation proof, or provider cache measurements. The raw public usage fields in faux reports must not be interpreted as live-provider cost evidence.
 
-After functional implementation and deterministic validation, M0.4b requires the authorized credential-capable route and bounded execution settings stated above. Execute comparable baseline/target real-model conditions where reproducible, review the semantic rubric, and retain the compact source-bound report. The canonical backlog retains this deferred remainder; missing model observations do not block changing runtime names or prompts. Do not treat calibration or missing baseline observations as completed model evidence or an agent-quality improvement.
+After functional implementation and deterministic validation, M0.4b requires the authorized credential-capable route and bounded execution settings stated above. Execute comparable baseline/target real-model conditions where reproducible, review the semantic rubric, and retain the compact source-bound report. The canonical backlog retains this deferred remainder separately from 0.27.2 release-local cleanup; missing model observations do not reopen completed runtime implementation. Do not treat calibration or missing baseline observations as completed model evidence or an agent-quality improvement.

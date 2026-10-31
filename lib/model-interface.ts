@@ -8,7 +8,6 @@ import type { AtomicScopePatches, StateScope } from "./state.ts";
 
 import { MODEL_PLANE_NAMES } from "./planes.ts";
 
-const PATCH_PLANES = MODEL_PLANE_NAMES;
 const SEMANTIC_ROOT = /^(?:intents|strategy|tactics|artifacts|response|lazy|x_[a-z][a-z0-9_]*)(?=\.|\[|$)/;
 const PATCH_PATH = /^(?:effective|global|cwd|session)\.patches(?:\[\d+\])?$/;
 
@@ -57,7 +56,7 @@ function admitKeys(value: JsonObject, selected: ScopeSelection, external: readon
 	const keys = Object.keys(value);
 	if (!keys.length) throw new Error("Model patch requires at least one supplied branch");
 	if (selected.length === 1) {
-		if (keys.some(key => !PATCH_PLANES.includes(key) && !external.includes(key))) throw new Error("Single-owner model patches require flat semantic planes");
+		if (keys.some(key => !MODEL_PLANE_NAMES.includes(key) && !external.includes(key))) throw new Error("Single-owner model patches require flat semantic planes");
 	} else for (const key of keys) {
 		if (!selected.includes(key as StateScope)) throw new Error(`Multi-owner model patches require participating explicit owners; does not accept field ${key}`);
 	}
@@ -66,7 +65,7 @@ function admitKeys(value: JsonObject, selected: ScopeSelection, external: readon
 function planePatch(value: unknown, external: readonly string[]): asserts value is JsonObject {
 	if (!isObject(value) || !Object.keys(value).length) throw new Error("Model scope patch must be a nonempty object");
 	for (const key of Object.keys(value)) {
-		if (!PATCH_PLANES.includes(key) && !external.includes(key)) throw new Error(`Model patch does not accept semantic plane ${key}`);
+		if (!MODEL_PLANE_NAMES.includes(key) && !external.includes(key)) throw new Error(`Model patch does not accept semantic plane ${key}`);
 		if (!isObject(value[key])) throw new Error(`Model patch plane ${key} must be a JSON object`);
 	}
 }
