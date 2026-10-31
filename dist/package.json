@@ -18,6 +18,7 @@
     "url": "https://github.com/llblab/pi-state-flow/issues"
   },
   "type": "module",
+  "types": "./dist/index.d.ts",
   "files": [
     "index.ts",
     "api",
