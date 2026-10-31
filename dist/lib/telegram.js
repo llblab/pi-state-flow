@@ -57,7 +57,6 @@ export function buildStateFlowSectionView(snapshot, callbackData) {
             inspectionRows.push([]);
         inspectionRows.at(-1).push({ text: STATE_FLOW_SCOPE_LABELS[scope], callback_data: callbackData("inspect", scope) });
     }
-    const named = scopes.map(scope => `<code>${scope}</code>`).join(" → ");
     const modes = STATE_FLOW_MODES.map((mode) => ({
         text: `${mode === snapshot.mode ? STATE_FLOW_SELECTED_MARKERS[mode] : "⚫️"} ${STATE_FLOW_MODE_LABELS[mode]}`,
         callback_data: callbackData(mode),
@@ -76,15 +75,12 @@ export function buildStateFlowSectionView(snapshot, callbackData) {
             `<code>-</code> <code>passive</code>: regular chat with memory tools; available memory from the selected ${scopes.length === 1 ? "scope" : "scopes"} enters the agent's context.`,
             "<code>-</code> <code>active</code>: same memory access; each completed answer closes a cycle, and the next request starts from saved state, not the full chat.",
             "",
-            `<b>Participating scopes:</b> ${named}`,
-            ...(!scopes.includes("session") ? ["New answers are delivered, not stored: Session is excluded."] : []),
-            "",
             "<b>Inspect participating memory</b> — view available stored state even in Off:",
             "",
             ...scopes.map(scope => `<code>-</code> <code>${scope}</code>: ${STATE_FLOW_SCOPE_DESCRIPTIONS[scope]}`),
             ...(scopes.length > 1
-                ? [`<code>-</code> <code>effective</code>: validated available ${named} overlay; excluded scopes do not contribute.`]
-                : ["This single scope is also the agent's effective state; no separate overlay is needed."]),
+                ? ["<code>-</code> <code>effective</code>: merged state of the selected scopes in order from the general to the specific."]
+                : []),
         ].join("\n"),
         parseMode: "html",
         replyMarkup: { inline_keyboard: [

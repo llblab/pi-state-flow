@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.27.3: Minimal Telegram inspection menu
+
+- `Single participating-owner list`: Removes the duplicated Participating scopes summary and the Session-exclusion notice from the Telegram section. The Inspect participating memory list and its buttons are now the only statement of participating owners, so no line can disagree with the available actions.
+- `Selection-independent Effective line`: Replaces the generated `global → cwd → session` enumeration and its three-owner variant with one fixed sentence about overlay order. A single selected owner shows only that owner, without an Effective line, button or explanatory tail.
+
 ## 0.27.2: Consistency & Simplification
 
 - `Documentation reconciliation`: Correct current release/public-module status to the published 0.27.0/0.27.1 behavior, including metadata v4 retention and external-root tools/context/producers. Distinguish the six-plane internal seam from public registration and mark M4/M5 deferrals as historical without upgrading their review verdicts. No production behavior or compatibility policy changed.

@@ -236,9 +236,9 @@ When `pi-telegram` is available, its main-menu section shows `State Flow: active
 - The submenu heading shows the current value in monospace.
 - The bold Mode heading uses a long dash, a description ending in a colon, and a blank line before its settings-style list. Each line has a monospaced minus and lowercase monospaced mode value, then a plain colon and description.
 - The descriptions progress from regular chat with no memory (Off, the new-session default), to ordinary chat with memory tools and an available combined memory view (Passive), to the same memory access with completed answers followed by memory-first continuation (Active). They do not claim a new physical Pi session or disabled native compaction.
-- A Participating scopes line shows the captured current choice, initially from global defaults; later default edits do not replace an existing session choice. Mode/help text describes only that set and states when excluded Session means new answers are delivered without storage.
+- The captured participating owners are named by the Inspect participating memory list below, not a separate line; later default edits do not replace an existing session choice. Mode/help text describes only that set.
 - The bold Inspect participating memory heading follows the same long-dash, description, colon and blank-line pattern. Only selected owners get a monospaced description and direct button; this is not a scope chooser.
-- With one selected owner, its state is also effective and no separate Effective button appears. With two or three, Effective shows the validated available overlay of those selected owners only, in Global→CWD→Session order. Excluded owners do not contribute or gain an inspection action.
+- With one selected owner there is no separate effective state: the agent reads that owner directly, so neither an Effective line nor button appears. With two or three, Effective shows the validated available overlay of those selected owners only, in Global→CWD→Session order. Excluded owners do not contribute or gain an inspection action. The Effective description is a fixed sentence, not an owner enumeration: the list above already names the selected owners.
 
 **Memory inspection:**
 

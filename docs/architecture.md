@@ -840,7 +840,7 @@ Status is a projection of the selected runtime and semantic view, not a second s
 **Telegram menu layout.** The optional Telegram leaf adapter shows, in order:
 
 1. the current mode as a monospace value in the submenu heading;
-2. matching Mode and Inspect participating memory headings (a long-dash-separated description ending in a colon), with a captured Participating scopes line and selection-aware settings-style descriptions;
+2. matching Mode and Inspect participating memory headings (a long-dash-separated description ending in a colon), with selection-aware settings-style descriptions; the captured participating owners are named only by that Inspect list, with no separate scope-summary or Session-exclusion line;
 3. one radio row `Off | Passive | Active`, where selected Off uses 🟣, Passive 🟡 or Active 🟢, and inactive choices use ⚫️;
 4. only captured participating owner-inspection buttons, plus Effective for two or three owners. A sole owner is already effective. Inspection stays explicit and available in all three modes; unavailable memory is not invented.
 

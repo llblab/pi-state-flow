@@ -109,11 +109,20 @@ test("Telegram inspection buttons and help follow all seven wanted selections in
 		assert.ok(rows.slice(1).every(row => row.length > 0 && row.length <= 2));
 		for (const owner of DEFAULT_SCOPE_SELECTION) assert.equal(view.text.includes(`<code>-</code> <code>${owner}</code>:`), scopes.includes(owner));
 		assert.equal(view.text.includes("<code>-</code> <code>effective</code>:"), scopes.length > 1);
-		assert.equal(view.text.includes("New answers are delivered, not stored"), !scopes.includes("session"));
+		// The Inspect participating memory section already owns the participating-owner list.
+		assert.equal(view.text.includes("Participating scopes"), false);
+		assert.equal(view.text.includes("Session excluded"), false);
 		if (scopes.length === 1) {
-			assert.match(view.text, /single scope is also the agent's effective state/);
 			assert.match(view.text, /selected scope enters/);
-		} else assert.match(view.text, /selected scopes enters/);
+			// A single owner is effective by identity: no Effective line, button or explanatory tail.
+			assert.match(view.text.split("\n").at(-1)!, new RegExp(`^<code>-</code> <code>${scopes[0]}</code>: `));
+		} else {
+			assert.match(view.text, /selected scopes enters/);
+			// One selection-independent sentence, never an owner enumeration or a three-owner special case.
+			assert.match(view.text, /<code>effective<\/code>: merged state of the selected scopes in order from the general to the specific\./);
+		}
+		// The effective line never re-enumerates owners; the list above already names them.
+		assert.equal(view.text.includes(" → "), false);
 		assert.deepEqual(supplied, before);
 	}
 });
@@ -187,8 +196,9 @@ test("legacy Effective revision display includes only participating owners witho
 test("Telegram Effective describes an operator view, never all-owner model participation", () => {
 	for (const mode of ["off", "passive", "active"] as const) {
 		const view = buildStateFlowSectionView({ mode, step: 0, bootstrap: false, startPending: false }, (a, p) => `${a}:${p ?? ""}`);
-		assert.match(view.text, /validated available .*global.*cwd.*session.* overlay/);
-		assert.match(view.text, /excluded scopes do not contribute/);
+		assert.match(view.text, /<code>effective<\/code>: merged state of the selected scopes in order from the general to the specific\./);
+		assert.doesNotMatch(view.text, /the agent can use it when memory is enabled and available/);
+		assert.doesNotMatch(view.text, /global<\/code> → /);
 		assert.equal(view.replyMarkup!.inline_keyboard[0]!.length, 3); assert.equal(view.replyMarkup!.inline_keyboard.flat().length, 7, "no scope-selection chooser added");
 	}
 });
@@ -265,14 +275,12 @@ test("section view uses capitalized radio modes with one semantic selected marke
 			"<code>-</code> <code>passive</code>: regular chat with memory tools; available memory from the selected scopes enters the agent's context.",
 			"<code>-</code> <code>active</code>: same memory access; each completed answer closes a cycle, and the next request starts from saved state, not the full chat.",
 			"",
-			"<b>Participating scopes:</b> <code>global</code> → <code>cwd</code> → <code>session</code>",
-			"",
 			"<b>Inspect participating memory</b> — view available stored state even in Off:",
 			"",
 			"<code>-</code> <code>global</code>: memory shared across projects and sessions.",
 			"<code>-</code> <code>cwd</code>: memory shared by sessions in this directory.",
 			"<code>-</code> <code>session</code>: private memory for this session, kept on resume.",
-			"<code>-</code> <code>effective</code>: validated available <code>global</code> → <code>cwd</code> → <code>session</code> overlay; excluded scopes do not contribute.",
+			"<code>-</code> <code>effective</code>: merged state of the selected scopes in order from the general to the specific.",
 		].join("\n"));
 		assert.deepEqual(view.replyMarkup?.inline_keyboard, [[
 			{ text: `${mode === "off" ? "🟣" : "⚫️"} Off`, callback_data: "cb:off" },
