@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.27.4: TypeScript Declaration Hotfix
+
+- `Package type discovery`: Adds the top-level `types` entry pointing to `dist/index.d.ts` so TypeScript consumers and tools that do not read conditional exports can discover the built declarations. Existing conditional type exports remain unchanged. The tracked distribution manifest is rebuilt with matching metadata.
+
 ## 0.27.3: Minimal Telegram inspection menu
 
 - `Single participating-owner list`: Removes the duplicated Participating scopes summary and the Session-exclusion notice from the Telegram section. The Inspect participating memory list and its buttons are now the only statement of participating owners, so no line can disagree with the available actions.
