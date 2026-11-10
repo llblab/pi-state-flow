@@ -192,13 +192,11 @@ export function buildStateFlowSectionView(
 			] : []),
 			"",
 			"<b>Mode</b> — choose a workflow (switching modes never erases stored memory):",
-			"",
 			"<code>-</code> <code>off</code> (default): regular chat without State Flow memory tools or context.",
 			`<code>-</code> <code>passive</code>: regular chat with memory tools; available memory from the selected ${scopes.length === 1 ? "scope" : "scopes"} enters the agent's context.`,
 			"<code>-</code> <code>active</code>: same memory access; each completed answer closes a cycle, and the next request starts from saved state, not the full chat.",
 			"",
 			"<b>Inspect participating memory</b> — view available stored state even in Off:",
-			"",
 			...scopes.map(scope => `<code>-</code> <code>${scope}</code>: ${STATE_FLOW_SCOPE_DESCRIPTIONS[scope]}`),
 			...(scopes.length > 1
 				? ["<code>-</code> <code>effective</code>: merged state of the selected scopes in order from the general to the specific."]

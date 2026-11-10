@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.27.5: Compact Telegram Help and Migration Guidance
+
+- `Telegram help spacing`: Removes the empty lines between the Mode and Inspect participating memory headings and their lists. The canonical source now preserves the compact layout in rebuilt packages; controls, scope selection and inspection behavior are unchanged.
+- `Migration guidance`: Explains why legacy `contract`/`working` files can remain after an update, when owned acceptance converts them to `strategy`/`tactics`, and why untouched owners/sessions are not upgraded by inspection. Documents quiescing old writers and accepting current memory through upgraded Active/Start; migration behavior and storage formats are unchanged.
+
 ## 0.27.4: TypeScript Declaration Hotfix
 
 - `Package type discovery`: Adds the top-level `types` entry pointing to `dist/index.d.ts` so TypeScript consumers and tools that do not read conditional exports can discover the built declarations. Existing conditional type exports remain unchanged. The tracked distribution manifest is rebuilt with matching metadata.
