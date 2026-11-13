@@ -8,13 +8,13 @@ For the concept and installation, start with the [README](../README.md). This gu
 
 State Flow has three distinct model-facing states. **Active versus passive changes the agent's workflow, not the existence of disk memory.**
 
-- **Active:** Both `read_state` and `patch_state` are available, subject to host restrictions and valid memory authority.
+- **Active:** Both `state_flow_read` and `state_flow_patch` are available, subject to host restrictions and valid memory authority.
   - Prompts require the agent to consolidate future-relevant results into state before ending an iteration.
   - The final meaningful semantic patch preserves the decisions, outcomes and continuation needed once the completed conversation leaves model projection.
   - The next iteration starts from accepted state and its new input, not from the previous iteration's completed reasoning.
   - The native trace stays inspectable: a clean model context does not mean deleting Pi history.
 - **Passive:** Both memory tools are available, existing state except the `response` plane is projected into context, and the agent may read or patch memory as useful.
-  - The last Active answer is not repeated in automatic memory context, Stop handoffs or state updates. Its stored value and explicit `read_state` access remain intact; native/user/tool history is not redacted.
+  - The last Active answer is not repeated in automatic memory context, Stop handoffs or state updates. Its stored value and explicit `state_flow_read` access remain intact; native/user/tool history is not redacted.
   - Ordinary conversation continuity remains: there is no active iteration-ending context reset and no mandatory consolidation pressure.
   - Accepted patches still reach the same canonical store, with the same validation and ownership guarantees.
 - **Off:** Neither memory tool is exposed to the model, and State Flow injects no protocol, bootstrap/state context or frozen passive handoff. Stored memory and the native conversation trace are not deleted.
@@ -23,11 +23,11 @@ One session-owned `mode` selects these behaviors; there are no separate passive-
 
 **Completion is semantic, not ceremonial.** In active mode, necessary final state changes must be accepted before relying on state-only continuation. That does not require:
 
-- an empty `patch_state` when memory is already current;
+- an empty `state_flow_patch` when memory is already current;
 - an extra model turn;
 - a special finalization tool.
 
-In Active mode, `patch_state` is an inference barrier, not automatically the end of an iteration; Passive has no such barrier. The runtime separately completes the run and captures the accepted ordinary answer only in Active participating Session. With Session excluded, completion is lifecycle-only unless another semantic change is accepted; no answer is backfilled or relocated.
+In Active mode, `state_flow_patch` is an inference barrier, not automatically the end of an iteration; Passive has no such barrier. The runtime separately completes the run and captures the accepted ordinary answer only in Active participating Session. With Session excluded, completion is lifecycle-only unless another semantic change is accepted; no answer is backfilled or relocated.
 
 **Two meanings of “bootstrap”:**
 
@@ -161,7 +161,7 @@ The canonical store is `state-flow/` beneath the agent directory. Keeping config
   - Off exposes neither memory tools nor State Flow context.
 - `scopes`: Missing means `global`, `cwd`, `session`. Any of the seven nonempty unique subsets is supported; order is canonicalized without rewriting the file. For example, `"scopes": ["cwd"]` selects project-only memory. The default is captured once for a new or not-yet-captured legacy branch; an existing choice survives reload, tree navigation and later default edits, and forks inherit their parent branch's choice. Mode-only commands/Telegram actions preserve it. Use explicit owner tokens on an existing mode command to change only the current branch's choice; a settings chooser is not required. Never edit accepted lifecycle files to select scopes. Disabled owners cannot be read/patched as model memory or relocated into another owner. Without Session, native answers are delivered but not stored/backfilled; a fork defers private acquisition rather than creating a hidden Session stream. See [native seven-selection integration](scope-selection-contract.md#retained-native-seven-selection-integration) and the [capture boundary](scope-selection-contract.md#configured-scope-defaults-and-native-capture).
 - `logging`: Defaults to `false`. When enabled, rejected patch executions, active barrier blocks, preparation failures and accepted-answer reconciliation failures are recorded locally at `tmp/pi-state-flow/logs.jsonl` beneath the agent directory. Older `tmp/state-flow` logs are left untouched and are not migrated. Asynchronous Git push failures are recorded there even when this setting is off.
-- `showSuccessfulPatches`: Defaults to `true`. In interactive Pi, `patch_state` rows show pretty-printed JSON arguments once in the call, with blank lines between adjacent memory sections; the result shows the acceptance or no-op acknowledgement, never a second patch. Set it to `false` to hide call arguments and keep the compact acknowledgement. Rejected calls retain their arguments and error acknowledgement; State Flow adds no private validation turn.
+- `showSuccessfulPatches`: Defaults to `true`. In interactive Pi, `state_flow_patch` rows show pretty-printed JSON arguments once in the call, with blank lines between adjacent memory sections; the result shows the acceptance or no-op acknowledgement, never a second patch. Set it to `false` to hide call arguments and keep the compact acknowledgement. Rejected calls retain their arguments and error acknowledgement; State Flow adds no private validation turn.
 - `historyLimit`: Defaults to `7` and accepts integers from `0` through `100`. It counts accepted semantic transitions, **not elapsed time or conversation length**, and bounds materialized-history and scope patch-history offsets.
   - Lowering it on reload/restore/fork folds excess tails forward without losing current state; selected boundaries outside the new window become unavailable.
   - Zero keeps only current checkpoints.
@@ -171,7 +171,7 @@ The canonical store is `state-flow/` beneath the agent directory. Keeping config
 
 - Before canonical runtime acceptance, an owner-bound native v2 policy record captures `{mode, scopes}` instead of a manufactured storage pair or accepted semantic boundary. A captured branch/fork choice survives later global-default edits.
 - Off stays native-only even after an accepted runtime: its mode/bookmark overrides the earlier canonical mode without needing store access or granting semantic authority.
-- Edit global defaults manually or through an authorized agent, not through `patch_state`.
+- Edit global defaults manually or through an authorized agent, not through `state_flow_patch`.
 - Legacy flag decoding is read-only; see [mode compatibility](compatibility.md#mode-configuration-compatibility).
 
 **Passive model-facing footprint.** When selected, Passive declares both memory tools even with no canonical store. Its system-prompt section and projected memory message appear only after a validated memory view is loaded. New sessions default to Off, which exposes none of these surfaces. With unavailable memory the tools may still reject reads or writes: declared tools do not prove usable storage.
@@ -184,7 +184,7 @@ The canonical store is `state-flow/` beneath the agent directory. Keeping config
 
 **What gets recorded:**
 
-- Rejected `patch_state` executions may include the exact attempted arguments and useful draft text, plus the error category and tool/call identity.
+- Rejected `state_flow_patch` executions may include the exact attempted arguments and useful draft text, plus the error category and tool/call identity.
 - The `barrier-block` category records only the blocked tool name, call id, reason and batch tool names, never sibling arguments or reasoning. Passive has no patch barrier, and with logging off no barrier blocks are recorded.
 - Asynchronous push failures keep the available redacted Git error in the log regardless of `logging`. Interactive warnings stay short, appear once per failure streak and reset on success. If logging the push failure is unavailable, one warning shows the available detail instead.
 - Successful patches are not logged, and reasoning bodies are excluded.
@@ -208,7 +208,7 @@ Treat logs and state files as private. Removing a secret from current state does
 - Captured selected owners and, when different, available materialized owners; their known keys, local run step, exact available owner-revision vector and hot-history depth. Unavailable owners receive no fabricated value or zero revision.
 - Known recovery or publication failures, actual artifact counts when nonzero, and pending invalidations. Status does not discover or validate sources.
 - A `Scope memory:` block with one line per scope that has content: the UTF-8 byte size of each present nonempty plane and, when `tactics` or `lazy` has top-level entries, the share owned by an open intent of that scope (for example `- cwd: intents 137 B, tactics 32 B; intent-owned tactics 1/2`). It is operator-only: no notice, threshold or model-facing effect.
-- One JSON representation of available selected memory in relative global → CWD → session order, with a blank line between top-level semantic planes. Nested JSON is unchanged; individual scope JSON remains available through `read_state`.
+- One JSON representation of available selected memory in relative global → CWD → session order, with a blank line between top-level semantic planes. Nested JSON is unchanged; individual scope JSON remains available through `state_flow_read`.
 
 Status reports the selected mode and any Active restoration inference fence, while omitting generic ownership/configuration prose. Failed inspection reports unavailable evidence, not invented empty state. Status is observational: it does not read source files, calculate fingerprints, create invalidations or mutate semantic state.
 
@@ -243,7 +243,7 @@ When `pi-telegram` is available, its main-menu section shows `State Flow: active
 **Memory inspection:**
 
 - Owner-scope Rich snapshots show `#revision`; Effective shows the vector.
-- Fields show pretty-printed JSON directly. Large fields show a bounded JSON prefix with a separate truncation notice and omitted-character count, not a JSON-encoded `preview` string. The preview may end mid-value; actual escapes inside JSON string values remain intact. These presentation limits never truncate stored memory or successful `read_state` results.
+- Fields show pretty-printed JSON directly. Large fields show a bounded JSON prefix with a separate truncation notice and omitted-character count, not a JSON-encoded `preview` string. The preview may end mid-value; actual escapes inside JSON string values remain intact. These presentation limits never truncate stored memory or successful `state_flow_read` results.
 - A failed-Passive write fence does not grant repair or cached fallback: explicit operator inspection still validates current canonical memory through a disposable reader. Peer-accepted current values remain observable without clearing the fence or installing a model cache.
 - Inspection waits cancelably for its required current authority, even when model tools are disabled. It does not initialize, publish or advance storage.
 - Data and displayed revisions come from the same observation; absent or invalid memory stays unavailable.
@@ -284,11 +284,11 @@ See the [storage contract](architecture.md#storage-and-identity) for the exact l
 
 - Current and historical semantic views include only known fields present in the selected scope or overlay; absent fields and empty responses are omitted. Higher scopes contribute only present values.
 - Built-in fields and metadata v4-declared external roots are known semantic content. Declared external values/history survive missing or incompatible definitions; unrelated unknown roots remain outside the supported semantic view. Retired target-format roots explicitly reject rather than being silently ignored. Nested data within admitted planes stays intact.
-- An explicit `read_state` value query for an absent documented top-level field returns `null`, including an empty or absent `session.response`.
+- An explicit `state_flow_read` value query for an absent documented top-level field returns `null`, including an empty or absent `session.response`.
 - Read-only inspection never normalizes or converts files. Start does not fill missing planes or create a semantic revision merely for normalization; independently authorized acceptance may perform the supported backed-up format conversion described below.
 - An empty semantic object is different from a missing file or missing ownership metadata.
 
-**Wholly absent shared files.** A checkpoint and its tail are one semantic pair. If both live files of a global or CWD scope disappear, State Flow treats that complete absence as current empty shared reality. An authored `patch_state` applies to that empty basis under exclusion, and normal file-cohort CAS creates the accepted pair without resurrecting cold values or orphaned compilation evidence. Raw precomputed replay still refuses a removed selected target rather than replaying stale normalized changes.
+**Wholly absent shared files.** A checkpoint and its tail are one semantic pair. If both live files of a global or CWD scope disappear, State Flow treats that complete absence as current empty shared reality. An authored `state_flow_patch` applies to that empty basis under exclusion, and normal file-cohort CAS creates the accepted pair without resurrecting cold values or orphaned compilation evidence. Raw precomputed replay still refuses a removed selected target rather than replaying stale normalized changes.
 
 **Corruption fails closed.** These are never replaced:
 
@@ -303,7 +303,7 @@ Memory never depends on the Pi step, so an old or expired branch checkpoint is n
 
 - Under Active, the selected mode remains Active and the indicator shows `active (blocked)`. Live inference is aborted before the provider instead of silently sending native history under an inactive fallback. Reload/resume retains this fence. Repair the files and choose Active/Passive; explicit Off permits native context without reading memory. Signal-less inspection remains observational.
 - Global/CWD memory stays readable; the unavailable session layer is never replaced by an empty one.
-- Session reads and every `patch_state` refuse without changing canonical files or appending substitute checkpoints.
+- Session reads and every `state_flow_patch` refuse without changing canonical files or appending substitute checkpoints.
 - **Modes are stable.** Explicit Passive accepts validated current same-session memory exactly like Active, keeping Passive policy. Only while current memory is still unreadable or unpublishable does Passive keep native inference with paused writes and report the cause. Off records native policy only.
 - Status distinguishes a write fence from unavailable materialization.
 
@@ -327,7 +327,7 @@ See the complete [filesystem recovery contract](filesystem-recovery.md).
 
 ### Canonical files and optional Git backup
 
-Canonical scope/runtime files own the current materialization and retained hot history, whether or not Git is available. Pi checkpoints record mode and run lifecycle for a branch, not a Git commit or a memory revision to rewind to. Restart and branch navigation always attach the current files; historical states remain available only through explicit `read_state` offsets within retained history.
+Canonical scope/runtime files own the current materialization and retained hot history, whether or not Git is available. Pi checkpoints record mode and run lifecycle for a branch, not a Git commit or a memory revision to rewind to. Restart and branch navigation always attach the current files; historical states remain available only through explicit `state_flow_read` offsets within retained history.
 
 **Local backup commit:**
 
@@ -362,7 +362,7 @@ Commit or push failure is diagnostic-only; repeated push failures warn once per 
 
 ### Conflicts and interrupted publication
 
-**Patches.** `patch_state` waits asynchronously for a live cooperating writer, with native cancellation and no ordinary-contention deadline. It then applies authored Global/CWD operations to the current canonical values:
+**Patches.** `state_flow_patch` waits asynchronously for a live cooperating writer, with native cancellation and no ordinary-contention deadline. It then applies authored Global/CWD operations to the current canonical values:
 
 - Unmentioned fields survive.
 - Overlapping assignments follow successful acceptance order.
@@ -397,9 +397,9 @@ No automatic crash repair or power-loss durability is promised, and Git backup h
 
 ## Lazy navigation and historical reading
 
-With exactly one captured participating owner, `read_state` needs no scope token: `lazy.releasePlan` reads current data, `effective[3].lazy.releasePlan` selects its retained older boundary, and a scalar `patches[0]` reads its latest retained owner patch. Ordinary `lazy.items[3]` still indexes an array. Optional explicit selected-owner paths remain legal. With multiple wanted owners, ordinary flat paths use the effective overlay and owner patch history requires `owner.patches[N]`; sparse available memory does not turn a multi-owner choice into one-owner mode. Unavailable history/owners still fail rather than returning invented empty data.
+With exactly one captured participating owner, `state_flow_read` needs no scope token: `lazy.releasePlan` reads current data, `effective[3].lazy.releasePlan` selects its retained older boundary, and a scalar `patches[0]` reads its latest retained owner patch. Ordinary `lazy.items[3]` still indexes an array. Optional explicit selected-owner paths remain legal. With multiple wanted owners, ordinary flat paths use the effective overlay and owner patch history requires `owner.patches[N]`; sparse available memory does not turn a multi-owner choice into one-owner mode. Unavailable history/owners still fail rather than returning invented empty data.
 
-Returned current same-owner structured refs may be scope-free; persisted refs retain canonical ownership. For one wanted owner, `patch_state` now takes planes directly (for example `{ "tactics": { "ready": true } }`) and anchors eligible refs after native admission; do not add an owner wrapper. For multiple wanted owners, keep explicit participating owner patches in one atomic call. Canonical ownership/replay never become scope-free, and changing schema cannot admit an old call under a new owner. Single-owner Active/Passive/bootstrap instructions and packaged Skills use that same grammar. Active/Passive heads and projection-bound updates now render eligible same-owner current refs relatively; the lazy catalog points to `lazy` for one WANTED owner and `effective.lazy` for several. Active recent context uses `{id,at,patch}` for one owner and explicit `transitions` for several, retaining IDs/positions while omitting lazy bodies. These are read-only context DTOs, not patch arguments or storage/replay formats. Canonical provenance, source paths, history and cross-owner/resource refs remain intact. Registered Skill acquisition targets use direct `artifacts[exact source key]` in one-owner mode, explicit owners in multi mode; this target syntax is not a `read_state` locator. Deletion text uses relative JSON pointers such as `/tactics/missing` for one owner, while result details retain canonical owners/paths. Newly generated Stop/reload/bootstrap handoffs render eligible current refs in the same captured interface. Canonical compiler diagnostics may name provenance owners; those are not extra patch wrappers, and retries use the declared flat planes. Exact source keys and canonical operator/error evidence are never broadly prefix-stripped. See the [context presentation boundary](single-scope-interface-contract.md#runtime-context-presentation).
+Returned current same-owner structured refs may be scope-free; persisted refs retain canonical ownership. For one wanted owner, `state_flow_patch` now takes planes directly (for example `{ "tactics": { "ready": true } }`) and anchors eligible refs after native admission; do not add an owner wrapper. For multiple wanted owners, keep explicit participating owner patches in one atomic call. Canonical ownership/replay never become scope-free, and changing schema cannot admit an old call under a new owner. Single-owner Active/Passive/bootstrap instructions and packaged Skills use that same grammar. Active/Passive heads and projection-bound updates now render eligible same-owner current refs relatively; the lazy catalog points to `lazy` for one WANTED owner and `effective.lazy` for several. Active recent context uses `{id,at,patch}` for one owner and explicit `transitions` for several, retaining IDs/positions while omitting lazy bodies. These are read-only context DTOs, not patch arguments or storage/replay formats. Canonical provenance, source paths, history and cross-owner/resource refs remain intact. Registered Skill acquisition targets use direct `artifacts[exact source key]` in one-owner mode, explicit owners in multi mode; this target syntax is not a `state_flow_read` locator. Deletion text uses relative JSON pointers such as `/tactics/missing` for one owner, while result details retain canonical owners/paths. Newly generated Stop/reload/bootstrap handoffs render eligible current refs in the same captured interface. Canonical compiler diagnostics may name provenance owners; those are not extra patch wrappers, and retries use the declared flat planes. Exact source keys and canonical operator/error evidence are never broadly prefix-stripped. See the [context presentation boundary](single-scope-interface-contract.md#runtime-context-presentation).
 
 Lazy bodies require explicit reads:
 

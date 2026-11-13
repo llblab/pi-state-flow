@@ -21,7 +21,7 @@ import { commitTerminal, harness, start } from "./harness.ts";
 const skillRoot = mkdtempSync(join(tmpdir(), "pi-state-flow-skills-"));
 
 async function patchCwdArtifacts(h: ReturnType<typeof harness>, artifacts: unknown) {
-	return h.tools.get("patch_state")!.execute("compile-skill", { cwd: { artifacts } }, undefined, undefined, h.ctx);
+	return h.tools.get("state_flow_patch")!.execute("compile-skill", { cwd: { artifacts } }, undefined, undefined, h.ctx);
 }
 
 function skillFile(name: string, body = `# ${name}\n\nOperational rules.`): string {
@@ -60,7 +60,7 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 	assert.match(guideBody, /ordinary completion requires no finalization patch/);
 	assert.doesNotMatch(guideBody, /final:true|fallback/);
 	assert.match(guideBody, /Missing history is not empty history/);
-	assert.match(guideBody, /`\$`-prefixed `read_state` paths inside ordinary strings/);
+	assert.match(guideBody, /`\$`-prefixed `state_flow_read` paths inside ordinary strings/);
 	assert.match(guideBody, /Neither form proves authority or existence/);
 	assert.match(guideBody, /Never scan or resolve references merely to test them/);
 	assert.match(guideBody, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
@@ -81,11 +81,11 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 		assert.match(body, /only intent ownership.* has a deletion consequence/);
 	}
 	assert.match(memoryBody, /Keep `lazy` shallow and priority-ordered/);
-	assert.match(memoryBody, /`\$`-prefixed `read_state` paths inside ordinary strings/);
+	assert.match(memoryBody, /`\$`-prefixed `state_flow_read` paths inside ordinary strings/);
 	assert.match(memoryBody, /Never scan or resolve references merely to find broken ones/);
 	assert.match(memoryBody, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
 	assert.match(memoryBody, /top-level hint as conditional navigation and provenance/);
-	assert.match(memoryBody, /one atomic multi-scope `patch_state` for destination and source changes/);
+	assert.match(memoryBody, /one atomic multi-scope `state_flow_patch` for destination and source changes/);
 	assert.match(memoryBody, /Write and verify accepted content plus a content-bound revision or receipt/);
 	assert.match(memoryBody, /before deleting or narrowing the State Flow source in a later patch/);
 	assert.match(memoryBody, /Preserve it when acceptance is ambiguous/);
@@ -96,8 +96,8 @@ test("discovers distinct operational and memory-curation Skills without diagnost
 test("requested curation compiles an acquired Skill with one atomic scope move", async () => {
 	const h = harness();
 	await start(h);
-	const patchState = h.tools.get("patch_state")!;
-	const readState = h.tools.get("read_state")!;
+	const patchState = h.tools.get("state_flow_patch")!;
+	const readState = h.tools.get("state_flow_read")!;
 	await patchState.execute("seed", {
 		global: { strategy: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
@@ -130,10 +130,10 @@ test("requested curation compiles an acquired Skill with one atomic scope move",
 test("memory curation can narrow an established value without retaining two authoritative scopes", async () => {
 	const h = harness();
 	await start(h);
-	await h.tools.get("patch_state")!.execute("retain-global", {
+	await h.tools.get("state_flow_patch")!.execute("retain-global", {
 		global: { strategy: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
-	await h.tools.get("patch_state")!.execute("narrow", {
+	await h.tools.get("state_flow_patch")!.execute("narrow", {
 		global: { strategy: { projectRule: null } },
 		cwd: { strategy: { projectRule: "project-only" } },
 	}, undefined, undefined, h.ctx);
@@ -214,7 +214,7 @@ test("registered Skill acquisition does not block an independent patch and valid
 	const source = skillFile("required");
 	recordRead(h, source);
 
-	await h.tools.get("patch_state")!.execute("independent", { session: { tactics: { accepted: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("independent", { session: { tactics: { accepted: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.readState(0, "session").tactics.accepted, true);
 	await assert.rejects(patchCwdArtifacts(h, { [source]: {} }), (error: unknown) => {
 		return error instanceof Error
@@ -261,12 +261,12 @@ for (const [sourceScope, stateScope] of [["user", "global"], ["project", "cwd"],
 		const first = h.handlers.get("tool_result")!(event, h.ctx);
 		assert.match(first.content.at(-1).text, new RegExp(`belongs at ${stateScope}\\.artifacts`));
 		assert.match(first.content.at(-1).text, /Unrelated semantic patches do not need to include it/);
-		await h.tools.get("patch_state")!.execute(`compile-${sourceScope}`, {
+		await h.tools.get("state_flow_patch")!.execute(`compile-${sourceScope}`, {
 			[stateScope]: { artifacts: { [source]: compilerOutput(`${sourceScope} guidance`) } },
 		}, undefined, undefined, h.ctx);
 		assert.deepEqual(h.readState(0, stateScope).artifacts[source], compilerOutput(`${sourceScope} guidance`));
 		assert.equal(h.handlers.get("tool_result")!(event, h.ctx), undefined, "matching source hash needs no new compilation hint");
-		await h.tools.get("patch_state")!.execute(`independent-${sourceScope}`, { session: { tactics: { [sourceScope]: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute(`independent-${sourceScope}`, { session: { tactics: { [sourceScope]: true } } }, undefined, undefined, h.ctx);
 	});
 }
 
@@ -283,7 +283,7 @@ test("a changed registered owner is reported without silently promoting the old 
 	assert.match(moved.content.at(-1).text, /belongs at global\.artifacts/);
 	assert.deepEqual(h.readState(0, "cwd").artifacts[source], compilerOutput("project version"));
 	assert.equal(h.readState(0, "global").artifacts[source], undefined);
-	await h.tools.get("patch_state")!.execute("move-owner", {
+	await h.tools.get("state_flow_patch")!.execute("move-owner", {
 		global: { artifacts: { [source]: compilerOutput("portable version") } },
 		cwd: { artifacts: { [source]: null } },
 	}, undefined, undefined, h.ctx);
@@ -297,7 +297,7 @@ test("an unregistered SKILL.md read has no acquisition semantics", async () => {
 	const source = skillFile("unregistered");
 	const result = h.handlers.get("tool_result")!({ toolCallId: "plain", toolName: "read", input: { path: source }, content: [{ type: "text", text: "Ordinary source" }], isError: false }, h.ctx);
 	assert.equal(result, undefined);
-	await h.tools.get("patch_state")!.execute("unrelated", { session: { tactics: { accepted: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("unrelated", { session: { tactics: { accepted: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.readState(0, "session").tactics.accepted, true);
 });
 

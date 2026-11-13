@@ -24,7 +24,7 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 	const answer = fauxAssistantMessage, call = fauxToolCall;
 
 	type Candidate = "stable" | "replacement";
-	const names = ["patch_state", "read_state"];
+	const names = ["state_flow_patch", "state_flow_read"];
 	const allowed = ["read", ...names, "schema_foreign"];
 	const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 	function prototype(candidate: Candidate) {
@@ -76,7 +76,7 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 	function declarations(context: Context) { return structuredClone(getCurrentTools(context.messages)); }
 	async function invoke(f: Awaited<ReturnType<typeof realPiFixture>>, session: AgentSession, batch: Array<{ id: string; args: Parameters<typeof call>[1]; name?: string }>) {
 		const seen: ReturnType<typeof declarations>[] = [];
-		f.faux.setResponses([context => { seen.push(declarations(context)); return answer(batch.map(item => call(item.name ?? "patch_state", item.args, { id: item.id })), { stopReason: "toolUse" }); }, context => { seen.push(declarations(context)); return answer("SDK probe settled"); }]);
+		f.faux.setResponses([context => { seen.push(declarations(context)); return answer(batch.map(item => call(item.name ?? "state_flow_patch", item.args, { id: item.id })), { stopReason: "toolUse" }); }, context => { seen.push(declarations(context)); return answer("SDK probe settled"); }]);
 		await session.prompt("Run SDK-only schema witnesses");
 		assert.equal(seen.length, 2, "native continuation requested exactly once");
 		return seen;
@@ -90,7 +90,7 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 			const initial: string[] = [];
 			for (const owner of PROBE_OWNERS) {
 				await session.prompt(`/sdk-schema-probe active ${owner}`);
-				const seen = await invoke(f, session, [{ id: `flat-${owner}`, args: { strategy: { witness: owner } } }, { id: `read-${owner}`, name: "read_state", args: { lazy: { witness: owner } } }]);
+				const seen = await invoke(f, session, [{ id: `flat-${owner}`, args: { strategy: { witness: owner } } }, { id: `read-${owner}`, name: "state_flow_read", args: { lazy: { witness: owner } } }]);
 				assert.deepEqual(seen[0]!.map(tool => tool.name).sort(), [...allowed].sort());
 				for (const name of names) {
 					const tool = seen[0]!.find(tool => tool.name === name)!;
@@ -109,7 +109,7 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 			for (const selection of ["global,cwd", "global,cwd,session"]) {
 				await session.prompt(`/sdk-schema-probe passive ${selection}`);
 				const id = `scoped-${selection}`;
-				const seen = await invoke(f, session, [{ id, args: { global: { intents: { witness: true } }, cwd: { tactics: { witness: true } } } }, { id: `${id}-read`, name: "read_state", args: { cwd: { lazy: { witness: true } } } }, { id: `${id}-arity`, args: { strategy: { wrong: true } } }]);
+				const seen = await invoke(f, session, [{ id, args: { global: { intents: { witness: true } }, cwd: { tactics: { witness: true } } } }, { id: `${id}-read`, name: "state_flow_read", args: { cwd: { lazy: { witness: true } } } }, { id: `${id}-arity`, args: { strategy: { wrong: true } } }]);
 				for (const name of names) assert.equal(digest(seen[0]!.find(tool => tool.name === name)!.parameters), digest(candidate === "stable" ? STABLE_PROBE_SCHEMA : SCOPED_PROBE_SCHEMA));
 				assert.deepEqual(results(session, [id, `${id}-read`, `${id}-arity`]).map(result => result.isError), [false, false, true]);
 				assert.equal(p.entries.includes(`${id}-arity`), candidate === "stable", "stable wrong arity uses labeled runtime gate; replacement rejects in native schema validation");
@@ -133,7 +133,7 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 			f.faux.setResponses([async context => {
 				seen.push(declarations(context));
 				await session.prompt("/sdk-schema-probe active global,cwd"); changed = true;
-				return answer(call("patch_state", { strategy: { oldFlat: true } }, { id: "mid-replace" }), { stopReason: "toolUse" });
+				return answer(call("state_flow_patch", { strategy: { oldFlat: true } }, { id: "mid-replace" }), { stopReason: "toolUse" });
 			}, context => { seen.push(declarations(context)); return answer("continued"); }]);
 			await session.prompt("Probe mid-response schema replacement");
 			assert.equal(changed, true); assert.equal(seen.length, 2);
@@ -148,7 +148,7 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 			let moved = false;
 			f.faux.setResponses([async () => {
 				await session.prompt("/sdk-schema-probe active cwd"); moved = true;
-				return answer(call("patch_state", { strategy: { staleOwner: true } }, { id: "same-flat-stale" }), { stopReason: "toolUse" });
+				return answer(call("state_flow_patch", { strategy: { staleOwner: true } }, { id: "same-flat-stale" }), { stopReason: "toolUse" });
 			}, answer("continued")]);
 			await session.prompt("Probe schema is not an owner receipt");
 			assert.equal(moved, true);
@@ -158,7 +158,7 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 			const offSeen: ReturnType<typeof declarations>[] = [];
 			f.faux.setResponses([async context => {
 				offSeen.push(declarations(context)); await session.prompt("/sdk-schema-probe off cwd"); off = true;
-				return answer(call("patch_state", { strategy: { staleOff: true } }, { id: "old-after-off" }), { stopReason: "toolUse" });
+				return answer(call("state_flow_patch", { strategy: { staleOff: true } }, { id: "old-after-off" }), { stopReason: "toolUse" });
 			}, context => { offSeen.push(declarations(context)); return answer("Off continuation"); }]);
 			await session.prompt("Probe Off in flight");
 			assert.equal(off, true); assert.equal(offSeen.length, 2);
@@ -188,9 +188,9 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 {
 	for (const roundtrip of [false, true]) test(`SDK-only candidate closed schema validation survives JSON serialization roundtrip=${roundtrip}`, () => {
 		for (const [candidate, schema] of Object.entries(PROBE_SCHEMAS)) {
-			const tool = { name: "patch_state", description: "SDK-only candidate", parameters: roundtrip ? JSON.parse(JSON.stringify(schema)) : schema };
+			const tool = { name: "state_flow_patch", description: "SDK-only candidate", parameters: roundtrip ? JSON.parse(JSON.stringify(schema)) : schema };
 			const accepts = (args: unknown) => {
-				const call = { type: "toolCall" as const, id: "candidate", name: "patch_state", arguments: args as ToolCall["arguments"] };
+				const call = { type: "toolCall" as const, id: "candidate", name: "state_flow_patch", arguments: args as ToolCall["arguments"] };
 				return validateToolArguments(tool, call);
 			};
 			if (candidate !== "scoped") assert.deepEqual(accepts({ tactics: { deleteKey: null } }), { tactics: { deleteKey: null } });
@@ -249,7 +249,7 @@ test("all Pi peers and the pinned verification stack use the 1.0.0 baseline", ()
 				try {
 					const base = fauxProvider().getModel();
 					const model = { ...base, api: adapter.api, provider: adapter.provider, id: adapter.id, baseUrl: "https://schema-probe.invalid" };
-					const context = normalizeContext({ messages: [{ role: "user", content: "Local serialization probe", timestamp: 0 }], tools: [{ name: "patch_state", description: "Local schema probe", parameters, constrainedSampling: false }] });
+					const context = normalizeContext({ messages: [{ role: "user", content: "Local serialization probe", timestamp: 0 }], tools: [{ name: "state_flow_patch", description: "Local schema probe", parameters, constrainedSampling: false }] });
 					// Each public API has a narrower model discriminant; all descriptors use the public Model structure.
 					if (adapter.api === "openai-responses") result = await openai(model as Model<"openai-responses">, context, { apiKey: "LOCAL-NONCREDENTIAL", fetch: capture, transport: "sse", maxRetries: 0, timeoutMs: 1000 }).result();
 					else if (adapter.api === "anthropic-messages") result = await anthropic(model as Model<"anthropic-messages">, context, { apiKey: "LOCAL-NONCREDENTIAL", fetch: capture, transport: "sse", maxRetries: 0, timeoutMs: 1000 }).result();

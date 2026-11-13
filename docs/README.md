@@ -12,7 +12,7 @@ Start with the [project README](../README.md) for installation and the memory mo
 ## Integration and verification
 
 - [Architecture](architecture.md): Semantic state, temporal history, Pi lifecycle, storage transactions, artifact acquisition and embedding APIs.
-- [SDK compatibility](compatibility.md): Required packages, verified environments, host lifecycle requirements and isolated validation procedures.
+- [SDK compatibility](compatibility.md): Required packages, canonical/legacy tool-name dispatch and host allowlists, verified environments, host lifecycle requirements and isolated validation procedures.
 - [Session performance](performance.md): Run synthetic benchmarks, interpret their metrics and understand the current cost model. No provider-cache or latency guarantees.
 - [Temporal acceptance](temporal-acceptance.md): Find the tests that witness each required property, including cancellation, ownership and replay.
 - [Semantic handoff contract](semantic-handoff-contract.md): Current Intents / Strategy / Tactics meanings and ownership, the offline-bundle patch corpus and explicitly historical M0 preservation evidence. Deterministic acceptance is not live-model quality evidence.

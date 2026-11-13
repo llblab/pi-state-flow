@@ -1006,7 +1006,7 @@ test("accepts ordinary terminal answers without invented bookkeeping and rejects
 	await commitTerminal(h, {}, { move: null, result: "ok" });
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.tactics, { result: "ok" });
 	await assert.rejects(
-		h.tools.get("patch_state")!.execute("null", { session: { tactics: { cells: ["pawn", null] } } }, undefined, undefined, h.ctx),
+		h.tools.get("state_flow_patch")!.execute("null", { session: { tactics: { cells: ["pawn", null] } } }, undefined, undefined, h.ctx),
 		/Materialized state cannot contain null/,
 	);
 });

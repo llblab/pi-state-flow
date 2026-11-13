@@ -42,7 +42,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-With this companion registered, a sole participating owner can persist `{"x_acme_notes":{"entries":["accepted"]}}` through `patch_state` and read `x_acme_notes` through `read_state`. Multiple participating owners retain explicit scope wrappers. The context callback executes on admitted Active/Passive provider contexts; its data is transported as fallible user-level data, not system instructions. Pi 1.0.0 uses `session_shutdown`, not `shutdown`.
+With this companion registered, a sole participating owner can persist `{"x_acme_notes":{"entries":["accepted"]}}` through `state_flow_patch` and read `x_acme_notes` through `state_flow_read`. Multiple participating owners retain explicit scope wrappers. The context callback executes on admitted Active/Passive provider contexts; its data is transported as fallible user-level data, not system instructions. Pi 1.0.0 uses `session_shutdown`, not `shutdown`.
 
 Registration returns an idempotent disposer for that exact instance. It cannot revoke a later equal-ID registration or another host generation. Catalog changes abort old catalog signals; host retirement removes only its own binding before signaling cancellation. Snapshots capture immutable policy, callback identities and definition order. Constructor-injected services remain bound to their original instance. Trusted callbacks are not an effects sandbox, and a catalog snapshot alone is not publication authority.
 

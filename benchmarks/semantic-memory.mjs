@@ -115,10 +115,10 @@ export async function runSemanticTrial({ modelRuntime, model, thinkingLevel, lim
 			assert.equal(loader.getExtensions().errors.length, 0, "isolated extensions must load");
 			({ session } = await createAgentSession({ cwd, agentDir, modelRuntime, model, thinkingLevel, resourceLoader: loader, settingsManager: settings,
 				sessionManager: SessionManager.create(cwd, sessionDir), sessionStartEvent: { type: "session_start", reason: "new" },
-				tools: [...Object.keys(task.schemas), ...(condition === "native" ? [] : ["read_state", "patch_state"])] }));
+				tools: [...Object.keys(task.schemas), ...(condition === "native" ? [] : ["state_flow_read", "state_flow_patch"])] }));
 			await session.bindExtensions({ mode: "json", uiContext: { notify() {}, setStatus() {}, theme: { fg: (_color, text) => text } } });
 			result.tools = session.getActiveToolNames();
-			assert.deepEqual([...result.tools].sort(), [...Object.keys(task.schemas), ...(condition === "native" ? [] : ["read_state", "patch_state"])].sort(), "no unrestricted tools may enter the trial");
+			assert.deepEqual([...result.tools].sort(), [...Object.keys(task.schemas), ...(condition === "native" ? [] : ["state_flow_read", "state_flow_patch"])].sort(), "no unrestricted tools may enter the trial");
 			const stream = session.agent.streamFunction;
 			session.agent.streamFunction = (selected, context, options) => {
 				if (++current.requestsAttempted > limits.requestsPerRun) { current.failure = "request-limit"; throw new Error("Semantic trial request limit"); }
@@ -183,7 +183,7 @@ export async function runSemanticTrial({ modelRuntime, model, thinkingLevel, lim
 function calibrationResponses(condition, run) {
 	const memory = condition !== "native";
 	const tool = (name, args) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
-	const patch = (value) => tool("patch_state", { session: value });
+	const patch = (value) => tool("state_flow_patch", { session: value });
 	const strategy = { requirement: "Offline without credentials", phases: ["prepare", "validate"], decision: "Default bundled verifier v1",
 		rejected: { online_only: "Cannot satisfy offline requirement" }, assumption: "Default verifier is self-contained" };
 	return [

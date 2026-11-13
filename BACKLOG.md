@@ -1,6 +1,6 @@
 # State Flow — Current Work
 
-The completed 0.27.2 Consistency & Simplification outcomes are recorded in [CHANGELOG.md](CHANGELOG.md). No release-local implementation queue remains; the external evidence below is still outstanding.
+Completed local outcomes, including the 0.27.6 tool-naming migration, are recorded in [CHANGELOG.md](CHANGELOG.md). External evidence and installed-client rollout remain outstanding and separately authorized.
 
 The semantic rename/migration, seven-scope selection, flat single-owner tools, six built-in bindings and public `./modules` registration shipped in [0.27.0](CHANGELOG.md#0270-semantic-memory-and-scope-selection); wanted-but-unavailable reads were corrected in [0.27.1](CHANGELOG.md#0271-selected-scope-read-diagnostics). Completed milestone queues are not current work. Historical rationale, counterexamples and original verdicts remain in the [indexed contracts](docs/README.md), including the [offline-bundle corpus](docs/semantic-handoff-contract.md#offline-bundle-patch-corpus).
 

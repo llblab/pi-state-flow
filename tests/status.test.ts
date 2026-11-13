@@ -63,7 +63,7 @@ test("failed Active is visibly blocked while inactive policies never claim an in
 test("a passive patch keeps the compact mode stable and exposes revisions only in detailed status", async () => {
 	const h = harness({ mode: "passive" });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	await h.tools.get("patch_state")!.execute("passive", { global: { tactics: { passiveCounter: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("passive", { global: { tactics: { passiveCounter: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.resolveSnapshot().config.mode, "passive");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
@@ -182,7 +182,7 @@ test("status keeps live shared tails and full hot history after old-step tree na
 	await start(h);
 	let oldEntries: any[] = [];
 	for (let n = 1; n <= 8; n++) {
-		await h.tools.get("patch_state").execute("global", { global: { tactics: { n } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch").execute("global", { global: { tactics: { n } } }, undefined, undefined, h.ctx);
 		if (n === 1) oldEntries = structuredClone(h.entries);
 	}
 	await h.commands.get("state-flow-status").handler("", h.ctx);

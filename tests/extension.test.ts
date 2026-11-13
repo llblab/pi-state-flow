@@ -51,7 +51,7 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 				await session.prompt(id); const result = results.get(id)!; assert.ok(result); return result;
 			};
 			await seed.prompt("/state-flow-passive global cwd");
-			assert.notEqual((await run(seed, "patch_state", { global: { strategy: { privateSentinel: "SHARED_VALUE_NOT_A_PARTIAL_RESULT" } }, cwd: { strategy: { seed: true } } }, "seed-shared")).isError, true);
+			assert.notEqual((await run(seed, "state_flow_patch", { global: { strategy: { privateSentinel: "SHARED_VALUE_NOT_A_PARTIAL_RESULT" } }, cwd: { strategy: { seed: true } } }, "seed-shared")).isError, true);
 			const session = await f.createSession("new");
 			await session.prompt(wanted.length === 3 ? "/state-flow-passive" : `/state-flow-passive ${wanted.join(" ")}`);
 			const before = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
@@ -60,15 +60,15 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			const reads: JsonObject[] = [{ path: "session" }, { path: "session.strategy" }];
 			if (wanted.length === 3) reads.push({ paths: ["global.strategy", "session.strategy"] });
 			for (const args of reads) {
-				const result = await run(session, "read_state", args, `read-unavailable-${JSON.stringify(args)}`);
+				const result = await run(session, "state_flow_read", args, `read-unavailable-${JSON.stringify(args)}`);
 				assert.equal(result.isError, true); assert.match(text(result), error);
 				assert.ok(!text(result).includes("SHARED_VALUE_NOT_A_PARTIAL_RESULT"));
 				assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), before, "read cannot initialize private memory or write canonical state");
 			}
 			if (hasSession) {
 				const patch: JsonObject = wanted.length === 1 ? { strategy: { available: true } } : { session: { strategy: { available: true } } };
-				assert.notEqual((await run(session, "patch_state", patch, "material-session-write")).isError, true);
-				assert.deepEqual(JSON.parse(text(await run(session, "read_state", { path: "session.strategy" }, "read-after-accepted-acquisition"))), { value: { available: true } });
+				assert.notEqual((await run(session, "state_flow_patch", patch, "material-session-write")).isError, true);
+				assert.deepEqual(JSON.parse(text(await run(session, "state_flow_read", { path: "session.strategy" }, "read-after-accepted-acquisition"))), { value: { available: true } });
 			}
 		}
 	});
@@ -84,7 +84,7 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			await parent.prompt(`/state-flow-${immutable ? "active" : "passive"} session`);
 			const settle = async (session: AgentSession) => {
 				f.faux.setResponses(immutable ? [fauxAssistantMessage("Produced current semantic memory")]
-					: [fauxAssistantMessage(fauxToolCall("patch_state", { x_public_notes: { note: `v${desired}`, nested: { empty: {} } } }, { id: "companion-write" }), { stopReason: "toolUse" }), fauxAssistantMessage("Authored current semantic memory")]);
+					: [fauxAssistantMessage(fauxToolCall("state_flow_patch", { x_public_notes: { note: `v${desired}`, nested: { empty: {} } } }, { id: "companion-write" }), { stopReason: "toolUse" }), fauxAssistantMessage("Authored current semantic memory")]);
 				await session.prompt(`Accept companion version ${desired}`);
 			};
 			await settle(parent); const oldPoint = parent.sessionManager.getLeafId()!;
@@ -121,18 +121,18 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 				await session.prompt(id); const result = results.get(id)!; assert.ok(result); return result;
 			};
 			const opaque = JSON.parse('{"note":"v0","empty":{},"slots":[{},[],{"keep":{}}],"__proto__":{"constructor":{}},"utf8":"данные"}') as JsonObject;
-			assert.notEqual((await execute("patch_state", modelPatchArguments(selected, { [target]: { x_public_notes: opaque } }), "first-public-value")).isError, true);
+			assert.notEqual((await execute("state_flow_patch", modelPatchArguments(selected, { [target]: { x_public_notes: opaque } }), "first-public-value")).isError, true);
 			const value = { ...opaque, note: "v1" };
-			assert.notEqual((await execute("patch_state", modelPatchArguments(selected, { [target]: { x_public_notes: { note: "v1" } } }), "second-public-value")).isError, true);
+			assert.notEqual((await execute("state_flow_patch", modelPatchArguments(selected, { [target]: { x_public_notes: { note: "v1" } } }), "second-public-value")).isError, true);
 			companion.unregister(session.sessionManager); installed = false;
 			const counts = { ...companion.calls };
-			for (let index = 0; index < limit + 3; index++) assert.notEqual((await execute("patch_state", modelPatchArguments(selected, { [target]: { tactics: { unrelated: index } } }), `opaque-core-${index}`)).isError, true);
+			for (let index = 0; index < limit + 3; index++) assert.notEqual((await execute("state_flow_patch", modelPatchArguments(selected, { [target]: { tactics: { unrelated: index } } }), `opaque-core-${index}`)).isError, true);
 			await session.reload();
 			const current = (await loadSelectedFileCohort(f.cwd, session.sessionId, selected, f.repositoryRoot, nativeSessionKey(session)))!;
 			assert.ok(current); assert.ok(current.view.scopes[target]!.checkpoint.through.position > 0, "fixture actually crossed a fold, not merely appended a tail");
 			for (let offset = 0; offset < current.view.lineage.length; offset++) {
 				assert.deepEqual(readTemporalView(current.view, offset, target, limit).x_public_notes, value, `${selected}/${limit}/${offset}`);
-				assert.notEqual((await execute("read_state", { path: `${target}[${offset}].x_public_notes` }, `absent-history-${offset}`)).isError, true);
+				assert.notEqual((await execute("state_flow_read", { path: `${target}[${offset}].x_public_notes` }, `absent-history-${offset}`)).isError, true);
 				assert.deepEqual(JSON.parse(text(results.get(`absent-history-${offset}`)!)), { value });
 			}
 			assert.deepEqual(companion.calls, counts, "uninstalled implementation cannot participate in reads, core writes, folding or reload");
@@ -140,14 +140,14 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			for (const overrides of [{ schemaVersion: 2 }, { immutable: true }]) {
 				companion.register(session.sessionManager, overrides);
 				const path = selected.length === 1 ? "x_public_notes" : `${target}.x_public_notes`;
-				assert.deepEqual(JSON.parse(text(await execute("read_state", { path }, "incompatible-raw-read"))), { value });
-				assert.equal((await execute("patch_state", modelPatchArguments(selected, { [target]: { x_public_notes: { note: "refused" } } }), "incompatible-write")).isError, true);
+				assert.deepEqual(JSON.parse(text(await execute("state_flow_read", { path }, "incompatible-raw-read"))), { value });
+				assert.equal((await execute("state_flow_patch", modelPatchArguments(selected, { [target]: { x_public_notes: { note: "refused" } } }), "incompatible-write")).isError, true);
 			}
 			assert.equal(contextCalls.get(target), targetContexts, "incompatible retained owner rejects before its context callback; unwritten other owners remain independently available");
 			assert.equal(companion.calls.validate, counts.validate, "incompatible retained content never enters definition validators");
 			installed = true; await session.reload();
-			assert.deepEqual(JSON.parse(text(await execute("read_state", { path: `${target}.x_public_notes` }, "reinstalled-raw-read"))), { value });
-			assert.notEqual((await execute("patch_state", modelPatchArguments(selected, { [target]: { x_public_notes: { note: "reinstalled" } } }), "reinstalled-write")).isError, true);
+			assert.deepEqual(JSON.parse(text(await execute("state_flow_read", { path: `${target}.x_public_notes` }, "reinstalled-raw-read"))), { value });
+			assert.notEqual((await execute("state_flow_patch", modelPatchArguments(selected, { [target]: { x_public_notes: { note: "reinstalled" } } }), "reinstalled-write")).isError, true);
 			const restored = (await loadSelectedFileCohort(f.cwd, session.sessionId, selected, f.repositoryRoot, nativeSessionKey(session)))!;
 			assert.deepEqual(restored.view.scopes[target]!.modules, { x_public_notes: { schemaVersion: 1, immutable: false } });
 			assert.deepEqual(readTemporalView(restored.view, 0, target, limit).x_public_notes, { ...value, note: "reinstalled" });
@@ -249,9 +249,9 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 					assert.equal(calls, selected.length); assert.equal(inputs, selected.length, "context reuses original producer input, not reacquisition");
 					for (const scope of selected) { assert.equal(metadata(scope).version, 4); assert.deepEqual(metadata(scope).modules.x_public_notes, { schemaVersion: 1, immutable: true }); }
 					const rendered = JSON.stringify(context.messages); assert.match(rendered, /ACCEPTED-PRODUCER-CONTEXT/); for (const scope of selected) assert.ok(rendered.includes(`1:${scope}`));
-					return fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(selected, { [selected[0]]: { x_public_notes: { note: "manual forbidden" } } }), { id: "immutable-manual" }), { stopReason: "toolUse" });
+					return fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(selected, { [selected[0]]: { x_public_notes: { note: "manual forbidden" } } }), { id: "immutable-manual" }), { stopReason: "toolUse" });
 				},
-				context => { observe(context, results); return fauxAssistantMessage(fauxToolCall("read_state", { paths: selected.map(scope => `${scope}.x_public_notes`) }, { id: "producer-read" }), { stopReason: "toolUse" }); },
+				context => { observe(context, results); return fauxAssistantMessage(fauxToolCall("state_flow_read", { paths: selected.map(scope => `${scope}.x_public_notes`) }, { id: "producer-read" }), { stopReason: "toolUse" }); },
 				context => { observe(context, results); return fauxAssistantMessage("Accepted produced memory"); },
 			]);
 			await session.prompt("Produce immutable semantic content");
@@ -260,7 +260,7 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			const first = selected.map(scope => ({ note: `1:${scope}`, obsolete: true }));
 			assert.deepEqual(JSON.parse(text(results.get("producer-read")!)), { value: selected.length === 1 ? first[0] : first });
 			generation = 2;
-			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("read_state", { paths: selected.map(scope => `${scope}[1].x_public_notes`) }, { id: "producer-history" }), { stopReason: "toolUse" }), context => { observe(context, results); return fauxAssistantMessage("Replacement settled"); }]);
+			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("state_flow_read", { paths: selected.map(scope => `${scope}[1].x_public_notes`) }, { id: "producer-history" }), { stopReason: "toolUse" }), context => { observe(context, results); return fauxAssistantMessage("Replacement settled"); }]);
 			await session.prompt("Replace complete content without obsolete fields");
 			assert.deepEqual(JSON.parse(text(results.get("producer-history")!)), { value: selected.length === 1 ? first[0] : first });
 			const current = await loadSelectedFileCohort(f.cwd, session.sessionId, selected, f.repositoryRoot, nativeSessionKey(session)); assert.ok(current);
@@ -301,7 +301,7 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			const f = await realPiFixture(t, { initializeRepository: false, extensions: [{ name: "public-input-context-consumer", factory: companion.factory }] });
 			const { session } = await f.createRuntime("new"); await session.prompt(`/state-flow-${mode} ${selected.join(" ")}`);
 			f.faux.setResponses([fauxAssistantMessage("Older answer")]); await session.prompt("OLDER-NATIVE-NOT-IN-WINDOW");
-			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(selected, { [selected[0]]: { tactics: { seed: true } } }), { id: "completed-module-unit" }), { stopReason: "toolUse" }), fauxAssistantMessage("Completed source unit")]);
+			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(selected, { [selected[0]]: { tactics: { seed: true } } }), { id: "completed-module-unit" }), { stopReason: "toolUse" }), fauxAssistantMessage("Completed source unit")]);
 			await session.prompt("LATEST-COMPLETED-SOURCE-RUN");
 			let context: Context | undefined;
 			const before = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
@@ -356,13 +356,13 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 			f.faux.setResponses([
 				context => {
-					const declaration = getCurrentTools(context.messages).find(tool => tool.name === "patch_state")!;
+					const declaration = getCurrentTools(context.messages).find(tool => tool.name === "state_flow_patch")!;
 					if (selected.length === 1) assert.ok(Object.hasOwn((declaration.parameters as { properties: object }).properties, "x_public_notes"));
-					return fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(selected, { [target]: { x_public_notes: value } }), { id: "module-first" }), { stopReason: "toolUse" });
+					return fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(selected, { [target]: { x_public_notes: value } }), { id: "module-first" }), { stopReason: "toolUse" });
 				},
-				context => { observe(context, results); beforeInvalid = files(); return fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(selected, { [target]: { x_public_notes: { note: 4 } } }), { id: "module-invalid" }), { stopReason: "toolUse" }); },
-				context => { observe(context, results); afterInvalid = files(); return fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(selected, { [target]: { x_public_notes: { extra: true } } }), { id: "module-partial" }), { stopReason: "toolUse" }); },
-				context => { observe(context, results); return fauxAssistantMessage(fauxToolCall("read_state", { paths: [root, `${target}[1].x_public_notes`] }, { id: "module-read" }), { stopReason: "toolUse" }); },
+				context => { observe(context, results); beforeInvalid = files(); return fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(selected, { [target]: { x_public_notes: { note: 4 } } }), { id: "module-invalid" }), { stopReason: "toolUse" }); },
+				context => { observe(context, results); afterInvalid = files(); return fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(selected, { [target]: { x_public_notes: { extra: true } } }), { id: "module-partial" }), { stopReason: "toolUse" }); },
+				context => { observe(context, results); return fauxAssistantMessage(fauxToolCall("state_flow_read", { paths: [root, `${target}[1].x_public_notes`] }, { id: "module-read" }), { stopReason: "toolUse" }); },
 				context => { observe(context, results); return fauxAssistantMessage("Accepted external memory"); },
 			]);
 			await session.prompt("Use the installed companion's semantic plane");
@@ -388,13 +388,13 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 			const before = files(), results = new Map<string, ToolResultMessage>();
 			f.faux.setResponses([
-				() => { companion.register(session.sessionManager); return fauxAssistantMessage(fauxToolCall("patch_state", { cwd: { x_public_notes: { note: "stale definition" } } }, { id: "stale-catalog" }), { stopReason: "toolUse" }); },
+				() => { companion.register(session.sessionManager); return fauxAssistantMessage(fauxToolCall("state_flow_patch", { cwd: { x_public_notes: { note: "stale definition" } } }, { id: "stale-catalog" }), { stopReason: "toolUse" }); },
 				context => { observe(context, results); return fauxAssistantMessage("Fresh continuation"); },
 			]);
 			await session.prompt("The original model request cannot adopt replacement module authority");
 			const stale = results.get("stale-catalog")!; assert.ok(stale); assert.equal(stale.isError, true, text(stale));
 			assert.deepEqual(files(), before); assert.equal(companion.calls.validate, 0, "stale provider calls reject before validation/source work");
-			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("patch_state", { cwd: { x_public_notes: { note: "fresh definition" } } }, { id: "fresh-catalog" }), { stopReason: "toolUse" }), context => { observe(context, results); return fauxAssistantMessage("Fresh accepted"); }]);
+			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("state_flow_patch", { cwd: { x_public_notes: { note: "fresh definition" } } }, { id: "fresh-catalog" }), { stopReason: "toolUse" }), context => { observe(context, results); return fauxAssistantMessage("Fresh accepted"); }]);
 			await session.prompt("A fresh native request captures the replacement catalog");
 			assert.notEqual(results.get("fresh-catalog")!.isError, true, text(results.get("fresh-catalog")!));
 		}
@@ -409,23 +409,23 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			f.faux.setResponses([fauxAssistantMessage(fauxToolCall(name, args, { id }), { stopReason: "toolUse" }), context => { observe(context, results); return fauxAssistantMessage("Done"); }]);
 			await session.prompt(id); const result = results.get(id)!; assert.ok(result, id); return result;
 		};
-		assert.notEqual((await execute("patch_state", { x_public_notes: { note: "retained", empty: {} } }, "first")).isError, true);
+		assert.notEqual((await execute("state_flow_patch", { x_public_notes: { note: "retained", empty: {} } }, "first")).isError, true);
 		companion.unregister(session.sessionManager);
 		const calls = companion.calls.validate;
-		assert.notEqual((await execute("patch_state", { tactics: { unrelated: true } }, "core-while-absent")).isError, true);
-		assert.deepEqual(JSON.parse(text(await execute("read_state", { path: "x_public_notes" }, "raw-absent"))), { value: { note: "retained", empty: {} } });
+		assert.notEqual((await execute("state_flow_patch", { tactics: { unrelated: true } }, "core-while-absent")).isError, true);
+		assert.deepEqual(JSON.parse(text(await execute("state_flow_read", { path: "x_public_notes" }, "raw-absent"))), { value: { note: "retained", empty: {} } });
 		assert.equal(companion.calls.validate, calls, "raw reads/core writes do not call an absent implementation");
-		assert.equal((await execute("patch_state", { x_public_notes: { note: "refused" } }, "write-absent")).isError, true);
+		assert.equal((await execute("state_flow_patch", { x_public_notes: { note: "refused" } }, "write-absent")).isError, true);
 		for (const overrides of [{ schemaVersion: 2 }, { immutable: true }]) {
 			companion.register(session.sessionManager, overrides);
-			assert.equal((await execute("patch_state", { x_public_notes: { note: "incompatible" } }, "write-mismatch")).isError, true);
-			assert.deepEqual(JSON.parse(text(await execute("read_state", { path: "x_public_notes" }, "raw-mismatch"))), { value: { note: "retained", empty: {} } });
+			assert.equal((await execute("state_flow_patch", { x_public_notes: { note: "incompatible" } }, "write-mismatch")).isError, true);
+			assert.deepEqual(JSON.parse(text(await execute("state_flow_read", { path: "x_public_notes" }, "raw-mismatch"))), { value: { note: "retained", empty: {} } });
 		}
 		assert.equal(companion.calls.validate, calls, "unavailable/immutable registration rejects before validators");
 		await session.reload();
-		assert.deepEqual(JSON.parse(text(await execute("read_state", { path: "x_public_notes" }, "raw-reloaded"))), { value: { note: "retained", empty: {} } });
-		assert.notEqual((await execute("patch_state", { x_public_notes: { note: "fresh" } }, "write-reloaded")).isError, true);
-		assert.deepEqual(JSON.parse(text(await execute("read_state", { path: "x_public_notes" }, "raw-fresh"))), { value: { note: "fresh", empty: {} } });
+		assert.deepEqual(JSON.parse(text(await execute("state_flow_read", { path: "x_public_notes" }, "raw-reloaded"))), { value: { note: "retained", empty: {} } });
+		assert.notEqual((await execute("state_flow_patch", { x_public_notes: { note: "fresh" } }, "write-reloaded")).isError, true);
+		assert.deepEqual(JSON.parse(text(await execute("state_flow_read", { path: "x_public_notes" }, "raw-fresh"))), { value: { note: "fresh", empty: {} } });
 	});
 }
 
@@ -443,7 +443,7 @@ test("public module registration follows actual SDK native-host lifetime without
 	assert.equal(registered, 2);
 	for (const runtime of [first, second]) {
 		assert.throws(() => registerStateFlowModule(runtime.session.sessionManager, module), /already registered/);
-		assert.equal(runtime.session.getActiveToolNames().includes("patch_state"), false);
+		assert.equal(runtime.session.getActiveToolNames().includes("state_flow_patch"), false);
 		const manager = runtime.session.sessionManager;
 		const key = resolveSessionAddress(manager.getSessionFile(), manager.getSessionId(), manager.getHeader()?.timestamp).key;
 		for (const scope of ["global", "cwd", "session"] as const) {
@@ -530,7 +530,7 @@ test("public module registration follows actual SDK native-host lifetime without
 			assert.equal(contexts.length, 1, "an independent inactive choice releases inference before the foreign lock");
 			assert.equal(getCurrentSystemMessage(contexts[0]!.messages)?.sections?.state_flow, undefined);
 			const names = getCurrentTools(contexts[0]!.messages).map(tool => tool.name);
-			for (const name of ["read_state", "patch_state"]) assert.equal(names.includes(name), mode === "passive");
+			for (const name of ["state_flow_read", "state_flow_patch"]) assert.equal(names.includes(name), mode === "passive");
 			const withdrawn = await finish();
 			if (mode === "passive") {
 				assert.equal(withdrawn, undefined, "Passive retains independently owned current acceptance");
@@ -570,14 +570,14 @@ test("all public mode commands bind the same completion grammar and reject malfo
 
 test("native composition uses captured default selection and one syntax grammar without granting subset activation", async () => {
 	const h = harness({ initializeRepository: false, mode: "active" }); await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	await h.tools.get("patch_state")!.execute("protocol-current-seed", { session: { tactics: { retained: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("protocol-current-seed", { session: { tactics: { retained: true } } }, undefined, undefined, h.ctx);
 	const active = { prompt: "Owned protocol", systemPromptOptions: { sections: {} as Record<string, string> } };
 	h.handlers.get("before_agent_start")!(active, h.ctx); assert.equal(active.systemPromptOptions.sections.state_flow, stateFlowProtocol(false, DEFAULT_SCOPE_SELECTION));
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 	const passive = { prompt: "Owned Passive protocol", systemPromptOptions: { sections: {} as Record<string, string> } };
 	h.handlers.get("before_agent_start")!(passive, h.ctx); assert.equal(passive.systemPromptOptions.sections.state_flow, passiveMemoryProtocol(DEFAULT_SCOPE_SELECTION));
-	assert.deepEqual(Object.keys(h.tools.get("patch_state")!.parameters.properties), ["global", "cwd", "session"]);
-	for (const name of ["read_state", "patch_state"]) assert.ok(h.tools.get(name)!.promptGuidelines.includes(SCOPE_PARTICIPATION_GUIDELINE));
+	assert.deepEqual(Object.keys(h.tools.get("state_flow_patch")!.parameters.properties), ["global", "cwd", "session"]);
+	for (const name of ["state_flow_read", "state_flow_patch"]) assert.ok(h.tools.get(name)!.promptGuidelines.includes(SCOPE_PARTICIPATION_GUIDELINE));
 });
 
 {
@@ -626,7 +626,7 @@ test("native composition uses captured default selection and one syntax grammar 
 	  let calls = 0;
 	  const results: ToolResultMessage[] = [];
 	  f.faux.setResponses([
-	    () => { calls++; return answer(tool('patch_state', modelPatchArguments(selected, Object.fromEntries(selected.map(o => [o, { tactics: { [o]: marker(o) } }]))), { id: 'telegram-original-patch' }), { stopReason: 'toolUse' }); },
+	    () => { calls++; return answer(tool('state_flow_patch', modelPatchArguments(selected, Object.fromEntries(selected.map(o => [o, { tactics: { [o]: marker(o) } }]))), { id: 'telegram-original-patch' }), { stopReason: 'toolUse' }); },
 	    c => { calls++; results.push(...c.messages.filter((m): m is ToolResultMessage => m.role === 'toolResult' && m.toolCallId === 'telegram-original-patch')); return answer('Initial selected answer'); },
 	  ]);
 	  await session.prompt('Write distinct selected owners');
@@ -688,7 +688,7 @@ test("native composition uses captured default selection and one syntax grammar 
 	      assert.equal(calls, 1); assert.ok(delivered);
 	      const names = getCurrentTools(delivered.messages).map(v => v.name);
 	      assert.ok(names.includes('read'), 'native default read remains available');
-	      for (const name of ['patch_state', 'read_state']) assert.equal(names.includes(name), mode !== 'off');
+	      for (const name of ['state_flow_patch', 'state_flow_read']) assert.equal(names.includes(name), mode !== 'off');
 	      if (mode === 'off') assert.equal(getCurrentSystemMessage(delivered.messages)?.sections?.state_flow, undefined);
 	      if (mode !== 'active' || !selected.includes('session')) assert.deepEqual(owners.map(triple), deliveryBefore);
 	      else assert.equal(f.readState(session).response, `Completed ${mode} ${reload}`);
@@ -701,7 +701,7 @@ test("native composition uses captured default selection and one syntax grammar 
 	    calls = 0;
 	    const reads: ToolResultMessage[] = [];
 	    f.faux.setResponses([
-	      () => { calls++; return answer(tool('read_state', { path: excluded[0] }, { id: 'telegram-excluded-read' }), { stopReason: 'toolUse' }); },
+	      () => { calls++; return answer(tool('state_flow_read', { path: excluded[0] }, { id: 'telegram-excluded-read' }), { stopReason: 'toolUse' }); },
 	      c => { calls++; reads.push(...c.messages.filter((m): m is ToolResultMessage => m.role === 'toolResult' && m.toolCallId === 'telegram-excluded-read')); return answer('Denied read finished'); },
 	    ]);
 	    await session.prompt('Attempt excluded model read');
@@ -724,7 +724,7 @@ test("native Telegram Effective reads only selected owners and Off inspection ne
 	let calls = 0;
 	const results: ToolResultMessage[] = [];
 	f.faux.setResponses([
-		() => { calls++; return fauxAssistantMessage(fauxToolCall("patch_state", Object.fromEntries(owners.map(owner => [owner, { tactics: { [`${owner}_only`]: `MEMORY-${owner}` } }])), { id: "menu-owner-seed" }), { stopReason: "toolUse" }); },
+		() => { calls++; return fauxAssistantMessage(fauxToolCall("state_flow_patch", Object.fromEntries(owners.map(owner => [owner, { tactics: { [`${owner}_only`]: `MEMORY-${owner}` } }])), { id: "menu-owner-seed" }), { stopReason: "toolUse" }); },
 		context => { calls++; results.push(...context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult" && message.toolCallId === "menu-owner-seed")); return fauxAssistantMessage("MENU_SESSION_RESPONSE"); },
 	]);
 	await session.prompt("Create distinct memory in each owner for inspection");
@@ -830,7 +830,7 @@ test("lifecycle and write-fence diagnostics retain causes and filenames under lo
 	assert.match(stopped, /EEXIST: file already exists/);
 	assert.match(stopped, /\.state-flow-publication\.lock/);
 	assert.ok(stopped.length <= 220 && !stopped.includes("\n"));
-	await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), (error: unknown) => {
+	await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), (error: unknown) => {
 		assert.ok(error instanceof Error);
 		assert.match(error.message, /^\nMemory writes paused after mode change:/);
 		assert.match(error.message, /EEXIST: file already exists/);
@@ -879,7 +879,7 @@ test("fresh explicit start is local-only; ordinary startup/status and old pointe
 	assert.equal(git("rev-parse", "HEAD"), sourceHead);
 	assert.deepEqual(readFileSync(join(unrelatedRoot, ".git", "index")), sourceIndex);
 	assert.equal(readFileSync(join(unrelatedRoot, "checkpoint.json"), "utf8"), "unrelated owned-name witness");
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	assert.equal(h.notifications.some((message) => /push is pending/.test(message)), false);
 	const context = h.handlers.get("context")!({ messages: [user("Inspect", 1)] }, h.ctx);
 	const contextText = context.messages
@@ -944,26 +944,26 @@ test("live storage paths mirror Pi CWD and session file names without appended h
 	const metaBytes = readFileSync(runtime.meta);
 	const foreign = harness({ repositoryRoot: root, cwd, sessionId: "foreign-session", sessionFile, initializeRepository: false });
 	await start(foreign);
-	assert.equal(foreign.activeTools.includes("patch_state"), false);
+	assert.equal(foreign.activeTools.includes("state_flow_patch"), false);
 	assert.match(foreign.notifications.at(-1)!, /scope identity mismatch/);
 	assert.deepEqual(readFileSync(runtime.meta), metaBytes);
 	assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }), head);
 });
 
-test("registers patch_state plus read-only read_state and exposes the lifecycle commands", () => {
+test("registers state_flow_patch plus read-only state_flow_read and exposes the lifecycle commands", () => {
 	const h = harness();
-	assert.equal(h.registeredTools, 2);
-	assert.deepEqual([...h.tools.keys()].sort(), ["patch_state", "read_state"]);
-	const patchState = h.tools.get("patch_state")!;
+	assert.equal(h.registeredTools, 4);
+	assert.deepEqual([...h.tools.keys()].sort(), ["patch_state", "read_state", "state_flow_patch", "state_flow_read"]);
+	const patchState = h.tools.get("state_flow_patch")!;
 	assert.equal(patchState.executionMode, "sequential");
 	assert.match(patchState.description, /one or more global, cwd, or session patches/);
 	assert.match(patchState.promptGuidelines.join("\n"), /ordinary answers need no finalization call/);
 	assert.match(patchState.promptGuidelines.join("\n"), /Never patch response in global, cwd or session, including clearing\/deleting it/);
 	assert.match(patchState.promptGuidelines.join("\n"), /captures your final answer automatically in Active mode/);
-	assert.match(patchState.promptGuidelines.join("\n"), /Call patch_state alone in an assistant response/);
+	assert.match(patchState.promptGuidelines.join("\n"), /Call state_flow_patch alone in an assistant response/);
 	assert.match(patchState.description, /Intent updates run first, then clear owned same-scope strategy\/tactics\/lazy keys unless a remaining or new intent refs them, then other fields apply/);
 	assert.match(patchState.description, /Name keys in ASCII/);
-	assert.match(h.tools.get("read_state")!.description, /Path object keys must be ASCII identifiers/);
+	assert.match(h.tools.get("state_flow_read")!.description, /Path object keys must be ASCII identifiers/);
 	assert.doesNotMatch(patchState.promptGuidelines.join("\n"), /final:true|terminal-eligible/);
 	assert.deepEqual([...h.commands.keys()], ["state-flow-active", "state-flow-passive", "state-flow-off", "state-flow-status"]);
 });
@@ -973,7 +973,7 @@ test("session mode controls passive tools and bootstrap together without startin
 		const seed = harness({ mode: "off" });
 		await seed.handlers.get("session_start")!({ reason: "new" }, seed.ctx);
 		await start(seed);
-		await seed.tools.get("patch_state")!.execute("seed", { cwd: {
+		await seed.tools.get("state_flow_patch")!.execute("seed", { cwd: {
 			tactics: { shared: "durable" },
 			intents: { release: { action: "Validate release", plan: { $ref: "cwd.lazy.releasePlan" } } },
 			lazy: { releasePlan: { steps: ["validate"] } },
@@ -981,7 +981,7 @@ test("session mode controls passive tools and bootstrap together without startin
 		await seed.commands.get("state-flow-off")!.handler("", seed.ctx);
 		const h = harness({ repositoryRoot: seed.repositoryRoot, cwd: seed.ctx.cwd, sessionId: `passive-${mode}`, initializeRepository: false, mode });
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-		assert.equal(h.activeTools.includes("patch_state"), passiveTools);
+		assert.equal(h.activeTools.includes("state_flow_patch"), passiveTools);
 		const bootstrapResult = h.beforeAgentStart("ordinary");
 		assert.equal(bootstrapResult.handlerResult, undefined);
 		assert.equal(bootstrapResult.systemPrompt.includes("State Flow passive memory is available"), passiveBootstrap);
@@ -1000,43 +1000,43 @@ test("session mode controls passive tools and bootstrap together without startin
 		assert.deepEqual(files(), beforeStop, "pre-runtime Stop never publishes the passive view");
 		await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 		assert.deepEqual(files(), beforeStop);
-		assert.equal(h.activeTools.includes("patch_state"), passiveTools);
+		assert.equal(h.activeTools.includes("state_flow_patch"), passiveTools);
 		if (passiveTools) {
-			const read = await h.tools.get("read_state")!.execute("read", { path: "tactics.shared" }, undefined, undefined, h.ctx);
+			const read = await h.tools.get("state_flow_read")!.execute("read", { path: "tactics.shared" }, undefined, undefined, h.ctx);
 			assert.match(read.content[0].text, /durable/);
-			const intent = await h.tools.get("read_state")!.execute("intent", { path: "intents.release" }, undefined, undefined, h.ctx);
+			const intent = await h.tools.get("state_flow_read")!.execute("intent", { path: "intents.release" }, undefined, undefined, h.ctx);
 			assert.match(intent.content[0].text, /cwd\.lazy\.releasePlan/);
-			await h.tools.get("patch_state")!.execute("write", { session: { intents: { local: "Continue locally" } } }, undefined, undefined, h.ctx);
+			await h.tools.get("state_flow_patch")!.execute("write", { session: { intents: { local: "Continue locally" } } }, undefined, undefined, h.ctx);
 			assert.notEqual(h.resolveSnapshot().config.mode, "active");
 			assert.equal(h.compactRequests.length, 0);
 			assert.equal(h.resolveSnapshot().meta.step, 1);
-			const local = await h.tools.get("read_state")!.execute("local-intent", { path: "session.intents.local" }, undefined, undefined, h.ctx);
+			const local = await h.tools.get("state_flow_read")!.execute("local-intent", { path: "session.intents.local" }, undefined, undefined, h.ctx);
 			assert.match(local.content[0].text, /Continue locally/);
 		}
 	}
 });
 
-for (const scope of ["global", "cwd"] as const) test(`first passive patch_state adopts another session's untouched ${scope} update`, async () => {
+for (const scope of ["global", "cwd"] as const) test(`first passive state_flow_patch adopts another session's untouched ${scope} update`, async () => {
 	const seed = harness();
 	await seed.handlers.get("session_start")!({ reason: "new" }, seed.ctx);
 	await start(seed);
 	const h = harness({ repositoryRoot: seed.repositoryRoot, cwd: seed.ctx.cwd, sessionId: `passive-drift-${scope}`, initializeRepository: false, mode: "passive" });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	await seed.tools.get("patch_state")!.execute("neighbor", {
+	await seed.tools.get("state_flow_patch")!.execute("neighbor", {
 		[scope]: { tactics: { neighbor: "shared update" } },
 		session: { tactics: { private: "neighbor only" } },
 	}, undefined, undefined, seed.ctx);
 	const files = () => captureTemporalFileBases(seed.ctx.cwd, seed.ctx.sessionManager.getSessionId(), seed.repositoryRoot);
 	const winner = files();
-	await h.tools.get("patch_state")!.execute("first-passive", { session: { tactics: { mine: "private update" } } }, undefined, undefined, h.ctx);
-	const read = await h.tools.get("read_state")!.execute("accepted", { paths: [`${scope}.tactics`, "session.tactics"] }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("first-passive", { session: { tactics: { mine: "private update" } } }, undefined, undefined, h.ctx);
+	const read = await h.tools.get("state_flow_read")!.execute("accepted", { paths: [`${scope}.tactics`, "session.tactics"] }, undefined, undefined, h.ctx);
 	assert.deepEqual(JSON.parse(read.content[0].text).value, [{ neighbor: "shared update" }, { mine: "private update" }]);
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(h.compactRequests.length, 0);
 	assert.deepEqual(files(), winner);
 	await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
-	const restored = await h.tools.get("read_state")!.execute("restored", { paths: [`${scope}.tactics`, "session.tactics"] }, undefined, undefined, h.ctx);
+	const restored = await h.tools.get("state_flow_read")!.execute("restored", { paths: [`${scope}.tactics`, "session.tactics"] }, undefined, undefined, h.ctx);
 	assert.deepEqual(restored.content, read.content);
 });
 
@@ -1058,7 +1058,7 @@ for (const activate of ["start", "passive-patch"] as const) {
 		assert.deepEqual(files(), before);
 		assert.equal(h.readState(0, "global").tactics.shared, "global");
 		if (activate === "start") await h.commands.get("state-flow-active").handler("", h.ctx);
-		await h.tools.get("patch_state")!.execute("local", { session: { tactics: { local: "retained" } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("local", { session: { tactics: { local: "retained" } } }, undefined, undefined, h.ctx);
 		assert.equal(h.resolveSnapshot().config.mode === "active", activate === "start");
 		assert.equal(h.resolveSnapshot().meta.step, 1);
 		assert.ok("boundary" in h.entries.at(-1).data);
@@ -1121,7 +1121,7 @@ for (const invalid of ["cwd-without-global", "malformed-global", "incomplete-glo
 test("restarting a long ordinary session without State Flow checkpoints bootstraps from native conversation", async () => {
 	const seed = harness({ initializeRepository: false, mode: "passive" });
 	await seed.handlers.get("session_start")!({ reason: "new" }, seed.ctx);
-	await seed.tools.get("patch_state")!.execute("shared", { cwd: { tactics: { shared: "retained" } } }, undefined, undefined, seed.ctx);
+	await seed.tools.get("state_flow_patch")!.execute("shared", { cwd: { tactics: { shared: "retained" } } }, undefined, undefined, seed.ctx);
 	const h = harness({ repositoryRoot: seed.repositoryRoot, sessionId: "ordinary-restarted", initializeRepository: false, mode: "passive" });
 	h.entries.push({ type: "message", message: user("Long conversation before the extension was enabled", 1) });
 	await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
@@ -1138,7 +1138,7 @@ test("an old passive checkpoint attaches current memory automatically and retain
 	h.entries.push({ type: "message", message: user("A long ordinary conversation", 1) });
 	await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 	for (let index = 1; index <= 9; index++) {
-		await h.tools.get("patch_state")!.execute(`passive-${index}`, { cwd: { tactics: { shared: index } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute(`passive-${index}`, { cwd: { tactics: { shared: index } } }, undefined, undefined, h.ctx);
 	}
 	const expired = structuredClone(h.entries.slice(0, 2));
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
@@ -1152,7 +1152,7 @@ test("an old passive checkpoint attaches current memory automatically and retain
 	assert.equal(resumed.resolveSnapshot().config.mode, "passive");
 	assert.equal(resumed.resolveSnapshot().meta.step, 9);
 	assert.equal(resumed.readState(0, "cwd").tactics.shared, 9);
-	await resumed.tools.get("patch_state")!.execute("writable", { session: { tactics: { writable: true } } }, undefined, undefined, resumed.ctx);
+	await resumed.tools.get("state_flow_patch")!.execute("writable", { session: { tactics: { writable: true } } }, undefined, undefined, resumed.ctx);
 	assert.equal(resumed.readState(0, "session").tactics.writable, true);
 });
 
@@ -1160,7 +1160,7 @@ test("an old passive checkpoint adopts nonempty current private memory instead o
 	const h = harness({ initializeRepository: false, mode: "passive", sessionId: "private-passive" });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	for (let index = 1; index <= 9; index++) {
-		await h.tools.get("patch_state")!.execute(`private-${index}`, { session: { tactics: { private: index } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute(`private-${index}`, { session: { tactics: { private: index } } }, undefined, undefined, h.ctx);
 	}
 	const expired = structuredClone(h.entries.filter(({ data }) => typeof data?.boundary === "string").slice(0, 1));
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
@@ -1174,7 +1174,7 @@ test("an old passive checkpoint adopts nonempty current private memory instead o
 	assert.equal(resumed.resolveSnapshot().config.mode, "active");
 	assert.equal(resumed.resolveSnapshot().meta.step, 9);
 	assert.equal(resumed.readState(0, "session").tactics.private, 9);
-	await resumed.tools.get("patch_state")!.execute("after-start", { session: { tactics: { afterStart: true } } }, undefined, undefined, resumed.ctx);
+	await resumed.tools.get("state_flow_patch")!.execute("after-start", { session: { tactics: { afterStart: true } } }, undefined, undefined, resumed.ctx);
 	assert.deepEqual(resumed.readState(0, "session").tactics, { private: 9, afterStart: true });
 	assert.equal(resumed.resolveSnapshot().meta.step, 10);
 });
@@ -1186,7 +1186,7 @@ test("old Pi steps never block memory: tree navigation keeps current memory in e
 		if (mode === "passive") await h.commands.get("state-flow-passive").handler("", h.ctx);
 		const old = structuredClone(h.entries);
 		for (let index = 1; index <= 9; index++) {
-			await h.tools.get("patch_state")!.execute(`seed-${index}`, { session: { tactics: { private: index } } }, undefined, undefined, h.ctx);
+			await h.tools.get("state_flow_patch")!.execute(`seed-${index}`, { session: { tactics: { private: index } } }, undefined, undefined, h.ctx);
 		}
 		const notices = h.notifications.length;
 		h.ctx.sessionManager.getBranch = () => old;
@@ -1197,7 +1197,7 @@ test("old Pi steps never block memory: tree navigation keeps current memory in e
 		const permitted = new AbortController();
 		await h.inferenceContext([user("Continue", 100)], permitted);
 		assert.equal(permitted.signal.aborted, false);
-		await h.tools.get("patch_state")!.execute("continued", { session: { tactics: { continued: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("continued", { session: { tactics: { continued: true } } }, undefined, undefined, h.ctx);
 		assert.equal(h.readState(0, "session").tactics.continued, true);
 	}
 });
@@ -1206,7 +1206,7 @@ test("unreadable current session memory visibly blocks Active; Passive retries a
 	for (const recovery of ["passive", "off"] as const) {
 		const h = harness({ initializeRepository: false, mode: "active" });
 		await start(h);
-		await h.tools.get("patch_state")!.execute("seed", { global: { tactics: { shared: "retained" } }, session: { tactics: { private: 1 } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("seed", { global: { tactics: { shared: "retained" } }, session: { tactics: { private: 1 } } }, undefined, undefined, h.ctx);
 		const runtimePath = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).runtime;
 		const original = readFileSync(runtimePath);
 		writeFileSync(runtimePath, "malformed runtime");
@@ -1214,7 +1214,7 @@ test("unreadable current session memory visibly blocks Active; Passive retries a
 		const before = files();
 		await h.handlers.get("session_tree")!({}, h.ctx);
 		assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active (blocked)</dim>");
-		assert.equal(h.activeTools.includes("patch_state"), true, "failed Active does not silently select Off");
+		assert.equal(h.activeTools.includes("state_flow_patch"), true, "failed Active does not silently select Off");
 		assert.equal(h.handlers.get("context")!({ messages: [user("Idle inspection", 99)] }, h.ctx), undefined, "unavailable memory never fabricates an idle projection");
 		await h.commands.get("state-flow-status").handler("", h.ctx);
 		assert.match(h.notifications.at(-1)!, /Mode: active\nSelected scopes: global, cwd, session\nInference blocked:/);
@@ -1222,9 +1222,9 @@ test("unreadable current session memory visibly blocks Active; Passive retries a
 		await h.inferenceContext([user("Do not send the raw history", 100)], blocked);
 		assert.equal(blocked.signal.aborted, true);
 		assert.match(h.notifications.at(-1)!, /inference blocked/);
-		await assert.rejects(h.tools.get("read_state")!.execute("shared", { path: "global.tactics.shared" }), /selected branch is unavailable/, "failed current-private proof cannot authorize a shared-only model fallback");
+		await assert.rejects(h.tools.get("state_flow_read")!.execute("shared", { path: "global.tactics.shared" }), /selected branch is unavailable/, "failed current-private proof cannot authorize a shared-only model fallback");
 		assert.throws(() => h.readState(0, "session"), /unavailable/);
-		await assert.rejects(h.tools.get("patch_state")!.execute("refused", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /selected branch is unavailable/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("refused", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /selected branch is unavailable/);
 		await h.commands.get(`state-flow-${recovery}`).handler("", h.ctx);
 		if (recovery === "passive") assert.match(h.notifications.at(-1)!, /passive; memory writes paused:.*session policy contains invalid JSON/);
 		const permitted = new AbortController();
@@ -1234,7 +1234,7 @@ test("unreadable current session memory visibly blocks Active; Passive retries a
 		writeFileSync(runtimePath, original);
 		await h.commands.get(`state-flow-${recovery === "passive" ? "passive" : "active"}`).handler("", h.ctx);
 		assert.equal(h.readState(0, "session").tactics.private, 1);
-		await h.tools.get("patch_state")!.execute("repaired", { session: { tactics: { repaired: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("repaired", { session: { tactics: { repaired: true } } }, undefined, undefined, h.ctx);
 		assert.equal(h.readState(0, "session").tactics.repaired, true);
 	}
 });
@@ -1262,7 +1262,7 @@ test("removes proven-missing registered artifacts from every owning scope withou
 		session: join(h.repositoryRoot, "session-source.md"),
 	} as const;
 	for (const path of Object.values(paths)) writeFileSync(path, "registered source");
-	await h.tools.get("patch_state")!.execute("register", {
+	await h.tools.get("state_flow_patch")!.execute("register", {
 		global: { artifacts: { [paths.global]: { description: "Global source" } } },
 		cwd: { artifacts: { [paths.cwd]: { description: "CWD source" } } },
 		session: { artifacts: { [paths.session]: { description: "Session source" } } },
@@ -1279,14 +1279,14 @@ test("automatic artifact cleanup updates revision status before a later scoped p
 	await start(h);
 	const source = join(h.repositoryRoot, "cwd-source.txt");
 	writeFileSync(source, "registered source");
-	await h.tools.get("patch_state")!.execute("register", {
+	await h.tools.get("state_flow_patch")!.execute("register", {
 		cwd: { artifacts: { [source]: { description: "CWD source" } } },
 	}, undefined, undefined, h.ctx);
 	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
 	rmSync(source);
 	await h.beginRun("Observe removal");
 	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
-	await h.tools.get("patch_state")!.execute("session-only", {
+	await h.tools.get("state_flow_patch")!.execute("session-only", {
 		session: { tactics: { retained: true } },
 	}, undefined, undefined, h.ctx);
 	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
@@ -1296,25 +1296,25 @@ test("State Flow tools follow branch enablement and history reads cannot run whi
 	const h = harness();
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	assert.deepEqual(h.activeTools, ["read", "bash"]);
-	const read = h.tools.get("read_state");
+	const read = h.tools.get("state_flow_read");
 	await assert.rejects(read.execute("disabled", {}, undefined), /tools are off/);
 	await start(h);
-	assert.deepEqual([...h.activeTools].sort(), ["bash", "patch_state", "read", "read_state"]);
+	assert.deepEqual([...h.activeTools].sort(), ["bash", "patch_state", "read", "read_state", "state_flow_patch", "state_flow_read"]);
 	const enabled = structuredClone(h.entries);
 	await h.commands.get("state-flow-off").handler("", h.ctx);
 	assert.deepEqual(h.activeTools, ["read", "bash"]);
 	await assert.rejects(read.execute("disabled-again", {}, undefined), /tools are off/);
 	h.ctx.sessionManager.getBranch = () => enabled;
 	await h.handlers.get("session_tree")!({}, h.ctx);
-	assert.equal(h.activeTools.includes("read_state"), true);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_read"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	await assert.rejects(read.execute("aborted", {}, AbortSignal.abort()), /aborted/);
 });
 
-test("read_state lazily projects all hot historical paths and scopes without publication or Git calls", async () => {
+test("state_flow_read lazily projects all hot historical paths and scopes without publication or Git calls", async () => {
 	const h = harness();
 	await start(h);
-	const read = h.tools.get("read_state");
+	const read = h.tools.get("state_flow_read");
 	await assert.rejects(read.execute("missing-path", {}, undefined, undefined, h.ctx), /requires path or paths/);
 	await assert.rejects(read.execute("pre-origin", { path: "effective[1]" }, undefined, undefined, h.ctx), /predates the proven temporal origin/);
 	const expected: Record<string, Record<string, string>> = { global: {}, cwd: {}, session: {} };
@@ -1322,7 +1322,7 @@ test("read_state lazily projects all hot historical paths and scopes without pub
 	const changes = [["global", "G1"], ["cwd", "C2"], ["session", "S3"], ["session", null],
 		["cwd", null], ["global", "G6"], ["cwd", "C7"], ["session", "S8"]] as const;
 	for (const [scope, value] of changes) {
-		await h.tools.get("patch_state").execute("patch", { [scope]: { tactics: { shared: value } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch").execute("patch", { [scope]: { tactics: { shared: value } } }, undefined, undefined, h.ctx);
 		if (value === null) delete expected[scope]!.shared;
 		else expected[scope]!.shared = value;
 		history.push(structuredClone(expected));
@@ -1374,13 +1374,13 @@ test("read_state lazily projects all hot historical paths and scopes without pub
 	assert.equal(h.resolveSnapshot().meta.step, 8);
 });
 
-test("read_state returns dangling-reference hints as top-level metadata beside a null sentinel value", async () => {
+test("state_flow_read returns dangling-reference hints as top-level metadata beside a null sentinel value", async () => {
 	const h = harness();
 	await start(h);
-	await h.tools.get("patch_state").execute("seed-reference", {
+	await h.tools.get("state_flow_patch").execute("seed-reference", {
 		cwd: { tactics: { continuation: "Read `$cwd.lazy.missing` only when needed." } },
 	}, undefined, undefined, h.ctx);
-	const read = h.tools.get("read_state");
+	const read = h.tools.get("state_flow_read");
 	const result = await read.execute("missing-reference", { path: "cwd.lazy.missing" }, undefined, undefined, h.ctx);
 	assert.deepEqual(JSON.parse(result.content[0].text), {
 		value: null,
@@ -1427,8 +1427,8 @@ test("ordinary direct and tool-followed answers complete without a finalization 
 test("multiple patch barriers can precede one ordinary answer", async () => {
 	const h = harness();
 	await start(h, "Patch twice then answer");
-	await h.tools.get("patch_state")!.execute("first", { session: { tactics: { first: true } } }, undefined, undefined, h.ctx);
-	await h.tools.get("patch_state")!.execute("second", { session: { tactics: { second: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("first", { session: { tactics: { first: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("second", { session: { tactics: { second: true } } }, undefined, undefined, h.ctx);
 	const message = finalMessage("Both changes are retained.");
 	h.handlers.get("message_end")!({ message }, h.ctx);
 	await h.handlers.get("turn_end")!({ message }, h.ctx);
@@ -1442,7 +1442,7 @@ test("global memory is always available while State Flow is enabled", async () =
 	const started = await start(h, "Durable preference");
 	assert.match(started.systemPrompt, /State Flow is enabled\. It owns durable memory\./);
 	assert.match(started.systemPrompt, /global=cross-project\/user\/environment knowledge/);
-	const accepted = await h.tools.get("patch_state")!.execute(
+	const accepted = await h.tools.get("state_flow_patch")!.execute(
 		"global-memory", { global: { tactics: { preference: "compact" } } }, undefined, undefined, h.ctx,
 	);
 	assert.equal(accepted.content[0].text, "\nState materialized atomically at global scope.");
@@ -1450,11 +1450,11 @@ test("global memory is always available while State Flow is enabled", async () =
 	assert.equal(h.readState(0, "global").tactics.preference, "compact");
 });
 
-test("patch_state commits global, CWD, and session as one model-facing atomic barrier", async () => {
+test("state_flow_patch commits global, CWD, and session as one model-facing atomic barrier", async () => {
 	const h = harness();
 	await start(h, "Atomic scope cohort");
 	const beforeStep = h.resolveSnapshot().meta.step;
-	const result = await h.tools.get("patch_state")!.execute("atomic", {
+	const result = await h.tools.get("state_flow_patch")!.execute("atomic", {
 		global: { strategy: { shared: "global" } },
 		cwd: { tactics: { project: "cwd" } },
 		session: { tactics: { continuation: "session" } },
@@ -1470,10 +1470,10 @@ test("patch_state commits global, CWD, and session as one model-facing atomic ba
 	assert.equal(h.readState().response, "Still pending.");
 });
 
-test("patch_state materializes session state before the next inference and response reconciliation", async () => {
+test("state_flow_patch materializes session state before the next inference and response reconciliation", async () => {
 	const h = harness();
 	await start(h, "Long-running task");
-	const patchState = h.tools.get("patch_state")!;
+	const patchState = h.tools.get("state_flow_patch")!;
 	const result = await patchState.execute(
 		"patch-1",
 		{ session: { tactics: { verified: "intermediate" } } },
@@ -1487,7 +1487,7 @@ test("patch_state materializes session state before the next inference and respo
 	assert.equal(Object.hasOwn(h.entries.at(-1)!.data, "state"), false);
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.tactics.verified, "intermediate");
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "");
-	const acceptedResult = { role: "toolResult", toolCallId: "patch-1", toolName: "patch_state", content: result.content, timestamp: 2 };
+	const acceptedResult = { role: "toolResult", toolCallId: "patch-1", toolName: "state_flow_patch", content: result.content, timestamp: 2 };
 	const projected = h.handlers.get("context")!({ messages: [user("Long-running task", 1), acceptedResult] }, h.ctx);
 	assert.equal(projected.messages.filter((message: any) => message.content?.[0]?.text?.startsWith("State Flow runtime context")).length, 1);
 	assert.doesNotMatch(projected.messages[0].content[0].text, /"verified":"intermediate"/, "the head stays at iteration start");
@@ -1501,10 +1501,10 @@ test("patch_state materializes session state before the next inference and respo
 	assert.equal(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot)!.response, "Complete.");
 });
 
-test("patch_state renders arguments once with separate changed, no-op and error results", async () => {
+test("state_flow_patch renders arguments once with separate changed, no-op and error results", async () => {
 	const h = harness();
 	await start(h, "Single patch display");
-	const patchState = h.tools.get("patch_state")!;
+	const patchState = h.tools.get("state_flow_patch")!;
 	const args = {
 		global: { tactics: { shared: true } },
 		cwd: { tactics: { project: true } },
@@ -1518,7 +1518,7 @@ test("patch_state renders arguments once with separate changed, no-op and error 
 	const context = { args, isError: false } as any;
 	const call = patchState.renderCall(args, theme, context);
 	const callText = call.render(1_000).map((line: string) => line.trimEnd()).join("\n");
-	assert.ok(callText.startsWith("patch_state\n\n{"));
+	assert.ok(callText.startsWith("state_flow_patch\n\n{"));
 	assert.deepEqual(JSON.parse(callText.slice(callText.indexOf("\n") + 1)), args);
 	assert.match(callText, /"global": \{[\s\S]+\n\n  "cwd": \{[\s\S]+\n\n  "session": \{/);
 	assert.match(callText, /"strategy": \{[\s\S]+\n\n    "tactics": \{/);
@@ -1545,31 +1545,68 @@ test("patch_state renders arguments once with separate changed, no-op and error 
 	}
 });
 
-test("patch_state suppresses call arguments when configured but retains rejected arguments", async (t) => {
+test("state_flow_patch suppresses call arguments when configured but retains rejected arguments", async (t) => {
 	const agentDir = mkdtempSync(join(tmpdir(), "state-flow-hidden-patches-"));
 	t.after(() => rmSync(agentDir, { recursive: true, force: true }));
 	mkdirSync(join(agentDir, "state-flow"));
 	writeFileSync(join(agentDir, "state-flow", "config.json"), JSON.stringify({ showSuccessfulPatches: false }));
 	const h = harness({ agentDir, repositoryRoot: join(agentDir, "state-flow") });
 	await start(h, "Hide successful patch details");
-	const patchState = h.tools.get("patch_state")!;
+	const patchState = h.tools.get("state_flow_patch")!;
 	const args = { session: { tactics: { hiddenPatch: "hidden" } } };
 	const result = await patchState.execute("hidden-patch", args, undefined, undefined, h.ctx);
 	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as any;
 	for (const expanded of [false, true]) {
 		const context = { args, expanded, isError: false } as any;
 		const call = patchState.renderCall(args, theme, context);
-		assert.equal(call.render(120).map((line: string) => line.trimEnd()).join("\n"), "patch_state");
+		assert.equal(call.render(120).map((line: string) => line.trimEnd()).join("\n"), "state_flow_patch");
 		const rendered = patchState.renderResult(result, { expanded, isPartial: false }, theme, context);
 		const row = [...call.render(120), ...rendered.render(120)].join("\n");
-		assert.match(row, /patch_state\s+State materialized atomically at session scope\./);
+		assert.match(row, /state_flow_patch\s+State materialized atomically at session scope\./);
 		assert.doesNotMatch(row, /hiddenPatch|"hidden"/);
 	}
 	const rejected = patchState.renderCall(args, theme, { args, isError: true } as any);
 	assert.match(rejected.render(120).join("\n"), /hiddenPatch/);
 });
 
-test("patch_state is the only tool allowed to execute from its assistant response", async (t) => {
+test("canonical and legacy names share native admission, nested refusal and one mixed mutation barrier", async () => {
+	const h = harness({ initializeRepository: false });
+	await start(h, "Alias admission");
+	const names = ["state_flow_patch", "patch_state", "state_flow_read", "read_state"];
+	const batch = (calls: Array<{ id: string; name: string }>) => {
+		const message = { role: "assistant", content: calls.map(call => ({ type: "toolCall", ...call, arguments: {} })) };
+		h.entries.push({ type: "message", message });
+		h.handlers.get("turn_start")!({}, h.ctx);
+		h.handlers.get("message_end")!({ message }, h.ctx);
+	};
+	const end = () => h.handlers.get("turn_end")!({ message: toolAssistant("finished") }, h.ctx);
+	const gate = h.handlers.get("tool_call")!;
+	for (const name of names) {
+		const args = name.endsWith("read") || name === "read_state" ? { path: "session" } : { session: { tactics: { alias: true } } };
+		batch([{ id: "alias-owned", name }]);
+		assert.equal(gate({ toolCallId: "alias-owned", toolName: name, input: args }, h.ctx), undefined);
+		assert.equal(gate({ toolCallId: "unbound", toolName: name, input: args }, h.ctx)?.block, true);
+		await h.tools.get(name)!.execute("alias-owned", args, undefined, undefined, h.ctx);
+		await assert.rejects(h.tools.get(name)!.execute("alias-owned", args, undefined, undefined, h.ctx), /already consumed/);
+		await end();
+		await assert.rejects(h.tools.get(name)!.execute("alias-owned", args, undefined, undefined, { ...h.ctx, signal: new AbortController().signal }), /native request/);
+	}
+	for (const first of names.slice(0, 2)) for (const second of names.slice(0, 2)) {
+		batch([{ id: "first", name: first }, { id: "second", name: second }, { id: "sibling", name: "bash" }]);
+		for (const [id, name] of [["first", first], ["second", second], ["sibling", "bash"]]) assert.match(gate({ toolCallId: id, toolName: name, input: {} }, h.ctx).reason, /exactly one/);
+		await end();
+	}
+	for (const name of names.slice(0, 2)) {
+		batch([{ id: "outer", name: "bash" }]);
+		assert.match(gate({ toolCallId: "nested", parentToolCallId: "outer", toolName: name, input: {} }, h.ctx).reason, /not a nested call/);
+		await end();
+	}
+	await h.commands.get("state-flow-off")!.handler("", h.ctx);
+	assert.ok(names.every(name => !h.activeTools.includes(name)));
+	for (const name of names) await assert.rejects(h.tools.get(name)!.execute("off", {}, undefined, undefined, h.ctx), /off/);
+});
+
+test("state_flow_patch is the only tool allowed to execute from its assistant response", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-barrier-integration-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const repositoryRoot = join(root, "state-flow");
@@ -1582,9 +1619,9 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 		message: {
 			role: "assistant",
 			content: [
-				{ type: "toolCall", id: "history-1", name: "read_state", arguments: { offset: 1 } },
+				{ type: "toolCall", id: "history-1", name: "state_flow_read", arguments: { offset: 1 } },
 				{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "echo private sibling input" } },
-				{ type: "toolCall", id: "patch-1", name: "patch_state", arguments: { session: { tactics: { next: true } } } },
+				{ type: "toolCall", id: "patch-1", name: "state_flow_patch", arguments: { session: { tactics: { next: true } } } },
 				{ type: "thinking", thinking: "private reasoning body" },
 			],
 		},
@@ -1592,43 +1629,43 @@ test("patch_state is the only tool allowed to execute from its assistant respons
 	h.handlers.get("turn_start")!({}, h.ctx);
 	h.handlers.get("message_end")!({ message: h.entries.at(-1)!.message }, h.ctx);
 	const gate = h.handlers.get("tool_call")!;
-	assert.match(gate({ toolCallId: "history-1", toolName: "read_state", input: { offset: 1 } }, h.ctx).reason, /barrier/);
+	assert.match(gate({ toolCallId: "history-1", toolName: "state_flow_read", input: { offset: 1 } }, h.ctx).reason, /barrier/);
 	assert.match(gate({ toolCallId: "bash-1", toolName: "bash", input: { command: "echo private sibling input" } }, h.ctx).reason, /barrier/);
-	assert.equal(gate({ toolCallId: "patch-1", toolName: "patch_state", input: { session: { tactics: { next: true } } } }, h.ctx), undefined);
+	assert.equal(gate({ toolCallId: "patch-1", toolName: "state_flow_patch", input: { session: { tactics: { next: true } } } }, h.ctx), undefined);
 
 	h.entries.push({
 		type: "message",
 		message: {
 			role: "assistant",
 			content: [
-				{ type: "toolCall", id: "patch-2", name: "patch_state", arguments: { session: { tactics: { first: true } } } },
-				{ type: "toolCall", id: "patch-3", name: "patch_state", arguments: { cwd: { tactics: { second: true } } } },
+				{ type: "toolCall", id: "patch-2", name: "state_flow_patch", arguments: { session: { tactics: { first: true } } } },
+				{ type: "toolCall", id: "patch-3", name: "state_flow_patch", arguments: { cwd: { tactics: { second: true } } } },
 			],
 		},
 	});
 	await h.handlers.get("turn_end")!({ message: toolAssistant("previous") }, h.ctx);
 	h.handlers.get("turn_start")!({}, h.ctx);
 	h.handlers.get("message_end")!({ message: h.entries.at(-1)!.message }, h.ctx);
-	assert.match(gate({ toolCallId: "patch-2", toolName: "patch_state", input: {} }, h.ctx).reason, /exactly one/);
-	assert.match(gate({ toolCallId: "patch-3", toolName: "patch_state", input: {} }, h.ctx).reason, /exactly one/);
+	assert.match(gate({ toolCallId: "patch-2", toolName: "state_flow_patch", input: {} }, h.ctx).reason, /exactly one/);
+	assert.match(gate({ toolCallId: "patch-3", toolName: "state_flow_patch", input: {} }, h.ctx).reason, /exactly one/);
 	const path = stateFlowLogPath(root);
 	const jsonl = readFileSync(path, "utf8");
 	assert.doesNotMatch(jsonl, /private sibling input|private reasoning body|"input"|"content"/);
 	const records = jsonl.trimEnd().split("\n").map((line) => JSON.parse(line));
-	const blockedSibling = "Blocked by the patch_state barrier; reconsider this action after State Flow rematerializes context";
-	const multiplePatches = "A State Flow barrier response must contain exactly one patch_state call";
+	const blockedSibling = "Blocked by the state_flow_patch barrier; reconsider this action after State Flow rematerializes context";
+	const multiplePatches = "A State Flow barrier response must contain exactly one state_flow_patch call";
 	assert.deepEqual(records.map(({ category, error, tool, toolCallId, batchToolNames }) => ({ category, error, tool, toolCallId, batchToolNames })), [
-		{ category: "barrier-block", error: blockedSibling, tool: "read_state", toolCallId: "history-1", batchToolNames: ["read_state", "bash", "patch_state"] },
-		{ category: "barrier-block", error: blockedSibling, tool: "bash", toolCallId: "bash-1", batchToolNames: ["read_state", "bash", "patch_state"] },
-		{ category: "barrier-block", error: multiplePatches, tool: "patch_state", toolCallId: "patch-2", batchToolNames: ["patch_state", "patch_state"] },
-		{ category: "barrier-block", error: multiplePatches, tool: "patch_state", toolCallId: "patch-3", batchToolNames: ["patch_state", "patch_state"] },
+		{ category: "barrier-block", error: blockedSibling, tool: "state_flow_read", toolCallId: "history-1", batchToolNames: ["state_flow_read", "bash", "state_flow_patch"] },
+		{ category: "barrier-block", error: blockedSibling, tool: "bash", toolCallId: "bash-1", batchToolNames: ["state_flow_read", "bash", "state_flow_patch"] },
+		{ category: "barrier-block", error: multiplePatches, tool: "state_flow_patch", toolCallId: "patch-2", batchToolNames: ["state_flow_patch", "state_flow_patch"] },
+		{ category: "barrier-block", error: multiplePatches, tool: "state_flow_patch", toolCallId: "patch-3", batchToolNames: ["state_flow_patch", "state_flow_patch"] },
 	]);
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
-	assert.match(gate({ toolCallId: "patch-3", toolName: "patch_state", input: {} }, h.ctx).reason, /no current native request/, "the old Active batch cannot become Passive work");
+	assert.match(gate({ toolCallId: "patch-3", toolName: "state_flow_patch", input: {} }, h.ctx).reason, /no current native request/, "the old Active batch cannot become Passive work");
 	await h.handlers.get("turn_end")!({ message: toolAssistant("previous") }, h.ctx);
 	h.handlers.get("turn_start")!({}, h.ctx);
 	h.handlers.get("message_end")!({ message: h.entries.findLast(entry => entry.type === "message")!.message }, h.ctx);
-	assert.equal(gate({ toolCallId: "patch-3", toolName: "patch_state", input: {} }, h.ctx), undefined, "a fresh Passive batch has no patch barrier");
+	assert.equal(gate({ toolCallId: "patch-3", toolName: "state_flow_patch", input: {} }, h.ctx), undefined, "a fresh Passive batch has no patch barrier");
 	assert.equal(readFileSync(path, "utf8"), jsonl, "Passive does not record barrier diagnostics");
 });
 
@@ -1636,13 +1673,13 @@ test("patch barrier still blocks calls without opt-in logging", async () => {
 	const h = harness();
 	await start(h, "Barrier without diagnostics");
 	h.entries.push({ type: "message", message: { role: "assistant", content: [
-		{ type: "toolCall", id: "patch-1", name: "patch_state", arguments: {} },
-		{ type: "toolCall", id: "patch-2", name: "patch_state", arguments: {} },
+		{ type: "toolCall", id: "patch-1", name: "state_flow_patch", arguments: {} },
+		{ type: "toolCall", id: "patch-2", name: "state_flow_patch", arguments: {} },
 	] } });
 	h.handlers.get("turn_start")!({}, h.ctx);
 	h.handlers.get("message_end")!({ message: h.entries.at(-1)!.message }, h.ctx);
 	const gate = h.handlers.get("tool_call")!;
-	assert.match(gate({ toolCallId: "patch-1", toolName: "patch_state", input: {} }, h.ctx).reason, /exactly one/);
+	assert.match(gate({ toolCallId: "patch-1", toolName: "state_flow_patch", input: {} }, h.ctx).reason, /exactly one/);
 	assert.equal(existsSync(stateFlowLogPath(h.agentDir)), false);
 });
 
@@ -1661,14 +1698,14 @@ test("tool preflight walks only the selected native suffix for matching calls, w
 		}
 		const assistant = manager.appendMessage(fauxAssistantMessage([
 			fauxToolCall("read", { path: "not-executed.txt" }, { id: "read-1" }),
-			fauxToolCall("patch_state", {}, { id: "patch-1" }),
+			fauxToolCall("state_flow_patch", {}, { id: "patch-1" }),
 		], { stopReason: "toolUse" }));
 		const custom = manager.appendCustomEntry("foreign-context", { retained: true });
 		const result = manager.appendMessage({ role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "Blocked sibling" }], isError: true, timestamp: Date.now() });
 		const selected = manager.appendCustomEntry("foreign-after-result", { retained: true });
 		const abandoned = manager.appendMessage(fauxAssistantMessage([
-			fauxToolCall("patch_state", {}, { id: "patch-1" }),
-			fauxToolCall("patch_state", {}, { id: "patch-2" }),
+			fauxToolCall("state_flow_patch", {}, { id: "patch-1" }),
+			fauxToolCall("state_flow_patch", {}, { id: "patch-2" }),
 		], { stopReason: "toolUse" }));
 		manager.branch(selected);
 		const before = structuredClone(manager.getEntries());
@@ -1695,7 +1732,7 @@ test("tool preflight walks only the selected native suffix for matching calls, w
 		await h.handlers.get("turn_end")!({ message: toolAssistant("previous") }, ctx);
 		h.handlers.get("turn_start")!({}, ctx);
 		h.handlers.get("message_end")!({ message: (manager.getEntry(assistant) as any).message }, ctx);
-		for (const [toolCallId, toolName] of [["read-1", "read"], ["patch-1", "patch_state"]]) {
+		for (const [toolCallId, toolName] of [["read-1", "read"], ["patch-1", "state_flow_patch"]]) {
 			branchEntries = 0;
 			visited = [];
 			const rejection = gate({ toolCallId, toolName, input: {} }, ctx);
@@ -1710,7 +1747,7 @@ test("tool preflight walks only the selected native suffix for matching calls, w
 		h.handlers.get("message_end")!({ message: (manager.getEntry(abandoned) as any).message }, ctx);
 		branchEntries = 0;
 		visited = [];
-		assert.match(gate({ toolCallId: "patch-1", toolName: "patch_state", input: {} }, ctx).reason, /exactly one/);
+		assert.match(gate({ toolCallId: "patch-1", toolName: "state_flow_patch", input: {} }, ctx).reason, /exactly one/);
 		observations.push({ pastRuns, branchEntries, visited, expected: [abandoned] });
 		visited = [];
 		assert.equal(gate({ toolCallId: "missing", toolName: "read", input: {} }, ctx), undefined);
@@ -1722,10 +1759,10 @@ test("tool preflight walks only the selected native suffix for matching calls, w
 	for (const { visited, expected } of observations) assert.deepEqual(visited, expected, "stop at the nearest matching assistant without a stale branch/batch cache");
 });
 
-test("patch_state tolerates shared-scope drift while preserving the session layer", async () => {
+test("state_flow_patch tolerates shared-scope drift while preserving the session layer", async () => {
 	const a = harness();
 	await start(a, "Session A");
-	await a.tools.get("patch_state")!.execute("a-initial", { session: { tactics: { owner: "A" } } }, undefined, undefined, a.ctx);
+	await a.tools.get("state_flow_patch")!.execute("a-initial", { session: { tactics: { owner: "A" } } }, undefined, undefined, a.ctx);
 	const b = harness({
 		repositoryRoot: a.repositoryRoot,
 		cwd: a.ctx.cwd,
@@ -1733,9 +1770,9 @@ test("patch_state tolerates shared-scope drift while preserving the session laye
 		initializeRepository: false,
 	});
 	await start(b, "Session B");
-	await b.tools.get("patch_state")!.execute("b-global", { global: { tactics: { globalFromB: true } } }, undefined, undefined, b.ctx);
+	await b.tools.get("state_flow_patch")!.execute("b-global", { global: { tactics: { globalFromB: true } } }, undefined, undefined, b.ctx);
 	const beforeStep = a.resolveSnapshot().meta.step;
-	const result = await a.tools.get("patch_state")!.execute("a-session", { session: { tactics: { continued: true } } }, undefined, undefined, a.ctx);
+	const result = await a.tools.get("state_flow_patch")!.execute("a-session", { session: { tactics: { continued: true } } }, undefined, undefined, a.ctx);
 	assert.deepEqual(JSON.parse(result.content[1].text).state_updates.effective, [
 		{ path: ["tactics", "globalFromB"], value: true },
 	]);
@@ -1744,8 +1781,8 @@ test("patch_state tolerates shared-scope drift while preserving the session laye
 	assert.equal(a.readState(0, "session").tactics.continued, true);
 	assert.equal(a.readState(0, "global").tactics.globalFromB, true);
 	assert.equal(JSON.stringify(a.sentMessages).includes("cannot publish"), false);
-	await b.tools.get("patch_state")!.execute("b-drift", { global: { tactics: { globalFromB: "newer" } } }, undefined, undefined, b.ctx);
-	const repeated = await a.tools.get("patch_state")!.execute("a-repeat", { session: { tactics: { continued: true } } }, undefined, undefined, a.ctx);
+	await b.tools.get("state_flow_patch")!.execute("b-drift", { global: { tactics: { globalFromB: "newer" } } }, undefined, undefined, b.ctx);
+	const repeated = await a.tools.get("state_flow_patch")!.execute("a-repeat", { session: { tactics: { continued: true } } }, undefined, undefined, a.ctx);
 	assert.equal(repeated.details.changed, false, "adopting foreign memory is not a new authored change");
 	assert.deepEqual(JSON.parse(repeated.content[1].text).state_updates.effective, [
 		{ path: ["tactics", "globalFromB"], value: "newer" },
@@ -1787,7 +1824,7 @@ test("inference preparation captures without writing, then accepts current maint
 	const reappeared = join(h.repositoryRoot, "reappeared.txt");
 	const missing = join(h.repositoryRoot, "new-shared-missing.txt");
 	writeFileSync(reappeared, "source");
-	await h.tools.get("patch_state")!.execute("register", { cwd: { artifacts: { [reappeared]: { description: "Keep if it returns" } } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("register", { cwd: { artifacts: { [reappeared]: { description: "Keep if it returns" } } } }, undefined, undefined, h.ctx);
 	rmSync(reappeared);
 	const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const previous = h.resolveSnapshot();
@@ -1877,7 +1914,7 @@ for (const boundary of ["abort", "stop", "session_start", "session_tree", "sessi
 	if (boundary === "stop") {
 		assert.match(h.statuses.at(-1)!, /<dim>passive<\/dim>/);
 		assert.ok(h.entries.at(-1)!.data.persistenceError);
-		await assert.rejects(h.tools.get("patch_state")!.execute("late", { session: { tactics: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("late", { session: { tactics: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 	}
 });
 
@@ -1977,7 +2014,7 @@ test("post-acceptance preparation failure never replays an old specification ove
 test("response reconciliation waits for current shared memory and accepts lifecycle once without another publication", async (t) => {
 	const h = harness({ initializeRepository: false });
 	await start(h, "Finish this run");
-	await h.tools.get("patch_state")!.execute("private", { session: { tactics: { owner: "local" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("private", { session: { tactics: { owner: "local" } } }, undefined, undefined, h.ctx);
 	const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const entries = structuredClone(h.entries);
 	const release = await holdResponseStorage(t, h.repositoryRoot);
@@ -2099,7 +2136,7 @@ for (const boundary of ["stop", "session_start", "session_tree", "session_shutdo
 	assert.deepEqual(h.statuses, statuses, "obsolete completion cannot update the selected UI");
 	if (boundary === "stop") {
 		assert.equal(h.readState().response, "");
-		await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { tactics: { stale: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { stale: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 	}
 });
 
@@ -2131,7 +2168,7 @@ test("an empty accepted answer finalizes the run and stores an empty response", 
 	h.handlers.get("message_end")!({ message: first }, h.ctx);
 	await h.handlers.get("turn_end")!({ message: first }, h.ctx);
 	await h.beginRun("Update state without prose");
-	await h.tools.get("patch_state")!.execute("update", {
+	await h.tools.get("state_flow_patch")!.execute("update", {
 		session: { tactics: { updated: true } },
 	}, undefined, undefined, h.ctx);
 	const empty = { ...finalMessage(""), content: [] };
@@ -2146,7 +2183,7 @@ test("an empty accepted answer finalizes the run and stores an empty response", 
 test("accepts canonical atomic scope patches, correct repeats and missing nested deletions without another checkpoint", async () => {
 	const h = harness();
 	await start(h, "Resolve me");
-	const execute = (input: unknown) => h.tools.get("patch_state")!.execute("invalid", input, undefined, undefined, h.ctx);
+	const execute = (input: unknown) => h.tools.get("state_flow_patch")!.execute("invalid", input, undefined, undefined, h.ctx);
 	for (const input of [null, [], {}, { final: false }, { unchanged: true },
 		{ scope: "session", patch: { tactics: { value: true } } }, { session: {} },
 		{ session: { tactics: { value: true } }, extra: "forbidden" }, { global: null }]) await assert.rejects(execute(input));
@@ -2194,7 +2231,7 @@ test("artifact freshness is rechecked after waiting, before accepting any part o
 	await start(h, "Compile source");
 	const source = join(h.repositoryRoot, "registered.txt");
 	writeFileSync(source, "Before");
-	const execute = (patch: unknown) => h.tools.get("patch_state")!.execute("compile", patch, undefined, undefined, h.ctx);
+	const execute = (patch: unknown) => h.tools.get("state_flow_patch")!.execute("compile", patch, undefined, undefined, h.ctx);
 	await execute({ cwd: { artifacts: { [source]: { description: "Registered" } } } });
 	h.handlers.get("context")!({ messages: [] }, h.ctx);
 	h.handlers.get("tool_execution_start")!({ toolCallId: "read-source", toolName: "read", args: { path: source } }, h.ctx);
@@ -2234,7 +2271,7 @@ test("a rejected first passive patch leaves no empty canonical initialization or
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const before = files();
 	const entries = structuredClone(h.entries);
-	const execute = (patch: unknown) => h.tools.get("patch_state")!.execute("first", patch, undefined, undefined, h.ctx);
+	const execute = (patch: unknown) => h.tools.get("state_flow_patch")!.execute("first", patch, undefined, undefined, h.ctx);
 	await assert.rejects(execute({ global: { tactics: { rejected: true } }, session: { artifacts: { invalid: { kind: "document" } } } }), /non-empty description/);
 	assert.deepEqual(files(), before);
 	assert.deepEqual(h.entries, entries);
@@ -2250,7 +2287,7 @@ test("a rejected first passive patch leaves no empty canonical initialization or
 for (const initialMode of ["passive"] as const) for (const mode of ["passive"] as const) test(`${initialMode} → ${mode} applies immediately and coalesces into one metadata-only acceptance`, { timeout: 5_000 }, async (t) => {
 	const h = harness({ initializeRepository: false });
 	await start(h, "Unfinished Stop request");
-	await h.tools.get("patch_state")!.execute("private", { session: { tactics: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("private", { session: { tactics: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
 	const previous = h.resolveSnapshot();
 	const entries = structuredClone(h.entries);
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
@@ -2260,10 +2297,10 @@ for (const initialMode of ["passive"] as const) for (const mode of ["passive"] a
 	const publication = t.mock.method(TemporalRuntime.prototype, "persistSelectedPassive");
 	let ended = false;
 	const stopping = h.commands.get(`state-flow-${initialMode}`)!.handler("", h.ctx).then(() => { ended = true; });
-	assert.equal(h.activeTools.includes("patch_state"), initialMode === "passive");
+	assert.equal(h.activeTools.includes("state_flow_patch"), initialMode === "passive");
 	const repeat = h.commands.get(`state-flow-${mode}`)!.handler("", h.ctx);
 	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
-	assert.equal(h.activeTools.includes("patch_state"), mode === "passive");
+	assert.equal(h.activeTools.includes("state_flow_patch"), mode === "passive");
 	const raw = [user("Unfinished Stop request", 1), toolAssistant("late-tool")];
 	const projected = h.handlers.get("context")!({ messages: raw }, h.ctx);
 	assert.match(JSON.stringify(projected), /exit handoff/);
@@ -2292,7 +2329,7 @@ for (const initialMode of ["passive"] as const) for (const mode of ["passive"] a
 	const acceptedContext = h.handlers.get("context")!({ messages: raw }, h.ctx);
 	assert.doesNotMatch(JSON.stringify(acceptedContext), /globalPeer|cwdPeer/);
 	assert.match(h.notifications.at(-1)!, /memory writes paused/);
-	await assert.rejects(h.tools.get("patch_state")!.execute("fenced-drift", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
+	await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced-drift", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 });
 
 test("Stop derives lifecycle after waiting instead of overwriting a newer same-instance passive patch", async (t) => {
@@ -2306,7 +2343,7 @@ test("Stop derives lifecycle after waiting instead of overwriting a newer same-i
 		return gate.then(() => original.apply(this, args));
 	});
 	const stopping = h.commands.get("state-flow-passive")!.handler("", h.ctx);
-	await h.tools.get("patch_state")!.execute("passive", { session: { tactics: { acceptedWhileStopped: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("passive", { session: { tactics: { acceptedWhileStopped: true } } }, undefined, undefined, h.ctx);
 	const accepted = h.resolveSnapshot();
 	release();
 	await stopping;
@@ -2359,14 +2396,14 @@ for (const boundary of ["abort", "session_start", "session_tree", "session_shutd
 	if (boundary === "abort") {
 		assert.match(h.statuses.at(-1)!, /<dim>passive<\/dim>/);
 		assert.match(h.entries.at(-1)!.data.persistenceError, /Stop operation cancelled/);
-		await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { tactics: { forbidden: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { forbidden: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 	}
 });
 
 test("failed Start leaves an already pending Stop able to accept", { timeout: 5_000 }, async (t) => {
 	const h = harness({ initializeRepository: false });
 	await start(h);
-	await h.tools.get("patch_state")!.execute("retained-before-start", { session: { tactics: { retained: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("retained-before-start", { session: { tactics: { retained: true } } }, undefined, undefined, h.ctx);
 	const before = captureTemporalFileBases(h.ctx.cwd, "harness-session", h.repositoryRoot);
 	const release = await holdResponseStorage(t, h.repositoryRoot);
 	const stopping = h.commands.get("state-flow-passive")!.handler("", h.ctx);
@@ -2386,7 +2423,7 @@ test("failed Start leaves an already pending Stop able to accept", { timeout: 5_
 test("Start waits and coalesces repeats before adopting current memory and enabling tools", { timeout: 5_000 }, async (t) => {
 	const h = harness({ initializeRepository: false });
 	await start(h, "Old unfinished request");
-	await h.tools.get("patch_state")!.execute("seed", { session: { tactics: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("seed", { session: { tactics: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
 	h.readState();
 	await h.commands.get("state-flow-off")!.handler("", h.ctx);
 	const previous = h.resolveSnapshot();
@@ -2401,7 +2438,7 @@ test("Start waits and coalesces repeats before adopting current memory and enabl
 	await delay(40);
 	assert.equal(ended, false);
 	assert.equal(h.statuses.at(-1), undefined);
-	assert.equal(h.activeTools.includes("patch_state"), false);
+	assert.equal(h.activeTools.includes("state_flow_patch"), false);
 	assert.throws(() => h.readState(), /unavailable|pending/);
 	assert.deepEqual(files(), before);
 	assert.deepEqual(h.entries, entries);
@@ -2417,7 +2454,7 @@ test("Start waits and coalesces repeats before adopting current memory and enabl
 	assert.equal(h.resolveSnapshot().meta.step, previous.meta.step);
 	assert.equal(h.resolveSnapshot().meta.specification, undefined);
 	assert.equal(h.entries.length, entries.length + 1, "activation checkpoints once without a second persistence transaction");
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 });
 
 test("Start derives current private lifecycle and bootstrap after waiting instead of restoring a stale snapshot", async (t) => {
@@ -2432,7 +2469,7 @@ test("Start derives current private lifecycle and bootstrap after waiting instea
 		return gate.then(() => original.apply(this, args));
 	});
 	const starting = h.commands.get("state-flow-active")!.handler("", h.ctx);
-	await h.tools.get("patch_state")!.execute("passive", { session: { tactics: { acceptedWhileWaiting: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("passive", { session: { tactics: { acceptedWhileWaiting: true } } }, undefined, undefined, h.ctx);
 	const accepted = h.resolveSnapshot();
 	h.entries.push({ type: "message", message: user("Conversation arriving during activation", 100) });
 	release();
@@ -2468,7 +2505,7 @@ for (const boundary of ["abort", "stop", "session_start", "session_tree", "sessi
 	await Promise.race([starting, delay(500).then(() => assert.fail("obsolete Start still waits"))]);
 	assert.deepEqual(files(), before);
 	assert.equal(h.statuses.at(-1), undefined);
-	assert.equal(h.activeTools.includes("patch_state"), false);
+	assert.equal(h.activeTools.includes("state_flow_patch"), false);
 	assert.equal(readFileSync(join(h.repositoryRoot, ".state-flow-publication.lock"), "utf8"), `${process.pid}\n`);
 	const notices = [...h.notifications];
 	const entries = structuredClone(h.entries);
@@ -2514,7 +2551,7 @@ test("post-acceptance Start checkpoint failure retains enabled policy and cleare
 	assert.equal(JSON.parse(readFileSync(paths.runtime, "utf8")).specification, undefined);
 	assert.match(h.statuses.at(-1)!, /<dim>active<\/dim>/);
 	assert.match(h.notifications.at(-1)!, /active; lifecycle update failed: injected Start checkpoint failure/);
-	await h.tools.get("patch_state")!.execute("accepted", { session: { tactics: { retainedEnabled: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("accepted", { session: { tactics: { retainedEnabled: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.resolveSnapshot().config.mode, "active");
 	assert.equal(h.resolveSnapshot().meta.specification, undefined);
 	assert.equal(h.readState().tactics.retainedEnabled, true);
@@ -2556,7 +2593,7 @@ test("post-acceptance Stop checkpoint failure neither rolls back accepted mode n
 	assert.equal(JSON.parse(readFileSync(path, "utf8")).mode, "passive");
 	assert.match(h.statuses.at(-1)!, /<dim>passive<\/dim>/);
 	assert.match(h.notifications.at(-1)!, /passive; lifecycle update failed:.*injected Stop checkpoint failure/);
-	await h.tools.get("patch_state")!.execute("continue", { session: { tactics: { afterAcceptedStop: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("continue", { session: { tactics: { afterAcceptedStop: true } } }, undefined, undefined, h.ctx);
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
 	assert.equal(h.readState().tactics.afterAcceptedStop, true);
 });
@@ -2568,7 +2605,7 @@ test("Passive persistence failures retain context and memory and fence writes th
 			const options = { initializeRepository: false, mode };
 			const h = harness(options);
 			await start(h, "Uncompiled request");
-			await h.tools.get("patch_state")!.execute("accepted", { session: { tactics: { private: "retained" } } }, undefined, undefined, h.ctx);
+			await h.tools.get("state_flow_patch")!.execute("accepted", { session: { tactics: { private: "retained" } } }, undefined, undefined, h.ctx);
 			const paths = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 			const originalRuntime = readFileSync(paths.runtime);
 			const lock = join(h.repositoryRoot, ".state-flow-publication.lock");
@@ -2577,14 +2614,14 @@ test("Passive persistence failures retain context and memory and fence writes th
 				const peer = harness({ ...options, repositoryRoot: h.repositoryRoot });
 				peer.entries.push(...structuredClone(h.entries));
 				await peer.handlers.get("session_start")!({ reason: "resume" }, peer.ctx);
-				await peer.tools.get("patch_state")!.execute("peer", { session: { tactics: { peer: "accepted" } } }, undefined, undefined, peer.ctx);
+				await peer.tools.get("state_flow_patch")!.execute("peer", { session: { tactics: { peer: "accepted" } } }, undefined, undefined, peer.ctx);
 			} else if (fault === "malformed") writeFileSync(paths.runtime, "malformed runtime");
 			const canonical = files();
 			if (fault === "locked") mkdirSync(lock);
 			const checkpointCount = h.entries.length;
 			await h.commands.get(`state-flow-${mode}`)!.handler("", h.ctx);
 			assert.equal(h.statuses.at(-1), passiveBootstrap || passiveTools ? "<accent>state-flow</accent> <dim>passive</dim>" : undefined);
-			assert.equal(h.activeTools.includes("patch_state"), passiveTools);
+			assert.equal(h.activeTools.includes("state_flow_patch"), passiveTools);
 			assert.match(h.notifications.at(-1)!, /(?:off|passive); memory writes paused/);
 			assert.equal(h.readState(0, "session").tactics.private, "retained", "a failed write never erases the accepted cache");
 			assert.equal(h.entries.length, checkpointCount + 1);
@@ -2597,7 +2634,7 @@ test("Passive persistence failures retain context and memory and fence writes th
 			const immediateContext = h.handlers.get("context")!({ messages }, h.ctx);
 			assert.deepEqual(immediateContext.messages.slice(1), messages);
 			assert.doesNotMatch(h.beforeAgentStart("Ordinary continuation").systemPrompt, /State Flow is enabled/);
-			await assert.rejects(h.tools.get("patch_state")!.execute("refused", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /paused after mode change|tools are off/);
+			await assert.rejects(h.tools.get("state_flow_patch")!.execute("refused", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /paused after mode change|tools are off/);
 			if (fault !== "concurrent") {
 				await h.commands.get("state-flow-active")!.handler("", h.ctx);
 				assert.match(h.notifications.at(-1)!, /activation failed/);
@@ -2626,12 +2663,12 @@ test("Passive persistence failures retain context and memory and fence writes th
 				assert.equal(resumed.readState(0, "session").tactics.private, "retained");
 				if (fault === "concurrent") assert.equal(resumed.readState(0, "session").tactics.peer, "accepted");
 			} else assert.throws(() => resumed.readState(0, "session"), /selected branch is unavailable/);
-			await assert.rejects(resumed.tools.get("patch_state")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, resumed.ctx), /paused after mode change|selected branch is unavailable|tools are off/);
+			await assert.rejects(resumed.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, resumed.ctx), /paused after mode change|selected branch is unavailable|tools are off/);
 			assert.deepEqual(files(), canonical);
 			if (fault === "malformed") writeFileSync(paths.runtime, originalRuntime);
 			await resumed.commands.get("state-flow-active")!.handler("", resumed.ctx);
 			assert.equal(resumed.resolveSnapshot().config.mode, "active");
-			await resumed.tools.get("patch_state")!.execute("accepted-again", { session: { tactics: { afterStart: true } } }, undefined, undefined, resumed.ctx);
+			await resumed.tools.get("state_flow_patch")!.execute("accepted-again", { session: { tactics: { afterStart: true } } }, undefined, undefined, resumed.ctx);
 			assert.equal(resumed.readState(0, "session").tactics.afterStart, true);
 			assert.equal(resumed.readState(0, "session").tactics.private, "retained");
 		}
@@ -2641,27 +2678,27 @@ test("Passive persistence failures retain context and memory and fence writes th
 for (const fault of ["locked", "concurrent"] as const) test(`explicit Passive resumes writes after its persistence fault clears (fault=${fault})`, async () => {
 	const h = harness({ initializeRepository: false, mode: "passive" });
 	await start(h, "Uncompiled request");
-	await h.tools.get("patch_state")!.execute("accepted", { session: { tactics: { private: "retained" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("accepted", { session: { tactics: { private: "retained" } } }, undefined, undefined, h.ctx);
 	const lock = join(h.repositoryRoot, ".state-flow-publication.lock");
 	if (fault === "concurrent") {
 		const peer = harness({ initializeRepository: false, mode: "passive", repositoryRoot: h.repositoryRoot });
 		peer.entries.push(...structuredClone(h.entries));
 		await peer.handlers.get("session_start")!({ reason: "resume" }, peer.ctx);
-		await peer.tools.get("patch_state")!.execute("peer", { session: { tactics: { peer: "accepted" } } }, undefined, undefined, peer.ctx);
+		await peer.tools.get("state_flow_patch")!.execute("peer", { session: { tactics: { peer: "accepted" } } }, undefined, undefined, peer.ctx);
 	} else mkdirSync(lock);
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /passive; memory writes paused/);
-	await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /paused after mode change/);
+	await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /paused after mode change/);
 	if (fault === "locked") rmSync(lock, { recursive: true });
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 	assert.equal(h.notifications.at(-1), "State Flow passive; memory writes resumed from current session memory.");
 	assert.equal(h.resolveSnapshot().config.mode, "passive");
-	await h.tools.get("patch_state")!.execute("resumed", { session: { tactics: { resumed: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("resumed", { session: { tactics: { resumed: true } } }, undefined, undefined, h.ctx);
 	assert.deepEqual(h.readState(0, "session").tactics, { private: "retained", ...(fault === "concurrent" ? { peer: "accepted" } : {}), resumed: true });
 	const resumed = harness({ initializeRepository: false, mode: "passive", repositoryRoot: h.repositoryRoot });
 	resumed.entries.push(...structuredClone(h.entries));
 	await resumed.handlers.get("session_start")!({ reason: "reload" }, resumed.ctx);
-	await resumed.tools.get("patch_state")!.execute("after-reload", { session: { tactics: { reloaded: true } } }, undefined, undefined, resumed.ctx);
+	await resumed.tools.get("state_flow_patch")!.execute("after-reload", { session: { tactics: { reloaded: true } } }, undefined, undefined, resumed.ctx);
 	assert.equal(resumed.readState(0, "session").tactics.reloaded, true, "an accepted Passive checkpoint supersedes the old native fence");
 });
 
@@ -2671,8 +2708,8 @@ test("stop removes State Flow semantics while retaining a bounded passive contin
 	await commitTerminal(h, {}, { continuation: "keep this" }, "Context compiled.");
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 
-	assert.equal(h.activeTools.includes("patch_state"), true);
-	assert.equal(h.activeTools.includes("read_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
+	assert.equal(h.activeTools.includes("state_flow_read"), true);
 	assert.match(h.beforeAgentStart("Continue").systemPrompt, /State Flow passive memory is available/);
 
 	const projected = h.handlers.get("context")!({ messages: [
@@ -2757,7 +2794,7 @@ test("idle Stop does not retain the last run anchor and legacy markers keep thei
 test("repeated stop retains one passive handoff without adding another marker", async () => {
 	const h = harness();
 	await start(h, "Remember state");
-	await h.tools.get("patch_state")!.execute("state", { session: { tactics: { continuation: "repeat" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("state", { session: { tactics: { continuation: "repeat" } } }, undefined, undefined, h.ctx);
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 	const markerCount = h.entries.filter((entry) => entry.customType === "state-flow-passive-stop").length;
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
@@ -2789,7 +2826,7 @@ test("start uses the passive boundary for one active bootstrap instead of resurr
 	const protocol = await h.beginRun("Restart State Flow");
 	assert.match(protocol.systemPrompt, /State Flow is enabled/);
 	const projected = h.handlers.get("context")!({ messages: [...oldMessages, ...postStopMessages] }, h.ctx);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	assert.match(projected.messages[0].content[0].text, /State Flow runtime context/);
 	assert.match(projected.messages[1].content[0].text, /State Flow exit handoff/);
 	assert.match(JSON.stringify(projected.messages), /Post-stop question/);
@@ -2877,7 +2914,7 @@ test("shutdown drains superseded restoration operations as well as the current s
 
 test("passive attachment never installs an old CWD after physical identity changes during its wait", async (t) => {
 	const { h: owner } = await restorableBranch();
-	await owner.tools.get("patch_state")!.execute("project", { cwd: { tactics: { project: "OLD-CWD" } } }, undefined, undefined, owner.ctx);
+	await owner.tools.get("state_flow_patch")!.execute("project", { cwd: { tactics: { project: "OLD-CWD" } } }, undefined, undefined, owner.ctx);
 	const h = harness({ initializeRepository: false, repositoryRoot: owner.repositoryRoot, cwd: owner.ctx.cwd, sessionId: "passive-owner", mode: "passive" });
 	const release = await holdResponseStorage(t, h.repositoryRoot);
 	const selecting = h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
@@ -2928,12 +2965,12 @@ test("pending Passive attachment fences local authoring and cannot replace a pee
 	const selecting = h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await entered;
 	const pending = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
-	await assert.rejects(h.tools.get("patch_state")!.execute("unadmitted-during-attachment", { session: { tactics: { forbidden: true } } }, undefined, undefined, h.ctx), /branch restoration is pending/);
+	await assert.rejects(h.tools.get("state_flow_patch")!.execute("unadmitted-during-attachment", { session: { tactics: { forbidden: true } } }, undefined, undefined, h.ctx), /branch restoration is pending/);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), pending);
 	// A separately admitted same-physical-session peer establishes the actual lost-update interleaving.
 	const peer = harness({ initializeRepository: false, repositoryRoot: h.repositoryRoot, cwd: h.ctx.cwd, sessionId: "passive-owner", mode: "passive" });
 	await peer.handlers.get("session_start")!({ reason: "new" }, peer.ctx);
-	await peer.tools.get("patch_state")!.execute("accepted-during-attachment", { session: { tactics: { retained: "NEW-PRIVATE" } } }, undefined, undefined, peer.ctx);
+	await peer.tools.get("state_flow_patch")!.execute("accepted-during-attachment", { session: { tactics: { retained: "NEW-PRIVATE" } } }, undefined, undefined, peer.ctx);
 	const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	release(); await selecting;
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
@@ -2952,7 +2989,7 @@ for (const retry of [false, true]) for (const cold of [false, true]) for (const 
 	const parent = harness({ cwd, repositoryRoot, initializeRepository: false, sessionId: parentManager.getSessionId(), sessionFile: parentManager.getSessionFile(), sessionTimestamp: parentManager.getHeader()!.timestamp });
 	writeFileSync(parentManager.getSessionFile()!, JSON.stringify(parentManager.getHeader()) + "\n");
 	await start(parent);
-	await parent.tools.get("patch_state")!.execute("parent-private", { session: { tactics: { private: "SELECTED-PRIVATE" } } }, undefined, undefined, parent.ctx);
+	await parent.tools.get("state_flow_patch")!.execute("parent-private", { session: { tactics: { private: "SELECTED-PRIVATE" } } }, undefined, undefined, parent.ctx);
 	const manager = SessionManager.create(cwd, sessions);
 	const header = { ...manager.getHeader()!, version: 3, parentSession: parentManager.getSessionFile()! };
 	const childOptions = { cwd, repositoryRoot, initializeRepository: false, sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile(), sessionTimestamp: header.timestamp, mode: "passive" as const };
@@ -2960,7 +2997,7 @@ for (const retry of [false, true]) for (const cold of [false, true]) for (const 
 	child.ctx.sessionManager.getHeader = () => header;
 	child.entries.push(...structuredClone(parent.entries));
 	if (expired) for (let index = 0; index < 9; index++) {
-		await parent.tools.get("patch_state")!.execute(`advance-${index}`, { session: { tactics: { private: "LATER-PRIVATE", index } } }, undefined, undefined, parent.ctx);
+		await parent.tools.get("state_flow_patch")!.execute(`advance-${index}`, { session: { tactics: { private: "LATER-PRIVATE", index } } }, undefined, undefined, parent.ctx);
 	}
 	if (retry) {
 		child.ctx.sessionManager.getHeader = () => ({ ...header, parentSession: join(fixture, "missing-parent.jsonl") });
@@ -3003,7 +3040,7 @@ for (const retry of [false, true]) for (const cold of [false, true]) for (const 
 	{
 		assert.notEqual(child.resolveSnapshot().config.mode, "active");
 		assert.equal(child.readState(0, "session").tactics.private, expired ? "LATER-PRIVATE" : "SELECTED-PRIVATE");
-		await child.tools.get("patch_state")!.execute("passive-child-private", { session: { tactics: { private: "CHILD-OWNED" } } }, undefined, undefined, child.ctx);
+		await child.tools.get("state_flow_patch")!.execute("passive-child-private", { session: { tactics: { private: "CHILD-OWNED" } } }, undefined, undefined, child.ctx);
 		assert.notEqual(child.resolveSnapshot().config.mode, "active", "passive patching does not enable active policy");
 	}
 	const reopenChild = async () => {
@@ -3047,7 +3084,7 @@ test("native branch restoration awaits exclusion, fences pending authority and c
 	assert.equal(restored, false);
 	assert.match(h.statuses.at(-1)!, /<dim>active \(blocked\)<\/dim>/, "pending selection retains Active policy without accepted memory");
 	assert.throws(() => h.readState(0, "session"), /restoration is pending/);
-	await assert.rejects(h.tools.get("patch_state")!.execute("pending", { session: { tactics: { early: true } } }, undefined, undefined, h.ctx), /restoration is pending/);
+	await assert.rejects(h.tools.get("state_flow_patch")!.execute("pending", { session: { tactics: { early: true } } }, undefined, undefined, h.ctx), /restoration is pending/);
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /restoration is pending/);
 	assert.deepEqual(files(), before);
@@ -3144,7 +3181,7 @@ for (const restart of [false, true]) for (const branch of ["boundary", "auto-sta
 	if (branch === "boundary") assert.deepEqual(h.readState(), state);
 	assert.equal(existsSync(sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).config), true);
 	assert.equal(h.notifications.some((message) => /writes paused|failed/.test(message)), false);
-	await h.tools.get("patch_state")!.execute("mode-independent", { session: { tactics: { resumed: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("mode-independent", { session: { tactics: { resumed: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.readState(0, "session").tactics.resumed, true);
 	assert.equal(h.resolveSnapshot().config.mode === "active", restart);
 	await h.handlers.get("session_start")!({ reason: "reload" }, h.ctx);
@@ -3176,7 +3213,7 @@ test("Stop withdraws Start-owned attachment without cancelling retained memory a
 	} finally { await release(); await recovered; }
 	assert.deepEqual(h.readState(), state);
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
-	await h.tools.get("patch_state")!.execute("passive-after-attachment", { session: { tactics: { passive: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("passive-after-attachment", { session: { tactics: { passive: true } } }, undefined, undefined, h.ctx);
 	assert.equal(h.readState(0, "session").tactics.passive, true);
 });
 
@@ -3210,13 +3247,13 @@ for (const initialMode of ["passive"] as const) for (const mode of ["off", "pass
 		for (const reload of [false, true]) {
 			if (reload) await h.handlers.get("session_start")!({ reason: "reload" }, h.ctx);
 			assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
-			await h.tools.get("patch_state")!.execute(`writable-${reload}`, { session: { tactics: { [`writable${reload}`]: true } } }, undefined, undefined, h.ctx);
+			await h.tools.get("state_flow_patch")!.execute(`writable-${reload}`, { session: { tactics: { [`writable${reload}`]: true } } }, undefined, undefined, h.ctx);
 		}
 		return;
 	}
 	await h.commands.get(`state-flow-${mode}`)!.handler("", h.ctx);
 	await reloading;
-	assert.equal(h.activeTools.includes("patch_state"), false);
+	assert.equal(h.activeTools.includes("state_flow_patch"), false);
 	assert.equal(h.entries.length, entryCount + 1);
 	assert.equal(h.entries.at(-1)!.data.mode, mode);
 	assert.equal(h.entries.at(-1)!.data.persistenceError, fence);
@@ -3226,13 +3263,13 @@ for (const initialMode of ["passive"] as const) for (const mode of ["off", "pass
 	for (const reload of [false, true]) {
 		if (reload) await h.handlers.get("session_start")!({ reason: "reload" }, h.ctx);
 		assert.throws(() => h.readState(0, "session"), /temporal runtime is unavailable/);
-		assert.equal(h.activeTools.includes("patch_state"), false);
+		assert.equal(h.activeTools.includes("state_flow_patch"), false);
 		assert.equal(h.statuses.at(-1), undefined);
 		assert.equal(h.handlers.get("context")!({ messages: [] }, h.ctx), undefined, "recovery must not resurrect State Flow context after Off");
 		assert.equal(h.beforeAgentStart("Continue").systemPrompt.includes("State Flow passive memory is available"), false);
 		assert.deepEqual(files(), before, "read-only recovery never publishes");
 		assert.deepEqual(h.entries, entries, "recovery appends no checkpoint and retains the latest policy marker");
-		await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /tools are off/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /tools are off/);
 	}
 });
 
@@ -3252,7 +3289,7 @@ test("auto-start initializes a truly new branch in one awaited acceptance", { ti
 	assert.equal(h.entries.length, 2);
 	assert.equal(h.resolveSnapshot().config.mode, "active");
 	assert.match(h.statuses.at(-1)!, /<dim>active<\/dim>/);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 });
 
 test("accepted restoration survives a native checkpoint failure without rollback or replay", async () => {
@@ -3268,7 +3305,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	assert.match(h.notifications.at(-1)!, /^State Flow memory restored; lifecycle update failed: native trace unavailable/);
 	assert.equal(h.entries.length, entries);
 	assert.deepEqual(h.readState(), state);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	assert.match(h.statuses.at(-1)!, /<dim>active<\/dim>/);
 	const accepted = files();
 	await h.commands.get("state-flow-active")!.handler("", h.ctx);
@@ -3291,7 +3328,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				observed++;
 			};
 			fixture.faux.setResponses([
-				(context) => { observe(context); return fauxAssistantMessage(fauxToolCall("patch_state", {
+				(context) => { observe(context); return fauxAssistantMessage(fauxToolCall("state_flow_patch", {
 					session: { tactics: { seed: true } },
 				}), { stopReason: "toolUse" }); },
 				fauxAssistantMessage("Seeded"),
@@ -3371,7 +3408,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const inputs: Input[] = [], firstFiles: ReturnType<typeof canonical>[] = [], events: any[] = [];
 		const unsubscribe = session.subscribe(event => { if (event.type === "tool_execution_end") events.push(event); }); t.after(unsubscribe);
 		f.faux.setResponses([
-			context => { inputs.push(capture(context)); firstFiles.push(canonical(f, session)); return fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { passive_input_patch: "FIRST_INPUT_PATCH_ACCEPTED" } } }, { id: "passive-input-first-mutation" }), { stopReason: "toolUse" }); },
+			context => { inputs.push(capture(context)); firstFiles.push(canonical(f, session)); return fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { tactics: { passive_input_patch: "FIRST_INPUT_PATCH_ACCEPTED" } } }, { id: "passive-input-first-mutation" }), { stopReason: "toolUse" }); },
 			context => { inputs.push(capture(context)); return fauxAssistantMessage("Ordinary Passive answer is delivered, not stored as response"); },
 		]);
 		await session.prompt("FIRST_PASSIVE_INPUT_MUTATION");
@@ -3507,7 +3544,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				for (const message of context.messages) if (message.role === "toolResult") results.set(message.toolCallId, message);
 			};
 			f.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(previous, Object.fromEntries(previous.map(scope => [scope, { tactics: { sharedOwner: scope } }]))), { id: "shared-source" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(previous, Object.fromEntries(previous.map(scope => [scope, { tactics: { sharedOwner: scope } }]))), { id: "shared-source" }), { stopReason: "toolUse" }),
 				context => { observe(context); return fauxAssistantMessage("Shared native memory accepted"); },
 			]);
 			await session.prompt("Create shared-only native memory");
@@ -3538,7 +3575,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			assert.equal(calls, 1);
 			assert.deepEqual(files(), before, "ordinary Passive delivery cannot acquire or checkpoint the missing Session");
 			f.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(wanted, { session: { tactics: { acquiredByFirstPatch: true } } }), { id: "first-session" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(wanted, { session: { tactics: { acquiredByFirstPatch: true } } }), { id: "first-session" }), { stopReason: "toolUse" }),
 				context => { observe(context); return fauxAssistantMessage("First Session patch accepted"); },
 			]);
 			await session.prompt("Explicitly author the first selected Session mutation");
@@ -3567,7 +3604,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		fs.writeFileSync(`${f.repositoryRoot}/config.json`, JSON.stringify({ mode: "passive", scopes: ["cwd"] }));
 		const runtime = await f.createRuntime("new"), session = runtime.session;
 		f.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(["cwd"], { cwd: { tactics: { retained: true } } })), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(["cwd"], { cwd: { tactics: { retained: true } } })), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Shared source accepted"),
 		]);
 		await session.prompt("Create the shared source");
@@ -3620,7 +3657,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	async function patch(f: RealPiFixture, s: AgentSession, scopes: ScopeSelection, id: string, selection: ScopeSelection = ["global", "cwd", "session"]) {
 		const results: ToolResultMessage[] = [], inputs: Context[] = [];
 		f.faux.setResponses([
-			context => { inputs.push(structuredClone(context)); return fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(selection, Object.fromEntries(scopes.map(scope => [scope, { tactics: { denialMarker: id } }]))), { id }), { stopReason: "toolUse" }); },
+			context => { inputs.push(structuredClone(context)); return fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(selection, Object.fromEntries(scopes.map(scope => [scope, { tactics: { denialMarker: id } }]))), { id }), { stopReason: "toolUse" }); },
 			context => { inputs.push(structuredClone(context)); results.push(...context.messages.filter((m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === id)); return fauxAssistantMessage("Native ordinary answer"); },
 		]);
 		await s.prompt(`Native patch ${id}`);
@@ -3712,7 +3749,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.deepEqual(h.entries.map(({ data }) => data), [{ version: 2, owner: "harness-session", mode: "off", scopes: DEFAULT_SCOPE_SELECTION }]);
 		assert.deepEqual(h.notifications, []);
 		assert.equal(h.statuses.at(-1), undefined);
-		assert.equal(h.activeTools.includes("read_state"), false);
+		assert.equal(h.activeTools.includes("state_flow_read"), false);
 		await h.commands.get("state-flow-active")!.handler("", h.ctx);
 		assert.equal(h.resolveSnapshot().config.mode, "active");
 	});
@@ -3743,7 +3780,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 		assert.equal(h.readState(0, "session").tactics.retained, "PRIVATE");
 		assert.equal(h.resolveSnapshot().config.mode, "passive");
-		assert.equal(h.activeTools.includes("read_state"), true);
+		assert.equal(h.activeTools.includes("state_flow_read"), true);
 		await h.handlers.get("session_start")!({ reason: "reload" }, h.ctx);
 		assert.equal(h.readState(0, "session").tactics.retained, "PRIVATE");
 		assert.equal(h.resolveSnapshot().config.mode, "passive");
@@ -3752,7 +3789,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	test("explicit Active from a deferred Off branch does not rewind current private memory to an older valid boundary", async () => {
 		const { source, resumed: h } = await offBranch();
 		await source.commands.get("state-flow-active")!.handler("", source.ctx);
-		await source.tools.get("patch_state")!.execute("new-current", { session: { tactics: { retained: "CURRENT" } } }, undefined, undefined, source.ctx);
+		await source.tools.get("state_flow_patch")!.execute("new-current", { session: { tactics: { retained: "CURRENT" } } }, undefined, undefined, source.ctx);
 		await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 		await h.commands.get("state-flow-active")!.handler("", h.ctx);
 		assert.equal(h.readState(0, "session").tactics.retained, "CURRENT");
@@ -3767,7 +3804,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 		assert.equal(h.readState(0, "session").tactics.retained, "PRIVATE");
 		assert.equal(h.resolveSnapshot().config.mode, "passive");
-		await h.tools.get("patch_state")!.execute("passive", { session: { tactics: { passive: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("passive", { session: { tactics: { passive: true } } }, undefined, undefined, h.ctx);
 		await h.commands.get("state-flow-active")!.handler("", h.ctx);
 		assert.equal(h.readState(0, "session").tactics.retained, "PRIVATE");
 		assert.equal(h.resolveSnapshot().config.mode, "active");
@@ -3794,7 +3831,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.deepEqual(semantic(files()), semantic(before), "acceptance never rewinds current semantics");
 		assert.equal(h.entries.at(-1)!.data.mode, "passive");
 		assert.equal(typeof h.entries.at(-1)!.data.boundary, "string");
-		await h.tools.get("patch_state")!.execute("writable", { session: { tactics: { writable: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("writable", { session: { tactics: { writable: true } } }, undefined, undefined, h.ctx);
 		assert.equal(h.readState(0, "session").tactics.writable, true);
 	});
 
@@ -3883,15 +3920,15 @@ test("accepted restoration survives a native checkpoint failure without rollback
 					h.handlers.get("message_end")!({ message }, h.ctx);
 					await h.handlers.get("turn_end")!({ message }, h.ctx);
 				}
-				await assert.rejects(h.tools.get("read_state")!.execute("queued-memory-read", { path: "session.tactics.private" }), /tools are off/);
-				await assert.rejects(h.tools.get("patch_state")!.execute("queued-memory-patch", { session: { tactics: { unexpected: true } } }, undefined, undefined, h.ctx), /tools are off/);
+				await assert.rejects(h.tools.get("state_flow_read")!.execute("queued-memory-read", { path: "session.tactics.private" }), /tools are off/);
+				await assert.rejects(h.tools.get("state_flow_patch")!.execute("queued-memory-patch", { session: { tactics: { unexpected: true } } }, undefined, undefined, h.ctx), /tools are off/);
 				assert.equal(h.handlers.get("session_before_compact")!({ reason: "manual", customInstructions: "ordinary user request" }, h.ctx), undefined);
 				h.handlers.get("session_compact")!({}, h.ctx);
 				await h.handlers.get("agent_before_settle")!({}, h.ctx);
 				await h.handlers.get("agent_settled")!({}, h.ctx);
 				assert.deepEqual(h.entries, entries);
 				assert.equal(h.compactRequests.length, 0);
-				assert.equal(h.activeTools.includes("read_state"), false);
+				assert.equal(h.activeTools.includes("state_flow_read"), false);
 				await h.handlers.get("session_shutdown")!({}, h.ctx);
 			});
 			assert.deepEqual(h.notifications, notices);
@@ -3932,7 +3969,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			const peer = harness({ initializeRepository: false, cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot });
 			peer.entries.push(...structuredClone(h.entries));
 			await peer.handlers.get("session_start")!({ reason: "resume" }, peer.ctx);
-			await peer.tools.get("patch_state")!.execute("peer", { session: { tactics: { retained: "PEER" } } }, undefined, undefined, peer.ctx);
+			await peer.tools.get("state_flow_patch")!.execute("peer", { session: { tactics: { retained: "PEER" } } }, undefined, undefined, peer.ctx);
 		}
 		const files = () => captureTemporalFileBases(h.ctx.cwd, "harness-session", h.repositoryRoot);
 		const before = files();
@@ -3946,7 +3983,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.deepEqual(files(), before);
 		assert.deepEqual(h.notifications, notices, "Off neither validates memory nor emits recovery warnings");
 		assert.deepEqual(policy(h), { mode: "off" });
-		assert.equal(h.activeTools.includes("patch_state"), false);
+		assert.equal(h.activeTools.includes("state_flow_patch"), false);
 		assert.throws(() => h.readState(), /temporal runtime is unavailable/);
 		assert.deepEqual(JSON.parse(readFileSync(paths.config, "utf8")), { mode: "active", scopes: ["global", "cwd", "session"] }, "native Off need not rewrite canonical runtime policy");
 		if (fault === "locked") rmSync(lock, { recursive: true });
@@ -3989,7 +4026,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		if (kind === "restoration" || kind === "auto-start") operation = h.handlers.get("session_start")!({ reason: kind === "auto-start" ? "new" : "resume" }, h.ctx);
 		else if (kind === "passive") operation = h.commands.get("state-flow-passive")!.handler("", h.ctx);
 		else if (kind === "activation") operation = h.commands.get("state-flow-active")!.handler("", h.ctx);
-		else if (kind === "patch") operation = h.tools.get("patch_state")!.execute("pending", { session: { tactics: { forbidden: true } } }, undefined, undefined, h.ctx);
+		else if (kind === "patch") operation = h.tools.get("state_flow_patch")!.execute("pending", { session: { tactics: { forbidden: true } } }, undefined, undefined, h.ctx);
 		else if (kind === "preparation") {
 			h.beforeAgentStart("Unaccepted specification");
 			operation = h.inferenceContext();
@@ -4055,7 +4092,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			// Memory is the current JSON state regardless of the deferred Pi step.
 			assert.equal(h.readState(0, "session").tactics.retained, `CURRENT-${advances}`);
 			assert.deepEqual(policy(h), { mode: "passive" });
-			await h.tools.get("patch_state")!.execute("after-recovery", { session: { tactics: { writable: true } } }, undefined, undefined, h.ctx);
+			await h.tools.get("state_flow_patch")!.execute("after-recovery", { session: { tactics: { writable: true } } }, undefined, undefined, h.ctx);
 			assert.equal(h.readState(0, "session").tactics.writable, true);
 		}
 		assert.equal(h.notifications.some((notice) => /branch restoration is pending/.test(notice)), false, "pending work is not a persistence failure");
@@ -4081,7 +4118,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.deepEqual(files(), before, "Passive must not accept an origin from cancelled Active");
 		await h.commands.get("state-flow-active")!.handler("", h.ctx);
 		assert.equal(h.resolveSnapshot().config.mode, "active");
-		assert.equal(h.activeTools.includes("patch_state"), true);
+		assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	});
 
 	test("Off cancels pending settled backup capture without reading or committing canonical files", { timeout: 5_000 }, async (t) => {
@@ -4210,7 +4247,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await fenced.commands.get("state-flow-off")!.handler("", fenced.ctx);
 		await fenced.handlers.get("session_start")!({ reason: "fork" }, fenced.ctx);
 		for (let index = 0; index < 9; index++) {
-			await source.tools.get("patch_state")!.execute(`expire-${index}`, { session: { tactics: { index } } }, undefined, undefined, source.ctx);
+			await source.tools.get("state_flow_patch")!.execute(`expire-${index}`, { session: { tactics: { index } } }, undefined, undefined, source.ctx);
 		}
 		await fenced.commands.get("state-flow-passive")!.handler("", fenced.ctx);
 		// The fork copies the parent's current memory; an old fork step cannot fence the child.
@@ -4244,7 +4281,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 					}
 					for (const entry of payload.state_updates?.effective ?? []) assert.notEqual(entry.path[0], "response");
 				}
-				if (message.role === "toolResult" && message.toolName === "patch_state" && part.text.trim().startsWith('{"state_updates"')) {
+				if (message.role === "toolResult" && message.toolName === "state_flow_patch" && part.text.trim().startsWith('{"state_updates"')) {
 					for (const entry of JSON.parse(part.text).state_updates.effective) assert.notEqual(entry.path[0], "response");
 				}
 			}
@@ -4259,7 +4296,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			const session = await fixture.createSession("new");
 			if (entry !== "initial") {
 				fixture.faux.setResponses([
-					fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { seed: true } } }), { stopReason: "toolUse" }),
+					fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { tactics: { seed: true } } }), { stopReason: "toolUse" }),
 					fauxAssistantMessage("LAST_ACTIVE_RESPONSE"),
 				]);
 				await session.prompt("Seed Active memory");
@@ -4271,15 +4308,15 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			fixture.faux.setResponses([
 				(context) => {
 					assertPassiveProjection(context); observed++;
-					return fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { passive: true } } }), { stopReason: "toolUse" });
+					return fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { tactics: { passive: true } } }), { stopReason: "toolUse" });
 				},
 				(context) => {
 					assertPassiveProjection(context); observed++;
-					return fauxAssistantMessage(fauxToolCall("read_state", { path: "effective.response" }), { stopReason: "toolUse" });
+					return fauxAssistantMessage(fauxToolCall("state_flow_read", { path: "effective.response" }), { stopReason: "toolUse" });
 				},
 				(context) => {
 					assertPassiveProjection(context); observed++;
-					const result = context.messages.findLast((message) => message.role === "toolResult" && message.toolName === "read_state");
+					const result = context.messages.findLast((message) => message.role === "toolResult" && message.toolName === "state_flow_read");
 					assert.ok(result?.role === "toolResult");
 					assert.match(JSON.stringify(result.content), /LAST_ACTIVE_RESPONSE/, "explicit exact reads are not redacted");
 					return fauxAssistantMessage("Passive answer");
@@ -4319,10 +4356,10 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		return Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("native request did not settle while foreign exclusion remained held")), 5000); })]).finally(() => clearTimeout(timer));
 	}
 
-	for (const late of ["patch", "answer"] as const) test(`real Pi does not reinterpret an old ${late} under Active after an in-flight mode ABA`, async t => {
+	for (const late of ["state_flow_patch", "patch_state", "answer"] as const) test(`real Pi does not reinterpret an old ${late} under Active after an in-flight mode ABA`, async t => {
 		let session!: AgentSession, changed = false;
 		const sequence: string[] = [];
-		const f = await realPiFixture(t, { initializeRepository: false, mode: "active", tools: ["read", "patch_state", "read_state"], extensions: [{ name: "native-order", factory(pi) {
+		const f = await realPiFixture(t, { initializeRepository: false, mode: "active", tools: ["read", "state_flow_patch", "state_flow_read", "patch_state", "read_state"], extensions: [{ name: "native-order", factory(pi) {
 			pi.on("turn_start", () => { sequence.push("turn_start"); });
 			pi.on("context", () => { sequence.push("context"); });
 			pi.on("message_end", event => { if (event.message.role === "assistant") sequence.push("assistant_end"); });
@@ -4333,8 +4370,8 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const source = join(f.cwd, "foreign.txt"); writeFileSync(source, "FOREIGN TOOL STILL RUNS");
 		f.faux.setResponses([async () => {
 			await session.prompt("/state-flow-off"); await session.prompt("/state-flow-active"); changed = true;
-			return late === "patch" ? fauxAssistantMessage([
-				fauxToolCall("patch_state", { session: { strategy: { staleBatch: true } } }, { id: "late-owned" }),
+			return late !== "answer" ? fauxAssistantMessage([
+				fauxToolCall(late, { session: { strategy: { staleBatch: true } } }, { id: "late-owned" }),
 				fauxToolCall("read", { path: source }, { id: "foreign-read" }),
 			], { stopReason: "toolUse" }) : fauxAssistantMessage("STALE ANSWER MUST NOT CAPTURE");
 		}, fauxAssistantMessage("Fresh native response")]);
@@ -4343,7 +4380,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.equal(f.readState(session, 0, "session").strategy.staleBatch, undefined);
 		assert.notEqual(f.readState(session, 0, "session").response, "STALE ANSWER MUST NOT CAPTURE");
 		assert.ok(sequence.indexOf("turn_start") < sequence.indexOf("context"));
-		if (late === "patch") {
+		if (late !== "answer") {
 			const results = session.messages.filter(message => message.role === "toolResult");
 			const stale = results.find(message => message.toolCallId === "late-owned")!;
 			assert.equal(stale.isError, true); assert.match(JSON.stringify(stale.content), /no current native request/);
@@ -4363,7 +4400,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		} }] });
 		writeFileSync(join(f.repositoryRoot, "config.json"), JSON.stringify({ logging: true }));
 		session = await f.createSession("new");
-		f.faux.setResponses([fauxAssistantMessage(fauxToolCall("patch_state", { session: { strategy: { privateStaleArgument: true } } }, { id: "approved-then-stale" }), { stopReason: "toolUse" }), fauxAssistantMessage("Current response")]);
+		f.faux.setResponses([fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { strategy: { privateStaleArgument: true } } }, { id: "approved-then-stale" }), { stopReason: "toolUse" }), fauxAssistantMessage("Current response")]);
 		await deadline(session.prompt("Wait for permission"));
 		assert.equal(changed, true); assert.equal(f.readState(session, 0, "session").strategy.privateStaleArgument, undefined);
 		const result = session.messages.find(message => message.role === "toolResult" && message.toolCallId === "approved-then-stale");
@@ -4373,18 +4410,18 @@ test("accepted restoration survives a native checkpoint failure without rollback
 
 	for (const mode of ["active", "passive"] as const) test(`real Pi ${mode} nested reads/patches preserve explicit-parent proof and the mode-specific barrier`, async t => {
 		let observed: { read: boolean; patch: boolean } | undefined;
-		const f = await realPiFixture(t, { initializeRepository: false, mode, tools: ["nested-memory", "patch_state", "read_state"], extensions: [{ name: "nested-memory", factory(pi) {
+		const f = await realPiFixture(t, { initializeRepository: false, mode, tools: ["nested-memory", "state_flow_patch", "state_flow_read"], extensions: [{ name: "nested-memory", factory(pi) {
 			pi.registerTool({ name: "nested-memory", label: "Nested memory", description: "Fixture nested tool calls", parameters: Type.Object({}),
 				async execute(_id, _args, signal, _update, ctx) {
-					const read = await ctx.executeTool("read_state", { path: "strategy" }, { signal });
-					const patch = await ctx.executeTool("patch_state", { session: { strategy: { nestedMutation: true } } }, { signal });
+					const read = await ctx.executeTool("state_flow_read", { path: "strategy" }, { signal });
+					const patch = await ctx.executeTool("state_flow_patch", { session: { strategy: { nestedMutation: true } } }, { signal });
 					observed = { read: !read.isError, patch: !patch.isError };
 					return { content: [{ type: "text", text: "Nested results observed" }], details: undefined };
 				},
 			});
 		} }] });
 		const session = await f.createSession("new");
-		f.faux.setResponses([fauxAssistantMessage(fauxToolCall("patch_state", { session: { strategy: { seed: true } } }), { stopReason: "toolUse" }), fauxAssistantMessage("Seed")]);
+		f.faux.setResponses([fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { strategy: { seed: true } } }), { stopReason: "toolUse" }), fauxAssistantMessage("Seed")]);
 		await session.prompt("Seed memory");
 		f.faux.setResponses([fauxAssistantMessage(fauxToolCall("nested-memory", {}), { stopReason: "toolUse" }), fauxAssistantMessage("Nested complete")]);
 		await session.prompt("Nested inspection");
@@ -4410,7 +4447,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		}) as typeof fs.openSync; syncBuiltinESMExports();
 		let pending: Promise<void> | undefined;
 		try {
-			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("patch_state", { session: { strategy: { obsolete: true } } }, { id: "held-patch" }), { stopReason: "toolUse" }), fauxAssistantMessage("Continue natively under Off")]);
+			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { strategy: { obsolete: true } } }, { id: "held-patch" }), { stopReason: "toolUse" }), fauxAssistantMessage("Continue natively under Off")]);
 			pending = session.prompt("Wait to patch"); await deadline(wait);
 			await session.prompt("/state-flow-off"); await deadline(pending);
 			assert.equal(existsSync(lock), true);
@@ -4422,7 +4459,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			fs.openSync = open; syncBuiltinESMExports(); if (existsSync(lock)) rmSync(lock); await pending;
 		}
 		await session.prompt("/state-flow-active");
-		f.faux.setResponses([fauxAssistantMessage(fauxToolCall("patch_state", { session: { strategy: { fresh: true } } }, { id: "fresh-patch" }), { stopReason: "toolUse" }), fauxAssistantMessage("Accepted")]);
+		f.faux.setResponses([fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { strategy: { fresh: true } } }, { id: "fresh-patch" }), { stopReason: "toolUse" }), fauxAssistantMessage("Accepted")]);
 		await session.prompt("Fresh policy request");
 		assert.equal(f.readState(session, 0, "session").strategy.obsolete, undefined); assert.equal(f.readState(session, 0, "session").strategy.fresh, true);
 		assert.equal(readFileSync(session.sessionFile!, "utf8").includes("fresh-patch"), true);
@@ -4435,8 +4472,8 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	function files(h: ReturnType<typeof harness>) { return captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, address(h).key); }
 	async function accepted(persisted = true) {
 		const h = fixture(persisted); await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-		await h.tools.get("patch_state")!.execute("seed-query-owner", { cwd: { tactics: { sharedQuery: "OWNED_CWD_QUERY" } }, session: { tactics: { privateQuery: "OWNER_A_PRIVATE_V1" } } }, undefined, undefined, h.ctx);
-		await h.tools.get("patch_state")!.execute("advance-query-owner", { session: { tactics: { privateQuery: "OWNER_A_PRIVATE_V2" } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("seed-query-owner", { cwd: { tactics: { sharedQuery: "OWNED_CWD_QUERY" } }, session: { tactics: { privateQuery: "OWNER_A_PRIVATE_V1" } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("advance-query-owner", { session: { tactics: { privateQuery: "OWNER_A_PRIVATE_V2" } } }, undefined, undefined, h.ctx);
 		return h;
 	}
 	function foreignContexts(h: ReturnType<typeof harness>) {
@@ -4460,9 +4497,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			{ path: "session.tactics", projection: "keys" }, { path: "effective.tactics", projection: "patch" }, { path: "session.patches[0]" },
 		];
 		for (const ctx of foreignContexts(h)) {
-			for (const params of shapes) await assert.rejects(h.tools.get("read_state")!.execute("foreign-context-query", params, undefined, undefined, ctx), /read selection owner changed/);
+			for (const params of shapes) await assert.rejects(h.tools.get("state_flow_read")!.execute("foreign-context-query", params, undefined, undefined, ctx), /read selection owner changed/);
 			const params = { get path() { parameters++; return "session.tactics.privateQuery"; } };
-			await assert.rejects(h.tools.get("read_state")!.execute("foreign-parameter-query", params, undefined, undefined, ctx), /read selection owner changed/);
+			await assert.rejects(h.tools.get("state_flow_read")!.execute("foreign-parameter-query", params, undefined, undefined, ctx), /read selection owner changed/);
 		}
 		assert.equal(parameters, 0); assert.equal(views, 0);
 		assert.deepEqual(files(h), before); assert.deepEqual(h.entries, entries);
@@ -4471,13 +4508,13 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	test("in-memory native query identity binds immutable header timestamp before any parameter access", async () => {
 		const h = await accepted(false), before = files(h); let parameters = 0;
 		const foreign = { ...h.ctx, sessionManager: { ...h.ctx.sessionManager, getHeader: () => ({ ...h.ctx.sessionManager.getHeader()!, timestamp: "2026-10-24T01:00:00.000Z" }) } };
-		await assert.rejects(h.tools.get("read_state")!.execute("foreign-in-memory-query", { get path() { parameters++; return "session.tactics.privateQuery"; } }, undefined, undefined, foreign), /read selection owner changed/);
+		await assert.rejects(h.tools.get("state_flow_read")!.execute("foreign-in-memory-query", { get path() { parameters++; return "session.tactics.privateQuery"; } }, undefined, undefined, foreign), /read selection owner changed/);
 		assert.equal(parameters, 0); assert.deepEqual(files(h), before);
 	});
 
 	test("same-physical cloned native contexts retain exact current/historical/batch/keys/patch query paths without writes", async () => {
 		const h = await accepted(), before = files(h), entries = structuredClone(h.entries), ctx = { ...h.ctx, sessionManager: { ...h.ctx.sessionManager } };
-		const read = (params: unknown) => h.tools.get("read_state")!.execute("owned-context-query", params, undefined, undefined, ctx);
+		const read = (params: unknown) => h.tools.get("state_flow_read")!.execute("owned-context-query", params, undefined, undefined, ctx);
 		assert.match(JSON.stringify(await read({ path: "session.tactics.privateQuery" })), /OWNER_A_PRIVATE_V2/);
 		const historical = JSON.stringify(await read({ path: "session[1].tactics.privateQuery" })); assert.match(historical, /OWNER_A_PRIVATE_V1/); assert.doesNotMatch(historical, /OWNER_A_PRIVATE_V2/);
 		assert.match(JSON.stringify(await read({ paths: ["cwd.tactics.sharedQuery", "session.tactics.privateQuery"] })), /OWNED_CWD_QUERY/);
@@ -4491,10 +4528,10 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const h = await accepted();
 		h.handlers.get("turn_start")!({}, h.ctx);
 		h.handlers.get("message_end")!({ message: { role: "assistant", content: [
-			{ type: "toolCall", id: "foreign-original-query", name: "read_state" },
-			{ type: "toolCall", id: "owned-original-query", name: "read_state" },
+			{ type: "toolCall", id: "foreign-original-query", name: "state_flow_read" },
+			{ type: "toolCall", id: "owned-original-query", name: "state_flow_read" },
 		] } }, h.ctx);
-		const before = files(h), params = { path: "session.tactics.privateQuery" }, read = h.tools.get("read_state")!;
+		const before = files(h), params = { path: "session.tactics.privateQuery" }, read = h.tools.get("state_flow_read")!;
 		await assert.rejects(read.execute("foreign-original-query", params, undefined, undefined, foreignContexts(h)[2]), /read selection owner changed/);
 		await assert.rejects(read.execute("foreign-original-query", params, undefined, undefined, h.ctx), /native request|already|current/i);
 		assert.match(JSON.stringify(await read.execute("owned-original-query", params, undefined, undefined, h.ctx)), /OWNER_A_PRIVATE_V2/);
@@ -4507,7 +4544,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await source.withSelectedSharedOriginTransaction(["cwd"], { config: { mode: "passive" }, meta: { step: 0 } }, publish => publish(), undefined, true);
 		await source.withSelectedPatchTransaction(tx => tx.publish({ config: { mode: "passive" }, meta: { step: 1 } }, { id: "observed-query-source", transitions: [{ scope: "cwd", patch: { tactics: { observedQuery: "READ_ONLY_OBSERVED_QUERY" } } }] }), () => {});
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-		const before = files(h), entries = structuredClone(h.entries), read = h.tools.get("read_state")!;
+		const before = files(h), entries = structuredClone(h.entries), read = h.tools.get("state_flow_read")!;
 		assert.match(JSON.stringify(await read.execute("observed-query", { path: "cwd.tactics.observedQuery" }, undefined, undefined, h.ctx)), /READ_ONLY_OBSERVED_QUERY/);
 		await assert.rejects(read.execute("unavailable-private-query", { path: "session.tactics" }, undefined, undefined, h.ctx), /excluded|selected|unavailable/i);
 		await assert.rejects(read.execute("foreign-observed-query", { path: "cwd.tactics.observedQuery" }, undefined, undefined, foreignContexts(h)[0]), /read selection owner changed/);
@@ -4517,7 +4554,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 
 	test("cancelled and non-original signalled native queries reject before parameter access", async () => {
 		const h = await accepted(), before = files(h), controller = new AbortController(); controller.abort(); let parameters = 0;
-		const params = { get path() { parameters++; return "session.tactics.privateQuery"; } }, read = h.tools.get("read_state")!;
+		const params = { get path() { parameters++; return "session.tactics.privateQuery"; } }, read = h.tools.get("state_flow_read")!;
 		await assert.rejects(read.execute("cancelled-query", params, controller.signal, undefined, h.ctx), /aborted/i);
 		await assert.rejects(read.execute("unbound-model-query", params, undefined, undefined, { ...h.ctx, signal: new AbortController().signal }), /native request/i);
 		await assert.rejects(read.execute("missing-native-context", params, undefined, undefined, undefined), /read selection owner changed/);
@@ -4530,12 +4567,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 		assert.ok(h.entries.some(entry => entry.data?.persistenceError));
 		const before = files(h), entries = structuredClone(h.entries);
-		assert.match(JSON.stringify(await h.tools.get("read_state")!.execute("fenced-read", { path: "session.tactics.privateQuery" }, undefined, undefined, h.ctx)), /OWNER_A_PRIVATE_V2/);
-		await assert.rejects(h.tools.get("patch_state")!.execute("fenced-write", { session: { tactics: { forbidden: true } } }, undefined, undefined, h.ctx), /paused|fence/i);
+		assert.match(JSON.stringify(await h.tools.get("state_flow_read")!.execute("fenced-read", { path: "session.tactics.privateQuery" }, undefined, undefined, h.ctx)), /OWNER_A_PRIVATE_V2/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced-write", { session: { tactics: { forbidden: true } } }, undefined, undefined, h.ctx), /paused|fence/i);
 		assert.deepEqual(files(h), before); assert.deepEqual(h.entries, entries);
 	});
 
-	for (const name of ["read_state", "patch_state"] as const) test(`new policy owner cannot borrow old runtime native identity through ${name} even at the same storage key`, async t => {
+	for (const name of ["state_flow_read", "state_flow_patch"] as const) test(`new policy owner cannot borrow old runtime native identity through ${name} even at the same storage key`, async t => {
 		const h = await accepted(), before = files(h);
 		let batch!: NativeToolRequestCorrelation;
 		const begin = NativeToolRequestCorrelation.prototype.begin;
@@ -4552,7 +4589,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		// Callback admission now refuses this earlier. Explicit lower-correlation adapter fault
 		// keeps the independent callee guard exercised with real B policy/receipt and original ID.
 		batch.finalize([{ id: "rebound-owner-tool", name }]);
-		const params = name === "read_state" ? { path: "session.tactics.privateQuery" } : { session: { tactics: { privateQuery: "BORROWED_RUNTIME_OWNER" } } };
+		const params = name === "state_flow_read" ? { path: "session.tactics.privateQuery" } : { session: { tactics: { privateQuery: "BORROWED_RUNTIME_OWNER" } } };
 		await assert.rejects(h.tools.get(name)!.execute("rebound-owner-tool", params, undefined, undefined, other), /selection owner changed/);
 		assert.deepEqual(files(h), before); assert.equal(h.readState(0, "session").tactics.privateQuery, "OWNER_A_PRIVATE_V2");
 	});
@@ -4616,8 +4653,8 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			h.handlers.get("message_end")!({ message: answer("FOREIGN_NATIVE_COMPLETION") }, wrong);
 			await h.handlers.get("turn_end")!({ message: answer("FOREIGN_NATIVE_COMPLETION") }, wrong);
 		}
-		h.handlers.get("message_end")!({ message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "rightful-original-patch", name: "patch_state" }] } }, ctx);
-		await h.tools.get("patch_state")!.execute("rightful-original-patch", { session: { tactics: { rightfulBatch: true } } }, undefined, undefined, ctx);
+		h.handlers.get("message_end")!({ message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "rightful-original-patch", name: "state_flow_patch" }] } }, ctx);
+		await h.tools.get("state_flow_patch")!.execute("rightful-original-patch", { session: { tactics: { rightfulBatch: true } } }, undefined, undefined, ctx);
 		assert.equal(h.readState(0, "session").tactics.rightfulBatch, true);
 		await h.handlers.get("turn_end")!({ message: { role: "assistant", stopReason: "toolUse", content: [] } }, ctx);
 	});
@@ -4689,7 +4726,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	async function seeded(mode: "active" | "passive" = "passive") {
 		const h = harness({ initializeRepository: false, mode, sessionFile: "/tmp/native-input-owner.jsonl", sessionTimestamp: "2026-10-24T00:00:00.000Z" });
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-		await h.tools.get("patch_state")!.execute("input-owner-seed", { session: { tactics: { privateInput: "OWNER_A_PRIVATE_INPUT" }, lazy: { privateBody: "LAZY_BODY_NOT_AUTOMATIC_INPUT" } } }, undefined, undefined, h.ctx); return h;
+		await h.tools.get("state_flow_patch")!.execute("input-owner-seed", { session: { tactics: { privateInput: "OWNER_A_PRIVATE_INPUT" }, lazy: { privateBody: "LAZY_BODY_NOT_AUTOMATIC_INPUT" } } }, undefined, undefined, h.ctx); return h;
 	}
 	function bytes(h: ReturnType<typeof harness>) {
 		const a = resolveSessionAddress(h.ctx.sessionManager.getSessionFile(), h.ctx.sessionManager.getSessionId(), h.ctx.sessionManager.getHeader()?.timestamp);
@@ -4802,7 +4839,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 		const skill = join(h.repositoryRoot, "SKILL.md"), ordinary = join(h.repositoryRoot, "ordinary-source.md");
 		writeFileSync(skill, "Owner A registered Skill body"); writeFileSync(ordinary, "Owner A ordinary source body"); h.registerSkill(skill, "project");
-		await h.tools.get("patch_state")!.execute("register-ordinary-source", { cwd: { artifacts: { [ordinary]: { description: "Ordinary registered source" } } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("register-ordinary-source", { cwd: { artifacts: { [ordinary]: { description: "Ordinary registered source" } } } }, undefined, undefined, h.ctx);
 		return { h, skill, ordinary };
 	}
 	function files(h: Awaited<ReturnType<typeof active>>["h"]) {
@@ -4899,7 +4936,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 
 	test("foreign ordinary tool callback remains independent of an owned patch barrier", async () => {
 		const { h, skill } = await active();
-		const message = { role: "assistant", content: [{ type: "toolCall", id: "owned-barrier", name: "patch_state" }, { type: "toolCall", id: "foreign-native-read", name: "read" }] };
+		const message = { role: "assistant", content: [{ type: "toolCall", id: "owned-barrier", name: "state_flow_patch" }, { type: "toolCall", id: "foreign-native-read", name: "read" }] };
 		h.entries.push({ type: "message", message }); h.handlers.get("turn_start")!({}, h.ctx); h.handlers.get("message_end")!({ message }, h.ctx);
 		const event = { toolCallId: "foreign-native-read", toolName: "read", input: { path: skill } };
 		assert.equal(h.handlers.get("tool_call")!(event, foreign(h)[0]), undefined);
@@ -4939,10 +4976,10 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const before = files(h), opens: string[] = [], open = fs.openSync;
 		fs.openSync = ((...args: Parameters<typeof fs.openSync>) => { if (String(args[0]) === skill) opens.push(skill); return open(...args); }) as typeof fs.openSync;
 		syncBuiltinESMExports();
-		try { for (const ctx of foreign(h)) await assert.rejects(h.tools.get("patch_state")!.execute("foreign-compiler", params, undefined, undefined, ctx), /selection owner changed/); }
+		try { for (const ctx of foreign(h)) await assert.rejects(h.tools.get("state_flow_patch")!.execute("foreign-compiler", params, undefined, undefined, ctx), /selection owner changed/); }
 		finally { fs.openSync = open; syncBuiltinESMExports(); }
 		assert.deepEqual(opens, [], "foreign caller must be refused before owned source body rehash"); assert.deepEqual(files(h), before);
-		await h.tools.get("patch_state")!.execute("rightful-compiler", params, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("rightful-compiler", params, undefined, undefined, h.ctx);
 		assert.deepEqual(h.readState(0, "cwd").artifacts[skill].compilation, { rule: "owned compiler output" });
 	});
 }
@@ -4989,7 +5026,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	async function accepted() {
 		const h = harness({ initializeRepository: false, mode: "active" });
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-		await h.tools.get("patch_state")!.execute("owned-seed", { session: { strategy: { owned: "retain" } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("owned-seed", { session: { strategy: { owned: "retain" } } }, undefined, undefined, h.ctx);
 		return h;
 	}
 
@@ -5005,7 +5042,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		let lease!: SelectedPolicyRequest;
 		const capture = SelectedPolicyLifetime.prototype.capture;
 		t.mock.method(SelectedPolicyLifetime.prototype, "capture", function(this: SelectedPolicyLifetime, ...args: Parameters<typeof capture>) { const result = Reflect.apply(capture, this, args); lease = result; return result; });
-		const pending = assert.rejects(h.tools.get("patch_state")!.execute("old-scope-patch", { session: { tactics: { stale: true } } }, undefined, undefined, h.ctx));
+		const pending = assert.rejects(h.tools.get("state_flow_patch")!.execute("old-scope-patch", { session: { tactics: { stale: true } } }, undefined, undefined, h.ctx));
 		await deadline(waiting); const oldLease = lease;
 		assert.deepEqual(oldLease.policy.scopes, DEFAULT_SCOPE_SELECTION); assert.equal(oldLease.policy.mode, "passive");
 		let narrowed!: Promise<void>;
@@ -5179,7 +5216,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	  const marker = `seven-${selected.join('-')}-${mode}`;
 	  const patch = (phase: number) => Object.fromEntries(selected.map(o => [o, { tactics: { [o]: { marker, phase } }, lazy: { [o]: `LAZY-${marker}-${o}` } }]));
 	  let afterFirstPatch: ReturnType<typeof semantic>[] | undefined;
-	  f.faux.setResponses([call('patch_state', modelPatchArguments(selected, patch(1)), 'phase1'), c => { observe(c); afterFirstPatch = owners.map(semantic); return answer('ordinary final 1'); }]);
+	  f.faux.setResponses([call('state_flow_patch', modelPatchArguments(selected, patch(1)), 'phase1'), c => { observe(c); afterFirstPatch = owners.map(semantic); return answer('ordinary final 1'); }]);
 	  await session.prompt(`Native user ${marker}: remember selected owners`);
 	  result('phase1');
 	  for (const o of selected) assert.equal(tactics(f.readState(session, 0, o))[o].phase, 1);
@@ -5192,17 +5229,17 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	  const target = selected.at(-1)! , point = session.sessionManager.getLeafId()!;
 	  let beforeNoop: ReturnType<typeof files> | undefined, afterNoop: ReturnType<typeof files> | undefined, beforeReject: ReturnType<typeof files> | undefined, afterReject: ReturnType<typeof files> | undefined;
 	  const steps: FauxResponseStep[] = [
-	    call('patch_state', modelPatchArguments(selected, { [target]: { tactics: { [target]: { phase: 2 } } } }), 'phase2'),
-	    call('read_state', { path: `${target}.tactics.${target}` }, 'current'),
-	    call('read_state', { path: `${target}[1].tactics.${target}` }, 'history'),
-	    call('read_state', { paths: [...selected.map(o => `${o}.tactics.${o}.marker`), `${target}.tactics.${target}.phase`] }, 'batch'),
-	    call('read_state', { path: `${target}.tactics`, projection: 'keys' }, 'keys'),
-	    call('read_state', { path: `${target}.patches[0]` }, 'patch'),
-	    call('patch_state', modelPatchArguments(selected, { [target]: { tactics: { [target]: { phase: 2 } } } }), 'noop', () => { beforeNoop = files(); }),
+	    call('state_flow_patch', modelPatchArguments(selected, { [target]: { tactics: { [target]: { phase: 2 } } } }), 'phase2'),
+	    call('state_flow_read', { path: `${target}.tactics.${target}` }, 'current'),
+	    call('state_flow_read', { path: `${target}[1].tactics.${target}` }, 'history'),
+	    call('state_flow_read', { paths: [...selected.map(o => `${o}.tactics.${o}.marker`), `${target}.tactics.${target}.phase`] }, 'batch'),
+	    call('state_flow_read', { path: `${target}.tactics`, projection: 'keys' }, 'keys'),
+	    call('state_flow_read', { path: `${target}.patches[0]` }, 'patch'),
+	    call('state_flow_patch', modelPatchArguments(selected, { [target]: { tactics: { [target]: { phase: 2 } } } }), 'noop', () => { beforeNoop = files(); }),
 	  ];
 	  if (excluded.length) steps.push(
-	    call('patch_state', { [target]: { tactics: { atomicLeak: true } }, [excluded[0]]: { tactics: { forbidden: marker } } }, 'mixed', () => { afterNoop = files(); beforeReject = files(); }),
-	    call('read_state', { path: excluded[0] }, 'excluded', () => { afterReject = files(); }),
+	    call('state_flow_patch', { [target]: { tactics: { atomicLeak: true } }, [excluded[0]]: { tactics: { forbidden: marker } } }, 'mixed', () => { afterNoop = files(); beforeReject = files(); }),
+	    call('state_flow_read', { path: excluded[0] }, 'excluded', () => { afterReject = files(); }),
 	  );
 	  steps.push(c => { observe(c); if (!excluded.length) afterNoop = files(); return answer('ordinary final 2'); });
 	  f.faux.setResponses(steps);
@@ -5268,12 +5305,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	  assert.equal(getCurrentSystemMessage(offContext.messages)?.sections?.state_flow, undefined);
 	  assert.ok(!offContext.messages.some(m => m.role === 'user' && Array.isArray(m.content) && /^State Flow (?:runtime context|passive memory)/.test(text(m))), 'Off has no fresh automatic head; prior native tool/user trace remains legal');
 	  const offTools = getCurrentTools(offContext.messages).map(tool => tool.name);
-	  assert.ok(!offTools.includes('patch_state') && !offTools.includes('read_state'));
+	  assert.ok(!offTools.includes('state_flow_patch') && !offTools.includes('state_flow_read'));
 	  configure(owners);
 	  await session.prompt('/state-flow-passive');
 	  await session.prompt('/state-flow-active');
 	  if (mode === 'passive') await session.prompt('/state-flow-passive');
-	  f.faux.setResponses([call('patch_state', modelPatchArguments(selected, { [target]: { tactics: { [target]: { phase: 3 } } } }), 'afterOff'), final('after Off ordinary')]);
+	  f.faux.setResponses([call('state_flow_patch', modelPatchArguments(selected, { [target]: { tactics: { [target]: { phase: 3 } } } }), 'afterOff'), final('after Off ordinary')]);
 	  await session.prompt('First selected mutation after Off');
 	  result('afterOff');
 	  assert.equal(tactics(f.readState(session, 0, target))[target].phase, 3);
@@ -5387,7 +5424,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		// Semantic/provenance origins come from native read/patch tools, not fixture metadata.
 		f.faux.setResponses([
 			...owners.map(owner => call("read", { path: skills[owner] }, `initial-skill-${owner}`)),
-			call("patch_state", ownerRecord(owner => ({ artifacts: { [skills[owner]]: skillCard(owner), [ordinary[owner]]: { description: `Ordinary ${owner}` } }, tactics: { [`owner_${owner}`]: `OWNER-${owner}` }, lazy: { [`lazy_${owner}`]: `LAZY-BODY-${owner}` } })), "initial-register"),
+			call("state_flow_patch", ownerRecord(owner => ({ artifacts: { [skills[owner]]: skillCard(owner), [ordinary[owner]]: { description: `Ordinary ${owner}` } }, tactics: { [`owner_${owner}`]: `OWNER-${owner}` }, lazy: { [`lazy_${owner}`]: `LAZY-BODY-${owner}` } })), "initial-register"),
 			final("All three native owners registered"),
 		]);
 		await session.prompt("Read and compile all three registered native Skills and register exact ordinary paths");
@@ -5400,7 +5437,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		}
 		f.faux.setResponses([
 			...owners.map(owner => call("read", { path: ordinary[owner] }, `initial-ordinary-${owner}`)),
-			call("patch_state", ownerRecord(owner => ({ artifacts: { [ordinary[owner]]: { description: `Ordinary compiled ${owner}` } } })), "compile-ordinary"), final("Ordinary native provenance compiled"),
+			call("state_flow_patch", ownerRecord(owner => ({ artifacts: { [ordinary[owner]]: { description: `Ordinary compiled ${owner}` } } })), "compile-ordinary"), final("Ordinary native provenance compiled"),
 		]);
 		await session.prompt("Compile the three exact ordinary registered sources");
 		result("compile-ordinary");
@@ -5460,7 +5497,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			const excludedSteps = excluded.map(owner => call("read", { path: skills[owner] }, `excluded-read-${owner}`));
 			if (excluded.length) excludedSteps.push(context => {
 				observe(context); relocationStart = trace.events.length; trace.setPhase("relocation-attempt");
-				return answer(tool("patch_state", modelPatchArguments(selected, { [selected[0]]: { artifacts: { [skills[excluded[0]]]: skillCard(excluded[0]) } } }), { id: "relocate-excluded" }), { stopReason: "toolUse" });
+				return answer(tool("state_flow_patch", modelPatchArguments(selected, { [selected[0]]: { artifacts: { [skills[excluded[0]]]: skillCard(excluded[0]) } } }), { id: "relocate-excluded" }), { stopReason: "toolUse" });
 			});
 			excludedSteps.push(final("Excluded read and relocation observed in one native loop"));
 			f.faux.setResponses(excludedSteps);
@@ -5483,7 +5520,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			const beforeRefresh = trace.events.length;
 			f.faux.setResponses([
 				...selected.map(owner => call("read", { path: skills[owner] }, `selected-reread-${owner}`)),
-				call("patch_state", modelPatchArguments(selected, Object.fromEntries(selected.map(owner => [owner, { artifacts: { [skills[owner]]: skillCard(owner) } }]))), "rightful-refresh"), final("Rightful native selected compilation works"),
+				call("state_flow_patch", modelPatchArguments(selected, Object.fromEntries(selected.map(owner => [owner, { artifacts: { [skills[owner]]: skillCard(owner) } }]))), "rightful-refresh"), final("Rightful native selected compilation works"),
 			]);
 			await session.prompt("Read changed selected Skills and compile into rightful provenance-derived owners");
 			result("rightful-refresh");
@@ -5585,13 +5622,13 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	  const body = Object.fromEntries(scopes.map(scope => [scope, { tactics: { [`${scope}Marker`]: marker } }]));
 	  const beforeCalls = f.faux.state.callCount;
 	  f.faux.setResponses([
-	    () => fauxAssistantMessage(fauxToolCall('patch_state', modelPatchArguments(scopes, body), { id }), { stopReason: 'toolUse' }),
+	    () => fauxAssistantMessage(fauxToolCall('state_flow_patch', modelPatchArguments(scopes, body), { id }), { stopReason: 'toolUse' }),
 	    context => { results.push(...context.messages.filter((m): m is ToolResultMessage => m.role === 'toolResult' && m.toolCallId === id)); return fauxAssistantMessage(`NATIVE-ANSWER-${marker}`); },
 	  ]);
 	  await s.prompt(`NATIVE-REQUEST-${marker}`);
 	  assert.equal(f.faux.state.callCount - beforeCalls, 2);
 	  assert.equal(results.length, 1, 'original native result delivered exactly once');
-	  assert.equal(results[0]!.toolName, 'patch_state');
+	  assert.equal(results[0]!.toolName, 'state_flow_patch');
 	  assert.notEqual(results[0]!.isError, true, JSON.stringify(results[0]!.content));
 	  assert.equal(s.sessionManager.getBranch().filter(e => e.type === 'message' && e.message.role === 'assistant' && JSON.stringify(e.message.content).includes(`NATIVE-ANSWER-${marker}`)).length, 1, 'native answer delivered');
 	  for (const scope of scopes) assert.equal(f.readState(s, 0, scope).tactics[`${scope}Marker`], marker);
@@ -5796,7 +5833,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const runtime = await f.createRuntime("new"), session = runtime.session, target = scopes[0];
 		let seedResult: Context["messages"][number] | undefined;
 		f.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(scopes, { [target]: { tactics: { retained: "native-created" } } }), { id: "seed" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(scopes, { [target]: { tactics: { retained: "native-created" } } }), { id: "seed" }), { stopReason: "toolUse" }),
 			context => { seedResult = context.messages.find(message => message.role === "toolResult" && message.toolCallId === "seed"); return fauxAssistantMessage("Seed accepted"); },
 		]);
 		await session.prompt("Create selected memory through the original native tool");
@@ -5843,7 +5880,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.equal(f.readState(session, 0, target).tactics.retained, "native-created");
 		let freshResult: Context["messages"][number] | undefined;
 		f.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(scopes, { [target]: { tactics: { fresh: true } } }), { id: "fresh" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(scopes, { [target]: { tactics: { fresh: true } } }), { id: "fresh" }), { stopReason: "toolUse" }),
 			context => { freshResult = context.messages.find(message => message.role === "toolResult" && message.toolCallId === "fresh"); return fauxAssistantMessage("Fresh selected operation accepted"); },
 		]);
 		await session.prompt("Use the fresh selected original operation");
@@ -5879,7 +5916,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			fs.writeFileSync(`${f.repositoryRoot}/config.json`, JSON.stringify({ mode: "passive", scopes }));
 			const runtime = await f.createRuntime("new"), session = runtime.session;
 			f.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(scopes, { [target]: { tactics: { retained: "native-created" } } }), { id: "seed" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(scopes, { [target]: { tactics: { retained: "native-created" } } }), { id: "seed" }), { stopReason: "toolUse" }),
 				fauxAssistantMessage("Seed accepted"),
 			]);
 			await session.prompt("Create selected memory");
@@ -5900,7 +5937,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				return acquired.then(() => { oldSignal = args[2]; entered(); return Reflect.apply(patch, this, args); });
 			});
 			f.faux.setResponses(kind === "patch" ? [
-				fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(scopes, { [target]: { tactics: { stale: marker } } }), { id: "waiting-native-patch" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(scopes, { [target]: { tactics: { stale: marker } } }), { id: "waiting-native-patch" }), { stopReason: "toolUse" }),
 				fauxAssistantMessage("Old native tool settled"),
 			] : [fauxAssistantMessage(marker)]);
 			const operation = session.prompt(`Begin cancellable ${kind}`);
@@ -5925,7 +5962,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			}
 			await session.prompt("/state-flow-active");
 			f.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(scopes, { [target]: { tactics: { fresh: true } } }), { id: "fresh" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(scopes, { [target]: { tactics: { fresh: true } } }), { id: "fresh" }), { stopReason: "toolUse" }),
 				fauxAssistantMessage("Fresh answer"),
 			]);
 			await session.prompt("Use a fresh selected native request");
@@ -5949,7 +5986,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		};
 		const publish = async (session: typeof first, field: string, id: string) => {
 			f.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("patch_state", modelPatchArguments(scopes, Object.fromEntries(scopes.map(scope => [scope, { strategy: { [field]: id } }]))), { id }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("state_flow_patch", modelPatchArguments(scopes, Object.fromEntries(scopes.map(scope => [scope, { strategy: { [field]: id } }]))), { id }), { stopReason: "toolUse" }),
 				context => { observe(context); return fauxAssistantMessage(`Accepted ${id}`); },
 			]);
 			await session.prompt(`Publish ${id}`);
@@ -5966,7 +6003,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		}
 		await second.reload();
 		f.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("read_state", { paths: scopes.flatMap(scope => ["firstOwner", "secondOwner", "firstAfterPeer"].map(field => `${scope}.strategy.${field}`)) }, { id: "peer-read" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("state_flow_read", { paths: scopes.flatMap(scope => ["firstOwner", "secondOwner", "firstAfterPeer"].map(field => `${scope}.strategy.${field}`)) }, { id: "peer-read" }), { stopReason: "toolUse" }),
 			context => { observe(context); return fauxAssistantMessage("Current peer values observed"); },
 		]);
 		await second.prompt("Read current shared values after native reload");
@@ -6029,7 +6066,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	    await session.prompt('Observe mode before the first native patch');
 	    assert.equal(calls, 1);
 	    assert.ok(observed);
-	    for (const name of ['patch_state', 'read_state']) assert.equal(getCurrentTools(observed.messages).some(v => v.name === name), chosen !== 'off');
+	    for (const name of ['state_flow_patch', 'state_flow_read']) assert.equal(getCurrentTools(observed.messages).some(v => v.name === name), chosen !== 'off');
 	    if (chosen === 'off') assert.equal(getCurrentSystemMessage(observed.messages)?.sections?.state_flow, undefined);
 	    if (chosen !== 'active') {
 	      assert.deepEqual(files(), before, 'Passive/Off ordinary delivery cannot initialize canonical lifecycle');
@@ -6043,7 +6080,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	    const marker = `public-${selected.join('-')}-${chosen}`;
 	    const patch = Object.fromEntries(selected.map(o => [o, { tactics: { [o]: marker }, lazy: { hidden: `LAZY-${marker}` } }]));
 	    f.faux.setResponses([
-	      () => { calls++; return answer(tool('patch_state', modelPatchArguments(selected, patch), { id: 'public-first-patch' }), { stopReason: 'toolUse' }); },
+	      () => { calls++; return answer(tool('state_flow_patch', modelPatchArguments(selected, patch), { id: 'public-first-patch' }), { stopReason: 'toolUse' }); },
 	      c => { calls++; results.push(...c.messages.filter((m): m is ToolResultMessage => m.role === 'toolResult' && m.toolCallId === 'public-first-patch')); patchBytes = owners.map(semantic); return answer('Public ordinary answer'); },
 	    ]);
 	    await session.prompt('Write the publicly selected native owners');
@@ -6058,7 +6095,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	      const reads: ToolResultMessage[] = [];
 	      calls = 0;
 	      f.faux.setResponses([
-	        () => { calls++; return answer(tool('read_state', { path }, { id: `public-read-${i}` }), { stopReason: 'toolUse' }); },
+	        () => { calls++; return answer(tool('state_flow_read', { path }, { id: `public-read-${i}` }), { stopReason: 'toolUse' }); },
 	        c => {
 	          calls++; reads.push(...c.messages.filter((m): m is ToolResultMessage => m.role === 'toolResult' && m.toolCallId === `public-read-${i}`));
 	          observed = structuredClone(c); return answer('Read finished');
@@ -6125,7 +6162,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	}
 	async function seed(f: RealPiFixture, s: AgentSession, scopes = DEFAULT_SCOPE_SELECTION) {
 		const results: ToolResultMessage[] = [];
-		f.faux.setResponses([answer(tool("patch_state", modelPatchArguments(scopes, { cwd: { tactics: { retained: true } } }), { id: "public-seed" }), { stopReason: "toolUse" }), c => {
+		f.faux.setResponses([answer(tool("state_flow_patch", modelPatchArguments(scopes, { cwd: { tactics: { retained: true } } }), { id: "public-seed" }), { stopReason: "toolUse" }), c => {
 			results.push(...c.messages.filter((m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "public-seed")); return answer("Seed accepted");
 		}]);
 		await s.prompt("Create genuine native source"); assert.equal(results.length, 1); assert.notEqual(results[0]!.isError, true);
@@ -6227,7 +6264,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			holding = withStorageTransaction(f.repositoryRoot, async () => { entered(); await gate; });
 			return acquired.then(() => { oldSignal = a[2]; staged(); return Reflect.apply(patch, this, a); });
 		});
-		f.faux.setResponses([answer(tool("patch_state", { cwd: { tactics: { held: true } } }, { id: "held-public-patch" }), { stopReason: "toolUse" }), answer("Old operation delivered")]);
+		f.faux.setResponses([answer(tool("state_flow_patch", { cwd: { tactics: { held: true } } }, { id: "held-public-patch" }), { stopReason: "toolUse" }), answer("Old operation delivered")]);
 		const operation = session.prompt("Begin pending native mutation");
 		let b: Promise<void> | undefined, a: Promise<void> | undefined;
 		try {
@@ -6399,7 +6436,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const result = h.handlers.get("tool_result")!({ toolCallId: "owned-skill", toolName: "read", input: { path: source }, isError: false, content: [] }, h.ctx);
 		assert.match(JSON.stringify(result), /belongs at cwd\.artifacts/);
 		assert.match(current().successful.get(source)!.hash!, /^sha256:[0-9a-f]{64}$/);
-		await h.tools.get("patch_state")!.execute("compile-owned-skill", { cwd: { artifacts: { [source]: { description: "Owned guidance", kind: "skill", compilation: { rule: "native scoped guidance" } } } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("compile-owned-skill", { cwd: { artifacts: { [source]: { description: "Owned guidance", kind: "skill", compilation: { rule: "native scoped guidance" } } } } }, undefined, undefined, h.ctx);
 		assert.deepEqual(h.readState(0, "cwd").artifacts[source].compilation, { rule: "native scoped guidance" });
 		assert.equal(current().successful.has(source), false);
 	});
@@ -6563,7 +6600,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const { session } = await f.createRuntime("new"); await session.prompt(`/state-flow-${mode} ${selected.join(" ")}`);
 		const seed = Object.fromEntries(selected.map(owner => [owner, { intents: { task: { $ref: `${selected.length === 1 ? "" : owner + "."}lazy.plan` } }, strategy: { literal: `${owner}.lazy.plan` }, lazy: { plan: ["BODY_NOT_IN_HEAD"] } }]));
 		let seeded: ToolResultMessage | undefined;
-		f.faux.setResponses([answer(tool("patch_state", modelPatchArguments(selected, seed), { id: "seed-context" }), { stopReason: "toolUse" }), c => { seeded = result(c, "seed-context"); return answer("Seeded"); }]);
+		f.faux.setResponses([answer(tool("state_flow_patch", modelPatchArguments(selected, seed), { id: "seed-context" }), { stopReason: "toolUse" }), c => { seeded = result(c, "seed-context"); return answer("Seeded"); }]);
 		await session.prompt("Seed actual canonical memory"); assert.ok(seeded);
 		for (const owner of selected) assert.deepEqual(f.readState(session, 0, owner).intents.task, { $ref: `${owner}.lazy.plan` });
 		await session.reload(); let observed: Context | undefined;
@@ -6595,12 +6632,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		writeFileSync(`${f.repositoryRoot}/config.json`, JSON.stringify({ mode: "off", scopes: owners }));
 		const { session } = await f.createRuntime("new"); await session.prompt(`/state-flow-active ${owner}`);
 		let seed: ToolResultMessage | undefined;
-		f.faux.setResponses([answer(tool("patch_state", { lazy: { plan: "PRIVATE_LAZY_BODY" }, tactics: { step: "draft", kept: true }, intents: { task: { owns: [{ $ref: "lazy.plan" }, { $ref: "tactics.step" }] } } }, { id: "cascade-seed" }), { stopReason: "toolUse" }), c => { seed = result(c, "cascade-seed"); return answer("Seeded cascade"); }]);
+		f.faux.setResponses([answer(tool("state_flow_patch", { lazy: { plan: "PRIVATE_LAZY_BODY" }, tactics: { step: "draft", kept: true }, intents: { task: { owns: [{ $ref: "lazy.plan" }, { $ref: "tactics.step" }] } } }, { id: "cascade-seed" }), { stopReason: "toolUse" }), c => { seed = result(c, "cascade-seed"); return answer("Seeded cascade"); }]);
 		await session.prompt("Seed a real ref dependency"); assert.ok(seed); await session.reload();
 		let before: ReturnType<typeof head> | undefined, receipt: ToolResultMessage | undefined, read: ToolResultMessage | undefined;
 		f.faux.setResponses([
-			c => { before = head(c, "active"); return answer(tool("patch_state", { intents: { task: null } }, { id: "cascade-delete" }), { stopReason: "toolUse" }); },
-			c => { receipt = result(c, "cascade-delete"); return answer(tool("read_state", { path: "tactics" }, { id: "cascade-inspect" }), { stopReason: "toolUse" }); },
+			c => { before = head(c, "active"); return answer(tool("state_flow_patch", { intents: { task: null } }, { id: "cascade-delete" }), { stopReason: "toolUse" }); },
+			c => { receipt = result(c, "cascade-delete"); return answer(tool("state_flow_read", { path: "tactics" }, { id: "cascade-inspect" }), { stopReason: "toolUse" }); },
 			c => { read = result(c, "cascade-inspect"); return answer("Cascade inspected"); },
 		]);
 		await session.prompt("Delete source and inspect actual cascade"); assert.ok(before && receipt && read);
@@ -6618,7 +6655,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	test("actual wanted CWD+Session with available-only CWD keeps multi context and does not acquire private files", { timeout: 30_000 }, async t => {
 		const f = await realPiFixture(t, { initializeRepository: false }), { session } = await f.createRuntime("new");
 		await session.prompt("/state-flow-passive cwd"); let seeded: ToolResultMessage | undefined;
-		f.faux.setResponses([answer(tool("patch_state", { intents: { task: { $ref: "lazy.plan" } }, lazy: { plan: "ONLY_LAZY" } }, { id: "shared-seed" }), { stopReason: "toolUse" }), c => { seeded = result(c, "shared-seed"); return answer("Shared"); }]);
+		f.faux.setResponses([answer(tool("state_flow_patch", { intents: { task: { $ref: "lazy.plan" } }, lazy: { plan: "ONLY_LAZY" } }, { id: "shared-seed" }), { stopReason: "toolUse" }), c => { seeded = result(c, "shared-seed"); return answer("Shared"); }]);
 		await session.prompt("Seed shared ref"); assert.ok(seeded); await session.prompt("/state-flow-passive cwd session");
 		const paths = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
 		const presence = () => [paths.checkpoint, paths.patches, paths.meta].map(path => existsSync(path));
@@ -6678,19 +6715,19 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	    }]));
 	    let beforeReads: ReturnType<typeof files> | undefined, afterReads: ReturnType<typeof files> | undefined;
 	    const steps: FauxResponseFactory[] = [
-	      call('patch_state', modelPatchArguments(selected, patch(1)), 'patch1'), call('patch_state', modelPatchArguments(selected, patch(2)), 'patch2'),
-	      call('read_state', { path: 'tactics.items[1]' }, 'flat', () => { beforeReads = files(); }),
-	      call('read_state', { path: `${target}.intents.links` }, 'explicit-refs'),
-	      call('read_state', { path: 'lazy.body' }, 'lazy-refs'),
-	      call('read_state', { path: 'effective[1].tactics.items[1]' }, 'history'),
-	      call('read_state', { paths: [`${target}.tactics.items[1]`, 'tactics.items[0]', `${target}.intents.links`] }, 'batch'),
-	      call('read_state', { path: 'tactics', projection: 'keys' }, 'keys'),
-	      call('read_state', { path: 'patches[0]' }, 'alias-patch'),
-	      call('read_state', { path: `${target}.patches[0]` }, 'explicit-patch'),
-	      call('read_state', { path: 'nonexistent.value' }, 'bad-root'),
-	      call('read_state', { paths: [`${target}.tactics.items[1]`, 'nonexistent.value'] }, 'bad-batch'),
+	      call('state_flow_patch', modelPatchArguments(selected, patch(1)), 'patch1'), call('state_flow_patch', modelPatchArguments(selected, patch(2)), 'patch2'),
+	      call('state_flow_read', { path: 'tactics.items[1]' }, 'flat', () => { beforeReads = files(); }),
+	      call('state_flow_read', { path: `${target}.intents.links` }, 'explicit-refs'),
+	      call('state_flow_read', { path: 'lazy.body' }, 'lazy-refs'),
+	      call('state_flow_read', { path: 'effective[1].tactics.items[1]' }, 'history'),
+	      call('state_flow_read', { paths: [`${target}.tactics.items[1]`, 'tactics.items[0]', `${target}.intents.links`] }, 'batch'),
+	      call('state_flow_read', { path: 'tactics', projection: 'keys' }, 'keys'),
+	      call('state_flow_read', { path: 'patches[0]' }, 'alias-patch'),
+	      call('state_flow_read', { path: `${target}.patches[0]` }, 'explicit-patch'),
+	      call('state_flow_read', { path: 'nonexistent.value' }, 'bad-root'),
+	      call('state_flow_read', { paths: [`${target}.tactics.items[1]`, 'nonexistent.value'] }, 'bad-batch'),
 	    ];
-	    if (excluded.length) steps.push(call('read_state', { paths: [`${target}.tactics.items[1]`, `${excluded[0]}.tactics`] }, 'excluded'));
+	    if (excluded.length) steps.push(call('state_flow_read', { paths: [`${target}.tactics.items[1]`, `${excluded[0]}.tactics`] }, 'excluded'));
 	    steps.push(c => { observe(c); afterReads = files(); return answer('Completed native read cohort'); });
 	    f.faux.setResponses(steps);
 	    await session.prompt('Patch twice, then inspect current and historical selected memory in this operation.');
@@ -6731,7 +6768,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	    assert.ok(off);
 	    const names = getCurrentTools(off.messages).map(v => v.name);
 	    assert.ok(names.includes('read'));
-	    assert.ok(!names.includes('read_state') && !names.includes('patch_state'));
+	    assert.ok(!names.includes('state_flow_read') && !names.includes('state_flow_patch'));
 	    assert.deepEqual(files(), beforeOff);
 	    assert.deepEqual(errors, []);
 	  });
@@ -6744,7 +6781,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const h = harness({ initializeRepository: false, mode: "passive" });
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 		await h.commands.get("state-flow-passive")!.handler("cwd", h.ctx);
-		await h.tools.get("patch_state")!.execute("seed", modelPatchArguments(["cwd"], { cwd: { tactics: { marker: "OLD_CWD_BODY" } } }), undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("seed", modelPatchArguments(["cwd"], { cwd: { tactics: { marker: "OLD_CWD_BODY" } } }), undefined, undefined, h.ctx);
 		const controller = new AbortController(), cwd = h.ctx.cwd;
 		const pending: Promise<unknown>[] = [];
 		let captures = 0;
@@ -6758,7 +6795,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			return "cwd.tactics.marker";
 		} };
 		try {
-			const reading = h.tools.get("read_state")!.execute("late-raw-read", params, controller.signal, undefined, h.ctx);
+			const reading = h.tools.get("state_flow_read")!.execute("late-raw-read", params, controller.signal, undefined, h.ctx);
 			if (change === "equal") assert.match(JSON.stringify(await reading), /OLD_CWD_BODY/);
 			else await assert.rejects(reading);
 			assert.equal(captures, 1, "detach once, never reread live arguments after final lease check");
@@ -6776,11 +6813,11 @@ test("accepted restoration survives a native checkpoint failure without rollback
 
 	for (const change of ["sole-owner", "sole-aba", "arity", "off", "off-aba", "equal"] as const)
 	test(`actual native flat read retains original owner across public ${change}`, { timeout: 30_000 }, async t => {
-		const f = await realPiFixture(t, { initializeRepository: false, tools: ["read", "read_state", "patch_state"] });
+		const f = await realPiFixture(t, { initializeRepository: false, tools: ["read", "state_flow_read", "state_flow_patch"] });
 		const { session } = await f.createRuntime("new");
 		await session.prompt("/state-flow-passive cwd");
 		const results = new Map<string, ToolResultMessage>();
-		f.faux.setResponses([answer(tool("patch_state", modelPatchArguments(["cwd"], { cwd: { lazy: { box: { $ref: "cwd.tactics.x" } }, tactics: { x: "ORIGINAL_CWD" } } }), { id: "seed" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("Seeded"); }]);
+		f.faux.setResponses([answer(tool("state_flow_patch", modelPatchArguments(["cwd"], { cwd: { lazy: { box: { $ref: "cwd.tactics.x" } }, tactics: { x: "ORIGINAL_CWD" } } }), { id: "seed" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("Seeded"); }]);
 		await session.prompt("Seed actual selected memory");
 		const seeded = results.get("seed"); assert.ok(seeded); assert.notEqual(seeded.isError, true, text(seeded));
 		const semantic = () => {
@@ -6796,7 +6833,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				if (change === "arity") { await session.prompt("/state-flow-passive global cwd"); controls++; }
 				if (change === "off" || change === "off-aba") { await session.prompt("/state-flow-off"); controls++; }
 				if (change === "sole-aba" || change === "off-aba" || change === "equal") { await session.prompt("/state-flow-passive cwd"); controls++; }
-				return answer([tool("read_state", { path: "lazy.box" }, { id: "old-flat-read" }), tool("read", { path: foreign }, { id: "unrelated-read" })], { stopReason: "toolUse" });
+				return answer([tool("state_flow_read", { path: "lazy.box" }, { id: "old-flat-read" }), tool("read", { path: foreign }, { id: "unrelated-read" })], { stopReason: "toolUse" });
 			},
 			c => { observe(c, results); return answer("Actual continuation"); },
 		]);
@@ -6809,7 +6846,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const unrelated = results.get("unrelated-read"); assert.ok(unrelated); assert.notEqual(unrelated.isError, true, text(unrelated)); assert.match(text(unrelated), /FOREIGN_READ_OK/);
 		assert.deepEqual(semantic(), before, "mode/selection/read is not semantic mutation");
 		await session.prompt("/state-flow-passive cwd");
-		f.faux.setResponses([answer(tool("read_state", { path: "lazy.box" }, { id: "fresh-flat-read" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("Fresh receipt"); }]);
+		f.faux.setResponses([answer(tool("state_flow_read", { path: "lazy.box" }, { id: "fresh-flat-read" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("Fresh receipt"); }]);
 		await session.prompt("Read with fresh current native receipt");
 		const fresh = results.get("fresh-flat-read"); assert.ok(fresh); assert.notEqual(fresh.isError, true, text(fresh));
 		assert.deepEqual(JSON.parse(text(fresh)), { value: { $ref: "tactics.x" } });
@@ -6821,7 +6858,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const { session } = await f.createRuntime("new");
 		await session.prompt("/state-flow-passive cwd");
 		const results = new Map<string, ToolResultMessage>();
-		f.faux.setResponses([answer(tool("patch_state", modelPatchArguments(["cwd"], { cwd: { intents: { i: { $ref: "cwd.lazy.plan" } }, lazy: { plan: ["kept"] } } }), { id: "source" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("Seed shared source"); }]);
+		f.faux.setResponses([answer(tool("state_flow_patch", modelPatchArguments(["cwd"], { cwd: { intents: { i: { $ref: "cwd.lazy.plan" } }, lazy: { plan: ["kept"] } } }), { id: "source" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("Seed shared source"); }]);
 		await session.prompt("Seed genuine native CWD-only bookmark");
 		const source = results.get("source"); assert.ok(source); assert.notEqual(source.isError, true, text(source));
 		await session.prompt("/state-flow-passive cwd session");
@@ -6830,9 +6867,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.deepEqual(privatePresence(), [false, false, false]);
 		const before = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, key);
 		f.faux.setResponses([
-			answer(tool("read_state", { path: "intents.i" }, { id: "wanted-multi" }), { stopReason: "toolUse" }),
-			c => { observe(c, results); return answer(tool("read_state", { path: "patches[0]" }, { id: "no-single-alias" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); return answer(tool("read_state", { paths: ["intents.i", "session.lazy.plan"] }, { id: "unavailable-private-batch" }), { stopReason: "toolUse" }); },
+			answer(tool("state_flow_read", { path: "intents.i" }, { id: "wanted-multi" }), { stopReason: "toolUse" }),
+			c => { observe(c, results); return answer(tool("state_flow_read", { path: "patches[0]" }, { id: "no-single-alias" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); return answer(tool("state_flow_read", { paths: ["intents.i", "session.lazy.plan"] }, { id: "unavailable-private-batch" }), { stopReason: "toolUse" }); },
 			c => { observe(c, results); return answer("Observed only, not acquired"); },
 		]);
 		await session.prompt("Read wanted multi-owner policy over sparse available view");
@@ -6849,9 +6886,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const { session } = await f.createRuntime("new"); await session.prompt("/state-flow-passive cwd");
 		const results = new Map<string, ToolResultMessage>();
 		f.faux.setResponses([
-			answer(tool("patch_state", modelPatchArguments(["cwd"], { cwd: { tactics: { current: "FOLDED_CURRENT_VALUE" } } }), { id: "material" }), { stopReason: "toolUse" }),
-			c => { observe(c, results); return answer(tool("read_state", { path: "patches[0]" }, { id: "folded-patch" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); return answer(tool("read_state", { path: "tactics.current" }, { id: "available-current" }), { stopReason: "toolUse" }); },
+			answer(tool("state_flow_patch", modelPatchArguments(["cwd"], { cwd: { tactics: { current: "FOLDED_CURRENT_VALUE" } } }), { id: "material" }), { stopReason: "toolUse" }),
+			c => { observe(c, results); return answer(tool("state_flow_read", { path: "patches[0]" }, { id: "folded-patch" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); return answer(tool("state_flow_read", { path: "tactics.current" }, { id: "available-current" }), { stopReason: "toolUse" }); },
 			c => { observe(c, results); return answer("History absent, value present"); },
 		]);
 		await session.prompt("Keep current values without fabricated history");
@@ -6875,15 +6912,15 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const results = new Map<string, ToolResultMessage>(); let calls = 0, stored: JsonValue | undefined;
 		const observe = (c: Context) => { calls++; for (const m of c.messages) if (m.role === "toolResult") results.set(m.toolCallId, structuredClone(m)); };
 		f.faux.setResponses([
-			c => { observe(c); return answer(tool("patch_state", modelPatchArguments([owner], { [owner]: { intents: { original: { $ref: `${owner}.lazy.plan` } }, lazy: { plan: { keep: true } } } }), { id: "seed" }), { stopReason: "toolUse" }); },
-			c => { observe(c); return answer(tool("read_state", { path: "intents.original" }, { id: "read-flat-ref" }), { stopReason: "toolUse" }); },
-			c => { observe(c); const ref = JSON.parse(text(results.get("read-flat-ref")!)).value; return answer(tool("patch_state", modelPatchArguments([owner], { [owner]: { intents: { original: null, copy: ref } } }), { id: "roundtrip" }), { stopReason: "toolUse" }); },
-			c => { observe(c); stored = structuredClone(f.readState(session, 0, owner).intents); return answer(tool("read_state", { path: "lazy.plan" }, { id: "still-owned" }), { stopReason: "toolUse" }); },
-			c => { observe(c); return answer(tool("patch_state", modelPatchArguments([owner], { [owner]: { intents: { copy: null } } }), { id: "close-copy" }), { stopReason: "toolUse" }); },
-			c => { observe(c); return answer(tool("read_state", { path: "lazy.plan" }, { id: "closed-target" }), { stopReason: "toolUse" }); },
+			c => { observe(c); return answer(tool("state_flow_patch", modelPatchArguments([owner], { [owner]: { intents: { original: { $ref: `${owner}.lazy.plan` } }, lazy: { plan: { keep: true } } } }), { id: "seed" }), { stopReason: "toolUse" }); },
+			c => { observe(c); return answer(tool("state_flow_read", { path: "intents.original" }, { id: "read-flat-ref" }), { stopReason: "toolUse" }); },
+			c => { observe(c); const ref = JSON.parse(text(results.get("read-flat-ref")!)).value; return answer(tool("state_flow_patch", modelPatchArguments([owner], { [owner]: { intents: { original: null, copy: ref } } }), { id: "roundtrip" }), { stopReason: "toolUse" }); },
+			c => { observe(c); stored = structuredClone(f.readState(session, 0, owner).intents); return answer(tool("state_flow_read", { path: "lazy.plan" }, { id: "still-owned" }), { stopReason: "toolUse" }); },
+			c => { observe(c); return answer(tool("state_flow_patch", modelPatchArguments([owner], { [owner]: { intents: { copy: null } } }), { id: "close-copy" }), { stopReason: "toolUse" }); },
+			c => { observe(c); return answer(tool("state_flow_read", { path: "lazy.plan" }, { id: "closed-target" }), { stopReason: "toolUse" }); },
 			c => { observe(c); return answer("Read and write stay coherent"); },
 		]);
-		await session.prompt("Move this intent using the ref actually returned by read_state, then close it");
+		await session.prompt("Move this intent using the ref actually returned by state_flow_read, then close it");
 		assert.equal(calls, 7);
 		for (const id of ["seed", "read-flat-ref", "roundtrip", "still-owned", "close-copy"]) { const r = results.get(id); assert.ok(r, id); assert.notEqual(r.isError, true, `${id}: ${text(r)}`); }
 		assert.deepEqual(JSON.parse(text(results.get("read-flat-ref")!)), { value: { $ref: "lazy.plan" } });
@@ -6904,7 +6941,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	function assertInterface(context: Context, selected: readonly string[], mode: "active" | "passive") {
 		const protocol = section(context); assert.equal(typeof protocol, "string", "a validated native view contributes the mode protocol");
 		if (selected.length === 1) {
-			assert.match(protocol!, /One-owner interface: patch_state takes intents\/strategy\/tactics\/artifacts\/lazy object planes directly/);
+			assert.match(protocol!, /One-owner interface: state_flow_patch takes intents\/strategy\/tactics\/artifacts\/lazy object planes directly/);
 			assert.match(protocol!, /never add an owner wrapper/);
 			assert.match(protocol!, /\{"\$ref":"lazy\.plan"\}/);
 			assert.match(protocol!, /nested array\[N\] stays an array index/);
@@ -6916,7 +6953,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		}
 		if (mode === "passive") assert.match(protocol!, /Passive turns never trigger State Flow continuation or compaction/);
 		else assert.match(protocol!, /sole model-authored semantic mutation mechanism/);
-		const declaration = getCurrentTools(context.messages).find(v => v.name === "patch_state"); assert.ok(declaration);
+		const declaration = getCurrentTools(context.messages).find(v => v.name === "state_flow_patch"); assert.ok(declaration);
 		assert.deepEqual(Object.keys((declaration.parameters as { properties: object }).properties).sort(), selected.length === 1 ? ["artifacts", "intents", "lazy", "strategy", "tactics"] : ["cwd", "global", "session"]);
 	}
 
@@ -6932,8 +6969,8 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const target = selected.at(-1)!;
 		const patch = Object.fromEntries(selected.map(owner => [owner, { strategy: { normative: owner }, intents: { task: { $ref: `${selected.length === 1 ? "" : owner + "."}lazy.plan` } }, lazy: { plan: ["next"] } }]));
 		f.faux.setResponses([
-			c => { observe(c); return answer(tool("patch_state", modelPatchArguments(selected, patch), { id: "normative-patch" }), { stopReason: "toolUse" }); },
-			c => { observe(c); beforeRead = files(); return answer(tool("read_state", { path: "intents.task" }, { id: "normative-read" }), { stopReason: "toolUse" }); },
+			c => { observe(c); return answer(tool("state_flow_patch", modelPatchArguments(selected, patch), { id: "normative-patch" }), { stopReason: "toolUse" }); },
+			c => { observe(c); beforeRead = files(); return answer(tool("state_flow_read", { path: "intents.task" }, { id: "normative-read" }), { stopReason: "toolUse" }); },
 			c => { observe(c); afterRead = files(); return answer("Normative native continuation"); },
 		]);
 		await session.prompt("Use the actual selected model grammar, then read its ref");
@@ -6958,7 +6995,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const f = await realPiFixture(t, { initializeRepository: false }), { session } = await f.createRuntime("new");
 		await session.prompt("/state-flow-passive cwd");
 		let patched: ToolResultMessage | undefined;
-		f.faux.setResponses([answer(tool("patch_state", { tactics: { known: true } }, { id: "source" }), { stopReason: "toolUse" }), c => { patched = c.messages.find((m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "source"); return answer("Shared only"); }]);
+		f.faux.setResponses([answer(tool("state_flow_patch", { tactics: { known: true } }, { id: "source" }), { stopReason: "toolUse" }), c => { patched = c.messages.find((m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "source"); return answer("Shared only"); }]);
 		await session.prompt("Establish actual shared source"); assert.ok(patched); assert.notEqual(patched.isError, true, text(patched));
 		await session.prompt("/state-flow-passive cwd session");
 		const p = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
@@ -6990,15 +7027,15 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		let beforeInvalid: ReturnType<typeof files> | undefined, afterInvalid: ReturnType<typeof files> | undefined;
 		const target = selected[0]; const update = modelPatchArguments(selected, { [target]: { tactics: { slots: { "[0]": { n: 3 } } } } });
 		f.faux.setResponses([
-			c => { contexts.push(structuredClone(c)); observe(c, results); return answer(tool("patch_state", args, { id: "initial" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); return answer(tool("patch_state", update, { id: "array-update" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); return answer(tool("read_state", { path: `${target}.tactics.slots[0].n` }, { id: "array-current" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); beforeInvalid = files(); return answer(tool("patch_state", selected.length === 1 ? { tactics: {}, [target]: { tactics: { forbidden: true } } } : { tactics: { forbidden: true } }, { id: "wrong-family" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); afterInvalid = files(); return answer(tool("read_state", { path: `${target}.intents.task` }, { id: "ref" }), { stopReason: "toolUse" }); },
+			c => { contexts.push(structuredClone(c)); observe(c, results); return answer(tool("state_flow_patch", args, { id: "initial" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); return answer(tool("state_flow_patch", update, { id: "array-update" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); return answer(tool("state_flow_read", { path: `${target}.tactics.slots[0].n` }, { id: "array-current" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); beforeInvalid = files(); return answer(tool("state_flow_patch", selected.length === 1 ? { tactics: {}, [target]: { tactics: { forbidden: true } } } : { tactics: { forbidden: true } }, { id: "wrong-family" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); afterInvalid = files(); return answer(tool("state_flow_read", { path: `${target}.intents.task` }, { id: "ref" }), { stopReason: "toolUse" }); },
 			c => { observe(c, results); return answer("Mutation settled"); },
 		]);
 		await session.prompt("Use the actual declared mutation grammar and preserve canonical replay");
-		assert.equal(contexts.length, 1); const declaration = getCurrentTools(contexts[0]!.messages).find(v => v.name === "patch_state"); assert.ok(declaration);
+		assert.equal(contexts.length, 1); const declaration = getCurrentTools(contexts[0]!.messages).find(v => v.name === "state_flow_patch"); assert.ok(declaration);
 		assert.deepEqual(Object.keys((declaration.parameters as { properties: object }).properties).sort(), selected.length === 1 ? ["artifacts", "intents", "lazy", "strategy", "tactics"] : ["cwd", "global", "session"]);
 		for (const id of ["initial", "array-update", "array-current", "ref"]) { const r = results.get(id); assert.ok(r, id); assert.notEqual(r.isError, true, `${id}: ${text(r)}`); }
 		assert.deepEqual(JSON.parse(text(results.get("array-current")!)), { value: 3 });
@@ -7010,9 +7047,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 
 	test("actual mutation registration caches only flat/multi shape on an unregistered template", { timeout: 30_000 }, async t => {
 		let api!: ExtensionAPI; const schemas: unknown[] = [];
-		const f = await realPiFixture(t, { stateFlow: false, initializeRepository: false, tools: ["read", "read_state", "patch_state"], extensions: [{ name: "actual-state-flow-registration-observer", factory(pi) {
+		const f = await realPiFixture(t, { stateFlow: false, initializeRepository: false, tools: ["read", "state_flow_read", "state_flow_patch"], extensions: [{ name: "actual-state-flow-registration-observer", factory(pi) {
 			api = pi; const register = pi.registerTool;
-			pi.registerTool = definition => { if (definition.name === "patch_state") schemas.push(definition.parameters); register(definition); };
+			pi.registerTool = definition => { if (definition.name === "state_flow_patch") schemas.push(definition.parameters); register(definition); };
 			stateFlowExtension(pi, { agentDir: f.agentDir, repositoryRoot: f.repositoryRoot });
 		} }] });
 		const { session } = await f.createRuntime("new"); assert.equal(schemas.length, 1);
@@ -7024,7 +7061,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await session.prompt("/state-flow-passive session"); assert.equal(schemas.length, 4);
 		assert.equal(schemas[1], schemas[3], "same flat schema reused without sole-owner embedded identity");
 		assert.equal(schemas[0], schemas[2], "same scoped schema reused");
-		const active = api.getActiveTools(); assert.ok(active.includes("read_state") && active.includes("patch_state"));
+		const active = api.getActiveTools(); assert.ok(active.includes("state_flow_read") && active.includes("state_flow_patch"));
 		const before = schemas.length; f.faux.setResponses([answer("No mutation")]); await session.prompt("Ordinary inference never registers again"); assert.equal(schemas.length, before);
 	});
 
@@ -7040,7 +7077,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				if (change === "off-aba") { await session.prompt("/state-flow-off"); await session.prompt("/state-flow-passive cwd"); }
 				else { await session.prompt(change === "arity" ? "/state-flow-passive global cwd" : "/state-flow-passive global"); if (change === "sole-aba") await session.prompt("/state-flow-passive cwd"); }
 				changed = true;
-				return answer(tool("patch_state", modelPatchArguments(selection, { cwd: { tactics: { stale: true } } }), { id: "old-mutation" }), { stopReason: "toolUse" });
+				return answer(tool("state_flow_patch", modelPatchArguments(selection, { cwd: { tactics: { stale: true } } }), { id: "old-mutation" }), { stopReason: "toolUse" });
 			},
 			c => { observe(c, results); return answer("Fresh continuation"); },
 		]);
@@ -7048,7 +7085,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.equal(changed, true); const old = results.get("old-mutation"); assert.ok(old); assert.equal(old.isError, true, text(old));
 		assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), before, "unaccepted stale native operation never creates semantic/lifecycle authority");
 		await session.prompt("/state-flow-passive cwd");
-		f.faux.setResponses([answer(tool("patch_state", { tactics: { fresh: true } }, { id: "fresh-mutation" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("Fresh accepted"); }]);
+		f.faux.setResponses([answer(tool("state_flow_patch", { tactics: { fresh: true } }, { id: "fresh-mutation" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("Fresh accepted"); }]);
 		await session.prompt("Fresh native receipt may independently author its actual sole owner");
 		const fresh = results.get("fresh-mutation"); assert.ok(fresh); assert.notEqual(fresh.isError, true, text(fresh)); assert.equal(f.readState(session, 0, "cwd").tactics.fresh, true);
 	});
@@ -7057,12 +7094,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		let api!: ExtensionAPI; let registrations = 0;
 		const f = await realPiFixture(t, { stateFlow: false, tools: ["read"], initializeRepository: false, extensions: [{ name: "actual-host-filtered-state-flow", factory(pi) {
 			api = pi; const register = pi.registerTool;
-			pi.registerTool = definition => { if (definition.name === "patch_state") registrations++; register(definition); };
+			pi.registerTool = definition => { if (definition.name === "state_flow_patch") registrations++; register(definition); };
 			stateFlowExtension(pi, { agentDir: f.agentDir, repositoryRoot: f.repositoryRoot });
 		} }] });
 		const { session } = await f.createRuntime("new"); assert.equal(registrations, 1);
 		await session.prompt("/state-flow-passive cwd"); assert.equal(registrations, 2);
-		assert.equal(api.getAllTools().some(tool => tool.name === "patch_state"), false, "host filtering really omits registered tool metadata");
+		assert.equal(api.getAllTools().some(tool => tool.name === "state_flow_patch"), false, "host filtering really omits registered tool metadata");
 		for (const command of ["/state-flow-passive cwd", "/state-flow-passive global", "/state-flow-active global", "/state-flow-passive global"]) { await session.prompt(command); assert.equal(registrations, 2); }
 		assert.deepEqual(api.getActiveTools(), ["read"]);
 	});
@@ -7070,11 +7107,11 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	test("raw patch caller coherence precedes parameters and failure-diagnostic capture", async () => {
 		const h = harness({ initializeRepository: false, mode: "passive" });
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-		await h.tools.get("patch_state")!.execute("seed", { cwd: { tactics: { keep: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("seed", { cwd: { tactics: { keep: true } } }, undefined, undefined, h.ctx);
 		let reads = 0;
 		const params = { get cwd() { reads++; return { tactics: { mustNotPublish: true } }; } };
 		const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
-		await assert.rejects(h.tools.get("patch_state")!.execute("foreign", params, undefined, undefined, { ...h.ctx, cwd: `${h.repositoryRoot}/foreign` }), /patch selection owner changed/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("foreign", params, undefined, undefined, { ...h.ctx, cwd: `${h.repositoryRoot}/foreign` }), /patch selection owner changed/);
 		assert.equal(reads, 0, "a rejected caller cannot force argument or diagnostic-input getters");
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 	});
@@ -7102,8 +7139,8 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			intents: { done: null },
 		} });
 		f.faux.setResponses([
-			() => answer(tool("patch_state", seed, { id: "phase-seed" }), { stopReason: "toolUse" }),
-			c => { observe(c, results); return answer(tool("patch_state", rewrite, { id: "phase-rewrite" }), { stopReason: "toolUse" }); },
+			() => answer(tool("state_flow_patch", seed, { id: "phase-seed" }), { stopReason: "toolUse" }),
+			c => { observe(c, results); return answer(tool("state_flow_patch", rewrite, { id: "phase-rewrite" }), { stopReason: "toolUse" }); },
 			c => { observe(c, results); return answer("Accepted phase rewrite"); },
 		]);
 		await session.prompt("Close the intent and write durable replacement knowledge in one patch");
@@ -7111,7 +7148,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.ok(text(receipt).includes("strategy.epic"));
 		await session.reload();
 		f.faux.setResponses([
-			() => answer(tool("read_state", { path: "strategy" }, { id: "phase-read" }), { stopReason: "toolUse" }),
+			() => answer(tool("state_flow_read", { path: "strategy" }, { id: "phase-read" }), { stopReason: "toolUse" }),
 			c => { observe(c, results); return answer("Read replacement"); },
 		]);
 		await session.prompt("Inspect the retained replacement");
@@ -7139,7 +7176,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	}
 	function record(value: unknown): JsonObject { assert.ok(isObject(value)); return value; }
 	function owned(c: Context) {
-		const declaration = getCurrentTools(c.messages).filter(v => ["patch_state", "read_state"].includes(v.name)).map(v => ({ name: v.name, description: v.description, parameters: v.parameters }));
+		const declaration = getCurrentTools(c.messages).filter(v => ["state_flow_patch", "state_flow_read"].includes(v.name)).map(v => ({ name: v.name, description: v.description, parameters: v.parameters }));
 		assert.equal(declaration.length, 2);
 		const protocol = getCurrentSystemMessage(c.messages)?.sections?.state_flow; assert.equal(typeof protocol, "string");
 		const message = c.messages.find(m => m.role === "user" && Array.isArray(m.content) && m.content.some(p => p.type === "text" && p.text.startsWith("State Flow runtime context")));
@@ -7163,7 +7200,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			lazy: { reportEvidence: { note: "SUPPORT_NOT_AUTOMATIC" } },
 		} });
 		f.faux.setResponses([
-			c => { seedContexts.push(structuredClone(c)); return answer(tool("patch_state", seed, { id: "linked-seed" }), { stopReason: "toolUse" }); },
+			c => { seedContexts.push(structuredClone(c)); return answer(tool("state_flow_patch", seed, { id: "linked-seed" }), { stopReason: "toolUse" }); },
 			c => { seedContexts.push(structuredClone(c)); observe(c, results); return answer("Checkpoint seeded"); },
 		]);
 		await session.prompt("Store the fixture's binding requirement, accepted method and separate unaccepted proposal"); result(results, "linked-seed");
@@ -7183,12 +7220,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 		const capture = (c: Context) => { continued.push(structuredClone(c)); observe(c, results); };
 		f.faux.setResponses([
-			c => { capture(c); return answer(tool("read_state", { path: "strategy" }, { id: "linked-restored" }), { stopReason: "toolUse" }); },
-			c => { capture(c); return answer(tool("patch_state", revise, { id: "linked-revise" }), { stopReason: "toolUse" }); },
-			c => { capture(c); boundary = structuredClone(stream().patches.at(-1)!.transition); beforeHistory = files(); return answer(tool("read_state", { path: "effective[1].strategy.accepted" }, { id: "linked-history" }), { stopReason: "toolUse" }); },
-			c => { capture(c); return answer(tool("read_state", { path: selected.length === 1 ? "patches[0]" : `${target}.patches[0]` }, { id: "linked-patch" }), { stopReason: "toolUse" }); },
-			c => { capture(c); afterHistory = files(); return answer(tool("patch_state", close, { id: "linked-close" }), { stopReason: "toolUse" }); },
-			c => { capture(c); const current = stream(); replay = structuredClone(current.checkpoint.state); for (const record of current.patches) replay = applyPatch(replay, record.patch as JsonObject); return answer(tool("read_state", { path: target }, { id: "linked-final-state" }), { stopReason: "toolUse" }); },
+			c => { capture(c); return answer(tool("state_flow_read", { path: "strategy" }, { id: "linked-restored" }), { stopReason: "toolUse" }); },
+			c => { capture(c); return answer(tool("state_flow_patch", revise, { id: "linked-revise" }), { stopReason: "toolUse" }); },
+			c => { capture(c); boundary = structuredClone(stream().patches.at(-1)!.transition); beforeHistory = files(); return answer(tool("state_flow_read", { path: "effective[1].strategy.accepted" }, { id: "linked-history" }), { stopReason: "toolUse" }); },
+			c => { capture(c); return answer(tool("state_flow_read", { path: selected.length === 1 ? "patches[0]" : `${target}.patches[0]` }, { id: "linked-patch" }), { stopReason: "toolUse" }); },
+			c => { capture(c); afterHistory = files(); return answer(tool("state_flow_patch", close, { id: "linked-close" }), { stopReason: "toolUse" }); },
+			c => { capture(c); const current = stream(); replay = structuredClone(current.checkpoint.state); for (const record of current.patches) replay = applyPatch(replay, record.patch as JsonObject); return answer(tool("state_flow_read", { path: target }, { id: "linked-final-state" }), { stopReason: "toolUse" }); },
 			c => { capture(c); return answer("Closed verified report"); },
 		]);
 		await session.prompt("Continue from the accepted memory, revise on supplied evidence and reconcile completed consequences");
@@ -7262,10 +7299,10 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		let beforeInvalid: ReturnType<typeof files> | undefined, afterInvalid: typeof beforeInvalid, beforeNoop: typeof beforeInvalid, afterNoop: typeof beforeInvalid;
 		f.faux.setResponses([
 			...owners.map(owner => (c: Context) => { observe(c, results); return answer(tool("read", { path: paths[owner] }, { id: `read-${owner}` }), { stopReason: "toolUse" }); }),
-			c => { observe(c, results); beforeInvalid = files(); return answer(tool("patch_state", invalid, { id: "bad-compile" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); afterInvalid = files(); return answer(tool("patch_state", valid, { id: "good-compile" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); beforeNoop = files(); return answer(tool("patch_state", noop, { id: "missing-delete" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); afterNoop = files(); return answer(tool("read_state", { path: "artifacts" }, { id: "read-card" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); beforeInvalid = files(); return answer(tool("state_flow_patch", invalid, { id: "bad-compile" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); afterInvalid = files(); return answer(tool("state_flow_patch", valid, { id: "good-compile" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); beforeNoop = files(); return answer(tool("state_flow_patch", noop, { id: "missing-delete" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); afterNoop = files(); return answer(tool("state_flow_read", { path: "artifacts" }, { id: "read-card" }), { stopReason: "toolUse" }); },
 			c => { observe(c, results); return answer("Output interface inspected"); },
 		]);
 		await session.prompt("Read actual Skills, retry compilation with declared grammar, inspect no-op deletion locators");
@@ -7298,7 +7335,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const { session } = await f.createRuntime("new"); await session.prompt(`/state-flow-active ${selected.join(" ")}`);
 		const patch = Object.fromEntries(selected.map(owner => [owner, { lazy: { plan: "LAZY_BODY_NOT_AUTOMATIC" }, tactics: { link: { $ref: `${selected.length === 1 ? "" : owner + "."}lazy.plan` }, literal: `${owner}.lazy.plan` } }]));
 		const results = new Map<string, ToolResultMessage>();
-		f.faux.setResponses([answer(tool("patch_state", modelPatchArguments(selected, patch), { id: "handoff-seed" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("LAST_ACTIVE_ANSWER"); }]);
+		f.faux.setResponses([answer(tool("state_flow_patch", modelPatchArguments(selected, patch), { id: "handoff-seed" }), { stopReason: "toolUse" }), c => { observe(c, results); return answer("LAST_ACTIVE_ANSWER"); }]);
 		await session.prompt("Seed durable continuation refs"); result(results, "handoff-seed");
 		await session.prompt("/state-flow-passive"); const contexts: Context[] = [];
 		const inspect = async () => { f.faux.setResponses([c => { contexts.push(structuredClone(c)); return answer("Passive native continuation"); }]); await session.prompt("Inspect the retained handoff"); };
@@ -7323,10 +7360,10 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const results = new Map<string, ToolResultMessage>(), files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 		let before: ReturnType<typeof files> | undefined, after: typeof before;
 		f.faux.setResponses([
-			answer(tool("patch_state", { artifacts: { [path]: { description: "Registered ordinary" } } }, { id: "ordinary-register" }), { stopReason: "toolUse" }),
+			answer(tool("state_flow_patch", { artifacts: { [path]: { description: "Registered ordinary" } } }, { id: "ordinary-register" }), { stopReason: "toolUse" }),
 			c => { observe(c, results); return answer(tool("read", { path }, { id: "ordinary-read" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); before = files(); return answer(tool("patch_state", { tactics: { mustNotPublish: true } }, { id: "ordinary-invalid" }), { stopReason: "toolUse" }); },
-			c => { observe(c, results); after = files(); return answer(tool("patch_state", { artifacts: { [path]: { description: "Compiled ordinary" } } }, { id: "ordinary-retry" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); before = files(); return answer(tool("state_flow_patch", { tactics: { mustNotPublish: true } }, { id: "ordinary-invalid" }), { stopReason: "toolUse" }); },
+			c => { observe(c, results); after = files(); return answer(tool("state_flow_patch", { artifacts: { [path]: { description: "Compiled ordinary" } } }, { id: "ordinary-retry" }), { stopReason: "toolUse" }); },
 			c => { observe(c, results); return answer("Ordinary compilation complete"); },
 		]);
 		await session.prompt("Acquire exact ordinary source and retry using only flat artifact fields");
@@ -7374,7 +7411,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const ui = presentation(), f = await realPiFixture(t, { initializeRepository: false, telegram: { load: ui.load } }), { session } = await f.createRuntime("new");
 		await session.prompt(`/state-flow-passive ${[...scopes].reverse().join(" ")}`);
 		const target = scopes[0], results: ToolResultMessage[] = [];
-		f.faux.setResponses([answer(tool("patch_state", modelPatchArguments(scopes, { [target]: { tactics: { retained: true } } }), { id: "telegram-source" }), { stopReason: "toolUse" }), c => {
+		f.faux.setResponses([answer(tool("state_flow_patch", modelPatchArguments(scopes, { [target]: { tactics: { retained: true } } }), { id: "telegram-source" }), { stopReason: "toolUse" }), c => {
 			results.push(...c.messages.filter((m): m is ToolResultMessage => m.role === "toolResult" && m.toolCallId === "telegram-source")); return answer("Source accepted");
 		}]);
 		await session.prompt("Create native memory before Telegram controls"); assert.equal(results.length, 1); assert.notEqual(results[0]!.isError, true);
@@ -7470,12 +7507,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.throws(() => h.readState(0, "session"), /excluded/);
 		assert.throws(() => h.readState(0, "cwd"), /excluded/);
 		const entries = structuredClone(h.entries);
-		await assert.rejects(h.tools.get("patch_state")!.execute("invalid", { session: { response: "forged" } }, undefined, undefined, h.ctx), /response/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("invalid", { session: { response: "forged" } }, undefined, undefined, h.ctx), /response/);
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 		assert.deepEqual(h.entries, entries);
 		assert.equal(h.entries.some(entry => entry.customType === SNAPSHOT_ENTRY_TYPE), false);
 		assert.equal(policy(h).mode, "passive");
-		await h.tools.get("patch_state")!.execute("first", { session: { tactics: { first: "authored" } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("first", { session: { tactics: { first: "authored" } } }, undefined, undefined, h.ctx);
 		const accepted = await cohort(h);
 		assert.equal(accepted.lifecycle.runtime.meta.version, 2);
 		assert.equal(accepted.lifecycle.runtime.meta.privateAcquisition, "acquired");
@@ -7536,12 +7573,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		}) as typeof fs.renameSync;
 		syncBuiltinESMExports();
 		try {
-			await assert.rejects(h.tools.get("patch_state")!.execute("fail", { session: { tactics: { first: true } } }, undefined, undefined, h.ctx), /injected/);
+			await assert.rejects(h.tools.get("state_flow_patch")!.execute("fail", { session: { tactics: { first: true } } }, undefined, undefined, h.ctx), /injected/);
 		} finally { fs.renameSync = rename; syncBuiltinESMExports(); }
 		assert.equal(injected, true);
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 		assert.equal(h.entries.some(entry => entry.customType === SNAPSHOT_ENTRY_TYPE), false);
-		await h.tools.get("patch_state")!.execute("retry", { session: { tactics: { first: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("retry", { session: { tactics: { first: true } } }, undefined, undefined, h.ctx);
 		assert.equal((await cohort(h)).lifecycle.runtime.meta.step, 1);
 	});
 
@@ -7553,7 +7590,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		writeFileSync(lock, `${process.pid}\n`);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			const rejected = assert.rejects(h.tools.get("patch_state")!.execute("queued-first", { session: { tactics: { stale: true } } }, undefined, undefined, h.ctx), /abort|cancel|current|changed/i);
+			const rejected = assert.rejects(h.tools.get("state_flow_patch")!.execute("queued-first", { session: { tactics: { stale: true } } }, undefined, undefined, h.ctx), /abort|cancel|current|changed/i);
 			await new Promise(resolve => setTimeout(resolve, 15));
 			await h.commands.get("state-flow-off")!.handler("", h.ctx);
 			await Promise.race([rejected, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("first patch did not withdraw while exclusion remained held")), 1000); })]);
@@ -7616,7 +7653,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		fs.renameSync = ((...args: Parameters<typeof fs.renameSync>) => { if (String(args[1]) === privateMeta) privatePublications++; return rename(...args); }) as typeof fs.renameSync;
 		syncBuiltinESMExports();
 		const result = await (async () => {
-			try { return await h.tools.get("patch_state")!.execute("existing-unacquired-first", { session: { tactics: { firstPrivate: true } } }, undefined, undefined, h.ctx); }
+			try { return await h.tools.get("state_flow_patch")!.execute("existing-unacquired-first", { session: { tactics: { firstPrivate: true } } }, undefined, undefined, h.ctx); }
 			finally { fs.renameSync = rename; syncBuiltinESMExports(); }
 		})();
 		assert.equal(privatePublications, 1, "origin and first private patch have no intermediate empty publication");
@@ -7641,7 +7678,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			getSessionId: () => "foreign-caller", getSessionFile: () => join(h.repositoryRoot, "foreign-caller.jsonl"),
 			getHeader: () => ({ ...h.ctx.sessionManager.getHeader()!, id: "foreign-caller" }) } };
 		const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
-		await assert.rejects(h.tools.get("patch_state")!.execute("foreign-first-owner", { session: { tactics: { prohibited: true } } }, undefined, undefined, foreign), /owner|selection|policy/i);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("foreign-first-owner", { session: { tactics: { prohibited: true } } }, undefined, undefined, foreign), /owner|selection|policy/i);
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
 		assert.equal(h.entries.filter(entry => entry.customType === SNAPSHOT_ENTRY_TYPE).length, 0);
 	});
@@ -7650,7 +7687,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		for (const selection of [["global"], ["cwd"], ["global", "cwd"]] as ScopeSelection[]) {
 			const { h, key } = await unacquiredNativeFixture(selection, "passive");
 			const patch = Object.fromEntries(selection.map(scope => [scope, { strategy: { retained: scope } }]));
-			const result = await h.tools.get("patch_state")!.execute("unacquired-noop", patch, undefined, undefined, h.ctx);
+			const result = await h.tools.get("state_flow_patch")!.execute("unacquired-noop", patch, undefined, undefined, h.ctx);
 			const accepted = await cohort(h);
 			assert.equal(result.details.changed, false); assert.equal(result.details.step, 4);
 			assert.equal(accepted.lifecycle.runtime.meta.privateAcquisition, "acquired");
@@ -7659,7 +7696,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			assert.equal(accepted.view.lineage.length, 1);
 			for (const scope of selection) assert.equal(accepted.view.scopes[scope]!.revision, 1);
 			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
-			await h.tools.get("patch_state")!.execute("repeat-noop", patch, undefined, undefined, h.ctx);
+			await h.tools.get("state_flow_patch")!.execute("repeat-noop", patch, undefined, undefined, h.ctx);
 			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
 			assert.equal(h.entries.filter(entry => entry.customType === SNAPSHOT_ENTRY_TYPE).length, 1);
 		}
@@ -7675,7 +7712,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				version: 2, owner: h.ctx.sessionManager.getSessionId(), mode: "passive", scopes: [...DEFAULT_SCOPE_SELECTION], forkPending: true } });
 			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), entries = structuredClone(h.entries);
 			const patch = refusal === "response" ? { session: { response: "forged" } } : refusal === "retired" ? { session: { contract: { old: true } } } : { session: { tactics: { prohibited: true } } };
-			await assert.rejects(h.tools.get("patch_state")!.execute(`refuse-${refusal}`, patch, undefined, undefined, h.ctx), /response|contract|retired|participation/i);
+			await assert.rejects(h.tools.get("state_flow_patch")!.execute(`refuse-${refusal}`, patch, undefined, undefined, h.ctx), /response|contract|retired|participation/i);
 			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
 			assert.deepEqual(h.entries, entries);
 		}
@@ -7693,7 +7730,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				entered(); await gate; return Reflect.apply(acquire, this, args);
 			});
 			const controller = new AbortController();
-			const operation = h.tools.get("patch_state")!.execute("held-first-mutation", { session: { tactics: { first: true } } }, controller.signal, undefined, h.ctx);
+			const operation = h.tools.get("state_flow_patch")!.execute("held-first-mutation", { session: { tactics: { first: true } } }, controller.signal, undefined, h.ctx);
 			const pending = boundary === "same-policy" ? operation.then((value: unknown) => ({ value }), (error: unknown) => ({ error })) : assert.rejects(operation);
 			try {
 				await waiting;
@@ -7724,7 +7761,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			const spy = t.mock.method(TemporalRuntime.prototype, "withSelectedSessionAcquisitionTransaction", async function(this: TemporalRuntime, ...args: Parameters<typeof acquire>) {
 				entered(); await gate; return Reflect.apply(acquire, this, args);
 			});
-			const pending = assert.rejects(h.tools.get("patch_state")!.execute("stale-first", { session: { tactics: { prohibited: true } } }, undefined, undefined, h.ctx));
+			const pending = assert.rejects(h.tools.get("state_flow_patch")!.execute("stale-first", { session: { tactics: { prohibited: true } } }, undefined, undefined, h.ctx));
 			try {
 				await waiting;
 				if (drift === "header-loss") { const life = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key); rmSync(life.config); rmSync(life.runtime); }
@@ -7748,7 +7785,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			const spy = t.mock.method(TemporalRuntime.prototype, "withSelectedSessionAcquisitionTransaction", function(this: TemporalRuntime, ...args: Parameters<typeof acquire>) {
 				owner = this; return Reflect.apply(acquire, this, args);
 			});
-			try { await h.tools.get("patch_state")!.execute("known-owned-first", { session: { strategy: { owned: true } } }, undefined, undefined, h.ctx); } finally { spy.mock.restore(); }
+			try { await h.tools.get("state_flow_patch")!.execute("known-owned-first", { session: { strategy: { owned: true } } }, undefined, undefined, h.ctx); } finally { spy.mock.restore(); }
 			const life = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
 			const metadata = JSON.parse(readFileSync(life.runtime, "utf8")); metadata.privateAcquisition = "unacquired";
 			writeFileSync(life.config, JSON.stringify({ mode: "passive", scopes: ["cwd"] })); writeFileSync(life.runtime, JSON.stringify(metadata));
@@ -7756,7 +7793,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			for (const name of ["checkpoint", "patches", "meta"] as const) rmSync(privatePaths[name]);
 			if (clearCache) owner.view = undefined;
 			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
-			await assert.rejects(h.tools.get("patch_state")!.execute("cannot-reinitialize", { session: { tactics: { prohibited: true } } }, undefined, undefined, h.ctx), /private|authority|acquisition/i);
+			await assert.rejects(h.tools.get("state_flow_patch")!.execute("cannot-reinitialize", { session: { tactics: { prohibited: true } } }, undefined, undefined, h.ctx), /private|authority|acquisition/i);
 			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
 		}
 	});
@@ -7766,13 +7803,13 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const push = h.entries.push;
 		h.entries.push = ((...entries: any[]) => { if (entries.some(entry => entry.customType === SNAPSHOT_ENTRY_TYPE)) throw new Error("first mutation checkpoint failed"); return push.apply(h.entries, entries); }) as typeof h.entries.push;
 		const patch = { session: { tactics: { acceptedDespiteNativeFailure: true } } };
-		await assert.rejects(h.tools.get("patch_state")!.execute("accepted-first", patch, undefined, undefined, h.ctx), /checkpoint failed/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("accepted-first", patch, undefined, undefined, h.ctx), /checkpoint failed/);
 		h.entries.push = push;
 		const accepted = await cohort(h);
 		assert.equal(accepted.lifecycle.runtime.meta.privateAcquisition, "acquired"); assert.equal(accepted.lifecycle.runtime.meta.step, 5);
 		assert.equal(h.readState(0, "session").tactics.acceptedDespiteNativeFailure, true);
 		const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
-		const retry = await h.tools.get("patch_state")!.execute("retry-first", patch, undefined, undefined, h.ctx);
+		const retry = await h.tools.get("state_flow_patch")!.execute("retry-first", patch, undefined, undefined, h.ctx);
 		assert.equal(retry.details.changed, false); assert.equal(retry.details.step, 5);
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
 	});
@@ -7870,7 +7907,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			});
 			try { await h.commands.get("state-flow-active")!.handler("", h.ctx); } finally { spy.mock.restore(); }
 			assert.ok(owner);
-			await h.tools.get("patch_state")!.execute("known-private", { session: { strategy: { privateAccepted: "must not reinitialize" } } }, undefined, undefined, h.ctx);
+			await h.tools.get("state_flow_patch")!.execute("known-private", { session: { strategy: { privateAccepted: "must not reinitialize" } } }, undefined, undefined, h.ctx);
 			await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 			const replacementRoot = join(h.repositoryRoot, "replacement-policy-fixture");
 			const replacement = new TemporalRuntime(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), replacementRoot, key);
@@ -7962,7 +7999,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 		assert.equal(policy(h).mode, "off");
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), beforeOff);
-		assert.equal(h.activeTools.includes("patch_state"), false);
+		assert.equal(h.activeTools.includes("state_flow_patch"), false);
 	});
 
 	test("native pre-runtime tree policy and failed native checkpoint cannot rewind or replace current private memory", async () => {
@@ -7975,7 +8012,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			return push.apply(h.entries, entries);
 		}) as typeof h.entries.push;
 		try {
-			await assert.rejects(h.tools.get("patch_state")!.execute("accepted-before-native-error", { session: { tactics: { survives: true } } }, undefined, undefined, h.ctx), /native checkpoint/);
+			await assert.rejects(h.tools.get("state_flow_patch")!.execute("accepted-before-native-error", { session: { tactics: { survives: true } } }, undefined, undefined, h.ctx), /native checkpoint/);
 		} finally { h.entries.push = push; }
 		assert.equal(h.readState(0, "session").tactics.survives, true, "ancillary error must retain accepted data");
 		await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
@@ -7989,23 +8026,23 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	test("native mode-only Passive refuses shared drift rather than adopting it, fences writes and recovers only through explicit current acceptance", async () => {
 		const h = harness({ initializeRepository: false }); await start(h);
 		const peer = harness({ initializeRepository: false, repositoryRoot: h.repositoryRoot, sessionId: "peer" }); await start(peer);
-		await peer.tools.get("patch_state")!.execute("peer", { global: { tactics: { newer: true } } }, undefined, undefined, peer.ctx);
+		await peer.tools.get("state_flow_patch")!.execute("peer", { global: { tactics: { newer: true } } }, undefined, undefined, peer.ctx);
 		const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 		assert.ok(policy(h).persistenceError);
-		await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { tactics: { x: true } } }, undefined, undefined, h.ctx), /writes paused/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { x: true } } }, undefined, undefined, h.ctx), /writes paused/);
 		await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before, "fenced restoration must stay read-only");
 		assert.equal(h.readState(0, "global").tactics.newer, true);
 		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 		assert.equal(policy(h).persistenceError, undefined);
-		await h.tools.get("patch_state")!.execute("recovered", { session: { tactics: { x: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("recovered", { session: { tactics: { x: true } } }, undefined, undefined, h.ctx);
 	});
 
 	test("explicit Start clears stale run specification and validation without rewinding accepted semantic memory", async () => {
 		const h = harness({ initializeRepository: false }); await start(h, "stale prior run");
-		await h.tools.get("patch_state")!.execute("retained", { session: { tactics: { retained: true } } }, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("retained", { session: { tactics: { retained: true } } }, undefined, undefined, h.ctx);
 		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
 		const paths = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 		const metadata = JSON.parse(readFileSync(paths.runtime, "utf8"));
@@ -8038,7 +8075,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			await h.inferenceContext([{ role: "user", content: [{ type: "text", text: "must not infer native fallback" }], timestamp: 1 }], operation);
 			assert.equal(operation.signal.aborted, true, fault);
 			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
-			await assert.rejects(h.tools.get("patch_state")!.execute("blocked", { session: { tactics: { no: true } } }, undefined, undefined, h.ctx), /unavailable|off/);
+			await assert.rejects(h.tools.get("state_flow_patch")!.execute("blocked", { session: { tactics: { no: true } } }, undefined, undefined, h.ctx), /unavailable|off/);
 			await h.commands.get("state-flow-off")!.handler("", h.ctx);
 			assert.equal(policy(h).mode, "off", "explicit Off must remain a memory-inert escape from failed admission");
 			if (fault === "subset") assert.deepEqual(policy(h).scopes, ["cwd"], "Off retains a recognized gated scope choice");
@@ -8060,7 +8097,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const parent = harness({ initializeRepository: false, repositoryRoot: root, sessionId: "source-parent", sessionFile: parentFile, sessionTimestamp: timestamp, mode: "active" });
 		writeFileSync(parentFile, JSON.stringify(parent.ctx.sessionManager.getHeader()) + "\n");
 		await parent.handlers.get("session_start")!({ reason: "new" }, parent.ctx);
-		await parent.tools.get("patch_state")!.execute("parent-current", { session: { strategy: { inherited: "actual current parent" } } }, undefined, undefined, parent.ctx);
+		await parent.tools.get("state_flow_patch")!.execute("parent-current", { session: { strategy: { inherited: "actual current parent" } } }, undefined, undefined, parent.ctx);
 		const childKey = resolveSessionAddress(childFile, "deferred-child", timestamp).key;
 		const deferred = new TemporalRuntime(parent.ctx.cwd, "deferred-child", root, childKey);
 		await deferred.withSelectedDeferredForkTransaction(["cwd"], { mode: "active" }, publish => publish(), undefined, true);
@@ -8168,7 +8205,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			}) as typeof parent.entries.push;
 			try {
 				await parent.handlers.get("session_start")!({ reason: "new" }, parent.ctx);
-				await assert.rejects(parent.tools.get("patch_state")!.execute("parent-accepted", { session: { tactics: { parentCurrent: "inherit-current" } } }, undefined, undefined, parent.ctx), /parent native checkpoint failed/);
+				await assert.rejects(parent.tools.get("state_flow_patch")!.execute("parent-accepted", { session: { tactics: { parentCurrent: "inherit-current" } } }, undefined, undefined, parent.ctx), /parent native checkpoint failed/);
 			} finally { parent.entries.push = pushParent; }
 			assert.equal(parent.entries.some(entry => entry.customType === SNAPSHOT_ENTRY_TYPE), false);
 			const parentKey = resolveSessionAddress(parentFile, "parent", timestamp).key;
@@ -8188,7 +8225,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			assert.equal(child.readState(0, "session").tactics.parentCurrent, "inherit-current");
 			assert.deepEqual(captureTemporalFileBases(parent.ctx.cwd, "parent", root, parentKey), parentBefore);
 			if (failChildReset) {
-				await child.tools.get("patch_state")!.execute("child-current", { session: { tactics: { childCurrent: true } } }, undefined, undefined, child.ctx);
+				await child.tools.get("state_flow_patch")!.execute("child-current", { session: { tactics: { childCurrent: true } } }, undefined, undefined, child.ctx);
 				const entries = structuredClone([...child.entries]).filter(entry => entry.customType !== SNAPSHOT_ENTRY_TYPE);
 				rmSync(parentFile);
 				child = harness(options); child.ctx.sessionManager.getHeader = () => header; child.entries.push(...entries);
@@ -8214,7 +8251,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			version: 2, owner: subset.ctx.sessionManager.getSessionId(), mode: "passive", scopes: ["cwd"],
 		} });
 		await subset.handlers.get("session_start")!({ reason: "resume" }, subset.ctx);
-		await assert.rejects(subset.tools.get("patch_state")!.execute("widen", { session: { tactics: { no: true } } }, undefined, undefined, subset.ctx), /State Flow session patch scope is excluded/);
+		await assert.rejects(subset.tools.get("state_flow_patch")!.execute("widen", { session: { tactics: { no: true } } }, undefined, undefined, subset.ctx), /State Flow session patch scope is excluded/);
 		assert.equal(existsSync(join(subset.repositoryRoot, "global")), false);
 		await assert.rejects(subset.commands.get("state-flow-active")!.handler("session session", subset.ctx), /State Flow scopes/);
 	});
@@ -8295,10 +8332,10 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				assert.throws(() => h.readState(), /unavailable/);
 			} else for (const scope of scopes) assert.deepEqual(h.readState(0, scope).tactics, {});
 			const target = scopes[0];
-			await h.tools.get("patch_state")!.execute("selected-first", modelPatchArguments(scopes, { [target]: { tactics: { capturedOwner: target, retained: "before-default" } } }), undefined, undefined, h.ctx);
+			await h.tools.get("state_flow_patch")!.execute("selected-first", modelPatchArguments(scopes, { [target]: { tactics: { capturedOwner: target, retained: "before-default" } } }), undefined, undefined, h.ctx);
 			assert.equal(h.readState(0, target).tactics.capturedOwner, target);
 			const beforeRefusal = files();
-			await assert.rejects(h.tools.get("patch_state")!.execute("no-widening", {
+			await assert.rejects(h.tools.get("state_flow_patch")!.execute("no-widening", {
 				[target]: { tactics: { retained: "must-not-commit" } }, [excluded[0]]: { tactics: { mustNotWrite: true } },
 			}, undefined, undefined, h.ctx), new RegExp(`State Flow ${excluded[0]} patch scope is excluded`));
 			assert.deepEqual(files(), beforeRefusal, "excluded owner rejects the whole supplied cohort");

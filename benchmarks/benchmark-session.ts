@@ -122,7 +122,7 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 				const global = loadGlobalState(fixture.repositoryRoot)!;
 				writeGlobalState({ tactics: { ...global.tactics, trajectoryForeign: "adopted" } }, fixture.repositoryRoot);
 			}
-			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { trajectoryBarrier: acceptedPatches + 1 } } }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { tactics: { trajectoryBarrier: acceptedPatches + 1 } } }), { stopReason: "toolUse" });
 		}
 		const call = fauxToolCall("read", { path: source });
 		readIds.add(call.id);
@@ -132,7 +132,7 @@ export async function trajectoryPrompt(fixture: RealPiFixture, session: AgentSes
 		if (event.type !== "tool_execution_end") return;
 		assert.equal(event.isError, false, "trajectory workload tools must succeed");
 		if (event.toolName === "read") completedReads++;
-		if (event.toolName === "patch_state") {
+		if (event.toolName === "state_flow_patch") {
 			const tail = event.result.content[1]?.text ?? "";
 			reconciliationTailBytes.push(Buffer.byteLength(tail));
 			if (acceptedPatches === 0) assert.equal(tail, "", "predictable patch needs only the acknowledgement");
@@ -233,12 +233,12 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 		...(stateFlow ? [(context: Context) => {
 			observe(context);
 			assertRead(context);
-			return fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { counter, ...(counter === 1 ? { payload: "x".repeat(size) } : {}) } } }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { tactics: { counter, ...(counter === 1 ? { payload: "x".repeat(size) } : {}) } } }), { stopReason: "toolUse" });
 		}] : []),
 		(context) => { observe(context); assertRead(context); return fauxAssistantMessage(`Accepted ${counter}`); },
 	]);
 	const unsubscribe = session.subscribe((event) => {
-		if (event.type === "tool_execution_end" && event.toolName === "patch_state") {
+		if (event.type === "tool_execution_end" && event.toolName === "state_flow_patch") {
 			assert.equal(event.isError, false, "benchmark patch barrier must be accepted");
 			patchStateBarriers++;
 		}
@@ -270,7 +270,7 @@ export async function prompt(fixture: RealPiFixture, session: AgentSession, opti
 		assert.equal(terminal.stopReason, "stop", terminal.errorMessage ?? "benchmark native inference did not complete");
 		assert.deepEqual(terminal.content, [{ type: "text", text: `Accepted ${counter}` }], "benchmark native answer was not accepted");
 		if (stateFlow) {
-			assert.ok(session.getActiveToolNames().includes("patch_state"), "cannot benchmark silently disabled State Flow");
+			assert.ok(session.getActiveToolNames().includes("state_flow_patch"), "cannot benchmark silently disabled State Flow");
 			const state = fixture.readState(session);
 			assert.equal(state.tactics.counter, counter, "patch was not accepted");
 			assert.equal(state.tactics.payload, "x".repeat(size));

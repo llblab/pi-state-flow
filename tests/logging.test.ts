@@ -28,16 +28,16 @@ test("barrier-block diagnostics persist only tool identities and batch names whe
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const path = stateFlowLogPath(join(root, "agent"));
 	const writer = new StateFlowDiagnosticWriter(true, path, join(root, "repository"), (warning) => assert.fail(warning));
-	const names = ["bash", "patch_state"];
-	writer.record("s", "/cwd", "Blocked by the patch_state barrier", "barrier-block", {
+	const names = ["bash", "state_flow_patch"];
+	writer.record("s", "/cwd", "Blocked by the state_flow_patch barrier", "barrier-block", {
 		tool: "bash", toolCallId: "bash-1", batchToolNames: names,
 	});
-	names.push("read_state");
+	names.push("state_flow_read");
 	const { at, ...record } = JSON.parse(readFileSync(path, "utf8"));
 	assert.match(at, /^\d{4}-\d\d-\d\dT/);
 	assert.deepEqual(record, {
-		sessionId: "s", cwd: "/cwd", category: "barrier-block", error: "Blocked by the patch_state barrier",
-		tool: "bash", toolCallId: "bash-1", batchToolNames: ["bash", "patch_state"],
+		sessionId: "s", cwd: "/cwd", category: "barrier-block", error: "Blocked by the state_flow_patch barrier",
+		tool: "bash", toolCallId: "bash-1", batchToolNames: ["bash", "state_flow_patch"],
 	});
 	const offPath = stateFlowLogPath(join(root, "off"));
 	new StateFlowDiagnosticWriter(false, offPath, join(root, "repository"), (warning) => assert.fail(warning))
@@ -61,7 +61,7 @@ test("diagnostics refuse symlinked paths without writing through them", (t) => {
 	assert.equal(existsSync(join(directory, "new.jsonl")), false);
 });
 
-test("rejected patch_state diagnostics retain the exact attempted arguments", async () => {
+test("rejected state_flow_patch diagnostics retain the exact attempted arguments", async () => {
 	const root = mkdtempSync(join(tmpdir(), "state-flow-input-log-"));
 	mkdirSync(join(root, "state-flow"));
 	writeFileSync(join(root, "state-flow", "config.json"), JSON.stringify({ logging: true }));
@@ -69,12 +69,12 @@ test("rejected patch_state diagnostics retain the exact attempted arguments", as
 	await start(h, "Reject an invalid patch");
 	const attempted = { global: { tactics: { example: true } }, final: "maybe" };
 	await assert.rejects(
-		h.tools.get("patch_state")!.execute("attempted", attempted, undefined, undefined, h.ctx),
+		h.tools.get("state_flow_patch")!.execute("attempted", attempted, undefined, undefined, h.ctx),
 		/does not accept field final/,
 	);
 	const record = JSON.parse(readFileSync(stateFlowLogPath(root), "utf8"));
 	assert.equal(record.category, "invalid-patch");
-	assert.equal(record.tool, "patch_state");
+	assert.equal(record.tool, "state_flow_patch");
 	assert.equal(record.toolCallId, "attempted");
 	assert.deepEqual(record.input, attempted);
 });
@@ -84,7 +84,7 @@ test("diagnostics fail inertly instead of entering an overlapping state reposito
 	writeFileSync(join(root, "config.json"), JSON.stringify({ logging: true }));
 	const h = harness({ agentDir: root, repositoryRoot: root });
 	await start(h, "Reject an invalid patch");
-	await assert.rejects(h.tools.get("patch_state")!.execute(
+	await assert.rejects(h.tools.get("state_flow_patch")!.execute(
 		"invalid", { extra: true }, undefined, undefined, h.ctx,
 	));
 	assert.equal(existsSync(stateFlowLogPath(root)), false);

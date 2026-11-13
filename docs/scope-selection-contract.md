@@ -2,6 +2,8 @@
 
 ## Status and baseline
 
+**Tool names since 0.27.6:** Advertise `state_flow_read`/`state_flow_patch`, retaining explicit legacy `read_state`/`patch_state` dispatch as the same owned operations. The original request, selection, nested refusal and mixed-name barrier requirements apply to either spelling; see [tool-name compatibility](compatibility.md#tool-name-compatibility). Historical checkpoints below retain their original tool names and evidence.
+
 **All seven nonempty selections and public command/completion controls shipped in 0.27.0.** The [M2 functional boundary](#m2-functional-acceptance-boundary) records bounded deterministic acceptance, including captured policy, private acquisition, Session-excluded response suppression, deferred forks and mode-only Telegram controls. The [flat model interface](single-scope-interface-contract.md) also shipped in 0.27.0; it does not change these scope/private authorities. No settings chooser is required. [BACKLOG.md](../BACKLOG.md) owns outstanding work.
 
 This document owns selected-scope policy and its authority boundaries; [usage](usage.md) owns operator syntax/configuration. The proposals, candidate gates and validation totals in implementation-checkpoint sections below are historical at their named M0/M2 source boundaries. Later retained integration superseded their all-three-only, pending-selector and deferred-copy implementation limits, not their preservation duties or original review verdicts. They are not current prerequisites.

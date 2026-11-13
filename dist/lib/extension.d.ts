@@ -16,6 +16,6 @@ export interface StateFlowExtensionOptions {
     mode?: StateFlowMode;
 }
 export { formatPatchStateArguments };
-export declare const PATCH_STATE_TOOL_NAME = "patch_state";
-export declare const READ_STATE_TOOL_NAME = "read_state";
+export declare const PATCH_STATE_TOOL_NAME = "state_flow_patch";
+export declare const READ_STATE_TOOL_NAME = "state_flow_read";
 export default function stateFlowExtension(pi: ExtensionAPI, options?: StateFlowExtensionOptions): void;

@@ -57,6 +57,8 @@ export async function realPiFixture(t: TestContext, options: {
 	/** SDK default-mode override for new sessions; "configured" follows repository config.json. Defaults to off. */
 	mode?: StateFlowMode | "configured";
 	stateFlow?: boolean;
+	/** Real packaged entrypoint parity, using the same isolated native host. */
+	stateFlowFactory?: typeof stateFlowExtension;
 	/** Existing optional presentation-loader seam, without network delivery or replacement mode owners. */
 	telegram?: { load?: StateFlowTelegramLoader };
 	extensions?: InlineExtension[];
@@ -143,7 +145,7 @@ export async function realPiFixture(t: TestContext, options: {
 			extensionFactories: [
 				...(options.stateFlow === false ? [] : [{
 					name: "state-flow-integration",
-					factory: (pi: Parameters<typeof stateFlowExtension>[0]) => stateFlowExtension(pi, { agentDir, repositoryRoot, ...(options.mode === "configured" ? {} : { mode: options.mode ?? "off" }), ...(options.telegram === undefined ? {} : { telegram: options.telegram }), onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
+					factory: (pi: Parameters<typeof stateFlowExtension>[0]) => (options.stateFlowFactory ?? stateFlowExtension)(pi, { agentDir, repositoryRoot, ...(options.mode === "configured" ? {} : { mode: options.mode ?? "off" }), ...(options.telegram === undefined ? {} : { telegram: options.telegram }), onRuntime: (accessor) => accessors.set(manager.getSessionId(), accessor) }),
 				}]),
 				...(options.extensions ?? []),
 			],
@@ -161,7 +163,7 @@ export async function realPiFixture(t: TestContext, options: {
 			settingsManager,
 			sessionManager: manager,
 			sessionStartEvent,
-			tools: options.tools ?? (options.stateFlow === false ? ["read"] : ["read", "patch_state", "read_state"]),
+			tools: options.tools ?? (options.stateFlow === false ? ["read"] : ["read", "state_flow_patch", "state_flow_read", "patch_state", "read_state"]),
 		});
 		const { session } = result;
 		options.onSessionCreated?.(session, sessionStartEvent);

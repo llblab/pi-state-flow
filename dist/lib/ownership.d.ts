@@ -25,7 +25,7 @@ export declare function extractOwnedPaths(scope: StateScope, value: JsonValue): 
 export declare function computeIntentCascade(scope: StateScope, before: SemanticState, after: SemanticState): OwnedPath[];
 /** Express cascade targets as explicit nested object-key deletions. */
 export declare function cascadeDeletionPatch(paths: readonly OwnedPath[]): JsonObject;
-/** Render an ownership target as its scoped `read_state` path. */
+/** Render an ownership target as its scoped `state_flow_read` path. */
 export declare function formatOwnedPath(scope: StateScope, path: OwnedPath): string;
 /** Top-level ownership-eligible keys referenced by current intents of `scope`. */
 export declare function ownedTopLevelKeys(scope: StateScope, state: SemanticState): Record<OwnedPlane, Set<string>>;

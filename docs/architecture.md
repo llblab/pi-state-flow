@@ -116,13 +116,15 @@ checkpoint.json + patches.jsonl
 - The top-level `state` segment is rejected. Pre-origin history is unavailable rather than empty.
 - Once enough accepted transitions are proven, offsets zero through the configured `historyLimit` stay addressable at their shared causal boundaries.
 
-**Responses in history.** A changed accepted response is runtime-owned, session-only semantic state and advances history. An accepted empty answer finalizes normally: it clears a previous nonempty response, but creates no transition merely to replace an absent response with `""`. Ordinary completion needs no `patch_state` call when durable semantic state is already correct.
+**Responses in history.** A changed accepted response is runtime-owned, session-only semantic state and advances history. An accepted empty answer finalizes normally: it clears a previous nonempty response, but creates no transition merely to replace an absent response with `""`. Ordinary completion needs no `state_flow_patch` call when durable semantic state is already correct.
 
 ## Pi lifecycle
 
-### `patch_state` acceptance
+### `state_flow_patch` acceptance
 
-`patch_state` is the sole mutation tool:
+`state_flow_read` and `state_flow_patch` are the canonical advertised names. Explicit legacy `read_state`/`patch_state` dispatch uses the same operations with exact original native-name admission; selection/schema refresh, Off activation and the Active mutation barrier cover both spellings. Hidden legacy declarations use the SDK loadout membrane, not history rewriting or a second publication path. See [tool-name compatibility](compatibility.md#tool-name-compatibility) for host allowlists and the bounded evidence.
+
+`state_flow_patch` is the sole mutation tool:
 
 1. It acquires store exclusion before selecting current Global/CWD.
 2. Preserving private Session ownership, it applies intents only, clears deleted intents' eligible same-scope strategy/tactics/lazy object-key targets protected by no final remaining/new intent (including ancestor/descendant references), then applies remaining authored planes before existing compilation/normalization. These phases ignore JSON insertion order; rewriting a cleared target creates fresh knowledge without old fields. Unowned entries remain legal.
@@ -181,7 +183,7 @@ The cache owns no persistence, publication authority or continuation scheduler, 
 
 **Diagnostics.** Opt-in local JSONL diagnostic categories are `invalid-patch`, `publication-conflict`, `finalization` and `barrier-block`.
 
-- Active preflight records each blocked call when a batch has multiple `patch_state` calls or a sibling of its single `patch_state` call.
+- Active preflight records each blocked call when a batch has multiple `state_flow_patch` calls or a sibling of its single `state_flow_patch` call.
 - A `barrier-block` record holds only the blocked tool name, call id, existing block reason and ordered batch tool names. It captures no sibling arguments, reasoning or draft content.
 - Logging off creates no barrier record, and Passive has no barrier.
 - Diagnostic persistence is outside canonical state and cannot change the blocking decision.
@@ -189,9 +191,9 @@ The cache owns no persistence, publication authority or continuation scheduler, 
 
 ### Reads, answers and the protocol
 
-`read_state` reads one cached effective or scoped projection, at current index zero or at a retained causal index up to the configured `historyLimit`. It never publishes or advances history.
+`state_flow_read` reads one cached effective or scoped projection, at current index zero or at a retained causal index up to the configured `historyLimit`. It never publishes or advances history.
 
-**Answers.** Before answering, the model uses `patch_state` only when future-relevant durable state must change. The exact accepted ordinary answer is reconciled directly into runtime-owned `response` at `turn_end`, including `""` when the accepted answer is empty.
+**Answers.** Before answering, the model uses `state_flow_patch` only when future-relevant durable state must change. The exact accepted ordinary answer is reconciled directly into runtime-owned `response` at `turn_end`, including `""` when the accepted answer is empty.
 
 - There is no terminal eligibility latch, finalization patch, repair inference or fallback budget.
 - If required ordinary-artifact compilation prevents reconciliation, State Flow reports the failure without generating another inference. Optional Skill acquisition never blocks unrelated reconciliation.
@@ -203,7 +205,7 @@ The cache owns no persistence, publication authority or continuation scheduler, 
 
 ```text
 SEMANTIC STATE       intents + strategy + tactics + artifacts + response + lazy
-MUTATION BARRIER     patch_state(scope patches) → rematerialized next inference
+MUTATION BARRIER     state_flow_patch(scope patches) → rematerialized next inference
 CONTEXT PROJECTION   Active state | Passive memory/handoff | Off: no injection
 ```
 
@@ -417,7 +419,7 @@ meta.json
 
 ### Runtime transaction APIs
 
-**`TemporalRuntime.withPatchTransaction`** routes `patch_state` through this capability.
+**`TemporalRuntime.withPatchTransaction`** routes `state_flow_patch` through this capability.
 
 - Its synchronous callback receives detached exact sparse scope semantics (without read defaults), their causal basis and provenance, plus one single-use `publish` operation. It cannot access selection or raw storage methods.
 - Shared drift is adopted before staging, not used to reject a stale agent. The exact accepted private cohort stays fenced against another physical writer or unselected history.
@@ -698,7 +700,7 @@ The package exposes read-only host contracts that:
 
 ### Model tools
 
-**`patch_state` grammar.** Captured WANTED participation, not the number of supplied targets or currently available owners, selects the model interface. One owner takes direct semantic planes without an owner wrapper; two/three owners take explicit participating `global`, `cwd` or `session` patches. See the [accepted interface boundary](single-scope-interface-contract.md#deterministic-m3-checkpoint); schema/selection DATA never grants source/private/publication authority.
+**`state_flow_patch` grammar.** Captured WANTED participation, not the number of supplied targets or currently available owners, selects the model interface. One owner takes direct semantic planes without an owner wrapper; two/three owners take explicit participating `global`, `cwd` or `session` patches. See the [accepted interface boundary](single-scope-interface-contract.md#deterministic-m3-checkpoint); schema/selection DATA never grants source/private/publication authority.
 
 - Each supplied canonical owner patch contains object-valued `artifacts`, `strategy`, `tactics`, `intents` and `lazy`; in one-owner model arguments these planes are top-level. Nested values are ordinary JSON.
 - Recursive object merge updates fields, arrays/primitives replace, and nested object-key `null` deletes, including inside newly created objects. Deletion-only patches through absent ancestors create no empty parents. Accepted supplied scopes recursively omit empty object fields and empty planes: deleting the last child removes its empty ancestors, and explicit `{}` is not a retained value. Nonempty omitted fields persist; an object patch that turns a scalar/array into an empty object removes that field. Cleanup is scope-local and can reveal inherited values; it stops at the scope root and never removes array slots.
@@ -731,12 +733,12 @@ For multiple wanted owners including Session (for example Global+Session), an ex
 
 Full details: [intent ownership](lazy-state.md#intent-ownership).
 
-**Reference forms.** Semantic-state references use either the optional structured `{"$ref":"cwd.lazy.plan"}` convention, or `$` immediately followed by one valid `read_state` path inside ordinary text, for example `$effective.lazy.memory[7]`. The text prefix distinguishes references from incidental path-like prose and leaves a deterministic seam for possible future parsing. Resource paths, document locators, URIs, Skill identities and agent identities keep their native syntax.
+**Reference forms.** Semantic-state references use either the optional structured `{"$ref":"cwd.lazy.plan"}` convention, or `$` immediately followed by one valid `state_flow_read` path inside ordinary text, for example `$effective.lazy.memory[7]`. The text prefix distinguishes references from incidental path-like prose and leaves a deterministic seam for possible future parsing. Resource paths, document locators, URIs, Skill identities and agent identities keep their native syntax.
 
 - State Flow stores all forms as ordinary JSON and, apart from intent ownership, does not parse or validate targets.
-- The agent resolves a relevant locator explicitly, through `read_state` or the appropriate external tool. Presence alone creates no authority, existence proof, dependency, hydration, execution or completion semantics.
+- The agent resolves a relevant locator explicitly, through `state_flow_read` or the appropriate external tool. Presence alone creates no authority, existence proof, dependency, hydration, execution or completion semantics.
 
-**Reactive repair.** The agent never scans or resolves references merely to test them. Only after one requested value path is missing does the query domain perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` or `$path` matches. When matches exist, `read_state` returns the explicit diagnostic sentinel `{value:null, hint:[{type:"dangling-reference", message, paths}]}`:
+**Reactive repair.** The agent never scans or resolves references merely to test them. Only after one requested value path is missing does the query domain perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` or `$path` matches. When matches exist, `state_flow_read` returns the explicit diagnostic sentinel `{value:null, hint:[{type:"dangling-reference", message, paths}]}`:
 
 - `hint` is a top-level sibling, not state data. Its message describes unavailability conditionally.
 - `paths` contains at most three runtime-verified current reference-owner addresses, not verified new locations of the requested data.
@@ -746,7 +748,7 @@ Full details: [intent ownership](lazy-state.md#intent-ownership).
 
 **History is task-driven.** Missing paths or hints alone do not require historical search. The agent may independently choose targeted historical reading when a previous value is useful to the current task; no separate user permission is required. Historical values are evidence, not automatically current state or a reason to restore deleted memory. Runtime never scans history for reference owners, triggers repair inference or hydrates lazy bodies. Effective absence does not establish ownership, and unavailable history, external inaccessibility or a transient read failure does not prove a broken reference.
 
-**`read_state` addressing.** It accepts exactly one of scalar `path` or ordered semantic `paths`, with `value`, `keys` or `patch` projection; batches stay all-or-error. One wanted owner's ordinary flat paths bind that owner; multi-owner flat paths use the effective overlay, even when the available view has only one owner.
+**`state_flow_read` addressing.** It accepts exactly one of scalar `path` or ordered semantic `paths`, with `value`, `keys` or `patch` projection; batches stay all-or-error. One wanted owner's ordinary flat paths bind that owner; multi-owner flat paths use the effective overlay, even when the available view has only one owner.
 
 - Explicit owner roots/examples below require that owner to participate and its requested current/historical authority to be available. Selection or an address alone does not acquire missing private memory.
 - `effective == effective[0]` is the current effective materialization; `global == global[0]` (and the CWD/session equivalents) selects that scope at the same composed causal boundary.
@@ -802,7 +804,7 @@ Current same-owner structured refs can render flat for one owner while storage r
 - Optional `mode` overrides the new-session default without changing retained session policy.
 - `onRuntime` receives a cached `read(offset?, scope?)` accessor; an omitted scope means effective state. Use it only after runtime initialization/restoration.
 
-The pure `readTemporalState(view, offset, scope?)` accessor is exported separately. SDK hosts with an explicit tool allowlist must include both `patch_state` and `read_state` when they want model access.
+The pure `readTemporalState(view, offset, scope?)` accessor is exported separately. SDK hosts with an explicit tool allowlist must include both `state_flow_patch` and `state_flow_read` when they want model access.
 
 **Shutdown.** Honor Pi's `session_shutdown` lifecycle before disposing an embedded session.
 

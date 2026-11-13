@@ -609,7 +609,7 @@ test("enabled context projects the complete overlay once in ordinary and bootstr
 		const h = harness();
 		if (bootstrap) h.entries.push({ type: "message", message: user("Existing request", 1) });
 		await start(h, "Current request");
-		await h.tools.get("patch_state")!.execute("seed-context", {
+		await h.tools.get("state_flow_patch")!.execute("seed-context", {
 			global: { strategy: { globalContext: true } },
 			cwd: { strategy: { cwdContext: true } },
 			session: {

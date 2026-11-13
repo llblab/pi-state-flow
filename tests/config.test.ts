@@ -175,7 +175,7 @@ test("load-time default mode controls new sessions, not resumed branch mode", as
 	const h = harness(options);
 	await h.handlers.get("session_start")!({ reason: "startup" }, h.ctx);
 	assert.equal(h.repositoryRoot, f.repositoryRoot);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	assert.equal(existsSync(join(h.repositoryRoot, "checkpoint.json")), true);
 	await h.beginRun("Automatic");
 	await commitTerminal(h, {}, { retained: true });
@@ -185,17 +185,17 @@ test("load-time default mode controls new sessions, not resumed branch mode", as
 	const resumed = harness(options);
 	resumed.entries.push(...stopped);
 	await resumed.handlers.get("session_start")!({ reason: "resume" }, resumed.ctx);
-	assert.equal(resumed.activeTools.includes("patch_state"), false);
+	assert.equal(resumed.activeTools.includes("state_flow_patch"), false);
 	assert.throws(() => resumed.readState(), /temporal runtime is unavailable/);
 	f.write({ mode: "off" });
 	// An existing registration retains its settings until reload, even for another new session.
 	h.entries.splice(0);
 	h.ctx.sessionManager.getSessionId = () => "before-reload";
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	const reloaded = harness({ ...options, sessionId: "after-reload" });
 	await reloaded.handlers.get("session_start")!({ reason: "new" }, reloaded.ctx);
-	assert.equal(reloaded.activeTools.includes("patch_state"), false);
+	assert.equal(reloaded.activeTools.includes("state_flow_patch"), false);
 	assert.deepEqual(reloaded.entries.map(({ data }) => data), [nativePolicyMarker("after-reload", "off")]);
 });
 
@@ -204,13 +204,13 @@ test("without configuration a new session defaults to Off without manufacturing 
 	const h = harness({ agentDir: f.agentDir, repositoryRoot: f.repositoryRoot, useConfiguredDirectory: true, mode: "configured",
 		initializeRepository: false, cwd: join(f.root, "project"), sessionId: "default-off" });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	assert.deepEqual(["read_state", "patch_state"].map((name) => h.activeTools.includes(name)), [false, false]);
+	assert.deepEqual(["state_flow_read", "state_flow_patch"].map((name) => h.activeTools.includes(name)), [false, false]);
 	assert.equal(h.statuses.at(-1), undefined);
 	assert.deepEqual(h.entries.map(({ data }) => data), [nativePolicyMarker("default-off", "off")], "the inherited default becomes session-owned without semantic storage");
 	assert.equal(existsSync(join(f.repositoryRoot, "checkpoint.json")), false);
 	assert.equal(existsSync(f.path), false);
 	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
-	assert.deepEqual(["read_state", "patch_state"].map((name) => h.activeTools.includes(name)), [true, true]);
+	assert.deepEqual(["state_flow_read", "state_flow_patch"].map((name) => h.activeTools.includes(name)), [true, true]);
 	assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>passive</dim>");
 	assert.equal(existsSync(join(f.repositoryRoot, "checkpoint.json")), false);
 });
@@ -237,7 +237,7 @@ for (const reason of ["new", "resume"] as const) for (const mode of ["off", "pas
 	const reloaded = harness(options);
 	reloaded.entries.push(...selected);
 	await reloaded.handlers.get("session_start")!({ reason: "reload" }, reloaded.ctx);
-	assert.equal(reloaded.activeTools.includes("patch_state"), mode === "passive");
+	assert.equal(reloaded.activeTools.includes("state_flow_patch"), mode === "passive");
 	assert.deepEqual(reloaded.entries, selected);
 	assert.deepEqual(files(), before);
 	const next = harness({ ...options, sessionId: "next-session" });
@@ -270,13 +270,13 @@ for (const historyLimit of [0, 1, 7, 12]) test(`scope patch-history reads honor 
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await h.beginRun("Build retained history");
 	for (let index = 1; index <= historyLimit + 1; index++) {
-		await h.tools.get("patch_state")!.execute(`patch-${index}`, {
+		await h.tools.get("state_flow_patch")!.execute(`patch-${index}`, {
 			global: { tactics: { index } }, cwd: { tactics: { index } }, session: { tactics: { index } },
 		}, undefined, undefined, h.ctx);
 	}
 	const entries = h.entries.length;
 	const read = async (params: { path: string } | { paths: string[] }) => {
-		const result = await h.tools.get("read_state")!.execute("read", params, undefined, undefined, h.ctx);
+		const result = await h.tools.get("state_flow_read")!.execute("read", params, undefined, undefined, h.ctx);
 		return JSON.parse(result.content[0].text);
 	};
 	for (const scope of ["global", "cwd", "session"]) {
@@ -324,7 +324,7 @@ test("SDK storage override selects its own repository-global configuration witho
 	writeFileSync(adjacentSource, "source bytes");
 	const h = harness({ agentDir: f.agentDir, repositoryRoot: override, initializeRepository: false, mode: "configured" });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	assert.equal(existsSync(join(h.repositoryRoot, "checkpoint.json")), true);
 	h.beforeAgentStart("Sources");
 	const projected = h.handlers.get("context")!({ messages: [] }, h.ctx);

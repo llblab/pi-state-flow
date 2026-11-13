@@ -1,4 +1,4 @@
-# Lazy state through progressive `read_state`
+# Lazy state through progressive `state_flow_read`
 
 This document describes the implemented lazy-state contract. [BACKLOG.md](../BACKLOG.md) owns release readiness; [temporal acceptance](temporal-acceptance.md) maps behavior to executable evidence.
 
@@ -11,9 +11,9 @@ State Flow supports the optional object-root `lazy` plane in every participating
 
 The model-facing surface remains small:
 
-- `read_state` reads one path or an ordered list of paths using one explicit projection.
+- `state_flow_read` reads one path or an ordered list of paths using one explicit projection.
 - `value` and `patch` return only the requested semantic snapshot or patch; `keys` returns narrowly bounded structural `meta` followed by `keys`.
-- `patch_state` remains a recursive semantic patch, not an edit-command language.
+- `state_flow_patch` remains a recursive semantic patch, not an edit-command language.
 - Array index selectors extend ordinary patch addressing; there are no `insert`, `remove`, `move`, or generalized query operations.
 
 > Retention is not activation. Hot state carries what must matter now; lazy state preserves what may matter later; an explicit read activates only the current trajectory.
@@ -59,7 +59,7 @@ Hot planes:
 
 - It is canonical semantic JSON, validated and versioned with its owning scope.
 - Its bodies are excluded from automatic state and recent-transition projections, including lazy writes, replacements and deletions. Empty visible patches/transitions disappear without renumbering history; hot changes remain visible.
-- Bounded baseline navigation exposes presence, path and structure without bodies. Explicit current/historical `read_state` values and patches may contain lazy bodies; already communicated native/user/tool/response text is not redacted.
+- Bounded baseline navigation exposes presence, path and structure without bodies. Explicit current/historical `state_flow_read` values and patches may contain lazy bodies; already communicated native/user/tool/response text is not redacted.
 - Reading it does not mutate state, freshness, usage metadata, history, or future context.
 
 ### Semantic references
@@ -67,7 +67,7 @@ Hot planes:
 A reference is semantic content, not a runtime type. There are two forms:
 
 - **Structured:** the optional `{"$ref":"cwd.lazy.plan"}` object.
-- **Textual:** inside any ordinary string or paragraph, `$` immediately followed by one valid `read_state` path, for example `$effective.lazy.memory[7]`. The prefix separates a deliberate reference from incidental path-like text, and leaves a deterministic seam if code-based parsing is ever justified.
+- **Textual:** inside any ordinary string or paragraph, `$` immediately followed by one valid `state_flow_read` path, for example `$effective.lazy.memory[7]`. The prefix separates a deliberate reference from incidental path-like text, and leaves a deterministic seam if code-based parsing is ever justified.
 
 File paths, document sections, URIs, artifact locators, Skill identities and agent identities keep their native syntax.
 
@@ -75,9 +75,9 @@ File paths, document sections, URIs, artifact locators, Skill identities and age
 
 This translation does not scan prose, index targets, validate existence, or infer authority, hydration, execution or completion. The separate [intent ownership](#intent-ownership) rule gives eligible canonical refs their bounded cleanup meaning.
 
-When a reference matters, the agent resolves it explicitly: with `read_state` for semantic paths, or with the appropriate external read/tool for other resources. A locator helps retrieval but does not replace content required for the current decision.
+When a reference matters, the agent resolves it explicitly: with `state_flow_read` for semantic paths, or with the appropriate external read/tool for other resources. A locator helps retrieval but does not replace content required for the current decision.
 
-**Reference repair is reactive, not a maintenance scan.** The agent does not enumerate, audit or resolve references merely to test them. Only after one requested `read_state` value path is missing does State Flow perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` and `$path` matches. The reverse lookup searches current reference owners only, never history. If it finds matches, the tool returns `{value:null, hint:[{type:"dangling-reference", message, paths}]}`:
+**Reference repair is reactive, not a maintenance scan.** The agent does not enumerate, audit or resolve references merely to test them. Only after one requested `state_flow_read` value path is missing does State Flow perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` and `$path` matches. The reverse lookup searches current reference owners only, never history. If it finds matches, the tool returns `{value:null, hint:[{type:"dangling-reference", message, paths}]}`:
 
 - `hint` is explicit top-level metadata, not state data. Its conditional message describes unavailability.
 - Its path array contains at most three runtime-verified current reference owners, not verified new locations of the target.
@@ -136,7 +136,7 @@ Ownership evaluates canonical references after model anchoring. A sole-CWD model
 - `artifacts`/`response`/`intents` targets;
 - paths still unscoped in canonical data, or `effective` paths;
 - missing targets;
-- keys outside the `read_state` key grammar `[A-Za-z_$][A-Za-z0-9_$-]*`, for example keys with spaces, dots or non-Latin letters.
+- keys outside the `state_flow_read` key grammar `[A-Za-z_$][A-Za-z0-9_$-]*`, for example keys with spaces, dots or non-Latin letters.
 
 **Receipt.** `state_updates.cascaded` lists targets cleared in the intermediate ownership phase, even if later authored writes recreate them. With multiple wanted owners paths stay scoped, for example `["session.lazy.plans.x", "session.tactics.draft"]`; with exactly one wanted owner they are relative, for example `["lazy.plans.x", "tactics.draft"]`. Canonical ownership and result details remain scoped. Paths only, never lazy bodies or deleted values. The list is deterministic (Global, CWD, Session, then each scope's cascade order), absent when no target cascaded, and never omitted as a predictable write. Nested lazy deletions are reported even when the top-level `lazy_navigation` catalog is unchanged.
 
@@ -155,11 +155,11 @@ Explicit paths such as `global.lazy`, `cwd.lazy`, and `session.lazy` preserve di
 
 Active obligations, current constraints, unresolved next actions, and facts required for the next correct action remain hot.
 
-## Progressive `read_state`
+## Progressive `state_flow_read`
 
 ### Request shape
 
-`read_state` accepts either one path or an ordered path list:
+`state_flow_read` accepts either one path or an ordered path list:
 
 ```json
 {
@@ -434,9 +434,9 @@ It may identify:
 
 - Whether effective lazy state exists.
 - Its immediate top-level keys and kinds.
-- The exact `read_state` path for deeper inspection.
+- The exact `state_flow_read` path for deeper inspection.
 
-The hint is emitted as `lazy_navigation` with `available` and the exact root `path`. For an object root it includes the complete immediate `keys` → child-kind map only when there are at most 32 keys and its canonical JSON is at most 1,024 characters. Otherwise it omits `keys` entirely rather than presenting a partial catalog. This keeps the hint bounded while `read_state` itself returns every explicitly requested value or key set; omission from the hint never makes lazy state unreachable.
+The hint is emitted as `lazy_navigation` with `available` and the exact root `path`. For an object root it includes the complete immediate `keys` → child-kind map only when there are at most 32 keys and its canonical JSON is at most 1,024 characters. Otherwise it omits `keys` entirely rather than presenting a partial catalog. This keeps the hint bounded while `state_flow_read` itself returns every explicitly requested value or key set; omission from the hint never makes lazy state unreachable.
 
 ## Activation and promotion
 
@@ -447,16 +447,16 @@ A lazy read enriches only the current tool-result trajectory. It does not:
 - Become authoritative merely because it was retrieved.
 - Update semantic freshness, usage counters, or history.
 
-When a retrieved fact becomes necessary for future correctness, the agent promotes a distilled consequence through an ordinary hot `patch_state` mutation:
+When a retrieved fact becomes necessary for future correctness, the agent promotes a distilled consequence through an ordinary hot `state_flow_patch` mutation:
 
 - Durable requirement or decision → `strategy`.
 - Current fact, uncertainty, or continuation → `tactics`.
 - Source-addressed reusable compilation → `artifacts`.
 - Historical support with no current consequence → remain under `lazy`.
 
-## `patch_state` and arrays
+## `state_flow_patch` and arrays
 
-`patch_state` remains the sole semantic mutation and publication barrier. There is no `edits` array and no operation vocabulary such as `replace`, `insert`, `remove`, or `move`.
+`state_flow_patch` remains the sole semantic mutation and publication barrier. There is no `edits` array and no operation vocabulary such as `replace`, `insert`, `remove`, or `move`.
 
 Existing recursive semantics continue:
 
@@ -484,7 +484,7 @@ Normative index behavior:
 
 - `"[N]"` addresses an existing zero-based element of the retained array.
 - Every addressed index must exist against the one captured publication basis.
-- If any index is invalid, the entire `patch_state` call fails and publishes nothing.
+- If any index is invalid, the entire `state_flow_patch` call fails and publishes nothing.
 - An indexed scalar or array value is replaced.
 - An indexed object receives the ordinary recursive object patch; the materialized element is the resulting replacement value at that index.
 - Multiple indexed and object changes in one call share one validation and one lock/CAS publication cohort.
@@ -566,7 +566,7 @@ Before release, implementation evidence must prove:
 - Whole-array replacement and indexed scalar, array, object, nested, multi-index, and stale-basis patches remain atomic.
 - Reload/resume/tree attach current lazy state with the rest of the owning scope; a supported fork copies parent-current lazy content only when private acquisition is admitted. Historical reads select the same retained causal boundary as other planes.
 - Malformed canonical lazy data fails closed without rewriting the store; rejected queries and patches preserve accepted hot state.
-- Unsupported store formats and `read_state` inputs fail actionably without rewriting retained bytes.
+- Unsupported store formats and `state_flow_read` inputs fail actionably without rewriting retained bytes.
 
 ## Limits and change authority
 

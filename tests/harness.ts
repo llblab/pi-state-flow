@@ -185,7 +185,7 @@ export async function commitScopedTerminal(
 ) {
 	if (transitions.length > 0) {
 		const input = Object.fromEntries(transitions.map(({ scope, patch }) => [scope, patch]));
-		await h.tools.get("patch_state")!.execute("terminal", input, undefined, undefined, h.ctx);
+		await h.tools.get("state_flow_patch")!.execute("terminal", input, undefined, undefined, h.ctx);
 	}
 	const message = {
 		role: "assistant" as const,

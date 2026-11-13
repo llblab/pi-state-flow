@@ -44,7 +44,7 @@ test("selected Passive guidance keeps answers conditional and prohibits grammar-
 		assert.match(protocol, /Never patch response/); assert.match(protocol, /only when Session participates/);
 		if (selected.length < 3) assert.ok(protocol.includes(`Participating owners: ${selected.join(" ")}.`));
 		if (selected.length === 1) {
-			assert.match(protocol, /patch_state takes intents\/strategy\/tactics\/artifacts\/lazy object planes directly/);
+			assert.match(protocol, /state_flow_patch takes intents\/strategy\/tactics\/artifacts\/lazy object planes directly/);
 			assert.match(protocol, /never add an owner wrapper/);
 			assert.match(protocol, /nested array\[N\] stays an array index/);
 		}
@@ -69,18 +69,22 @@ test("malformed explicit protocol selections refuse instead of widening", () => 
 	}
 });
 
-test("all-three Active and bootstrap protocol bodies retain accepted intent-first guidance bytes", () => {
+// Tool names grew in 0.27.6; freeze semantic prose/budgets independently of that exact rename.
+const beforeToolRename = (protocol: string) => protocol.replaceAll("state_flow_read", "read_state").replaceAll("state_flow_patch", "patch_state");
+
+test("all-three Active and bootstrap protocol bodies change only the authorized tool spelling", () => {
 	const expected = ["1ff1598b1122d0ca53df7a65ba27d8217105cfe095a3c16d7074b239c77a18e5", "4c0bc5e7dd89be7358e8aacbb2eb9e6c04cf3eb9f878200cbe702272f2346344"];
 	for (const [index, bootstrap] of [false, true].entries()) {
-		const protocol = stateFlowProtocol(bootstrap); assert.equal(createHash("sha256").update(protocol).digest("hex"), expected[index]);
+		const protocol = stateFlowProtocol(bootstrap); assert.equal(createHash("sha256").update(beforeToolRename(protocol)).digest("hex"), expected[index]);
+		assert.doesNotMatch(protocol, /\b(?:read_state|patch_state)\b/);
 		assert.equal(stateFlowProtocol(bootstrap, ["session", "global", "cwd"]), protocol);
 	}
 });
 
-test("protocol names patch_state as the sole semantic mutation mechanism", () => {
+test("protocol names state_flow_patch as the sole semantic mutation mechanism", () => {
 	const protocol = stateFlowProtocol(false);
 	assert.match(protocol, /sole model-authored semantic mutation mechanism/);
-	assert.doesNotMatch(protocol, /finalization patch|Call alone/, "patch_state guidelines own completion and barrier wording");
+	assert.doesNotMatch(protocol, /finalization patch|Call alone/, "state_flow_patch guidelines own completion and barrier wording");
 	assert.doesNotMatch(protocol, /final:true|terminal-ineligible|fallback turn/);
 	assert.match(protocol, /all supplied scopes are validated and durably accepted as one atomic transition/);
 	assert.match(protocol, /Global\/CWD use current canonical values after cancelable lock waiting/);
@@ -103,7 +107,7 @@ test("protocol names patch_state as the sole semantic mutation mechanism", () =>
 	assert.match(protocol, /Fixed phases, not JSON order: intents, cleanup, other planes, compile\/normalize\. Remaining\/new intents keep targets\/ancestors\/descendants\. Rewrite same\/new path: fresh, no old fields; unowned legal\./);
 	assert.doesNotMatch(protocol, /MUST|compiled knowledge|unresolved work, continuation/);
 	for (const bootstrap of [false, true]) {
-		const candidate = stateFlowProtocol(bootstrap);
+		const candidate = beforeToolRename(stateFlowProtocol(bootstrap));
 		assert.ok(candidate.length <= (bootstrap ? 4_496 : 4_395), `receipt wording must not grow the ${bootstrap ? "bootstrap" : "ordinary"} protocol (${candidate.length})`);
 		assert.ok(candidate.length <= 4_500, `${bootstrap ? "bootstrap" : "ordinary"} model protocol grew to ${candidate.length} characters`);
 	}
@@ -139,7 +143,7 @@ test("runtime and Skill guidance preserve reported ordinary and provenance-deriv
 	const memory = readFileSync(new URL("../skills/state-flow-memory/SKILL.md", import.meta.url), "utf8");
 	assert.match(memory, /only on explicit user request/);
 	assert.doesNotMatch(memory, /or once at an active State Flow|phase-boundary curation/);
-	assert.match(memory, /one atomic multi-scope `patch_state`/);
+	assert.match(memory, /one atomic multi-scope `state_flow_patch`/);
 	assert.match(memory, /pending optional Skill acquisition does not block unrelated curation/);
 	assert.match(memory, /External transfers require confirmed destination and write authority/);
 });
@@ -167,7 +171,7 @@ test("compact protocol retains read, patch, stewardship and acquisition obligati
 		/artifacts: source-path routing metadata; descriptions do not imply body acquisition/,
 		/response: read-only prior answer; never patch it in any scope\. Auto-stored at turn_end \(empty=""\)/,
 		/lazy: retrieve explicitly/,
-		/read_state for concrete scope\/retained-history gaps/,
+		/state_flow_read for concrete scope\/retained-history gaps/,
 		/lazy_navigation lists bounded effective lazy keys, not bodies/,
 		/global\/cwd\/session object patches for material updates, not acknowledgments/,
 		/Omit empty scopes/,
@@ -183,7 +187,7 @@ test("compact protocol retains read, patch, stewardship and acquisition obligati
 		/Exclude secrets, raw history, transient progress, speculation and unsupported claims/,
 		/retain decision-relevant uncertainty/,
 		/Curate touched state/,
-		/proven moves use targeted read_state and one atomic multi-scope patch, then verify both owners/i,
+		/proven moves use targeted state_flow_read and one atomic multi-scope patch, then verify both owners/i,
 		/External transfers need verified acceptance before deletion/,
 		/Never invent memory changes/,
 		/infer no authority, hydration, execution, or completion/,
@@ -308,11 +312,11 @@ test("nested and aggregate causes are explicit before transport, deduplicated an
 test("bootstrap adds only its reconciliation obligation to the compact active protocol", () => {
 	const ordinary = stateFlowProtocol(false);
 	const bootstrap = stateFlowProtocol(true);
-	const obligation = "BOOTSTRAP RUN: Reconcile all relevant state and continuation through patch_state before completion.\n\n";
+	const obligation = "BOOTSTRAP RUN: Reconcile all relevant state and continuation through state_flow_patch before completion.\n\n";
 	assert.equal(bootstrap.split(obligation).length, 2);
 	assert.equal(bootstrap.replace(obligation, ""), ordinary);
 	assert.doesNotMatch(ordinary, /BOOTSTRAP RUN/);
-	assert.ok(ordinary.length < 4_400 && bootstrap.length < 4_501, "result semantics remain within the compact protocol budget");
+	assert.ok(beforeToolRename(ordinary).length < 4_400 && beforeToolRename(bootstrap).length < 4_501, "result semantics remain within the compact protocol budget apart from the exact tool rename");
 	for (const protocol of [ordinary, PASSIVE_MEMORY_PROTOCOL]) {
 		assert.match(protocol, /state_updates: effective entries replace values at key\/index-segment path arrays/);
 		assert.match(protocol, /deleted:true means absent/);

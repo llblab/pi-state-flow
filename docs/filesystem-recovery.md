@@ -135,6 +135,6 @@ Every semantic repair follows the ordinary transaction path:
 
 **A wholly absent shared scope is current empty reality**, not permission to restore cached cold values or leftover compilation evidence.
 
-- Authored `patch_state` operations select this basis under the awaited store lock and publish only after complete validation. A rejected first patch never leaves separately published empty initialization.
+- Authored `state_flow_patch` operations select this basis under the awaited store lock and publish only after complete validation. A rejected first patch never leaves separately published empty initialization.
 - Raw precomputed replay targeting a disappeared selected basis still fails closed.
 - Discarded history is unavailable and is never reconstructed or promoted back into current shared memory.

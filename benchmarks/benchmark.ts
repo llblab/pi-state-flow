@@ -144,7 +144,7 @@ test("large-trajectory active and passive prompt prefixes", { skip: !prefixWorkl
 		const session = await fixture.createSession();
 		if (mode !== "passive") await session.prompt("/state-flow-active");
 		fixture.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("patch_state", { session: { tactics: { seed: "prefix baseline" } } }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { tactics: { seed: "prefix baseline" } } }), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Seed accepted"),
 		]);
 		await session.prompt("Seed memory before measurement");
@@ -190,7 +190,7 @@ test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_0
 				resumes.push(restored.metrics);
 				session = restored.result;
 				if (stateFlow) {
-					assert.ok(session.getActiveToolNames().includes("patch_state"));
+					assert.ok(session.getActiveToolNames().includes("state_flow_patch"));
 					assert.equal(fixture.readState(session).tactics.counter, counter);
 				}
 			}

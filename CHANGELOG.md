@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.27.6: Namespaced Memory Tools
+
+- `Canonical tool names`: Advertises `state_flow_read` and `state_flow_patch`, retaining explicit unadvertised `read_state`/`patch_state` dispatch compatibility without rewriting historical calls, stores or conversion policy. Skills, prompts, examples and packaged guidance use the canonical names.
+- `One operation across aliases`: Both spellings share exact native admission, owner/schema refresh, activation and nested-call refusal. Active counts mixed mutation names in the same single-call barrier; Off removes both. Deterministic extension and source/packed SDK checks preserve reads, no-op history and refusal behavior. Installed-client rollout remains separately gated.
+
 ## 0.27.5: Compact Telegram Help and Migration Guidance
 
 - `Telegram help spacing`: Removes the empty lines between the Mode and Inspect participating memory headings and their lists. The canonical source now preserves the compact layout in rebuilt packages; controls, scope selection and inspection behavior are unchanged.

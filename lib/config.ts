@@ -19,7 +19,7 @@ export interface StateFlowConfig {
 	inactiveMode: InactiveMode;
 	/** Opt-in local capture of rejected patch attempts and unresolved terminal drafts. */
 	logging: boolean;
-	/** Show successful patch_state arguments in the interactive tool row. */
+	/** Show successful state_flow_patch arguments in the interactive tool row. */
 	showSuccessfulPatches: boolean;
 	historyLimit: number;
 }

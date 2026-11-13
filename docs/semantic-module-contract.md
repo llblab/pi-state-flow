@@ -20,7 +20,7 @@ interface SemanticModule<Content extends JsonValue, Input = undefined> {
 }
 ```
 
-- **`immutable`:** The main agent cannot author that bound plane through `patch_state`. An independently authorized runtime/producer may still propose replacements. This is not frozen historical content or a flag that a model can toggle in its payload. Current bindings freeze the declaration; ordinary domain keys named `immutable` or `content` do not become policy.
+- **`immutable`:** The main agent cannot author that bound plane through `state_flow_patch`. An independently authorized runtime/producer may still propose replacements. This is not frozen historical content or a flag that a model can toggle in its payload. Current bindings freeze the declaration; ordinary domain keys named `immutable` or `content` do not become policy.
 - **`id`:** Stable identity for static host binding and diagnostics. It neither reserves a root nor grants native/source/private authority.
 - **`validate`:** Admit present module content and producer candidates. Absence stays absent; no defaults are invented. Observation and canonical acceptance are distinct: artifact projection admits retained legacy bookkeeping as an ordinary object, while canonical artifact validation remains in the existing artifact/state/transition owners.
 - **`context`:** Synchronous, mode-aware computation from captured data. An empty array contributes nothing. It may return multiple data/conversation contributions; it does not run a publisher or edit native history.

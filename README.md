@@ -143,7 +143,9 @@ Registered Pi Skills may be compiled into source-addressed artifacts when durabl
 
 ## Incremental updates and history
 
-`patch_state` uses the captured wanted interface, not the number of currently available views. With **one participating owner**, supply semantic planes directly, without an owner wrapper:
+The advertised tools are `state_flow_read` and `state_flow_patch`. Legacy `read_state` and `patch_state` calls still dispatch the same operations but are not advertised as extra model tools. Both spellings share scope/owner admission, schemas, refusals and the single Active mutation barrier, including mixed-name batches. No store or history conversion is involved. SDK hosts using an explicit allowlist must include the canonical names for new requests and the legacy names if historical calls must execute; see [tool-name compatibility](docs/compatibility.md#tool-name-compatibility).
+
+`state_flow_patch` uses the captured wanted interface, not the number of currently available views. With **one participating owner**, supply semantic planes directly, without an owner wrapper:
 
 ```json
 { "strategy": { "verification": { "command": "npm test" } } }
@@ -173,7 +175,7 @@ Multi-owner example, requiring CWD and Session to participate:
 
 During an active episode, a material patch is an inference barrier: sibling tool calls are blocked, and the next inference sees the accepted effective state. Ordinary completion needs no finalization patch or extra State Flow reasoning loop.
 
-`read_state` accepts flat ordinary paths with one owner (for example `{ "path": "tactics" }`); `effective[N]` selects that owner's retained temporal boundary and scalar `patches[N]` its retained patch. Current same-owner structured refs may use `{ "$ref": "lazy.plan" }`; persistence anchors them to the exact owner. Never reinterpret different-owner/historical/effective refs, resources or text as local permission.
+`state_flow_read` accepts flat ordinary paths with one owner (for example `{ "path": "tactics" }`); `effective[N]` selects that owner's retained temporal boundary and scalar `patches[N]` its retained patch. Current same-owner structured refs may use `{ "$ref": "lazy.plan" }`; persistence anchors them to the exact owner. Never reinterpret different-owner/historical/effective refs, resources or text as local permission.
 
 With multiple owners, unscoped reads use the effective overlay. This multi-owner example requires every explicit owner to participate:
 
@@ -215,11 +217,11 @@ The default store is `~/.pi/agent/state-flow/`, independent of registered source
 - Shutdown cancels owned pushes and waits for that repository's active push to close or time out.
 - Commit failures warn locally. Repeated push failures produce one concise warning until a push succeeds, with redacted Git detail kept in the local diagnostic log. Neither failure rejects or rolls back accepted memory.
 - Backup needs a Git commit identity; accepting and persisting state does not.
-- Git history can be inspected separately, but it is not the authority for `read_state` or for restoring memory.
+- Git history can be inspected separately, but it is not the authority for `state_flow_read` or for restoring memory.
 
 **Resume, tree navigation and forks:**
 
-- **State Flow does not depend on the Pi step.** Memory is the current JSON state of each scope and changes only through accepted `patch_state` calls and run lifecycle. Resume and tree navigation restore the branch's mode, never an older memory revision; Off defers acquisition. Past values stay readable through `read_state` offsets within retained history.
+- **State Flow does not depend on the Pi step.** Memory is the current JSON state of each scope and changes only through accepted `state_flow_patch` calls and run lifecycle. Resume and tree navigation restore the branch's mode, never an older memory revision; Off defers acquisition. Past values stay readable through `state_flow_read` offsets within retained history.
 - A new session gets its own private layer only when Session acquisition is admitted; shared-only selections create no hidden private semantics.
 - Supported native forks inherit captured policy and copy parent-**current** Session memory into a fresh child owner when admitted, without changing parent-private data. Off or Session-excluded forks defer private acquisition; an acquired child never recopies.
 - Explicit Active or Passive accepts the validated current memory of that same session; modes stay stable.

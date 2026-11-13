@@ -216,7 +216,7 @@ for (const recovery of ["active", "passive", "off"] as const) test(`failed Activ
 	const h = harness({ initializeRepository: false, telegram: { load: async () => modules.modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await h.commands.get("state-flow-active").handler("", h.ctx);
-	await h.tools.get("patch_state")!.execute("seed", { session: { tactics: { private: 9 } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("seed", { session: { tactics: { private: 9 } } }, undefined, undefined, h.ctx);
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const runtimePath = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).runtime;
 	const original = readFileSync(runtimePath);
@@ -431,7 +431,7 @@ async function restoredOffTelegramHarness(t: TestContext, busy: boolean, fenced 
 	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules.modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await delay(0);
-	await h.tools.get("patch_state")!.execute("seed", { session: { tactics: { retained: "PRIVATE" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("seed", { session: { tactics: { retained: "PRIVATE" } } }, undefined, undefined, h.ctx);
 	if (fenced) {
 		const publication = t.mock.method(TemporalRuntime.prototype, "persistSelectedPassive", async () => { throw new Error("Controlled mode-persistence failure"); });
 		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
@@ -506,14 +506,14 @@ for (const superseded of [false, true]) test(`pre-runtime Telegram Passive repor
 	await delay(40);
 	assert.equal(ended, false);
 	assert.deepEqual(passive.notices, ["Switching State Flow to passive"]);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	assert.deepEqual(h.entries.at(-1)!.data, nativePolicyMarker("harness-session", "off"), "pending observation does not claim accepted Passive persistence");
 	assert.deepEqual(files(), before);
 	if (superseded) await h.commands.get("state-flow-off")!.handler("", h.ctx);
 	const entries = structuredClone(h.entries);
 	await release();
 	await selecting;
-	assert.equal(h.activeTools.includes("patch_state"), !superseded);
+	assert.equal(h.activeTools.includes("state_flow_patch"), !superseded);
 	assert.deepEqual(files(), before, "selecting Passive must not initialize semantic storage");
 	if (superseded) assert.deepEqual(h.entries, entries, "withdrawn shared observation cannot append a marker");
 	else {
@@ -537,7 +537,7 @@ for (const active of [false, true]) test(`Telegram inspection awaits a current c
 	const h = harness({ initializeRepository: false, mode: active ? "active" : "off", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await new Promise((resolve) => setImmediate(resolve));
-	if (active) await h.tools.get("patch_state")!.execute("private", { session: { tactics: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
+	if (active) await h.tools.get("state_flow_patch")!.execute("private", { session: { tactics: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
 	await new TemporalRuntime(h.ctx.cwd, "peer", h.repositoryRoot).withPatchTransaction((tx) => {
 		const stage = stageAtomicScopePatches(tx.states, {
 			global: { tactics: { global: "LATEST-G" } }, cwd: { tactics: { cwd: "LATEST-C" } }, session: { tactics: { private: "FOREIGN-PRIVATE" } },
@@ -610,7 +610,7 @@ for (const boundary of ["stop", "off", "session_tree", "session_shutdown"] as co
 	if (boundary === "session_tree") assertTreePolicyCheckpoint(h.entries, entries);
 	else assert.deepEqual(h.entries, entries);
 	if (boundary === "stop") {
-		await assert.rejects(h.tools.get("patch_state")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 	}
 });
 
@@ -648,7 +648,7 @@ for (const next of ["passive", "active", "expired"] as const) test(`Off inspecti
 	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await new Promise((resolve) => setImmediate(resolve));
-	await h.tools.get("patch_state")!.execute("initial", { global: { tactics: { global: "GLOBAL" } }, cwd: { tactics: { cwd: "CWD" } }, session: { tactics: { private: "SELECTED-OLD" } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("initial", { global: { tactics: { global: "GLOBAL" } }, cwd: { tactics: { cwd: "CWD" } }, session: { tactics: { private: "SELECTED-OLD" } } }, undefined, undefined, h.ctx);
 	const peer = new TemporalRuntime(h.ctx.cwd, "harness-session", h.repositoryRoot);
 	await peer.withSelectedCurrentTransaction(DEFAULT_SCOPE_SELECTION, (current, publish) => { publish(current); }, () => {});
 	await h.commands.get("state-flow-off")!.handler("", h.ctx);
@@ -668,7 +668,7 @@ for (const next of ["passive", "active", "expired"] as const) test(`Off inspecti
 		if (scope === "effective") assert.ok(rendered.includes(`g1c1s${advances + 1}`));
 		assert.throws(() => h.readState(), /temporal runtime is unavailable/, "operator reads cannot install the model cache");
 	}
-	assert.equal(h.activeTools.includes("read_state"), false);
+	assert.equal(h.activeTools.includes("state_flow_read"), false);
 	assert.equal(h.handlers.get("context")!({ messages: [] }, h.ctx), undefined);
 	assert.deepEqual(h.entries, entries);
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, "harness-session", h.repositoryRoot), files);
@@ -681,7 +681,7 @@ for (const fault of ["missing", "malformed", "pending-fork"] as const) test(`Off
 	const { modules, sections } = fakeModules();
 	const source = harness({ initializeRepository: false, mode: "active" });
 	await source.handlers.get("session_start")!({ reason: "new" }, source.ctx);
-	await source.tools.get("patch_state")!.execute("parent", { global: { tactics: { shared: "SHARED" } }, session: { tactics: { private: "FOREIGN-PRIVATE" } } }, undefined, undefined, source.ctx);
+	await source.tools.get("state_flow_patch")!.execute("parent", { global: { tactics: { shared: "SHARED" } }, session: { tactics: { private: "FOREIGN-PRIVATE" } } }, undefined, undefined, source.ctx);
 	const id = fault === "malformed" ? "harness-session" : "unacquired-child";
 	const h = harness({ initializeRepository: false, cwd: source.ctx.cwd, repositoryRoot: source.repositoryRoot, sessionId: id, telegram: { load: async () => modules } });
 	if (fault === "malformed") writeFileSync(sessionRuntimePaths(h.ctx.cwd, id, h.repositoryRoot).runtime, "malformed runtime");
@@ -750,13 +750,13 @@ test("Telegram Passive reports local success after CAS failure and inspects curr
 	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await new Promise((resolve) => setImmediate(resolve));
-	await h.tools.get("patch_state")!.execute("remember", {
+	await h.tools.get("state_flow_patch")!.execute("remember", {
 		global: { tactics: { storedGlobal: true } }, cwd: { tactics: { storedCwd: true } }, session: { tactics: { storedSession: true } },
 	}, undefined, undefined, h.ctx);
 	const peer = harness({ initializeRepository: false, repositoryRoot: h.repositoryRoot });
 	peer.entries.push(...structuredClone(h.entries));
 	await peer.handlers.get("session_start")!({ reason: "resume" }, peer.ctx);
-	await peer.tools.get("patch_state")!.execute("peer", { session: { tactics: { other: true } } }, undefined, undefined, peer.ctx);
+	await peer.tools.get("state_flow_patch")!.execute("peer", { session: { tactics: { other: true } } }, undefined, undefined, peer.ctx);
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const before = files();
 	const stop = sectionContext("passive");
@@ -1048,7 +1048,7 @@ test("section controls drive the same branch lifecycle as the commands", async (
 	assert.equal(sections[0].getLabel!(), "🌀 State Flow: active");
 	assert.equal(await sections[0].handleCallback!(control("passive")), "handled");
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
-	await h.tools.get("patch_state")!.execute("passive-telegram", { global: { tactics: { visibleWhilePassive: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("passive-telegram", { global: { tactics: { visibleWhilePassive: true } } }, undefined, undefined, h.ctx);
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(sections[0].getLabel!(), "🌀 State Flow: passive");

@@ -118,7 +118,7 @@ for (const boundary of ["abort", "shutdown", "stop"] as const) test(`awaited bac
 	assert.deepEqual(h.entries, entries, "backup completion never checkpoints or replaces policy state");
 	if (boundary === "stop") {
 		assert.notEqual(head(), before);
-		await assert.rejects(h.tools.get("patch_state").execute("late", { session: { tactics: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
+		await assert.rejects(h.tools.get("state_flow_patch").execute("late", { session: { tactics: { late: true } } }, undefined, undefined, h.ctx), /Memory writes paused after mode change/);
 	} else if (boundary === "abort") {
 		await commitTerminal(h, {}, { next: true }, "Accepted retry");
 		await h.handlers.get("agent_before_settle")!({}, h.ctx);
@@ -291,7 +291,7 @@ test("start creates the CWD activation marker and stop preserves branch state", 
 	const h = harness({ cwd: "/tmp/state-flow-episode" });
 	assert.equal(loadCwdState(h.ctx.cwd, h.repositoryRoot), undefined);
 	await start(h);
-	assert.equal(h.activeTools.includes("patch_state"), true);
+	assert.equal(h.activeTools.includes("state_flow_patch"), true);
 	assert.deepEqual(loadCwdState(h.ctx.cwd, h.repositoryRoot), {
 		artifacts: {},
 		strategy: {},
@@ -309,7 +309,7 @@ test("start creates the CWD activation marker and stop preserves branch state", 
 	assert.equal(stopped.meta.step, committed.meta.step);
 	const checkpoint = h.entries.at(-1)!.data;
 	assert.equal(Object.hasOwn(checkpoint, "revision") || Object.hasOwn(checkpoint, "boundary"), true);
-	assert.equal(h.activeTools.includes("patch_state"), false);
+	assert.equal(h.activeTools.includes("state_flow_patch"), false);
 	assert.equal(h.statuses.at(-1), undefined);
 	assert.deepEqual(loadSessionState(h.ctx.cwd, "harness-session", h.repositoryRoot), semantic);
 });

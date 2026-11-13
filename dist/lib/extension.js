@@ -34,8 +34,12 @@ import { createStateFlowTelegramAdapter } from "./telegram.js";
 import { readTemporalScopes, temporalScopeRevisions } from "./temporal.js";
 import { commitSelectedTransition, stageSelectedScopePatches, stageSelectedScopedTransition } from "./transition.js";
 export { formatPatchStateArguments };
-export const PATCH_STATE_TOOL_NAME = "patch_state";
-export const READ_STATE_TOOL_NAME = "read_state";
+export const PATCH_STATE_TOOL_NAME = "state_flow_patch";
+export const READ_STATE_TOOL_NAME = "state_flow_read";
+const LEGACY_PATCH_STATE_TOOL_NAME = "patch_state";
+const LEGACY_READ_STATE_TOOL_NAME = "read_state";
+const STATE_FLOW_TOOL_NAMES = [PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME, LEGACY_PATCH_STATE_TOOL_NAME, LEGACY_READ_STATE_TOOL_NAME];
+const isPatchStateTool = (name) => name === PATCH_STATE_TOOL_NAME || name === LEGACY_PATCH_STATE_TOOL_NAME;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 const flatPatchParameters = Type.Object({
     intents: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
@@ -317,13 +321,14 @@ export default function stateFlowExtension(pi, options = {}) {
             // Every SDK registration is a fresh copy, preserving old response-wrapper declarations.
             if (force || patchStateTool.parameters !== parameters) {
                 patchStateTool.parameters = parameters;
-                pi.registerTool({ ...patchStateTool, ...(external.length ? {
-                        promptGuidelines: [...(patchStateTool.promptGuidelines ?? []), `Registered mutable object planes: ${external.join(", ")}. Availability and matching retained schema/policy are revalidated at acceptance.`],
-                    } : {}) });
+                for (const tool of [patchStateTool, legacyPatchStateTool])
+                    pi.registerTool({ ...tool, parameters, ...(external.length && tool === patchStateTool ? {
+                            promptGuidelines: [...(patchStateTool.promptGuidelines ?? []), `Registered mutable object planes: ${external.join(", ")}. Availability and matching retained schema/policy are revalidated at acceptance.`],
+                        } : {}) });
             }
         }
         const active = pi.getActiveTools();
-        const owned = [PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME];
+        const owned = STATE_FLOW_TOOL_NAMES;
         if (owned.every((name) => active.includes(name) === available))
             return;
         pi.setActiveTools(available
@@ -952,261 +957,272 @@ export default function stateFlowExtension(pi, options = {}) {
             return false;
         }
     }
-    pi.registerTool({
-        name: READ_STATE_TOOL_NAME,
-        label: "Read State",
-        description: "Read exact State Flow values or historical semantic patches with one path or an ordered path list. With one participating owner, semantic paths and structured references are scope-free, effective[N] selects that owner's historical boundary, and patches[N] selects its retained owner patch. With multiple owners, unscoped paths use the effective overlay and owner patch history requires an explicit owner. Optional global/cwd/session roots may address only participating available owners. Array selectors are zero-based indices or half-open [start..end] ranges, never temporal offsets inside a semantic value. Projection value returns data; keys returns minimal structure; patch intersects the selected path at its boundary. Path object keys must be ASCII identifiers ([A-Za-z_$][A-Za-z0-9_$-]*); non-ASCII keys cannot be addressed.",
-        promptSnippet: "Read exact state values, structures, or historical semantic patches",
-        promptGuidelines: [SCOPE_PARTICIPATION_GUIDELINE],
-        parameters: Type.Object({
-            path: Type.Optional(Type.String({ description: "One semantic path. One owner: flat planes, effective[N] history or retained patches[N]. Multiple owners: effective overlay or explicit participating owner; patch history needs owner.patches[N]. Nested array selectors stay ordinary indices/ranges." })),
-            paths: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Ordered query paths evaluated as one all-or-error read" })),
-            projection: Type.Optional(StringEnum(["value", "keys", "patch"], { description: "Value snapshot by default, structural keys with minimal meta, or the selected historical semantic patch" })),
-        }, { additionalProperties: false }),
-        async execute(toolCallId, params, signal, _onUpdate, ctx) {
-            try {
-                const admission = nativeToolAdmission(toolCallId, READ_STATE_TOOL_NAME, ctx);
-                admission?.revalidate();
-                if (admission)
-                    signal = signal ? AbortSignal.any([signal, admission.signal]) : admission.signal;
-                if (!memoryToolsAvailable())
-                    throw new Error("State Flow tools are off for this session");
-                if (signal?.aborted)
-                    throw new Error("State Flow read was aborted");
-                assertSelectedBranchAvailable();
-                const selected = runtime;
-                if (!selected)
-                    throw new Error("State Flow temporal runtime is unavailable");
-                const receipt = admission ?? requestPolicy.capture();
-                const check = () => {
-                    receipt.revalidate();
-                    signal?.throwIfAborted();
-                    if (!ctx || runtime !== selected || selected.sessionId !== receipt.policy.owner || receipt.policy.owner !== ctx.sessionManager.getSessionId() || receipt.policy.cwd !== ctx.cwd
-                        || selected.cwd !== ctx.cwd || selected.sessionKey !== sessionAddress(ctx).key)
-                        throw new Error("State Flow read selection owner changed");
-                };
-                check();
-                const wanted = captureScopeSelection(receipt.policy.scopes);
-                params = structuredClone(params);
-                check();
-                if (params.path === undefined && params.paths === undefined)
-                    throw new Error("read_state requires path or paths");
-                if (params.path !== undefined && params.paths !== undefined)
-                    throw new Error("read_state accepts path or paths, not both");
-                {
-                    const requestedPaths = [...(params.paths ?? [params.path])];
-                    const paths = requestedPaths.map(path => normalizeModelReadPath(path, wanted, config.historyLimit));
-                    check();
-                    const view = readableView(selected);
-                    // Wanted policy was checked by normalization; an observational subset is not an exclusion.
-                    for (const path of paths) {
-                        const owner = /^(global|cwd|session)(?=\.|\[|$)/.exec(path)?.[1];
-                        if (owner && !view?.selection.includes(owner))
-                            throw new Error(`State Flow ${owner}: selected, unavailable`);
-                    }
-                    if (!view)
+    function readStateDefinition(name) {
+        return defineTool({
+            name,
+            ...(name === LEGACY_READ_STATE_TOOL_NAME ? { prepareLoadout: () => ({ hiddenDeclarations: [name] }) } : {}),
+            label: "Read State",
+            description: "Read exact State Flow values or historical semantic patches with one path or an ordered path list. With one participating owner, semantic paths and structured references are scope-free, effective[N] selects that owner's historical boundary, and patches[N] selects its retained owner patch. With multiple owners, unscoped paths use the effective overlay and owner patch history requires an explicit owner. Optional global/cwd/session roots may address only participating available owners. Array selectors are zero-based indices or half-open [start..end] ranges, never temporal offsets inside a semantic value. Projection value returns data; keys returns minimal structure; patch intersects the selected path at its boundary. Path object keys must be ASCII identifiers ([A-Za-z_$][A-Za-z0-9_$-]*); non-ASCII keys cannot be addressed.",
+            promptSnippet: "Read exact state values, structures, or historical semantic patches",
+            promptGuidelines: [SCOPE_PARTICIPATION_GUIDELINE],
+            parameters: Type.Object({
+                path: Type.Optional(Type.String({ description: "One semantic path. One owner: flat planes, effective[N] history or retained patches[N]. Multiple owners: effective overlay or explicit participating owner; patch history needs owner.patches[N]. Nested array selectors stay ordinary indices/ranges." })),
+                paths: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Ordered query paths evaluated as one all-or-error read" })),
+                projection: Type.Optional(StringEnum(["value", "keys", "patch"], { description: "Value snapshot by default, structural keys with minimal meta, or the selected historical semantic patch" })),
+            }, { additionalProperties: false }),
+            async execute(toolCallId, params, signal, _onUpdate, ctx) {
+                try {
+                    const admission = nativeToolAdmission(toolCallId, name, ctx);
+                    admission?.revalidate();
+                    if (admission)
+                        signal = signal ? AbortSignal.any([signal, admission.signal]) : admission.signal;
+                    if (!memoryToolsAvailable())
+                        throw new Error("State Flow tools are off for this session");
+                    if (signal?.aborted)
+                        throw new Error("State Flow read was aborted");
+                    assertSelectedBranchAvailable();
+                    const selected = runtime;
+                    if (!selected)
                         throw new Error("State Flow temporal runtime is unavailable");
+                    const receipt = admission ?? requestPolicy.capture();
+                    const check = () => {
+                        receipt.revalidate();
+                        signal?.throwIfAborted();
+                        if (!ctx || runtime !== selected || selected.sessionId !== receipt.policy.owner || receipt.policy.owner !== ctx.sessionManager.getSessionId() || receipt.policy.cwd !== ctx.cwd
+                            || selected.cwd !== ctx.cwd || selected.sessionKey !== sessionAddress(ctx).key)
+                            throw new Error("State Flow read selection owner changed");
+                    };
                     check();
-                    if (paths.some((path) => /^session(?:\.|\[|$)/.test(path)))
-                        assertSelectedBranchAvailable();
-                    if (paths.length === 1 && /^(?:global|cwd|session)\.patches(?:\[\d+\])?$/.test(paths[0])) {
-                        if (params.projection !== undefined && params.projection !== "value")
-                            throw new Error("Scope patch paths support only the value projection");
-                        const result = readStatePath(view, paths[0], config.historyLimit);
-                        if (!("patch" in result))
-                            throw new Error("Expected a scope patch path");
-                        const output = wanted.length === 1 ? projectModelReferences({ patch: result.patch }, wanted, wanted.flatMap(scope => Object.keys(view.scopes[scope]?.modules ?? {}))) : { patch: result.patch };
+                    const wanted = captureScopeSelection(receipt.policy.scopes);
+                    params = structuredClone(params);
+                    check();
+                    if (params.path === undefined && params.paths === undefined)
+                        throw new Error("state_flow_read requires path or paths");
+                    if (params.path !== undefined && params.paths !== undefined)
+                        throw new Error("state_flow_read accepts path or paths, not both");
+                    {
+                        const requestedPaths = [...(params.paths ?? [params.path])];
+                        const paths = requestedPaths.map(path => normalizeModelReadPath(path, wanted, config.historyLimit));
+                        check();
+                        const view = readableView(selected);
+                        // Wanted policy was checked by normalization; an observational subset is not an exclusion.
+                        for (const path of paths) {
+                            const owner = /^(global|cwd|session)(?=\.|\[|$)/.exec(path)?.[1];
+                            if (owner && !view?.selection.includes(owner))
+                                throw new Error(`State Flow ${owner}: selected, unavailable`);
+                        }
+                        if (!view)
+                            throw new Error("State Flow temporal runtime is unavailable");
+                        check();
+                        if (paths.some((path) => /^session(?:\.|\[|$)/.test(path)))
+                            assertSelectedBranchAvailable();
+                        if (paths.length === 1 && /^(?:global|cwd|session)\.patches(?:\[\d+\])?$/.test(paths[0])) {
+                            if (params.projection !== undefined && params.projection !== "value")
+                                throw new Error("Scope patch paths support only the value projection");
+                            const result = readStatePath(view, paths[0], config.historyLimit);
+                            if (!("patch" in result))
+                                throw new Error("Expected a scope patch path");
+                            const output = wanted.length === 1 ? projectModelReferences({ patch: result.patch }, wanted, wanted.flatMap(scope => Object.keys(view.scopes[scope]?.modules ?? {}))) : { patch: result.patch };
+                            check();
+                            return {
+                                content: [{ type: "text", text: `\n${JSON.stringify(output)}` }],
+                                details: { path: requestedPaths[0], transitionId: result.boundary.id },
+                            };
+                        }
+                        const result = readProjectedState(view, paths, params.projection, config.historyLimit);
+                        const output = wanted.length === 1 ? projectModelReferences(result, wanted, wanted.flatMap(scope => Object.keys(view.scopes[scope]?.modules ?? {}))) : result;
                         check();
                         return {
                             content: [{ type: "text", text: `\n${JSON.stringify(output)}` }],
-                            details: { path: requestedPaths[0], transitionId: result.boundary.id },
+                            details: { ...(params.path === undefined ? { paths: requestedPaths } : { path: requestedPaths[0] }), projection: params.projection ?? "value" },
                         };
                     }
-                    const result = readProjectedState(view, paths, params.projection, config.historyLimit);
-                    const output = wanted.length === 1 ? projectModelReferences(result, wanted, wanted.flatMap(scope => Object.keys(view.scopes[scope]?.modules ?? {}))) : result;
-                    check();
-                    return {
-                        content: [{ type: "text", text: `\n${JSON.stringify(output)}` }],
-                        details: { ...(params.path === undefined ? { paths: requestedPaths } : { path: requestedPaths[0] }), projection: params.projection ?? "value" },
-                    };
                 }
-            }
-            catch (error) {
-                throw separatedFailure(error);
-            }
-        },
-    });
-    const patchStateTool = defineTool({
-        name: PATCH_STATE_TOOL_NAME,
-        label: "Patch State",
-        description: "The sole State Flow semantic mutation protocol. With one participating owner, supply intents/strategy/tactics/artifacts/lazy planes directly, without an owner wrapper. With multiple owners, supply one or more global, cwd, or session patches for participating owners; all supplied owners commit atomically. This call must be the only State Flow barrier in its assistant response. Intent updates run first, then clear owned same-scope strategy/tactics/lazy keys unless a remaining or new intent refs them, then other fields apply. Later writes can recreate cleared paths without old fields. Name keys in ASCII ([A-Za-z_$][A-Za-z0-9_$-]*) so read paths and refs resolve; values may use any language.",
-        promptSnippet: "Atomically patch participating semantic memory in its declared flat or multi-owner form",
-        promptGuidelines: [
-            RESPONSE_PATCH_GUIDELINE,
-            SCOPE_PARTICIPATION_GUIDELINE,
-            "Use patch_state only for material durable semantic changes; ordinary answers need no finalization call.",
-            "Use patch_state as reconciliation, not append-only notes: place new knowledge at the narrowest valid scope and remove superseded or completed state from touched branches.",
-            "Call patch_state alone in an assistant response; after its acknowledgement, further reasoning, tools, and later patch_state calls remain allowed.",
-        ],
-        executionMode: "sequential",
-        parameters: config.scopes.length === 1 ? flatPatchParameters : scopedPatchParameters,
-        renderCall(args, theme, context) {
-            const title = theme.fg("toolTitle", theme.bold(PATCH_STATE_TOOL_NAME));
-            if (!config.showSuccessfulPatches && !context.isError)
-                return new Text(title, 0, 0);
-            return new Text(`${title}\n${separatedOutput(theme.fg("dim", formatPatchStateArguments(args)))}`, 0, 0);
-        },
-        renderResult(result) {
-            const text = result.content.find((block) => block.type === "text")?.text ?? "";
-            return new Text(separatedOutput(text), 0, 0);
-        },
-        async execute(toolCallId, params, signal, _onUpdate, ctx) {
-            signal = signal ? AbortSignal.any([signal, memoryToolLifetime.signal]) : memoryToolLifetime.signal;
-            let admitted = false;
-            try {
-                const admission = nativeToolAdmission(toolCallId, PATCH_STATE_TOOL_NAME, ctx);
-                admission?.revalidate();
-                if (admission)
-                    signal = AbortSignal.any([signal, admission.signal]);
-                if (!memoryToolsAvailable())
-                    throw new Error("State Flow tools are off for this session");
-                assertPublicationAvailable();
-                if (signal?.aborted)
-                    throw new Error("State Flow patch was aborted before materialization");
-                if (!ctx)
-                    throw new Error("State Flow patch selection owner changed");
-                const selected = runtime ??= createRuntime(ctx);
-                const sameSession = sessionIdentity(ctx);
-                const receipt = admission ?? requestPolicy.capture();
-                const wanted = captureScopeSelection(receipt.policy.scopes);
-                const catalog = moduleHost.captureIfBound();
-                signal = AbortSignal.any([signal, receipt.signal, ...(catalog ? [catalog.signal] : [])]);
-                const check = () => {
-                    receipt.revalidate();
-                    if (runtime !== selected || !sameSession() || selected.sessionId !== receipt.policy.owner || receipt.policy.owner !== ctx.sessionManager.getSessionId()
-                        || receipt.policy.cwd !== ctx.cwd || selected.cwd !== ctx.cwd || selected.sessionKey !== sessionAddress(ctx).key)
-                        throw new Error("State Flow patch selection owner changed");
-                    assertPublicationAvailable();
-                    catalog?.assertCurrent();
-                };
-                // Rehash and normalize only after caller admission, still before canonical exclusion.
-                check();
-                const excluded = isObject(params) && Object.keys(params).find(key => DEFAULT_SCOPE_SELECTION.includes(key) && !wanted.includes(key));
-                if (excluded)
-                    throw new Error(`State Flow ${excluded} patch scope is excluded`);
-                params = structuredClone(params);
-                check();
-                admitted = true;
-                const knownModules = [...new Set([...(catalog?.modules.map(module => module.id) ?? []),
-                        ...wanted.flatMap(scope => Object.keys(readableView(selected)?.scopes[scope]?.modules ?? {}))])];
-                const patches = normalizeModelPatches(params, wanted, knownModules);
-                check();
-                const scopes = Object.keys(patches);
-                const firstAuthoring = selected.selectedView() === undefined;
-                const acquiredArtifacts = structuredClone([...artifactReads.successful.values()]);
-                const acquiredSkills = structuredClone([...skillReads.successful.values()]);
-                const previousEffective = effectiveState;
-                skillReads.validateCompilations(patches);
-                const author = (transaction) => {
-                    check();
-                    if (runtime !== selected)
-                        throw new Error("State Flow session selection changed while awaiting publication");
+                catch (error) {
+                    throw separatedFailure(error);
+                }
+            },
+        });
+    }
+    pi.registerTool(readStateDefinition(READ_STATE_TOOL_NAME));
+    pi.registerTool({ ...readStateDefinition(LEGACY_READ_STATE_TOOL_NAME), promptSnippet: "", promptGuidelines: [] });
+    function patchStateDefinition(name) {
+        return defineTool({
+            name,
+            ...(name === LEGACY_PATCH_STATE_TOOL_NAME ? { prepareLoadout: () => ({ hiddenDeclarations: [name] }) } : {}),
+            label: "Patch State",
+            description: "The sole State Flow semantic mutation protocol. With one participating owner, supply intents/strategy/tactics/artifacts/lazy planes directly, without an owner wrapper. With multiple owners, supply one or more global, cwd, or session patches for participating owners; all supplied owners commit atomically. This call must be the only State Flow barrier in its assistant response. Intent updates run first, then clear owned same-scope strategy/tactics/lazy keys unless a remaining or new intent refs them, then other fields apply. Later writes can recreate cleared paths without old fields. Name keys in ASCII ([A-Za-z_$][A-Za-z0-9_$-]*) so read paths and refs resolve; values may use any language.",
+            promptSnippet: "Atomically patch participating semantic memory in its declared flat or multi-owner form",
+            promptGuidelines: [
+                RESPONSE_PATCH_GUIDELINE,
+                SCOPE_PARTICIPATION_GUIDELINE,
+                "Use state_flow_patch only for material durable semantic changes; ordinary answers need no finalization call.",
+                "Use state_flow_patch as reconciliation, not append-only notes: place new knowledge at the narrowest valid scope and remove superseded or completed state from touched branches.",
+                "Call state_flow_patch alone in an assistant response; after its acknowledgement, further reasoning, tools, and later state_flow_patch calls remain allowed.",
+            ],
+            executionMode: "sequential",
+            parameters: config.scopes.length === 1 ? flatPatchParameters : scopedPatchParameters,
+            renderCall(args, theme, context) {
+                const title = theme.fg("toolTitle", theme.bold(name));
+                if (!config.showSuccessfulPatches && !context.isError)
+                    return new Text(title, 0, 0);
+                return new Text(`${title}\n${separatedOutput(theme.fg("dim", formatPatchStateArguments(args)))}`, 0, 0);
+            },
+            renderResult(result) {
+                const text = result.content.find((block) => block.type === "text")?.text ?? "";
+                return new Text(separatedOutput(text), 0, 0);
+            },
+            async execute(toolCallId, params, signal, _onUpdate, ctx) {
+                signal = signal ? AbortSignal.any([signal, memoryToolLifetime.signal]) : memoryToolLifetime.signal;
+                let admitted = false;
+                try {
+                    const admission = nativeToolAdmission(toolCallId, name, ctx);
+                    admission?.revalidate();
+                    if (admission)
+                        signal = AbortSignal.any([signal, admission.signal]);
                     if (!memoryToolsAvailable())
                         throw new Error("State Flow tools are off for this session");
                     assertPublicationAvailable();
-                    for (const acquired of acquiredArtifacts) {
-                        const observation = inspectRegisteredArtifactPaths([acquired.path])[0];
-                        if (acquired.sourceFingerprint === undefined || observation?.kind !== "present"
-                            || !sameArtifactSourceFingerprint(acquired.sourceFingerprint, observation.fingerprint)) {
-                            throw new Error(`Artifact source changed after acquisition: ${acquired.path}`);
-                        }
-                    }
-                    const stage = stageSelectedScopePatches(transaction, patches, acquiredSkills, transaction.causalBasis, acquiredArtifacts, catalog?.modules);
-                    const changed = transaction.selection.some((scope) => !sameJson(transaction.states[scope], stage.nextStates[scope])
-                        || Object.entries(stage.provenanceUpdates[scope] ?? {}).some(([path, evidence]) => !Object.hasOwn(transaction.provenance[scope] ?? {}, path) || !sameJson(transaction.provenance[scope]?.[path], evidence)));
-                    const nextSnapshot = structuredClone(firstAuthoring ? transaction.snapshot : snapshot);
-                    let publication;
-                    commitSelectedTransition(nextSnapshot, transaction, stage, (accepted, next) => {
+                    if (signal?.aborted)
+                        throw new Error("State Flow patch was aborted before materialization");
+                    if (!ctx)
+                        throw new Error("State Flow patch selection owner changed");
+                    const selected = runtime ??= createRuntime(ctx);
+                    const sameSession = sessionIdentity(ctx);
+                    const receipt = admission ?? requestPolicy.capture();
+                    const wanted = captureScopeSelection(receipt.policy.scopes);
+                    const catalog = moduleHost.captureIfBound();
+                    signal = AbortSignal.any([signal, receipt.signal, ...(catalog ? [catalog.signal] : [])]);
+                    const check = () => {
+                        receipt.revalidate();
+                        if (runtime !== selected || !sameSession() || selected.sessionId !== receipt.policy.owner || receipt.policy.owner !== ctx.sessionManager.getSessionId()
+                            || receipt.policy.cwd !== ctx.cwd || selected.cwd !== ctx.cwd || selected.sessionKey !== sessionAddress(ctx).key)
+                            throw new Error("State Flow patch selection owner changed");
+                        assertPublicationAvailable();
                         catalog?.assertCurrent();
-                        publication = transaction.publish(next, accepted, stage.provenanceUpdates, stage.moduleAdditions);
-                    }, transaction.causalBasis, { finalizeRun: false });
-                    snapshot = nextSnapshot;
-                    installScopeStates();
-                    if (publication?.changed) {
-                        recordPublication();
-                        appendCheckpoint();
-                    }
-                    clearAcceptedAcquisitions(new Set(acquiredArtifacts.map(({ path }) => path)));
-                    updateUi(ctx);
-                    const updates = contextProjection.acceptPatch(previousEffective, effectiveState, patches, acquisition.hints, stage.cascades, isActive(), wanted);
-                    const acknowledgement = changed
-                        ? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
-                        : "\nState already current.";
-                    return { content: [
-                            { type: "text", text: acknowledgement + stage.missingDeletions.map(deletion => projectModelMissingDeletion(deletion, wanted)).map(({ path, unavailablePath }) => `\n\nHint: deletion skipped at ${path}; target absent. First unavailable component: ${unavailablePath}. Check the path if you expected an existing value.`).join("") },
-                            ...(updates ? [{ type: "text", text: `\n${presentationJson({ state_updates: updates })}` }] : []),
-                        ], details: { scopes, step: snapshot.meta.step, changed, missingDeletions: stage.missingDeletions } };
-                };
-                if (!firstAuthoring)
-                    return await selected.withSelectedPatchTransaction(author, check, signal);
-                check();
-                const disposition = await selected.inspectSelectedLifecycle(wanted, check, signal);
-                if (disposition && !wanted.includes("session")) {
-                    return await selected.withSelectedCurrentTransaction(wanted, (_current, _publish, transaction) => author(Object.freeze({
-                        ...transaction, snapshot: { ...transaction.snapshot, config: { mode: receipt.policy.mode } },
-                    })), check, signal);
-                }
-                if (disposition) {
-                    const acquire = () => {
-                        check();
-                        if (receipt.policy.mode === "off" || !wanted.includes("session") || disposition.privateAcquisition !== "unacquired"
-                            || forkInitialization || branchPolicy(ctx).forkPending)
-                            throw new Error("State Flow first mutation requires independent unacquired Session participation");
                     };
-                    acquire();
-                    const base = await loadSelectedFileCohort(ctx.cwd, selected.sessionId, disposition.selection, selected.root, selected.sessionKey, signal);
-                    acquire();
-                    if (!base)
-                        throw new Error("Unacquired State Flow first mutation source disappeared");
-                    let result;
-                    return await selected.withSelectedSessionAcquisitionTransaction({ kind: "unacquired", base, selection: wanted,
-                        snapshot: { ...disposition.snapshot, config: { mode: receipt.policy.mode } }, historyLimit: config.historyLimit,
-                        author: (basis, publish) => {
-                            acquire();
-                            result = author(Object.freeze({ selection: wanted,
-                                states: readTemporalScopes(basis.view, 0, config.historyLimit), snapshot: basis.snapshot,
-                                modules: Object.fromEntries(wanted.filter(scope => basis.view.scopes[scope]?.modules !== undefined).map(scope => [scope, structuredClone(basis.view.scopes[scope].modules)])),
-                                causalBasis: basis.view.lineage.at(-1).id, provenance: basis.provenance,
-                                publish: (next, transition, provenance, additions) => { acquire(); return publish(next, transition, provenance, additions); } }));
-                        } }, publish => { acquire(); publish(); return result; }, signal, true);
-                }
-                if (!branchStartsWithoutRuntime || forkInitialization || branchPolicy(ctx).forkPending)
-                    throw new Error("State Flow first authoring requires native independent origin authority");
-                return await selected.withSelectedFirstPatchTransaction(wanted, snapshot, author, () => {
+                    // Rehash and normalize only after caller admission, still before canonical exclusion.
                     check();
+                    const excluded = isObject(params) && Object.keys(params).find(key => DEFAULT_SCOPE_SELECTION.includes(key) && !wanted.includes(key));
+                    if (excluded)
+                        throw new Error(`State Flow ${excluded} patch scope is excluded`);
+                    params = structuredClone(params);
+                    check();
+                    admitted = true;
+                    const knownModules = [...new Set([...(catalog?.modules.map(module => module.id) ?? []),
+                            ...wanted.flatMap(scope => Object.keys(readableView(selected)?.scopes[scope]?.modules ?? {}))])];
+                    const patches = normalizeModelPatches(params, wanted, knownModules);
+                    check();
+                    const scopes = Object.keys(patches);
+                    const firstAuthoring = selected.selectedView() === undefined;
+                    const acquiredArtifacts = structuredClone([...artifactReads.successful.values()]);
+                    const acquiredSkills = structuredClone([...skillReads.successful.values()]);
+                    const previousEffective = effectiveState;
+                    skillReads.validateCompilations(patches);
+                    const author = (transaction) => {
+                        check();
+                        if (runtime !== selected)
+                            throw new Error("State Flow session selection changed while awaiting publication");
+                        if (!memoryToolsAvailable())
+                            throw new Error("State Flow tools are off for this session");
+                        assertPublicationAvailable();
+                        for (const acquired of acquiredArtifacts) {
+                            const observation = inspectRegisteredArtifactPaths([acquired.path])[0];
+                            if (acquired.sourceFingerprint === undefined || observation?.kind !== "present"
+                                || !sameArtifactSourceFingerprint(acquired.sourceFingerprint, observation.fingerprint)) {
+                                throw new Error(`Artifact source changed after acquisition: ${acquired.path}`);
+                            }
+                        }
+                        const stage = stageSelectedScopePatches(transaction, patches, acquiredSkills, transaction.causalBasis, acquiredArtifacts, catalog?.modules);
+                        const changed = transaction.selection.some((scope) => !sameJson(transaction.states[scope], stage.nextStates[scope])
+                            || Object.entries(stage.provenanceUpdates[scope] ?? {}).some(([path, evidence]) => !Object.hasOwn(transaction.provenance[scope] ?? {}, path) || !sameJson(transaction.provenance[scope]?.[path], evidence)));
+                        const nextSnapshot = structuredClone(firstAuthoring ? transaction.snapshot : snapshot);
+                        let publication;
+                        commitSelectedTransition(nextSnapshot, transaction, stage, (accepted, next) => {
+                            catalog?.assertCurrent();
+                            publication = transaction.publish(next, accepted, stage.provenanceUpdates, stage.moduleAdditions);
+                        }, transaction.causalBasis, { finalizeRun: false });
+                        snapshot = nextSnapshot;
+                        installScopeStates();
+                        if (publication?.changed) {
+                            recordPublication();
+                            appendCheckpoint();
+                        }
+                        clearAcceptedAcquisitions(new Set(acquiredArtifacts.map(({ path }) => path)));
+                        updateUi(ctx);
+                        const updates = contextProjection.acceptPatch(previousEffective, effectiveState, patches, acquisition.hints, stage.cascades, isActive(), wanted);
+                        const acknowledgement = changed
+                            ? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
+                            : "\nState already current.";
+                        return { content: [
+                                { type: "text", text: acknowledgement + stage.missingDeletions.map(deletion => projectModelMissingDeletion(deletion, wanted)).map(({ path, unavailablePath }) => `\n\nHint: deletion skipped at ${path}; target absent. First unavailable component: ${unavailablePath}. Check the path if you expected an existing value.`).join("") },
+                                ...(updates ? [{ type: "text", text: `\n${presentationJson({ state_updates: updates })}` }] : []),
+                            ], details: { scopes, step: snapshot.meta.step, changed, missingDeletions: stage.missingDeletions } };
+                    };
+                    if (!firstAuthoring)
+                        return await selected.withSelectedPatchTransaction(author, check, signal);
+                    check();
+                    const disposition = await selected.inspectSelectedLifecycle(wanted, check, signal);
+                    if (disposition && !wanted.includes("session")) {
+                        return await selected.withSelectedCurrentTransaction(wanted, (_current, _publish, transaction) => author(Object.freeze({
+                            ...transaction, snapshot: { ...transaction.snapshot, config: { mode: receipt.policy.mode } },
+                        })), check, signal);
+                    }
+                    if (disposition) {
+                        const acquire = () => {
+                            check();
+                            if (receipt.policy.mode === "off" || !wanted.includes("session") || disposition.privateAcquisition !== "unacquired"
+                                || forkInitialization || branchPolicy(ctx).forkPending)
+                                throw new Error("State Flow first mutation requires independent unacquired Session participation");
+                        };
+                        acquire();
+                        const base = await loadSelectedFileCohort(ctx.cwd, selected.sessionId, disposition.selection, selected.root, selected.sessionKey, signal);
+                        acquire();
+                        if (!base)
+                            throw new Error("Unacquired State Flow first mutation source disappeared");
+                        let result;
+                        return await selected.withSelectedSessionAcquisitionTransaction({ kind: "unacquired", base, selection: wanted,
+                            snapshot: { ...disposition.snapshot, config: { mode: receipt.policy.mode } }, historyLimit: config.historyLimit,
+                            author: (basis, publish) => {
+                                acquire();
+                                result = author(Object.freeze({ selection: wanted,
+                                    states: readTemporalScopes(basis.view, 0, config.historyLimit), snapshot: basis.snapshot,
+                                    modules: Object.fromEntries(wanted.filter(scope => basis.view.scopes[scope]?.modules !== undefined).map(scope => [scope, structuredClone(basis.view.scopes[scope].modules)])),
+                                    causalBasis: basis.view.lineage.at(-1).id, provenance: basis.provenance,
+                                    publish: (next, transition, provenance, additions) => { acquire(); return publish(next, transition, provenance, additions); } }));
+                            } }, publish => { acquire(); publish(); return result; }, signal, true);
+                    }
                     if (!branchStartsWithoutRuntime || forkInitialization || branchPolicy(ctx).forkPending)
-                        throw new Error("State Flow origin authority changed");
-                }, signal, true);
-            }
-            catch (error) {
-                if (admitted && !signal.aborted && memoryToolsAvailable()) {
-                    let attempted;
-                    try {
-                        attempted = structuredClone(params);
-                    }
-                    catch {
-                        attempted = undefined;
-                    }
-                    const cause = diagnosticText(error);
-                    recordDiagnostic(cause, /concurrently|advanced/.test(cause) ? "publication-conflict" : "invalid-patch", ctx, {
-                        input: attempted, tool: PATCH_STATE_TOOL_NAME, toolCallId,
-                    });
+                        throw new Error("State Flow first authoring requires native independent origin authority");
+                    return await selected.withSelectedFirstPatchTransaction(wanted, snapshot, author, () => {
+                        check();
+                        if (!branchStartsWithoutRuntime || forkInitialization || branchPolicy(ctx).forkPending)
+                            throw new Error("State Flow origin authority changed");
+                    }, signal, true);
                 }
-                throw separatedFailure(error);
-            }
-        },
-    });
+                catch (error) {
+                    if (admitted && !signal.aborted && memoryToolsAvailable()) {
+                        let attempted;
+                        try {
+                            attempted = structuredClone(params);
+                        }
+                        catch {
+                            attempted = undefined;
+                        }
+                        const cause = diagnosticText(error);
+                        recordDiagnostic(cause, /concurrently|advanced/.test(cause) ? "publication-conflict" : "invalid-patch", ctx, {
+                            input: attempted, tool: name, toolCallId,
+                        });
+                    }
+                    throw separatedFailure(error);
+                }
+            },
+        });
+    }
+    const patchStateTool = patchStateDefinition(PATCH_STATE_TOOL_NAME);
+    const legacyPatchStateTool = { ...patchStateDefinition(LEGACY_PATCH_STATE_TOOL_NAME), promptSnippet: "", promptGuidelines: [] };
     pi.registerTool({ ...patchStateTool });
+    pi.registerTool({ ...legacyPatchStateTool });
     function startStateFlow(ctx, reselect = false) {
         if (shuttingDown)
             return Promise.resolve({ ok: false, message: "State Flow is shutting down" });
@@ -2050,10 +2066,10 @@ export default function stateFlowExtension(pi, options = {}) {
         artifactReads.recordStart(event.toolCallId, event.toolName, event.args);
     });
     pi.on("tool_call", (event, ctx) => {
-        const owned = event.toolName === PATCH_STATE_TOOL_NAME || event.toolName === READ_STATE_TOOL_NAME;
+        const owned = STATE_FLOW_TOOL_NAMES.includes(event.toolName);
         if (event.parentToolCallId) {
-            if (event.toolName === PATCH_STATE_TOOL_NAME && isActive())
-                return { block: true, reason: "patch_state requires a direct native assistant barrier, not a nested call" };
+            if (isPatchStateTool(event.toolName) && isActive())
+                return { block: true, reason: "state_flow_patch requires a direct native assistant barrier, not a nested call" };
             try {
                 nativeRequests.nested(event.toolCallId, event.toolName, event.parentToolCallId);
             }
@@ -2073,15 +2089,15 @@ export default function stateFlowExtension(pi, options = {}) {
         if (!isActive() || !currentNativeTool(event.toolCallId, event.toolName, ctx))
             return;
         const batch = findAssistantToolBatch(ctx.sessionManager, event.toolCallId);
-        const patchCalls = batch?.filter((name) => name === PATCH_STATE_TOOL_NAME).length ?? 0;
+        const patchCalls = batch?.filter(isPatchStateTool).length ?? 0;
         if (patchCalls > 0) {
             if (patchCalls !== 1) {
-                const reason = "A State Flow barrier response must contain exactly one patch_state call";
+                const reason = "A State Flow barrier response must contain exactly one state_flow_patch call";
                 recordDiagnostic(reason, "barrier-block", ctx, { tool: event.toolName, toolCallId: event.toolCallId, batchToolNames: batch });
                 return { block: true, reason };
             }
-            if (event.toolName !== PATCH_STATE_TOOL_NAME) {
-                const reason = "Blocked by the patch_state barrier; reconsider this action after State Flow rematerializes context";
+            if (!isPatchStateTool(event.toolName)) {
+                const reason = "Blocked by the state_flow_patch barrier; reconsider this action after State Flow rematerializes context";
                 recordDiagnostic(reason, "barrier-block", ctx, { tool: event.toolName, toolCallId: event.toolCallId, batchToolNames: batch });
                 return { block: true, reason };
             }

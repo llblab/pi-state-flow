@@ -19,8 +19,8 @@ test("prepared module source guards bind to the original native provider context
 	const captured = requests.preparing();
 	requests.bindPreparedContext(() => { assert.ok(current, "source obsolete"); });
 	captured.revalidate(); current = false; assert.throws(captured.revalidate, /source obsolete/);
-	current = true; requests.finalize([{ id: "read", name: "read_state" }]);
-	current = false; requests.take("read", "read_state").revalidate();
+	current = true; requests.finalize([{ id: "read", name: "state_flow_read" }]);
+	current = false; requests.take("read", "state_flow_read").revalidate();
 	requests.end(); assert.throws(captured.revalidate, /native request/);
 });
 
@@ -538,23 +538,23 @@ test("tree navigation restores the branch mode but keeps current memory", async 
 	}
 	test("native request correlation admits only finalized matching IDs once, with explicit nested-parent evidence", () => {
 		const f = fixture(); f.begin();
-		assert.throws(() => f.calls.check("patch", "patch_state"), /no current/);
-		f.calls.finalize([{ id: "patch", name: "patch_state" }, { id: "outer", name: "codemode" }]);
-		assert.throws(() => f.calls.check("patch", "read_state"), /no current/);
-		assert.throws(() => f.calls.check("unknown", "read_state"), /no current/);
-		const request = f.calls.take("patch", "patch_state"); request.revalidate();
-		assert.throws(() => f.calls.take("patch", "patch_state"), /already consumed/);
-		assert.throws(() => f.calls.nested("outer/1", "read_state", "guessed-parent"), /no current/);
-		assert.throws(() => f.calls.nested("outer", "read_state", "outer"), /no current/);
-		f.calls.nested("child", "read_state", "outer"); f.calls.nested("child", "read_state", "outer");
-		f.calls.take("child", "read_state").revalidate();
+		assert.throws(() => f.calls.check("patch", "state_flow_patch"), /no current/);
+		f.calls.finalize([{ id: "patch", name: "state_flow_patch" }, { id: "outer", name: "codemode" }]);
+		assert.throws(() => f.calls.check("patch", "state_flow_read"), /no current/);
+		assert.throws(() => f.calls.check("unknown", "state_flow_read"), /no current/);
+		const request = f.calls.take("patch", "state_flow_patch"); request.revalidate();
+		assert.throws(() => f.calls.take("patch", "state_flow_patch"), /already consumed/);
+		assert.throws(() => f.calls.nested("outer/1", "state_flow_read", "guessed-parent"), /no current/);
+		assert.throws(() => f.calls.nested("outer", "state_flow_read", "outer"), /no current/);
+		f.calls.nested("child", "state_flow_read", "outer"); f.calls.nested("child", "state_flow_read", "outer");
+		f.calls.take("child", "state_flow_read").revalidate();
 		f.calls.end(); assert.equal(request.signal.aborted, true); assert.throws(request.revalidate, /turn has ended/);
 		assert.equal(f.calls.has("patch"), false);
 	});
 
 	test("native policy ABA, native Abort and physical identity movement revoke already admitted tool leases", () => {
 		for (const change of ["policy", "abort", "identity"] as const) {
-			const f = fixture(); f.begin(); f.calls.finalize([{ id: "call", name: "read_state" }]); const lease = f.calls.take("call", "read_state");
+			const f = fixture(); f.begin(); f.calls.finalize([{ id: "call", name: "state_flow_read" }]); const lease = f.calls.take("call", "state_flow_read");
 			if (change === "policy") { const previous = f.policy.policy!; f.policy.select({ ...previous, scopes: ["cwd"] }); f.policy.select(previous); }
 			else if (change === "abort") f.operation.abort();
 			else f.move();
@@ -563,15 +563,15 @@ test("tree navigation restores the branch mode but keeps current memory", async 
 	});
 
 	test("overlapping turns, duplicate/finalized assistant batches and Off-origin requests cannot be repaired by guessing current policy", () => {
-		const f = fixture(); f.begin(); f.begin(); f.calls.finalize([{ id: "call", name: "patch_state" }]);
-		assert.throws(() => f.calls.check("call", "patch_state"), /no current/);
-		f.calls.end(); f.begin(); f.calls.finalize([{ id: "call", name: "patch_state" }, { id: "call", name: "read_state" }]);
+		const f = fixture(); f.begin(); f.begin(); f.calls.finalize([{ id: "call", name: "state_flow_patch" }]);
+		assert.throws(() => f.calls.check("call", "state_flow_patch"), /no current/);
+		f.calls.end(); f.begin(); f.calls.finalize([{ id: "call", name: "state_flow_patch" }, { id: "call", name: "state_flow_read" }]);
 		assert.throws(() => f.calls.current(), /no current/);
-		f.calls.end(); f.begin(); f.calls.finalize([]); f.calls.finalize([{ id: "call", name: "patch_state" }]);
+		f.calls.end(); f.begin(); f.calls.finalize([]); f.calls.finalize([{ id: "call", name: "state_flow_patch" }]);
 		assert.throws(() => f.calls.current(), /no current/);
-		f.calls.end(); f.calls.begin(undefined, f.operation.signal, () => true); f.calls.finalize([{ id: "call", name: "patch_state" }]);
+		f.calls.end(); f.calls.begin(undefined, f.operation.signal, () => true); f.calls.finalize([{ id: "call", name: "state_flow_patch" }]);
 		assert.throws(() => f.calls.current(), /no current/);
-		f.calls.end(); f.begin(); f.calls.finalize([{ id: "fresh", name: "read_state" }]); f.calls.take("fresh", "read_state").revalidate();
+		f.calls.end(); f.begin(); f.calls.finalize([{ id: "fresh", name: "state_flow_read" }]); f.calls.take("fresh", "state_flow_read").revalidate();
 	});
 }
 

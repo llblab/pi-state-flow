@@ -54,8 +54,12 @@ export interface StateFlowExtensionOptions {
 
 export { formatPatchStateArguments };
 
-export const PATCH_STATE_TOOL_NAME = "patch_state";
-export const READ_STATE_TOOL_NAME = "read_state";
+export const PATCH_STATE_TOOL_NAME = "state_flow_patch";
+export const READ_STATE_TOOL_NAME = "state_flow_read";
+const LEGACY_PATCH_STATE_TOOL_NAME = "patch_state";
+const LEGACY_READ_STATE_TOOL_NAME = "read_state";
+const STATE_FLOW_TOOL_NAMES = [PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME, LEGACY_PATCH_STATE_TOOL_NAME, LEGACY_READ_STATE_TOOL_NAME];
+const isPatchStateTool = (name: string) => name === PATCH_STATE_TOOL_NAME || name === LEGACY_PATCH_STATE_TOOL_NAME;
 const PASSIVE_STOP_ENTRY_TYPE = "state-flow-passive-stop";
 
 const flatPatchParameters = Type.Object({
@@ -381,13 +385,13 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			// Every SDK registration is a fresh copy, preserving old response-wrapper declarations.
 			if (force || patchStateTool.parameters !== parameters) {
 				patchStateTool.parameters = parameters;
-				pi.registerTool({ ...patchStateTool, ...(external.length ? {
+				for (const tool of [patchStateTool, legacyPatchStateTool]) pi.registerTool({ ...tool, parameters, ...(external.length && tool === patchStateTool ? {
 					promptGuidelines: [...(patchStateTool.promptGuidelines ?? []), `Registered mutable object planes: ${external.join(", ")}. Availability and matching retained schema/policy are revalidated at acceptance.`],
 				} : {}) });
 			}
 		}
 		const active = pi.getActiveTools();
-		const owned = [PATCH_STATE_TOOL_NAME, READ_STATE_TOOL_NAME];
+		const owned = STATE_FLOW_TOOL_NAMES;
 		if (owned.every((name) => active.includes(name) === available)) return;
 		pi.setActiveTools(available
 			? [...new Set([...active, ...owned])]
@@ -944,8 +948,10 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		} catch { return false; }
 	}
 
-	pi.registerTool({
-		name: READ_STATE_TOOL_NAME,
+	function readStateDefinition(name: string) {
+		return defineTool({
+		name,
+		...(name === LEGACY_READ_STATE_TOOL_NAME ? { prepareLoadout: () => ({ hiddenDeclarations: [name] }) } : {}),
 		label: "Read State",
 		description: "Read exact State Flow values or historical semantic patches with one path or an ordered path list. With one participating owner, semantic paths and structured references are scope-free, effective[N] selects that owner's historical boundary, and patches[N] selects its retained owner patch. With multiple owners, unscoped paths use the effective overlay and owner patch history requires an explicit owner. Optional global/cwd/session roots may address only participating available owners. Array selectors are zero-based indices or half-open [start..end] ranges, never temporal offsets inside a semantic value. Projection value returns data; keys returns minimal structure; patch intersects the selected path at its boundary. Path object keys must be ASCII identifiers ([A-Za-z_$][A-Za-z0-9_$-]*); non-ASCII keys cannot be addressed.",
 		promptSnippet: "Read exact state values, structures, or historical semantic patches",
@@ -957,7 +963,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}, { additionalProperties: false }),
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			try {
-				const admission = nativeToolAdmission(toolCallId, READ_STATE_TOOL_NAME, ctx);
+				const admission = nativeToolAdmission(toolCallId, name, ctx);
 				admission?.revalidate();
 				if (admission) signal = signal ? AbortSignal.any([signal, admission.signal]) : admission.signal;
 				type ReadDetails = { path?: string; paths?: string[]; projection?: string; transitionId?: string };
@@ -977,8 +983,8 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 				const wanted = captureScopeSelection(receipt.policy.scopes);
 				params = structuredClone(params);
 				check();
-				if (params.path === undefined && params.paths === undefined) throw new Error("read_state requires path or paths");
-				if (params.path !== undefined && params.paths !== undefined) throw new Error("read_state accepts path or paths, not both");
+				if (params.path === undefined && params.paths === undefined) throw new Error("state_flow_read requires path or paths");
+				if (params.path !== undefined && params.paths !== undefined) throw new Error("state_flow_read accepts path or paths, not both");
 				{
 					const requestedPaths = [...(params.paths ?? [params.path!])];
 					const paths = requestedPaths.map(path => normalizeModelReadPath(path, wanted, config.historyLimit));
@@ -1017,22 +1023,28 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		},
 	});
 
-	const patchStateTool = defineTool({
-		name: PATCH_STATE_TOOL_NAME,
+	}
+	pi.registerTool(readStateDefinition(READ_STATE_TOOL_NAME));
+	pi.registerTool({ ...readStateDefinition(LEGACY_READ_STATE_TOOL_NAME), promptSnippet: "", promptGuidelines: [] });
+
+	function patchStateDefinition(name: string) {
+		return defineTool({
+		name,
+		...(name === LEGACY_PATCH_STATE_TOOL_NAME ? { prepareLoadout: () => ({ hiddenDeclarations: [name] }) } : {}),
 		label: "Patch State",
 		description: "The sole State Flow semantic mutation protocol. With one participating owner, supply intents/strategy/tactics/artifacts/lazy planes directly, without an owner wrapper. With multiple owners, supply one or more global, cwd, or session patches for participating owners; all supplied owners commit atomically. This call must be the only State Flow barrier in its assistant response. Intent updates run first, then clear owned same-scope strategy/tactics/lazy keys unless a remaining or new intent refs them, then other fields apply. Later writes can recreate cleared paths without old fields. Name keys in ASCII ([A-Za-z_$][A-Za-z0-9_$-]*) so read paths and refs resolve; values may use any language.",
 		promptSnippet: "Atomically patch participating semantic memory in its declared flat or multi-owner form",
 		promptGuidelines: [
 			RESPONSE_PATCH_GUIDELINE,
 			SCOPE_PARTICIPATION_GUIDELINE,
-			"Use patch_state only for material durable semantic changes; ordinary answers need no finalization call.",
-			"Use patch_state as reconciliation, not append-only notes: place new knowledge at the narrowest valid scope and remove superseded or completed state from touched branches.",
-			"Call patch_state alone in an assistant response; after its acknowledgement, further reasoning, tools, and later patch_state calls remain allowed.",
+			"Use state_flow_patch only for material durable semantic changes; ordinary answers need no finalization call.",
+			"Use state_flow_patch as reconciliation, not append-only notes: place new knowledge at the narrowest valid scope and remove superseded or completed state from touched branches.",
+			"Call state_flow_patch alone in an assistant response; after its acknowledgement, further reasoning, tools, and later state_flow_patch calls remain allowed.",
 		],
 		executionMode: "sequential",
 		parameters: config.scopes.length === 1 ? flatPatchParameters : scopedPatchParameters,
 		renderCall(args, theme, context) {
-			const title = theme.fg("toolTitle", theme.bold(PATCH_STATE_TOOL_NAME));
+			const title = theme.fg("toolTitle", theme.bold(name));
 			if (!config.showSuccessfulPatches && !context.isError) return new Text(title, 0, 0);
 			return new Text(`${title}\n${separatedOutput(theme.fg("dim", formatPatchStateArguments(args)))}`, 0, 0);
 		},
@@ -1044,7 +1056,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 			signal = signal ? AbortSignal.any([signal, memoryToolLifetime.signal]) : memoryToolLifetime.signal;
 			let admitted = false;
 			try {
-				const admission = nativeToolAdmission(toolCallId, PATCH_STATE_TOOL_NAME, ctx);
+				const admission = nativeToolAdmission(toolCallId, name, ctx);
 				admission?.revalidate();
 				if (admission) signal = AbortSignal.any([signal, admission.signal]);
 				if (!memoryToolsAvailable()) throw new Error("State Flow tools are off for this session");
@@ -1164,7 +1176,7 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 					try { attempted = structuredClone(params); } catch { attempted = undefined; }
 					const cause = diagnosticText(error);
 					recordDiagnostic(cause, /concurrently|advanced/.test(cause) ? "publication-conflict" : "invalid-patch", ctx, {
-						input: attempted, tool: PATCH_STATE_TOOL_NAME, toolCallId,
+						input: attempted, tool: name, toolCallId,
 					});
 				}
 				throw separatedFailure(error);
@@ -1172,7 +1184,11 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		},
 	});
 
+	}
+	const patchStateTool = patchStateDefinition(PATCH_STATE_TOOL_NAME);
+	const legacyPatchStateTool = { ...patchStateDefinition(LEGACY_PATCH_STATE_TOOL_NAME), promptSnippet: "", promptGuidelines: [] };
 	pi.registerTool({ ...patchStateTool });
+	pi.registerTool({ ...legacyPatchStateTool });
 
 	function startStateFlow(ctx: ExtensionContext, reselect = false): Promise<StateFlowTelegramControlResult> {
 		if (shuttingDown) return Promise.resolve({ ok: false, message: "State Flow is shutting down" });
@@ -1925,9 +1941,9 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 	});
 
 	pi.on("tool_call", (event, ctx) => {
-		const owned = event.toolName === PATCH_STATE_TOOL_NAME || event.toolName === READ_STATE_TOOL_NAME;
+		const owned = STATE_FLOW_TOOL_NAMES.includes(event.toolName);
 		if (event.parentToolCallId) {
-			if (event.toolName === PATCH_STATE_TOOL_NAME && isActive()) return { block: true, reason: "patch_state requires a direct native assistant barrier, not a nested call" };
+			if (isPatchStateTool(event.toolName) && isActive()) return { block: true, reason: "state_flow_patch requires a direct native assistant barrier, not a nested call" };
 			try { nativeRequests.nested(event.toolCallId, event.toolName, event.parentToolCallId); }
 			catch { if (owned) return { block: true, reason: "State Flow tool batch has no current native request" }; }
 		}
@@ -1937,15 +1953,15 @@ export default function stateFlowExtension(pi: ExtensionAPI, options: StateFlowE
 		}
 		if (!isActive() || !currentNativeTool(event.toolCallId, event.toolName, ctx)) return;
 		const batch = findAssistantToolBatch(ctx.sessionManager, event.toolCallId);
-		const patchCalls = batch?.filter((name) => name === PATCH_STATE_TOOL_NAME).length ?? 0;
+		const patchCalls = batch?.filter(isPatchStateTool).length ?? 0;
 		if (patchCalls > 0) {
 			if (patchCalls !== 1) {
-				const reason = "A State Flow barrier response must contain exactly one patch_state call";
+				const reason = "A State Flow barrier response must contain exactly one state_flow_patch call";
 				recordDiagnostic(reason, "barrier-block", ctx, { tool: event.toolName, toolCallId: event.toolCallId, batchToolNames: batch });
 				return { block: true, reason };
 			}
-			if (event.toolName !== PATCH_STATE_TOOL_NAME) {
-				const reason = "Blocked by the patch_state barrier; reconsider this action after State Flow rematerializes context";
+			if (!isPatchStateTool(event.toolName)) {
+				const reason = "Blocked by the state_flow_patch barrier; reconsider this action after State Flow rematerializes context";
 				recordDiagnostic(reason, "barrier-block", ctx, { tool: event.toolName, toolCallId: event.toolCallId, batchToolNames: batch });
 				return { block: true, reason };
 			}

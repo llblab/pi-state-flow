@@ -113,10 +113,10 @@ test("sparse disk scopes survive passive reads, Start, patches and empty-respons
 	await h.commands.get("state-flow-status")!.handler("", h.ctx);
 	assert.match(h.notifications.at(-1)!, /retained lower answer/);
 	const patch = { session: { tactics: { accepted: true } } };
-	await h.tools.get("patch_state")!.execute("sparse-patch", patch, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("sparse-patch", patch, undefined, undefined, h.ctx);
 	assert.equal(h.readState().response, "retained lower answer", "an unrelated patch must not introduce an empty response override");
 	const accepted = files();
-	await h.tools.get("patch_state")!.execute("sparse-repeat", patch, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("sparse-repeat", patch, undefined, undefined, h.ctx);
 	assert.deepEqual(files(), accepted, "a repeated sparse patch must not create a revision");
 	await commitScopedTerminal(h, [], "");
 	assert.equal(h.readState().response, "retained lower answer", "empty and absent response have identical overlay meaning");
@@ -134,7 +134,7 @@ test("sparse disk scopes survive passive reads, Start, patches and empty-respons
 	assert.deepEqual(observed.scopes.session.patches.map(({ patch }) => patch), [{ tactics: { accepted: true } }]);
 	assert.equal(observed.scopes.global.checkpoint.state.extra, undefined);
 	assert.deepEqual(temporalScopeRevisions(observed), { global: 0, cwd: 0, session: 1 });
-	await h.tools.get("patch_state")!.execute("owned-global-write", { global: { tactics: { accepted: true } } }, undefined, undefined, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("owned-global-write", { global: { tactics: { accepted: true } } }, undefined, undefined, h.ctx);
 	assert.equal(JSON.parse(readFileSync(temporalScopePaths(cwd, owner, "global", root).checkpoint, "utf8")).extra, undefined);
 	await restored.refreshSelectedCurrent(DEFAULT_SCOPE_SELECTION, () => {});
 	assert.deepEqual(temporalScopeRevisions(restored.observedSelectedView()!), { global: 1, cwd: 0, session: 1 });
@@ -877,10 +877,10 @@ test("stopping an ordinary disabled session is harmless and does not initialize 
 	const before = head();
 	await h.commands.get("state-flow-off").handler("", h.ctx);
 	await h.commands.get("state-flow-off").handler("", h.ctx);
-	assert.equal(h.activeTools.includes("patch_state"), false);
+	assert.equal(h.activeTools.includes("state_flow_patch"), false);
 	assert.deepEqual(h.entries.at(-1).data, nativePolicyMarker(h.ctx.sessionManager.getSessionId(), "off"));
 	await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
-	assert.equal(h.activeTools.includes("patch_state"), false);
+	assert.equal(h.activeTools.includes("state_flow_patch"), false);
 	assert.equal(head(), before);
 	assert.equal(existsSync(join(h.repositoryRoot, "checkpoint.json")), false);
 	assert.throws(() => h.readState(), /runtime is unavailable/);

@@ -300,7 +300,7 @@ function diffObjects(previous: JsonValue, current: JsonValue): JsonValue {
 
 /** Project exact current/historical state paths without exposing temporal metadata. */
 export function readProjectedState(view: ReadableTemporalState, paths: readonly string[], projection: StateReadProjection = "value", historyLimit = DEFAULT_HISTORY_LIMIT): ProjectedStateRead {
-	if (paths.length === 0) throw new Error("read_state requires at least one path");
+	if (paths.length === 0) throw new Error("state_flow_read requires at least one path");
 	queryOwners(view);
 	if (projection === "patch") {
 		const patches = paths.map((path) => {

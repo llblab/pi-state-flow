@@ -14,6 +14,16 @@ State Flow requires matching `pi-coding-agent`, `pi-agent-core`, `pi-ai` and `pi
 
 Detailed behavioral witnesses live in [temporal acceptance](temporal-acceptance.md); benchmark methodology and source-bound results live in [performance](performance.md).
 
+## Tool-name compatibility
+
+Since 0.27.6 the advertised tools are `state_flow_read` and `state_flow_patch`. Explicit legacy `read_state`/`patch_state` calls dispatch through the same read/patch implementation with their exact native call name and ID; historical calls are not rewritten. Legacy declarations are hidden through the public SDK `prepareLoadout` membrane while remaining active for dispatch. This is tool-name compatibility only: no old semantic fields, wrapper grammar, storage formats or conversion rules are reinstated.
+
+- Active and Passive activate both spellings; Off removes both and retained wrappers still reject. Only canonical names contribute prompt guidance and provider declarations.
+- Selected-owner/schema refresh applies to both mutation spellings. A schema is not an owner receipt; stale, foreign, consumed or unbound native calls still reject before publication.
+- Active counts both mutation spellings as one barrier family: multiple calls, including mixed names, all reject; siblings of a single mutation are blocked. Nested Active mutation rejects under either name. Passive keeps its existing explicit-parent nested-call behavior and no new inference barrier.
+- An SDK host's explicit allowlist remains authoritative. Include `state_flow_read` and `state_flow_patch` for new requests, plus `read_state` and `patch_state` when legacy calls must dispatch. State Flow does not widen a host allowlist or rewrite native history to compensate.
+- Extension/native-request tests and real source/packed SDK witnesses cover name equivalence, retained reads, no-op history, scope-schema refresh, refusal, nested calls, mixed-name barriers and Off. These are deterministic isolated checks, not installed-client rollout or live-model certification.
+
 ## Canonical scope format admission
 
 Core-only canonical scope metadata remains **version 3**, with `strategy` and `tactics` fields. The implemented **version 4** codec additionally retains external object-plane descriptors and opaque values independently of loaded definitions; absent internal `modules` metadata keeps existing v3 output. Declared legacy versions **1/2** translate before known-field filtering. Target-format `contract`/`working` roots reject; nested domain keys remain ordinary JSON. Unsupported versions fail closed. These scope versions are distinct from selection-aware Session lifecycle v2 and public module API v1; supported legacy lifecycle-v1 admission retains its complete-cohort proof requirements. External-root tools, captured Active/Passive context and Active producers shipped in 0.27.0; see the [public module boundary](public-module-contract.md).

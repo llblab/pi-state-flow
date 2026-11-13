@@ -11,7 +11,7 @@ export interface OwnedPath {
 }
 
 const OWNED_PLANES = new Set<string>(["strategy", "tactics", "lazy"]);
-// Same key grammar as read_state value paths; array selectors never parse.
+// Same key grammar as state_flow_read value paths; array selectors never parse.
 const OBJECT_KEY = /^[A-Za-z_$][A-Za-z0-9_$-]*$/;
 
 /**
@@ -106,7 +106,7 @@ export function cascadeDeletionPatch(paths: readonly OwnedPath[]): JsonObject {
 	return patch;
 }
 
-/** Render an ownership target as its scoped `read_state` path. */
+/** Render an ownership target as its scoped `state_flow_read` path. */
 export function formatOwnedPath(scope: StateScope, path: OwnedPath): string {
 	return [scope, path.plane, ...path.keys].join(".");
 }

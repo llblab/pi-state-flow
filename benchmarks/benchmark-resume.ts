@@ -59,7 +59,7 @@ test("isolated first inference after native resume", { timeout: 35_000 }, async 
 	assert.equal(session.sessionFile, copiedSession);
 	let expectedFirstState;
 	if (input.stateFlow) {
-		assert.ok(session.getActiveToolNames().includes("patch_state"));
+		assert.ok(session.getActiveToolNames().includes("state_flow_patch"));
 		const selected = resolvedSnapshot(session);
 		assert.equal(selected.meta.step, input.counter * 2);
 		const { tactics, response } = fixture.readState(session);
@@ -67,7 +67,7 @@ test("isolated first inference after native resume", { timeout: 35_000 }, async 
 		assert.equal(expectedFirstState.tactics.counter, input.counter);
 		assert.equal(expectedFirstState.response, `Accepted ${input.counter}`);
 	} else {
-		assert.equal(session.getActiveToolNames().includes("patch_state"), false);
+		assert.equal(session.getActiveToolNames().includes("state_flow_patch"), false);
 	}
 	const run = await prompt(fixture, session, {
 		stateFlow: input.stateFlow, counter: input.counter + 1, size: input.size, source: input.source, sourceFileBytes,
