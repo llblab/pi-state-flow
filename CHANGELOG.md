@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 1.0.1: Documentation Ownership
+
+- `Rule owners`: The documentation index now names the single owning page for each rule area, so a rule change lands in one place instead of being restated across contracts. Retired-format guidance elsewhere links to the owning page.
+- `Stale 0.x wording removed`: Index, migration and scope-selection pages no longer claim that `contract`/`working` conversion is still available; they state the 1.0.0 rule that retired cohorts are refused and recovering one needs a State Flow 0.x acceptance first.
+
 ## 1.0.0: Automatic Recovery, No Legacy Conversion
 
 - `Visible self-healing`: An owner whose canonical files cannot be decoded, or a boundary whose session memory is missing, no longer blocks forever. After a failed acquisition, State Flow quarantines the exact bytes privately in `<store>-quarantine/`, resets only that owner to empty memory, retries once and tells the operator, the model and the local log. Healthy owners stay untouched; filesystem, lock, cancellation and foreign-identity failures stay fail-closed.

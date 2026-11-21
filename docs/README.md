@@ -16,7 +16,7 @@ Start with the [project README](../README.md) for installation and the memory mo
 - [Session performance](performance.md): Run synthetic benchmarks, interpret their metrics and understand the current cost model. No provider-cache or latency guarantees.
 - [Temporal acceptance](temporal-acceptance.md): Find the tests that witness each required property, including cancellation, ownership and replay.
 - [Semantic handoff contract](semantic-handoff-contract.md): Current Intents / Strategy / Tactics meanings and ownership, the offline-bundle patch corpus and explicitly historical M0 preservation evidence. Deterministic acceptance is not live-model quality evidence.
-- [Semantic compatibility decision](semantic-compatibility-decision.md): Shipped semantic migration/support policy, translation oracle, public API impact and historical writer-fence evidence. Core v3 and external-module v4 share Strategy/Tactics; legacy v1/v2 conversion and retired-root reservations remain through State Flow 0.x, with a 1.0.0 cutoff and persistent unsupported-version refusal.
+- [Semantic compatibility decision](semantic-compatibility-decision.md): Shipped semantic migration/support policy, translation oracle, public API impact and historical writer-fence evidence. Core v3 and external-module v4 share Strategy/Tactics; since 1.0.0 retired v1/v2 cohorts are refused with an actionable message and both retired root names stay reserved.
 - [Scope selection contract](scope-selection-contract.md): Completed [M2 functional boundary](scope-selection-contract.md#m2-functional-acceptance-boundary): seven-selection capture/native runtime, public controls and mode-only optional presentation, with explicit legacy/private proof and operator-inspection limits. Policy data alone grants no memory.
 - [Single-owner model interface](single-scope-interface-contract.md): Reviewed schema/canonical/native flat tools, protocol/Skills and typed runtime outputs; original-request/foreign-provenance counterexamples, deterministic linked-task/identity checkpoint and actual SDK byte measurements. No live model-quality, token/cache/cost or universal-access claim.
 - [Public semantic modules](public-module-contract.md): Published `./modules` API since 0.27.0: native-host registration, trusted callbacks, metadata v4 retention, external-root tools, Active/Passive context and atomic Active producers. Owns public integration and currentness boundaries, not dynamic loading or sandboxing.
@@ -24,6 +24,24 @@ Start with the [project README](../README.md) for installation and the memory mo
 - [Protocol composition decision](protocol-composition-decision.md): Historical accepted M4 retain/defer decision, producer/trust ownership and original review evidence. Later internal/public module work superseded only its bounded no-extraction disposition.
 - [Semantic extensibility decision](semantic-extensibility-decision.md): Historical accepted M5 no-new-API decision and atomic-validation countercase. Later explicitly authorized internal/public module work shipped in 0.27.0; no dynamic loader, sandbox, production archive or quality claim follows.
 - [Semantic memory evaluation](semantic-memory-evaluation.md): Fixed linked-task trial, controlled fixture, independent rubric, isolation/measurement contract and historical credential-safe preflight. Functional implementation has shipped; live-model comparison remains separately authorization-gated and unrun.
+
+## Rule owners
+
+Each rule has one owning document. Other pages link to it instead of restating it, so a change lands in one place and cannot drift.
+
+| Rule | Owner |
+| --- | --- |
+| Modes, configuration, lifecycle commands, storage recovery, self-healing, diagnostics | [usage.md](usage.md) |
+| Per-file recovery rules, durability limit and the transaction rule | [filesystem-recovery.md](filesystem-recovery.md) |
+| Canonical scope format admission, retired versions and required host packages | [compatibility.md](compatibility.md) |
+| Semantic migration history and the settled support policy | [semantic-compatibility-decision.md](semantic-compatibility-decision.md) |
+| Scope selection capture, native policy proof and operator inspection | [scope-selection-contract.md](scope-selection-contract.md) |
+| Temporal lineage, causal identities, storage transactions, Pi lifecycle | [architecture.md](architecture.md) |
+| Fork copy limits | [fork-contract.md](fork-contract.md) |
+| Public module registration and retention | [public-module-contract.md](public-module-contract.md) |
+| Packaged Skill guidance for the model | [../skills](../skills) |
+
+Release chronology belongs to [CHANGELOG.md](../CHANGELOG.md), never to a rule statement.
 
 ## Development policy
 
