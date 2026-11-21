@@ -121,7 +121,7 @@ This contract inherits [model-tool semantics](architecture.md#model-tools); it d
 
 ## Acceptance map
 
-The IDs below name contracts/oracles, not new runtime record types. The table retains the original M0 evidence plan: its milestone/future references describe that checkpoint, not pending implementation. Current deterministic renamed/native witnesses are recorded in the [migration](semantic-compatibility-decision.md#source-bound-m1-validation), [scope](scope-selection-contract.md#m2-functional-acceptance-boundary) and [model-interface](single-scope-interface-contract.md#deterministic-m3-checkpoint) contracts. Live-model semantic acceptance remains unrun.
+The IDs below name contracts/oracles, not new runtime record types. The table retains the original M0 evidence plan: its milestone/future references describe that checkpoint, not pending implementation. Current deterministic renamed/native witnesses are recorded in the [migration](semantic-compatibility-decision.md#source-bound-m1-validation), [scope](scope-selection-contract.md#functional-acceptance-boundary) and [model-interface](single-scope-interface-contract.md#deterministic-m3-checkpoint) contracts. Live-model semantic acceptance remains unrun.
 
 | ID | Obligation and falsification scenario | Evidence owner |
 | --- | --- | --- |

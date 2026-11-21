@@ -256,7 +256,7 @@ When `pi-telegram` is available, its main-menu section shows `State Flow: active
 - These reads install no model/runtime cache, change no bytes or mode, clear no write fence, and leave pending fork acquisition intact for a future Passive/Active selection.
 - Automatic Off callbacks never acquire memory. Explicit inspection is read-only even in Off, but the Telegram surface still restricts targets to the captured owners. Obsolete excluded-owner or singleton-Effective callbacks reject before invoking readers; selection changes during acknowledgement/observation withdraw stale results. This presentation rule is not confidentiality, transcript erasure or private-acquisition authority.
 
-The [M2 functional acceptance map](scope-selection-contract.md#m2-functional-acceptance-boundary) records deterministic SDK/presentation witnesses and unavoidable legacy/full-proof dependencies. Scripted provider plus fake presentation is not actual Telegram delivery or live-model quality evidence.
+The [M2 functional acceptance map](scope-selection-contract.md#functional-acceptance-boundary) records deterministic SDK/presentation witnesses and unavoidable legacy/full-proof dependencies. Scripted provider plus fake presentation is not actual Telegram delivery or live-model quality evidence.
 
 Open implementation work is tracked in [BACKLOG.md](../BACKLOG.md).
 

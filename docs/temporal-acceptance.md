@@ -18,7 +18,7 @@ The public-scope group in `tests/extension.test.ts` proves public command tokens
 
 The native-telegram-lifetime group in `tests/extension.test.ts` adds seven held-Start → Telegram Off withdrawals with exact canonical-path guards, seven accepted-Passive receipt → public scope-ABA stale-menu refusals, and two real busy native-operation deferrals (accepted same choice versus newer Off changing scopes). One pure copy/radio-layout property distinguishes operator Effective from participating model owners without adding a chooser. `tests/telegram.test.ts` retains optional registration/failure/inspection/fence/lifetime checks; its CAS-failure inspector now explicitly observes the peer's newer field without installing cache or clearing the write fence. No real Telegram delivery or rendered-device claim follows.
 
-See the [M2 functional boundary](scope-selection-contract.md#m2-functional-acceptance-boundary) for the complete property/owner map, legacy-v1 full-cohort dependency, acquired-private presence requirement and explicit-operator exception. These deterministic fixtures are not exhaustive interleavings or universal alias/async filesystem nonaccess.
+See the [M2 functional boundary](scope-selection-contract.md#functional-acceptance-boundary) for the complete property/owner map, legacy-v1 full-cohort dependency, acquired-private presence requirement and explicit-operator exception. These deterministic fixtures are not exhaustive interleavings or universal alias/async filesystem nonaccess.
 
 ## Required properties and witnesses
 

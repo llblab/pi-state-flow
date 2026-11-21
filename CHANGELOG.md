@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 1.0.2: Readable Scope Contract
+
+- `One contract, nine parts`: The scope-selection contract is grouped into policy, lifecycle encoding, request correlation, read surface, publication, origins and acquisition, forks, native integration, and authority. Section wording is unchanged, so every rule keeps its exact phrasing.
+- `Evidence and release-era wording removed`: Validation tallies, review chronologies, milestone labels and package-version references are gone from the contract; they belong to this changelog. The retired acceptance anchor redirects to the current one, and all inbound links follow.
+
 ## 1.0.1: Documentation Ownership
 
 - `Rule owners`: The documentation index now names the single owning page for each rule area, so a rule change lands in one place instead of being restated across contracts. Retired-format guidance elsewhere links to the owning page.

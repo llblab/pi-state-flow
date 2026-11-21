@@ -83,7 +83,7 @@ Native tests prove no provider call before coherent acceptance, cancellation whi
 
 - Global `config.json` accepts `mode: "active" | "passive" | "off"`, defaulting to Off, and a nonempty unique `scopes` array, defaulting to all three owners. These are initial defaults, not overrides of captured branch policy.
 - Accepted Session lifecycle v2 configuration stores concrete `{mode, scopes}`. Before canonical acceptance, owner-bound native v2 policy records capture the same choice without semantic storage. Commands and Telegram do not edit global defaults; mode-only actions preserve captured scopes.
-- [Usage](usage.md#lifecycle-operations) defines wanted, available and excluded owners and the 0.27.1 diagnostic. A wanted unacquired Session is unavailable, not excluded; inspection/observation never acquires it. [Scope selection](scope-selection-contract.md#m2-functional-acceptance-boundary) owns legacy proof, deferred forks and request-lifetime requirements.
+- [Usage](usage.md#lifecycle-operations) defines wanted, available and excluded owners and the 0.27.1 diagnostic. A wanted unacquired Session is unavailable, not excluded; inspection/observation never acquires it. [Scope selection](scope-selection-contract.md#functional-acceptance-boundary) owns legacy proof, deferred forks and request-lifetime requirements.
 
 **Legacy readable mode representations.** The following are compatibility inputs, not alternative current policy formats. Decoding is read-only; current accepted lifecycle writers use v2 concrete policy, without inspection-triggered conversion or semantic normalization. Malformed explicit scope evidence rejects rather than falling through to a wider mode-only fallback.
 
