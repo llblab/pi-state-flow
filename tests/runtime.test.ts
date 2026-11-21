@@ -14,9 +14,9 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 import { withStorageTransaction, loadSelectedFileCohort, assertSelectedFileCohortBasis, type SelectedFilePublication, type SelectedFileCohort, type SelectedForkCopyRequest, type SelectedSessionAcquisitionRequest, type StorageTransaction } from "../lib/storage.ts";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { readNativeSessionHeader } from "../lib/continuation.ts";
 import { TemporalRuntime, SharedScopeRemovalConflictError, type ForkLifecycle, type SelectedRuntimePatchTransaction } from "../lib/runtime.ts";
 import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths, type SessionAddress } from "../lib/durable.ts";
@@ -26,7 +26,7 @@ import { emptyState, type AtomicScopePatches, type StateScope } from "../lib/sta
 import type { JsonObject } from "../lib/json.ts";
 import type { SuccessfulArtifactRead } from "../lib/acquisition.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
-import { advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalState, readTemporalView, temporalScopeRevisions, validateTemporalState } from "../lib/temporal.ts";
+import { advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalView, temporalScopeRevisions, validateTemporalState } from "../lib/temporal.ts";
 import { commitScopedTransition, stageAtomicScopePatches, commitSelectedTransition, stageSelectedScopePatches, stageSelectedScopedTransition, type StagedSelectedTransition } from "../lib/transition.ts";
 import { commitScopedTerminal, harness, start } from "./harness.ts";
 import { loadScopeProvenance, nativePolicyMarker } from "./temporal-fixture.ts";
@@ -2034,34 +2034,6 @@ test("file-backed publication repairs a wholly absent untouched CWD pair without
 		}
 	});
 
-	test("legacy selected shared conversion is backed up with absent lifecycle and presence evidence; interruption rolls back and retry reuses that backup", async (t) => {
-		const f = fixture(t);
-		const source = seed(f, "cwd", true);
-		const target = f.paths.runtime;
-		const rename = fs.renameSync;
-		let injected = false;
-		fs.renameSync = (from, to) => { if (!injected && to === target) { injected = true; throw new Error("injected origin publication failure"); } rename(from, to); };
-		syncBuiltinESMExports();
-		try { await assert.rejects(create(f, ["cwd"]), /injected origin publication failure/); }
-		finally { fs.renameSync = rename; syncBuiltinESMExports(); }
-		for (const [path, bytes] of source.original) assert.deepEqual(readFileSync(path), bytes);
-		assert.equal(existsSync(f.paths.config), false);
-		assert.equal(existsSync(f.paths.runtime), false);
-		const directory = `${f.root}-migration-backups`;
-		assert.equal(readdirSync(directory).length, 1);
-		const result = await create(f, ["cwd"]);
-		assert.ok(result.migrationBackup);
-		assert.equal(readdirSync(directory).length, 1, "fresh origin ids must not make exact-source retry backups diverge");
-		const manifest = JSON.parse(readFileSync(result.migrationBackup, "utf8"));
-		assert.deepEqual(manifest.convertedScopes, ["cwd"]);
-		assert.equal(manifest.lifecycleConversion, undefined);
-		assert.equal(manifest.files.length, 5);
-		assert.equal(manifest.files.filter((file: any) => file.bytes === null).length, 2);
-		assert.ok(manifest.presenceDependencies.every((file: any) => file.present === false));
-		assert.equal(result.cohort.lifecycle.runtime.meta.privateAcquisition, "unacquired");
-		assert.deepEqual(temporalScopeRevisions(result.cohort.view), { cwd: 1 });
-	});
-
 	test("accepted or remembered session authority cannot become a new origin after its files disappear", async (t) => {
 		const f = fixture(t);
 		await create(f, ["cwd"]);
@@ -3717,19 +3689,6 @@ test("file-backed publication repairs a wholly absent untouched CWD pair without
 		}
 	});
 
-	test("legacy shared owners translate read-only, retaining revisions/provenance and exact predecessor bytes without backup", async t => {
-		for (const version of [1, 2]) {
-			const f = await fixture(t, ["cwd"]), p = temporalScopePaths(f.cwd, f.id, "cwd", f.root);
-			for (const path of [p.checkpoint, p.patches]) writeFileSync(path, readFileSync(path, "utf8").replaceAll('"strategy"', '"contract"'));
-			const metadata = JSON.parse(readFileSync(p.meta, "utf8")); metadata.version = version; writeFileSync(p.meta, JSON.stringify(metadata));
-			const before = cohortFiles(f), directories = readdirSync(join(f.root, ".."));
-			await f.observer.refreshSelectedShared(["cwd"], () => {});
-			assert.equal(f.observer.readView().strategy!.owner, "cwd"); assert.equal(f.observer.observedSelectedView()!.scopes.cwd!.revision, 1);
-			assert.equal(f.observer.artifactProvenance("cwd")["/unobserved-source"]!.compilerRevision, "evidence-cwd");
-			unchanged(before); assert.deepEqual(readdirSync(join(f.root, "..")), directories);
-		}
-	});
-
 	test("observations are detached, current-only and cannot masquerade as accepted cache, snapshots, checkpoints or publication basis", async t => {
 		const f = await fixture(t); await f.observer.refreshSelectedShared(["global", "cwd"], () => {});
 		const view = f.observer.observedSelectedView()!, original = f.observer.observedSelectedView();
@@ -3960,76 +3919,6 @@ test("first selected authoring retains exact source CAS and requires independent
 	function start(f: ReturnType<typeof fixture>, runtime = new TemporalRuntime(f.cwd, f.sessionId, f.root), signal?: AbortSignal) {
 		return runtime.withStartTransaction((current, publish) => publish({ ...current!, config: { mode: "active" } }), signal);
 	}
-
-	test("owned activation converts complete legacy cohorts once, backs up exact dependencies and preserves every retained boundary", async (t) => {
-		const f = fixture(t);
-		const runtime = new TemporalRuntime(f.cwd, f.sessionId, f.root);
-		assert.ok(await runtime.refreshCurrentMemory());
-		assertUnchanged(f);
-		assert.equal(existsSync(f.backupDir), false, "inspection is observational");
-		const result = await start(f, runtime);
-		assert.ok(result.migrationBackup);
-		const backup = JSON.parse(readFileSync(result.migrationBackup, "utf8"));
-		assert.equal(backup.files.length, f.base.files.length);
-		assert.equal(backup.targetVersion, 3);
-		assert.deepEqual(backup.convertedScopes, ["global", "cwd", "session"]);
-		for (const original of f.base.files) {
-			const saved = backup.files.find((file: { path: string }) => file.path === relative(f.root, original.path));
-			assert.ok(saved);
-			assert.equal(saved.identity, original.identity);
-			assert.deepEqual(saved.bytes === null ? undefined : Buffer.from(saved.bytes, "base64"), original.bytes === undefined ? undefined : Buffer.from(original.bytes));
-		}
-		assert.equal(fs.statSync(result.migrationBackup).mode & 0o777, 0o600);
-		assert.equal(backup.files.some((file: { path: string }) => file.path === "unrelated-note"), false);
-		for (const scope of ["global", "cwd", "session"] as const) {
-			const paths = temporalScopePaths(f.cwd, f.sessionId, scope, f.root);
-			const meta = JSON.parse(readFileSync(paths.meta, "utf8"));
-			assert.equal(meta.version, 3);
-			assert.equal(meta.temporal.revision, f.view.scopes[scope].revision);
-			assert.deepEqual(meta.temporal.extra, { preserve: true });
-			assert.deepEqual(meta.opaqueLifecycle, { identity: "do not reinterpret" });
-			assert.deepEqual(meta.foreign, { keep: true, address: "$session.working.job" });
-			assert.deepEqual(meta.artifacts, { "/opaque": { futureEvidence: "preserve" } });
-		}
-		for (let offset = 0; offset < f.view.lineage.length; offset++) assert.deepEqual(runtime.read(offset), readTemporalState(f.view, offset));
-		const repeated = await start(f);
-		assert.equal(repeated.migrationBackup, undefined);
-		assert.equal(fs.readdirSync(f.backupDir).length, 1);
-	});
-
-	test("backup failure and interrupted conversion preserve canonical bytes and leave no accepted runtime", async (t) => {
-		const blocked = fixture(t);
-		writeFileSync(blocked.backupDir, "not a directory");
-		const runtime = new TemporalRuntime(blocked.cwd, blocked.sessionId, blocked.root);
-		await assert.rejects(start(blocked, runtime), /not a regular directory/);
-		assert.equal(runtime.view, undefined);
-		assertUnchanged(blocked);
-		const exposed = fixture(t);
-		fs.mkdirSync(exposed.backupDir, { mode: 0o700 });
-		fs.chmodSync(exposed.backupDir, 0o755);
-		await assert.rejects(start(exposed), /backup directory must be private/);
-		assertUnchanged(exposed);
-		assert.deepEqual(fs.readdirSync(exposed.backupDir), []);
-		const f = fixture(t);
-		const candidate = new TemporalRuntime(f.cwd, f.sessionId, f.root);
-		const target = temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root).patches;
-		const rename = fs.renameSync;
-		let injected = false;
-		fs.renameSync = (from, to) => {
-			if (!injected && to === target) { injected = true; throw new Error("injected migration publication failure"); }
-			rename(from, to);
-		};
-		syncBuiltinESMExports();
-		try { await assert.rejects(start(f, candidate), /injected migration publication failure/); }
-		finally { fs.renameSync = rename; syncBuiltinESMExports(); }
-		assert.equal(injected, true);
-		assert.equal(candidate.view, undefined);
-		assertUnchanged(f);
-		assert.equal(fs.readdirSync(f.backupDir).length, 1, "a completed recovery backup survives failed publication");
-		const result = await start(f, candidate);
-		assert.ok(result.migrationBackup);
-		assert.equal(fs.readdirSync(f.backupDir).length, 1, "retry reuses the exact verified backup");
-	});
 
 	test("cancellation while exclusion is held cannot create migration writes or backups", async (t) => {
 		const f = fixture(t);

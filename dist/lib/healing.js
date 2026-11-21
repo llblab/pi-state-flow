@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { constants, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { canonicalJson } from "./json.js";
+import { RetiredSemanticFormatError } from "./migration.js";
 import { sessionRuntimePaths, temporalScopePaths } from "./durable.js";
 import { captureScopeSelection } from "./selection.js";
 import { RevisionUnavailableError } from "./snapshot.js";
@@ -15,7 +16,7 @@ import { assertStorageDirectory, PublicationBusyError, withStorageTransaction } 
 export function isHealableCorruption(error) {
     if (!(error instanceof Error))
         return false;
-    if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError)
+    if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError || error instanceof RetiredSemanticFormatError)
         return false;
     if (error.name === "AbortError")
         return false;

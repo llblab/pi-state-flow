@@ -19,7 +19,7 @@ import {
 	type ArtifactProvenanceRegistry,
 } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
-import { prepareSerializedScopeMigration } from "./migration.ts";
+import { prepareSerializedScopeMigration, refuseRetiredSemanticVersion } from "./migration.ts";
 import { canonicalJson, isJsonValue, isObject, type JsonObject } from "./json.ts";
 import { validateScopeStream, validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
 import { assertRetainedModules, validateRetainedModules } from "./semantic-module.ts";
@@ -83,7 +83,7 @@ export type ScopeStreamPresence =
 	| { kind: "present"; stream: ScopeStream };
 
 function isSupportedScopeMetadataVersion(version: unknown): boolean {
-	return version === 1 || version === 2 || version === 3 || version === 4;
+	return version === 3 || version === 4;
 }
 
 /** Distinguish a wholly absent semantic cohort from partial or malformed surviving authority. */
@@ -110,6 +110,7 @@ export function classifyScopeStream(
 		throw new Error(`Unsupported State Flow ${scope} storage format`);
 	}
 	const metadata = parseMetadataDocument(metaSource, `State Flow ${scope} metadata`);
+	if (metadata.version === 1 || metadata.version === 2) refuseRetiredSemanticVersion(metadata.version);
 	if (!isSupportedScopeMetadataVersion(metadata.version)) throw new Error(`Unsupported State Flow ${scope} metadata version`);
 	// In Unicode mode this range matches lone UTF-16 surrogates, not valid pairs or JSON escapes.
 	if ([checkpointSource, patchesSource, metaSource].some((source) => /[\uD800-\uDFFF]/u.test(source))) {

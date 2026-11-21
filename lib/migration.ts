@@ -3,14 +3,13 @@ import { resolve } from "node:path";
 import { parseArtifactProvenanceRegistry } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
 import { canonicalJson, isJsonValue, isObject, validatePatch, type JsonObject, type JsonValue } from "./json.ts";
-import { parseStateReadPath, parseValuePath } from "./query.ts";
 import { assertRetainedModules, validateRetainedModules, type RetainedModules } from "./semantic-module.ts";
 import { assertNoRetiredSemanticPlanes, type StateScope } from "./state.ts";
 import { validateScopeStream, type ScopeStream } from "./temporal.ts";
 
-/** Owns temporary pure semantic-dialect conversion; excludes I/O, publication, backup and lifecycle authority. */
+/** Owns the pure v3/v4 semantic codec and module-descriptor upgrade; excludes I/O, publication, backup and lifecycle authority. */
 export interface SemanticMigrationCandidate {
-	sourceVersion: 1 | 2 | 3 | 4;
+	sourceVersion: 3 | 4;
 	targetVersion: 3 | 4;
 	/** A format conversion is not an authored semantic transition or revision. */
 	requiresConversion: boolean;
@@ -31,57 +30,20 @@ export interface SerializedSemanticMigrationCandidate extends SemanticMigrationC
 	target: Record<ScopeMigrationFile, string>;
 }
 
-const LEGACY_PLANES = new Map([["contract", "strategy"], ["working", "tactics"]]);
-const LEGACY_SEMANTIC_PLANES = new Set(["intents", "contract", "working", "artifacts", "response", "lazy"]);
-const LEGACY_LOCATOR = /^(?:((?:effective|global|cwd|session)(?:\[\d+\])?(?:\.patches(?:\[\d+\])?)?)\.)?(contract|working)(?=$|\.|\[)/;
-const MARKED_LOCATOR = /(?<![\p{L}\p{N}_$.[\]:/\\-])\$([\p{L}\p{N}_$.[\]:-]+)(?![\p{L}\p{N}_$.[\]:/\\-])/gu;
+/** A known retired format, not corruption: self-healing must never reset it. */
+export class RetiredSemanticFormatError extends Error {}
 
-function translateLocator(path: string): string {
-	const match = LEGACY_LOCATOR.exec(path);
-	if (!match) return path;
-	const [, prefix, plane] = match;
-	const suffix = path.slice(match[0].length);
-	try {
-		if (prefix) parseStateReadPath(prefix, MAX_HISTORY_LIMIT);
-		// The unchanged lazy root lets the shared parser validate selectors after legacy names retire.
-		parseValuePath(`lazy${suffix}`);
-	} catch {
-		return path;
-	}
-	return `${prefix ? `${prefix}.` : ""}${LEGACY_PLANES.get(plane!)!}${suffix}`;
-}
-
-function translateReferences(value: JsonValue): JsonValue {
-	if (typeof value === "string") return value.replace(MARKED_LOCATOR, (_token, path: string) => `$${translateLocator(path)}`);
-	if (Array.isArray(value)) return value.map(translateReferences);
-	if (!isObject(value)) return value;
-	return Object.fromEntries(Object.entries(value).map(([key, child]) => [key,
-		key === "$ref" && typeof child === "string" ? translateLocator(child) : translateReferences(child)]));
-}
-
-function translateArtifacts(value: JsonValue): JsonValue {
-	if (!isObject(value)) return translateReferences(value);
-	return Object.fromEntries(Object.entries(value).map(([path, card]) => [path, !isObject(card) ? translateReferences(card)
-		: Object.fromEntries(Object.entries(card).map(([key, child]) => [key,
-			// Retired embedded provenance is evidence, never a semantic reference namespace.
-			["hash", "compiler", "compiled_at"].includes(key) ? structuredClone(child) : translateReferences(child)]))]));
-}
-
-/** Translate a raw legacy checkpoint or replay patch before any known-field filtering. */
-export function translateLegacySemanticObject(value: unknown): JsonObject {
-	validatePatch(value);
-	for (const plane of LEGACY_PLANES.values()) {
-		if (Object.hasOwn(value, plane)) throw new Error(`Target State Flow semantic plane in legacy format: ${plane}`);
-	}
-	return Object.fromEntries(Object.entries(value).map(([key, child]) => [LEGACY_PLANES.get(key) ?? key,
-		key === "artifacts" ? translateArtifacts(child) : LEGACY_SEMANTIC_PLANES.has(key) ? translateReferences(child) : structuredClone(child)]));
+/** State Flow 1.0.0 ended the temporary contract/working conversion window; refusal stays explicit. */
+export function refuseRetiredSemanticVersion(version: unknown): never {
+	throw new RetiredSemanticFormatError(`Unsupported State Flow semantic metadata version ${String(version)}: legacy contract/working memory is no longer converted since State Flow 1.0.0; open it once with State Flow 0.x to convert it`);
 }
 
 /** Build a detached target candidate; publication still belongs to the guarded storage transaction. */
 export function prepareSemanticMigration(
 	value: unknown, scope: StateScope, sourceVersion: number, historyLimit = MAX_HISTORY_LIMIT, targetModules?: RetainedModules,
 ): SemanticMigrationCandidate {
-	if (sourceVersion !== 1 && sourceVersion !== 2 && sourceVersion !== 3 && sourceVersion !== 4) throw new Error("Unsupported State Flow migration source version");
+	if (sourceVersion === 1 || sourceVersion === 2) refuseRetiredSemanticVersion(sourceVersion);
+	if (sourceVersion !== 3 && sourceVersion !== 4) throw new Error("Unsupported State Flow migration source version");
 	validatePatch(value);
 	if (!isObject(value.checkpoint) || !Array.isArray(value.patches)) throw new Error("Invalid temporal checkpoint/tail envelope");
 	if (targetModules !== undefined) validateRetainedModules(targetModules);
@@ -93,7 +55,6 @@ export function prepareSemanticMigration(
 	const translate = (state: unknown): JsonObject => {
 		if (sourceVersion !== 4 && targetModules !== undefined && isObject(state)
 			&& Object.keys(state).some(key => key.startsWith("x_"))) throw new Error("Legacy State Flow external namespace collision");
-		if (sourceVersion < 3) return translateLegacySemanticObject(state);
 		validatePatch(state);
 		assertNoRetiredSemanticPlanes(state);
 		return structuredClone(state);
@@ -149,7 +110,8 @@ export function prepareSerializedScopeMigration(
 	const metadata = parseMigrationJson(metaText, "metadata");
 	if (!isObject(metadata)) throw new Error("Invalid State Flow migration metadata");
 	const version = metadata.version;
-	if (version !== 1 && version !== 2 && version !== 3 && version !== 4) throw new Error("Unsupported State Flow migration source version");
+	if (version === 1 || version === 2) refuseRetiredSemanticVersion(version);
+	if (version !== 3 && version !== 4) throw new Error("Unsupported State Flow migration source version");
 	if (version === 4) validateRetainedModules(metadata.modules);
 	else if (targetModules !== undefined && Object.hasOwn(metadata, "modules")) throw new Error("Legacy State Flow modules metadata collision");
 	if (scope === "cwd") {
@@ -164,7 +126,7 @@ export function prepareSerializedScopeMigration(
 	if (!isObject(temporal) || !Object.hasOwn(temporal, "checkpoint") || !Array.isArray(temporal.patches)) {
 		throw new Error("Invalid State Flow migration temporal metadata");
 	}
-	if (version >= 3 && !Object.hasOwn(temporal, "revision")) throw new Error("State Flow target migration metadata requires a revision");
+	if (!Object.hasOwn(temporal, "revision")) throw new Error("State Flow target migration metadata requires a revision");
 	const checkpointText = decodeMigrationText(basis.checkpoint.bytes, "checkpoint");
 	const patchesText = decodeMigrationText(basis.patches.bytes, "tail");
 	const checkpoint = parseMigrationJson(checkpointText, "checkpoint");
@@ -174,7 +136,7 @@ export function prepareSerializedScopeMigration(
 	if (boundaries.length !== patches.length) throw new Error("State Flow migration metadata does not match its semantic tail");
 	const candidate = prepareSemanticMigration({
 		...(version === 4 ? { modules: metadata.modules } : {}),
-		revision: temporal.revision === undefined ? patches.length : temporal.revision,
+		revision: temporal.revision,
 		checkpoint: { through: temporal.checkpoint, state: checkpoint },
 		patches: patches.map((patch, index) => ({ transition: boundaries[index], patch })),
 	}, scope, version, MAX_HISTORY_LIMIT, targetModules);

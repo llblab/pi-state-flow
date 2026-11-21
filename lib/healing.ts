@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { constants, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { canonicalJson } from "./json.ts";
+import { RetiredSemanticFormatError } from "./migration.ts";
 import { sessionRuntimePaths, temporalScopePaths } from "./durable.ts";
 import { captureScopeSelection, type ScopeSelection } from "./selection.ts";
 import { RevisionUnavailableError } from "./snapshot.ts";
@@ -40,7 +41,7 @@ export interface HealRequest {
  */
 export function isHealableCorruption(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
-	if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError) return false;
+	if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError || error instanceof RetiredSemanticFormatError) return false;
 	if (error.name === "AbortError") return false;
 	if (typeof (error as NodeJS.ErrnoException).code === "string") return false;
 	if (/identity mismatch/i.test(error.message)) return false;

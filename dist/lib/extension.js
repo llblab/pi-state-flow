@@ -2362,6 +2362,9 @@ export default function stateFlowExtension(pi, options = {}) {
         return { compaction: result };
     });
     pi.on("agent_before_settle", async (_event, ctx) => {
+        // Passive has no response reconciliation: its settled run is the accepted turn for already published patches.
+        if (!shuttingDown && snapshot.config.mode === "passive" && memoryToolsAvailable())
+            backup.markTurnAccepted();
         if (shuttingDown || !memoryToolsAvailable() || !backup.takeSettledTurn())
             return;
         const operationSignal = ctx.signal;

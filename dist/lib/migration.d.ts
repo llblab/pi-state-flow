@@ -1,10 +1,9 @@
-import { type JsonObject } from "./json.ts";
 import { type RetainedModules } from "./semantic-module.ts";
 import { type StateScope } from "./state.ts";
 import { type ScopeStream } from "./temporal.ts";
-/** Owns temporary pure semantic-dialect conversion; excludes I/O, publication, backup and lifecycle authority. */
+/** Owns the pure v3/v4 semantic codec and module-descriptor upgrade; excludes I/O, publication, backup and lifecycle authority. */
 export interface SemanticMigrationCandidate {
-    sourceVersion: 1 | 2 | 3 | 4;
+    sourceVersion: 3 | 4;
     targetVersion: 3 | 4;
     /** A format conversion is not an authored semantic transition or revision. */
     requiresConversion: boolean;
@@ -21,8 +20,11 @@ export interface SerializedSemanticMigrationCandidate extends SemanticMigrationC
     basis: Record<ScopeMigrationFile, MigrationByteReceipt>;
     target: Record<ScopeMigrationFile, string>;
 }
-/** Translate a raw legacy checkpoint or replay patch before any known-field filtering. */
-export declare function translateLegacySemanticObject(value: unknown): JsonObject;
+/** A known retired format, not corruption: self-healing must never reset it. */
+export declare class RetiredSemanticFormatError extends Error {
+}
+/** State Flow 1.0.0 ended the temporary contract/working conversion window; refusal stays explicit. */
+export declare function refuseRetiredSemanticVersion(version: unknown): never;
 /** Build a detached target candidate; publication still belongs to the guarded storage transaction. */
 export declare function prepareSemanticMigration(value: unknown, scope: StateScope, sourceVersion: number, historyLimit?: number, targetModules?: RetainedModules): SemanticMigrationCandidate;
 /** Decode a complete raw owner cohort before filtering; never load files, normalize authority or publish. */

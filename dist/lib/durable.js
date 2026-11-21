@@ -4,7 +4,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { parseArtifactProvenanceRegistry, serializeArtifactProvenanceRegistry, } from "./artifact.js";
 import { MAX_HISTORY_LIMIT } from "./history.js";
-import { prepareSerializedScopeMigration } from "./migration.js";
+import { prepareSerializedScopeMigration, refuseRetiredSemanticVersion } from "./migration.js";
 import { canonicalJson, isJsonValue, isObject } from "./json.js";
 import { validateScopeStream, validateTemporalState } from "./temporal.js";
 import { assertRetainedModules, validateRetainedModules } from "./semantic-module.js";
@@ -46,7 +46,7 @@ export function serializeScopeStream(stream, scope, cwdIdentity) {
     };
 }
 function isSupportedScopeMetadataVersion(version) {
-    return version === 1 || version === 2 || version === 3 || version === 4;
+    return version === 3 || version === 4;
 }
 /** Distinguish a wholly absent semantic cohort from partial or malformed surviving authority. */
 export function classifyScopeStream(checkpointSource, patchesSource, scope, expectedCwd, metaSource) {
@@ -77,6 +77,8 @@ export function classifyScopeStream(checkpointSource, patchesSource, scope, expe
         throw new Error(`Unsupported State Flow ${scope} storage format`);
     }
     const metadata = parseMetadataDocument(metaSource, `State Flow ${scope} metadata`);
+    if (metadata.version === 1 || metadata.version === 2)
+        refuseRetiredSemanticVersion(metadata.version);
     if (!isSupportedScopeMetadataVersion(metadata.version))
         throw new Error(`Unsupported State Flow ${scope} metadata version`);
     // In Unicode mode this range matches lone UTF-16 surrogates, not valid pairs or JSON escapes.

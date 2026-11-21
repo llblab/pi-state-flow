@@ -4131,6 +4131,21 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await release();
 	});
 
+	test("Passive patches are committed and pushed at settlement like accepted Active turns", async () => {
+		const h = harness({ mode: "passive" });
+		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+		const git = (...args: string[]) => execFileSync("git", ["-C", h.repositoryRoot, ...args], { stdio: "pipe", encoding: "utf8" }).trim();
+		const initial = git("rev-parse", "HEAD");
+		await h.handlers.get("agent_before_settle")!({}, h.ctx);
+		assert.equal(git("rev-parse", "HEAD"), initial, "a settled Passive run without publication commits nothing");
+		await h.tools.get("state_flow_patch")!.execute("passive-write", { global: { strategy: { synced: true } } }, undefined, undefined, h.ctx);
+		await h.handlers.get("agent_before_settle")!({}, h.ctx);
+		const head = git("rev-parse", "HEAD");
+		assert.notEqual(head, initial, "accepted Passive memory gets a local backup commit");
+		await awaitInFlightBackupPushes(h.repositoryRoot);
+		assert.equal(git("ls-remote", "origin", "refs/heads/main").split("\t")[0], head, "and is pushed to the configured remote");
+	});
+
 	test("Off owns asynchronous push cancellation independently of the completed agent operation", async (t) => {
 		const h = harness({ initializeRepository: false });
 		await start(h);

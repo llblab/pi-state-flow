@@ -8,6 +8,7 @@ import {
 	loadScopeStream, parseScopeProvenance, parseScopeStream, resolveSessionAddress, serializeScopeMetadata, serializeScopeProvenance, serializeScopeStream, sessionScopeKey, sessionStorageKey,
 	temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
 } from "../lib/durable.ts";
+import { RetiredSemanticFormatError } from "../lib/migration.ts";
 import { emptyState, type StateScope } from "../lib/state.ts";
 import { advanceTemporalState, createTemporalState, readTemporalState, type ScopeStream, type TemporalState } from "../lib/temporal.ts";
 import type { RecentScopePatch } from "../lib/history.ts";
@@ -22,14 +23,14 @@ function temporalFixture(): TemporalState {
 }
 
 test("string codec entrypoints reject lossy UTF-8 source encoding but preserve escaped values and valid surrogate pairs", () => {
-	for (const version of [2, 3]) {
+	for (const version of [3]) {
 		for (const literal of ["\ud800", "\udc00", "😀"]) {
 			const view = advanceTemporalState(createTemporalState({ global: { strategy: { literal } }, cwd: {}, session: {} }, "unicode"), [
 				{ scope: "global", patch: { tactics: { literal } } },
 			], "unicode-T1");
 			const stream = view.scopes.global;
 			const wire = serializeScopeStream(stream, "global");
-			const legacy = (text: string) => version === 2 ? text.replaceAll('"strategy":', '"contract":').replaceAll('"tactics":', '"working":') : text;
+			const legacy = (text: string) => text;
 			const metadata = JSON.parse(serializeScopeMetadata(undefined, stream, "global"));
 			const source = { checkpoint: legacy(wire.checkpoint), patches: legacy(wire.patches), meta: JSON.stringify({ ...metadata, version, opaque: literal }) };
 			const decoded = parseScopeStream(source.checkpoint, source.patches, "global", undefined, source.meta)!;
@@ -245,8 +246,8 @@ test("scope codecs preserve tails above the default while runtime configuration 
 	assert.deepEqual(restored, view.scopes.session);
 });
 
-test("scope metadata revisions preserve legacy reads and reject unknown future writers", () => {
-	assert.deepEqual(parseScopeProvenance(JSON.stringify({ version: 1, artifacts: {} }), "/legacy/meta.json"), {});
+test("scope metadata revisions refuse retired versions and unknown future writers", () => {
+	for (const version of [1, 2]) assert.throws(() => parseScopeProvenance(JSON.stringify({ version, artifacts: {} }), "/legacy/meta.json"), /Invalid State Flow provenance document/);
 	assert.deepEqual(parseScopeProvenance(serializeScopeProvenance({}), "/current/meta.json"), {});
 	assert.equal(JSON.parse(serializeScopeProvenance({})).version, 3);
 	assert.throws(() => parseScopeProvenance(JSON.stringify({ version: 4, artifacts: {} }), "/malformed4/meta.json"), /retained modules/);
@@ -382,7 +383,9 @@ test("temporal codec rejects incomplete, legacy, malformed, oversized, and causa
 		patches: view.scopes.session.patches.map((record) => record.transition),
 	} });
 	const legacyCheckpoint = JSON.stringify({ intents: {}, contract: {}, working: {}, artifacts: {}, response: "", lazy: {} });
-	assert.equal(parseScopeStream(legacyCheckpoint, source.patches, "session", undefined, legacyMeta)!.revision, 1);
+	// Since 1.0.0 retired contract/working cohorts are refused explicitly, never converted or healed.
+	assert.throws(() => parseScopeStream(legacyCheckpoint, source.patches, "session", undefined, legacyMeta), RetiredSemanticFormatError);
+	assert.throws(() => parseScopeStream(legacyCheckpoint, source.patches, "session", undefined, legacyMeta), /open it once with State Flow 0\.x/);
 	assert.equal(parseScopeStream(undefined, undefined, "session"), undefined);
 	assert.throws(() => parseScopeStream(source.checkpoint, undefined, "session"), /incomplete checkpoint\/tail/);
 	assert.throws(() => parseScopeStream(undefined, source.patches, "session"), /incomplete checkpoint\/tail/);

@@ -210,7 +210,8 @@ test("metadata4 conversion preserves foreign edits during guarded rollback inste
 });
 
 test("metadata4 owned conversion uses exact-byte backup/CAS/rollback and selected replay/fork retain opaque descriptors", async t => {
-	for (const version of [1, 2, 3]) {
+	// Retired v1/v2 semantic cohorts are refused, so only the supported v3 baseline converts here.
+	for (const version of [3]) {
 		const parent = mkdtempSync(join(tmpdir(), "state-flow-external-upgrade-"));
 		t.after(() => rmSync(parent, { recursive: true, force: true }));
 		const root = join(parent, "store"), cwd = join(parent, "workspace"), id = "parent";
@@ -1021,15 +1022,14 @@ test("selected shared origin preparation is store-bound and expires with its tra
 		assert.deepEqual(readFileSync(life.runtime), acceptedRuntimeBytes);
 	});
 
-	test("Passive persistence cannot convert selected semantic predecessors even with matching candidate bytes", async t => {
+	test("retired semantic predecessors are refused before Passive persistence can convert them", async t => {
 		const f = await fixture(t, ["session"]), p = temporalScopePaths(f.cwd, f.id, "session", f.root);
 		const metadata = JSON.parse(readFileSync(p.meta, "utf8")); metadata.version = 2;
 		for (const path of [p.checkpoint, p.patches]) writeFileSync(path, readFileSync(path, "utf8").replaceAll('"strategy"', '"contract"'));
 		writeFileSync(p.meta, JSON.stringify(metadata));
 		const before = files(f);
 		await withStorageTransaction(f.root, transaction => {
-			const base = transaction.prepareSelected(f.cwd, f.id, ["session"], f.root)!;
-			assert.throws(() => transaction.persistSelectedPassive(f.cwd, f.id, base, f.root), /requires lifecycle v2 and semantic v3/);
+			assert.throws(() => transaction.prepareSelected(f.cwd, f.id, ["session"], f.root), /no longer converted since State Flow 1\.0\.0/);
 		});
 		unchanged(before);
 	});
@@ -1279,29 +1279,29 @@ test("selected Session acquisition rejects a mismatched storage transaction root
 		assert.equal(readdirSync(f.backupDir).length, 1);
 	});
 
-	test("selected semantic v2 conversion composes with lifecycle migration without touching omitted owners", async (t) => {
-		for (const version of [1, 2] as const) {
-			const f = fixture(t, version);
-			const paths = temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root);
-			for (const path of [paths.checkpoint, paths.patches]) writeFileSync(path, readFileSync(path, "utf8").replace(/"strategy"\s*:/g, '"contract":').replace(/"tactics"\s*:/g, '"working":'));
-			writeFileSync(paths.meta, JSON.stringify({ ...JSON.parse(readFileSync(paths.meta, "utf8")), version: 2 }));
-			const base = await f.load(["cwd"]);
-			const result = await f.publish(base, request(base));
-			assert.ok(result.migrationBackup);
-			const manifest = JSON.parse(readFileSync(result.migrationBackup, "utf8"));
-			assert.deepEqual(manifest.convertedScopes, ["cwd"]);
-			assert.deepEqual(manifest.lifecycleConversion, version === 1 ? { sourceVersion: 1, targetVersion: 2 } : undefined);
-			assert.deepEqual(result.cohort.view, base.view);
-			assert.equal(JSON.parse(readFileSync(paths.meta, "utf8")).version, 3);
-			assert.deepEqual(temporalScopeRevisions(result.cohort.view), temporalScopeRevisions(base.view));
-			assert.equal(readFileSync(paths.checkpoint, "utf8").includes('"contract"'), false);
-			assert.equal(readFileSync(paths.patches, "utf8").includes('"working"'), false);
-			for (const scope of ["global", "session"] as const) {
-				const omitted = temporalScopePaths(f.cwd, f.sessionId, scope, f.root);
-				for (const path of [omitted.checkpoint, omitted.patches, omitted.meta]) assert.deepEqual(readFileSync(path), f.original.files.find((file) => file.path === path)!.bytes);
+	test("a selected publication converts only a legacy lifecycle and never touches omitted owners", async (t) => {
+		const converted = fixture(t, 1);
+		const convertedBase = await converted.load(["cwd"]);
+		const convertedResult = await converted.publish(convertedBase, request(convertedBase));
+		assert.ok(convertedResult.migrationBackup);
+		const manifest = JSON.parse(readFileSync(convertedResult.migrationBackup, "utf8"));
+		// Semantic files are already v3; only the legacy lifecycle representation still converts.
+		assert.deepEqual(manifest.convertedScopes, []);
+		assert.deepEqual(manifest.lifecycleConversion, { sourceVersion: 1, targetVersion: 2 });
+		assert.deepEqual(convertedResult.cohort.view, convertedBase.view);
+		assert.deepEqual(temporalScopeRevisions(convertedResult.cohort.view), temporalScopeRevisions(convertedBase.view));
+		for (const scope of ["global", "session"] as const) {
+			const omitted = temporalScopePaths(converted.cwd, converted.sessionId, scope, converted.root);
+			for (const path of [omitted.checkpoint, omitted.patches, omitted.meta]) {
+				assert.deepEqual(readFileSync(path), converted.original.files.find((file) => file.path === path)!.bytes);
 			}
-			assertSelectedFileCohortBasis(result.cohort, await f.load(["cwd"]));
 		}
+		assertSelectedFileCohortBasis(convertedResult.cohort, await converted.load(["cwd"]));
+		const current = fixture(t, 2);
+		const currentBase = await current.load(["cwd"]);
+		const currentResult = await current.publish(currentBase, request(currentBase));
+		assert.equal(currentResult.migrationBackup, undefined, "a current lifecycle needs no recovery backup");
+		assert.equal(existsSync(current.backupDir), false);
 	});
 
 	test("uncooperative runtime edits during publication survive guarded rollback, not stale overwrite", async (t) => {
@@ -1374,17 +1374,16 @@ test("deferred fork storage capability is store-bound, single-use and transactio
 {
 	const fixture = legacyPublicationFixture.fixture;
 
-	test("a session-only publication converts no omitted shared owner", (t) => {
+	test("a version-only publication writes nothing and converts no omitted shared owner", (t) => {
 		const f = fixture(t);
+		// Semantic files are already v3, so an unchanged republish publishes no replacement bytes at all.
 		const result = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["session"], f.base, f.root, f.runtime);
-		assert.ok(result.migrationBackup);
-		const backup = JSON.parse(readFileSync(result.migrationBackup, "utf8"));
-		assert.deepEqual(backup.convertedScopes, ["session"]);
+		assert.equal(result.migrationBackup, undefined);
+		assert.equal(result.changed, false);
 		for (const scope of ["global", "cwd"] as const) {
 			const paths = temporalScopePaths(f.cwd, f.sessionId, scope, f.root);
 			for (const path of [paths.checkpoint, paths.patches, paths.meta]) {
 				assert.deepEqual(readFileSync(path), Buffer.from(f.base.files.find((file) => file.path === path)!.bytes!));
-				assert.equal(backup.updatedPaths.includes(relative(f.root, path)), false);
 			}
 		}
 	});

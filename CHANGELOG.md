@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 1.0.0: Automatic Recovery, No Legacy Conversion
+
+- `Visible self-healing`: An owner whose canonical files cannot be decoded, or a boundary whose session memory is missing, no longer blocks forever. After a failed acquisition, State Flow quarantines the exact bytes privately in `<store>-quarantine/`, resets only that owner to empty memory, retries once and tells the operator, the model and the local log. Healthy owners stay untouched; filesystem, lock, cancellation and foreign-identity failures stay fail-closed.
+- `Retired formats refused`: The temporary `contract`/`working` converter is gone. A store still in metadata v1/v2 now fails with an actionable message instead of being converted; open it once with a State Flow 0.x release first. Both retired root names stay reserved, and self-healing never resets a known old format.
+- `Empty stores read as empty`: A branch without accepted memory reads absent shared values as `null` instead of an unavailable runtime; an uncreated Session says the first accepted patch creates it.
+
 ## 0.28.0: Visible Self-Healing Memory
 
 - `Visible self-healing`: An owner whose canonical files cannot be decoded, or a boundary whose session memory is missing, no longer blocks forever. After a failed acquisition, State Flow quarantines the exact bytes privately in `<store>-quarantine/`, resets only that owner to empty memory, retries once and tells the operator, the model and the local log. Healthy owners stay untouched; filesystem, lock, cancellation and foreign-identity failures stay fail-closed.
