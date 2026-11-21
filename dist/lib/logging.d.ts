@@ -1,4 +1,4 @@
-export type StateFlowDiagnosticCategory = "invalid-patch" | "publication-conflict" | "finalization" | "barrier-block";
+export type StateFlowDiagnosticCategory = "invalid-patch" | "publication-conflict" | "finalization" | "barrier-block" | "self-heal";
 /** Minimal structural block; only ordinary text keeps its exact content. */
 export interface StateFlowDiagnosticBlock {
     type: string;
@@ -41,5 +41,7 @@ export declare class StateFlowDiagnosticWriter {
     record(sessionId: string, cwd: string, error: string, category: StateFlowDiagnosticCategory, extras?: DiagnosticExtras): void;
     /** Push warnings stay short; retain the available Git failure detail locally even without opt-in logging. */
     recordBackupPushFailure(sessionId: string, cwd: string, error: string): boolean;
+    /** Memory resets are always recorded locally, independently of opt-in logging. */
+    recordSelfHeal(sessionId: string, cwd: string, error: string): boolean;
     private write;
 }

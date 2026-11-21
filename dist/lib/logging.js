@@ -61,6 +61,10 @@ export class StateFlowDiagnosticWriter {
     recordBackupPushFailure(sessionId, cwd, error) {
         return this.write(sessionId, cwd, error, "publication-conflict", {}, false);
     }
+    /** Memory resets are always recorded locally, independently of opt-in logging. */
+    recordSelfHeal(sessionId, cwd, error) {
+        return this.write(sessionId, cwd, error, "self-heal", {});
+    }
     write(sessionId, cwd, error, category, extras, reportFailure = true) {
         try {
             const fromRepository = relative(this.repositoryRoot, this.path);

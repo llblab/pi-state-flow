@@ -911,9 +911,9 @@ test("fresh explicit start is local-only; ordinary startup/status and old pointe
 	old.entries.push(checkpoint);
 	await old.handlers.get("session_start")!({ reason: "resume" }, old.ctx);
 	await old.commands.get("state-flow-active").handler("", old.ctx);
-	assert.equal(existsSync(missingRoot), false);
-	assert.deepEqual(old.entries, [checkpoint]);
-	assert.match(old.notifications.at(-1)!, /Selected current session storage is unavailable/);
+	// Missing expected memory restarts visibly from empty memory instead of blocking the session forever.
+	assert.ok(old.notifications.some(message => /self-healed: session memory files were missing/.test(message)));
+	assert.equal(existsSync(join(missingRoot, "checkpoint.json")), true);
 });
 
 test("live storage paths mirror Pi CWD and session file names without appended hashes", async (t) => {
@@ -1079,44 +1079,43 @@ for (const activate of ["start", "passive-patch"] as const) {
 	});
 }
 
-for (const invalid of ["cwd-without-global", "malformed-global", "incomplete-global"] as const) {
-	test(`pre-runtime Stop leaves ${invalid} storage untouched`, async () => {
+for (const invalid of ["malformed-global", "incomplete-global"] as const) {
+	test(`pre-runtime Passive visibly heals ${invalid} storage and continues from empty global memory`, async () => {
 		const h = harness({ initializeRepository: false, mode: "passive" });
-		if (invalid === "cwd-without-global") writeCwdState(h.ctx.cwd, { ...emptyState(), tactics: { project: "retained" } }, h.repositoryRoot);
-		else {
-			const checkpoint = writeGlobalState(emptyState(), h.repositoryRoot);
-			if (invalid === "malformed-global") writeFileSync(checkpoint, "{broken\n");
-			else rmSync(temporalScopePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), "global", h.repositoryRoot).patches);
-		}
-		const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
-		const before = files();
+		const checkpoint = writeGlobalState({ ...emptyState(), tactics: { lost: true } }, h.repositoryRoot);
+		const global = temporalScopePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), "global", h.repositoryRoot);
+		if (invalid === "malformed-global") writeFileSync(checkpoint, "{broken\n");
+		else rmSync(global.patches);
+		writeCwdState(h.ctx.cwd, { ...emptyState(), tactics: { project: "retained" } }, h.repositoryRoot);
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
-		if (invalid === "cwd-without-global") {
-			assert.equal(h.notifications.length, 0);
-			assert.equal(h.readState(0, "cwd").tactics.project, "retained");
-			assert.equal(existsSync(sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).runtime), false);
-		} else assert.match(h.notifications.at(-1)!, /Snapshot restoration failed:.*(invalid JSON|Incomplete selected State Flow global observation)/);
+		assert.match(h.notifications.join("\n"), /self-healed: global memory was unreadable .* quarantined at /);
+		for (const path of [global.checkpoint, global.patches, global.meta]) assert.equal(existsSync(path), false);
+		assert.equal(h.readState(0, "cwd").tactics.project, "retained", "healthy owners survive");
 		await h.commands.get("state-flow-passive").handler("", h.ctx);
-		const stopped = structuredClone(h.entries.at(-1).data);
-		if (invalid === "cwd-without-global") assert.deepEqual(stopped, nativePolicyMarker(h.ctx.sessionManager.getSessionId(), "passive"));
-		else {
-			assert.match(stopped.persistenceError, /selected branch is unavailable/);
-			assert.equal(stopped.preserveContext, true);
-			assert.equal(typeof stopped.at, "number");
-			assert.deepEqual(stopped, { ...nativePolicyMarker(h.ctx.sessionManager.getSessionId(), "passive"), at: stopped.at, preserveContext: true, persistenceError: stopped.persistenceError });
-		}
-		assert.deepEqual(files(), before);
+		assert.equal(h.entries.some(entry => entry.data?.persistenceError !== undefined), false);
 		await h.commands.get("state-flow-active").handler("", h.ctx);
-		if (invalid === "cwd-without-global") {
-			assert.equal(h.resolveSnapshot().config.mode, "active", "explicit Start may initialize a wholly absent global scope");
-			assert.equal(h.readState(0, "cwd").tactics.project, "retained");
-		} else {
-			assert.match(h.notifications.at(-1)!, /activation failed/);
-			assert.deepEqual(files(), before);
-			assert.deepEqual(h.entries.at(-1).data, stopped);
-		}
+		assert.equal(h.resolveSnapshot().config.mode, "active");
+		assert.equal(h.readState(0, "cwd").tactics.project, "retained");
+		assert.equal(h.readState(0, "global").tactics?.lost, undefined);
 	});
 }
+
+test("pre-runtime Stop leaves cwd-without-global storage untouched", async () => {
+	const h = harness({ initializeRepository: false, mode: "passive" });
+	writeCwdState(h.ctx.cwd, { ...emptyState(), tactics: { project: "retained" } }, h.repositoryRoot);
+	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+	const before = files();
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	assert.equal(h.notifications.length, 0);
+	assert.equal(h.readState(0, "cwd").tactics.project, "retained");
+	assert.equal(existsSync(sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).runtime), false);
+	await h.commands.get("state-flow-passive").handler("", h.ctx);
+	assert.deepEqual(structuredClone(h.entries.at(-1).data), nativePolicyMarker(h.ctx.sessionManager.getSessionId(), "passive"));
+	assert.deepEqual(files(), before);
+	await h.commands.get("state-flow-active").handler("", h.ctx);
+	assert.equal(h.resolveSnapshot().config.mode, "active", "explicit Start may initialize a wholly absent global scope");
+	assert.equal(h.readState(0, "cwd").tactics.project, "retained");
+});
 
 test("restarting a long ordinary session without State Flow checkpoints bootstraps from native conversation", async () => {
 	const seed = harness({ initializeRepository: false, mode: "passive" });
@@ -1202,40 +1201,29 @@ test("old Pi steps never block memory: tree navigation keeps current memory in e
 	}
 });
 
-test("unreadable current session memory visibly blocks Active; Passive retries and Off releases inference only", async () => {
-	for (const recovery of ["passive", "off"] as const) {
+test("unreadable current session memory is quarantined visibly and every mode continues from empty session memory", async () => {
+	for (const recovery of ["active", "passive"] as const) {
 		const h = harness({ initializeRepository: false, mode: "active" });
 		await start(h);
 		await h.tools.get("state_flow_patch")!.execute("seed", { global: { tactics: { shared: "retained" } }, session: { tactics: { private: 1 } } }, undefined, undefined, h.ctx);
+		if (recovery === "passive") await h.commands.get("state-flow-passive").handler("", h.ctx);
 		const runtimePath = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).runtime;
-		const original = readFileSync(runtimePath);
 		writeFileSync(runtimePath, "malformed runtime");
-		const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
-		const before = files();
 		await h.handlers.get("session_tree")!({}, h.ctx);
-		assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active (blocked)</dim>");
-		assert.equal(h.activeTools.includes("state_flow_patch"), true, "failed Active does not silently select Off");
-		assert.equal(h.handlers.get("context")!({ messages: [user("Idle inspection", 99)] }, h.ctx), undefined, "unavailable memory never fabricates an idle projection");
-		await h.commands.get("state-flow-status").handler("", h.ctx);
-		assert.match(h.notifications.at(-1)!, /Mode: active\nSelected scopes: global, cwd, session\nInference blocked:/);
-		const blocked = new AbortController();
-		await h.inferenceContext([user("Do not send the raw history", 100)], blocked);
-		assert.equal(blocked.signal.aborted, true);
-		assert.match(h.notifications.at(-1)!, /inference blocked/);
-		await assert.rejects(h.tools.get("state_flow_read")!.execute("shared", { path: "global.tactics.shared" }), /selected branch is unavailable/, "failed current-private proof cannot authorize a shared-only model fallback");
-		assert.throws(() => h.readState(0, "session"), /unavailable/);
-		await assert.rejects(h.tools.get("state_flow_patch")!.execute("refused", { session: { tactics: { unsafe: true } } }, undefined, undefined, h.ctx), /selected branch is unavailable/);
-		await h.commands.get(`state-flow-${recovery}`).handler("", h.ctx);
-		if (recovery === "passive") assert.match(h.notifications.at(-1)!, /passive; memory writes paused:.*session policy contains invalid JSON/);
+		const notice = h.notifications.find(message => /self-healed: session memory was unreadable/.test(message));
+		assert.ok(notice, "a reset is never silent");
+		const quarantine = /quarantined at (\S+\.json)/.exec(notice)![1]!;
+		const record = JSON.parse(readFileSync(quarantine, "utf8"));
+		assert.ok(record.files.some((file: { bytes: string }) => Buffer.from(file.bytes, "base64").toString() === "malformed runtime"), "original bytes stay recoverable");
+		assert.equal(h.statuses.at(-1), `<accent>state-flow</accent> <dim>${recovery}</dim>`, "healed memory is not blocked");
+		const system = JSON.stringify(h.handlers.get("context_with_system")!({ messages: [{ role: "system", content: "", sections: {} }, user("Next", 100)] }, h.ctx));
+		assert.match(system, /self-healed: session memory was unreadable.*Tell the user/, "the model is told about the reset");
 		const permitted = new AbortController();
-		await h.inferenceContext([user("Explicit native context policy", 101)], permitted);
-		assert.equal(permitted.signal.aborted, false, "an explicit inactive choice releases the inference fence");
-		assert.deepEqual(files(), before, "unreadable memory is never replaced");
-		writeFileSync(runtimePath, original);
-		await h.commands.get(`state-flow-${recovery === "passive" ? "passive" : "active"}`).handler("", h.ctx);
-		assert.equal(h.readState(0, "session").tactics.private, 1);
-		await h.tools.get("state_flow_patch")!.execute("repaired", { session: { tactics: { repaired: true } } }, undefined, undefined, h.ctx);
-		assert.equal(h.readState(0, "session").tactics.repaired, true);
+		await h.inferenceContext([user("Continue after healing", 101)], permitted);
+		assert.equal(permitted.signal.aborted, false);
+		assert.equal(h.readState(0, "global").tactics.shared, "retained", "healthy shared memory survives");
+		await h.tools.get("state_flow_patch")!.execute("after-heal", { session: { tactics: { repaired: true } } }, undefined, undefined, h.ctx);
+		assert.deepEqual(h.readState(0, "session").tactics, { repaired: true });
 	}
 });
 
@@ -2599,15 +2587,14 @@ test("post-acceptance Stop checkpoint failure neither rolls back accepted mode n
 });
 
 test("Passive persistence failures retain context and memory and fence writes through reload without touching canonical bytes", async () => {
-	for (const fault of ["concurrent", "locked", "malformed"] as const) {
+	// Unreadable canonical memory is no longer a persistence fence; it heals visibly (see the quarantine test).
+	for (const fault of ["concurrent", "locked"] as const) {
 		for (const mode of ["passive"] as const) {
 			const passiveBootstrap = mode === "passive", passiveTools = mode === "passive";
 			const options = { initializeRepository: false, mode };
 			const h = harness(options);
 			await start(h, "Uncompiled request");
 			await h.tools.get("state_flow_patch")!.execute("accepted", { session: { tactics: { private: "retained" } } }, undefined, undefined, h.ctx);
-			const paths = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
-			const originalRuntime = readFileSync(paths.runtime);
 			const lock = join(h.repositoryRoot, ".state-flow-publication.lock");
 			const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 			if (fault === "concurrent") {
@@ -2615,7 +2602,7 @@ test("Passive persistence failures retain context and memory and fence writes th
 				peer.entries.push(...structuredClone(h.entries));
 				await peer.handlers.get("session_start")!({ reason: "resume" }, peer.ctx);
 				await peer.tools.get("state_flow_patch")!.execute("peer", { session: { tactics: { peer: "accepted" } } }, undefined, undefined, peer.ctx);
-			} else if (fault === "malformed") writeFileSync(paths.runtime, "malformed runtime");
+			}
 			const canonical = files();
 			if (fault === "locked") mkdirSync(lock);
 			const checkpointCount = h.entries.length;
@@ -2659,13 +2646,10 @@ test("Passive persistence failures retain context and memory and fence writes th
 			const projected = restoredContext?.messages ?? messages;
 			assert.match(JSON.stringify(projected), /Uncompiled request/);
 			assert.match(JSON.stringify(projected), /late-read/);
-			if (fault !== "malformed") {
-				assert.equal(resumed.readState(0, "session").tactics.private, "retained");
-				if (fault === "concurrent") assert.equal(resumed.readState(0, "session").tactics.peer, "accepted");
-			} else assert.throws(() => resumed.readState(0, "session"), /selected branch is unavailable/);
+			assert.equal(resumed.readState(0, "session").tactics.private, "retained");
+			if (fault === "concurrent") assert.equal(resumed.readState(0, "session").tactics.peer, "accepted");
 			await assert.rejects(resumed.tools.get("state_flow_patch")!.execute("fenced", { session: { tactics: { unsafe: true } } }, undefined, undefined, resumed.ctx), /paused after mode change|selected branch is unavailable|tools are off/);
 			assert.deepEqual(files(), canonical);
-			if (fault === "malformed") writeFileSync(paths.runtime, originalRuntime);
 			await resumed.commands.get("state-flow-active")!.handler("", resumed.ctx);
 			assert.equal(resumed.resolveSnapshot().config.mode, "active");
 			await resumed.tools.get("state_flow_patch")!.execute("accepted-again", { session: { tactics: { afterStart: true } } }, undefined, undefined, resumed.ctx);
@@ -3482,7 +3466,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		assert.deepEqual(canonical(f, session), before); assert.equal(metadata(f, session).privateAcquisition, "deferred");
 	});
 
-	test("pre-runtime Passive acquired current with corrupt required private body cannot fall back to valid shared source", { timeout: 20_000 }, async t => {
+	test("pre-runtime Passive acquired current with corrupt required private body heals visibly and tells the model", { timeout: 20_000 }, async t => {
 		const f = await realPiFixture(t, { initializeRepository: false, mode: "off" }), session = await f.createSession("new");
 		f.faux.setResponses([fauxAssistantMessage("Persist owner")]); await session.prompt("OFF_BEFORE_REQUIRED_PRIVATE_SOURCE");
 		// Explicit lower origin grant creates a real acquired cohort; native history still owns policy DATA only.
@@ -3493,11 +3477,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			{ scope: "session", patch: { tactics: { required: true } } },
 		] }), () => {});
 		writeFileSync(temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, key(session)).checkpoint, "null\n");
-		const before = canonical(f, session); await session.prompt("/state-flow-passive");
-		let input: Input | undefined; f.faux.setResponses([context => { input = capture(context); return fauxAssistantMessage("Native context without State Flow fallback"); }]); await session.prompt("REQUIRED_PRIVATE_CORRUPTION");
-		assert.ok(input); assert.equal(texts(input).filter(text => text.startsWith("State Flow passive memory")).length, 0);
-		assert.doesNotMatch(JSON.stringify(input), /DO_NOT_FALL_BACK_TO_SHARED/);
-		assert.throws(() => f.readState(session), /unavailable/);	assert.deepEqual(canonical(f, session), before); assert.equal(metadata(f, session).privateAcquisition, "acquired");
+		const checkpoint = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, key(session)).checkpoint;
+		await session.prompt("/state-flow-passive");
+		assert.ok(f.notifications.some(message => /self-healed: session memory was unreadable/.test(message)), "the operator sees the reset");
+		let input: Input | undefined; f.faux.setResponses([context => { input = capture(context); return fauxAssistantMessage("Healed Passive context"); }]); await session.prompt("REQUIRED_PRIVATE_CORRUPTION");
+		assert.ok(input); assert.match(JSON.stringify(input), /self-healed: session memory was unreadable.*Tell the user/, "the model sees the reset");
+		assert.notEqual(existsSync(checkpoint) ? readFileSync(checkpoint, "utf8") : undefined, "null\n", "the corrupt body was quarantined");
 	});
 
 	test("native handler newer Passive or Off owns the result across an unacquired header-inspection wait", async t => {
@@ -3678,7 +3663,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		if (absent) privateAbsent(f, s);
 	}
 
-	test("native acquired current cannot borrow unacquired Passive observer after excluded checkpoint and private corruption", { timeout: 20_000 }, async t => {
+	test("native acquired current heals private corruption after an excluded checkpoint without losing shared memory", { timeout: 20_000 }, async t => {
 		const f = await realPiFixture(t, { mode: "configured", initializeRepository: false });
 		fs.writeFileSync(`${f.repositoryRoot}/config.json`, JSON.stringify({ mode: "passive", scopes: ["global", "cwd", "session"] }));
 		const s = (await f.createRuntime("new")).session;
@@ -3689,11 +3674,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const accepted = checkpoints(s); assert.ok(accepted > 0);
 		const last = s.sessionManager.getBranch().filter(e => e.type === "custom" && e.customType === "state-flow-snapshot").at(-1);
 		assert.ok(last?.type === "custom"); assert.match(JSON.stringify(last.data), /"scopes":\["cwd"\]/);
-		fs.writeFileSync(temporalScopePaths(f.cwd, s.sessionId, "session", f.repositoryRoot, nativeSessionKey(s)).checkpoint, "null\n");
-		const before = files(f, s);
+		const privateCheckpoint = temporalScopePaths(f.cwd, s.sessionId, "session", f.repositoryRoot, nativeSessionKey(s)).checkpoint;
+		fs.writeFileSync(privateCheckpoint, "null\n");
 		policy(s, wanted); await s.reload();
-		assert.deepEqual(files(f, s), before); assert.equal(checkpoints(s), accepted);
-		await denied(f, s, "acquired", false);
+		assert.ok(f.notifications.some(message => /self-healed: session memory was unreadable/.test(message)), "the reset is visible");
+		assert.notEqual(fs.existsSync(privateCheckpoint) ? fs.readFileSync(privateCheckpoint, "utf8") : undefined, "null\n");
+		assert.equal(f.readState(s, 0, "cwd").tactics.denialMarker, "SHARED_SOURCE_SENTINEL", "healthy shared memory survives");
 	});
 
 	test("native deferred shared fork cannot invent parent Session permission on Passive expansion", { timeout: 20_000 }, async t => {
@@ -6314,17 +6300,18 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await session.prompt("/state-flow-status"); assert.ok(f.notifications.at(-1)?.includes("Memory writes paused"));
 	});
 
-	test("public Session choices cannot reacquire corrupt acquired memory after a shared-only checkpoint", { timeout: 15_000 }, async t => {
+	test("public Session choices heal corrupt acquired memory visibly after a shared-only checkpoint", { timeout: 15_000 }, async t => {
 		const f = await realPiFixture(t, { initializeRepository: false }), { session } = await f.createRuntime("new");
 		await session.prompt("/state-flow-passive cwd session"); await seed(f, session);
 		await session.prompt("/state-flow-passive cwd");
 		const privatePaths = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
 		fs.writeFileSync(privatePaths.checkpoint, "null\n");
-		const before = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
-		for (const command of ["/state-flow-passive cwd session", "/state-flow-active cwd session"]) {
-			await session.prompt(command); assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), before);
-			assert.throws(() => f.readState(session, 0, "cwd"), /unavailable/);
-		}
+		await session.prompt("/state-flow-passive cwd session");
+		assert.ok(f.notifications.some(message => /self-healed: session memory was unreadable/.test(message)), "the reset is visible");
+		assert.notEqual(fs.existsSync(privatePaths.checkpoint) ? fs.readFileSync(privatePaths.checkpoint, "utf8") : undefined, "null\n");
+		await session.prompt("/state-flow-active cwd session");
+		assert.equal(f.notifications.filter(message => /self-healed/.test(message)).length, 1, "healing converges once");
+		assert.doesNotThrow(() => f.readState(session, 0, "cwd"));
 	});
 
 	test("public Session expansion of a deferred shared child cannot manufacture parent private permission", { timeout: 15_000 }, async t => {
@@ -7872,6 +7859,11 @@ test("accepted restoration survives a native checkpoint failure without rollback
 				}, () => {});
 				const peer = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
 				release(); await pending;
+				if (drift === "header-loss") {
+					// A lost unacquired lifecycle held no private memory: Start restarts from empty session memory instead of blocking.
+					assert.equal(policy(h).mode, "active");
+					continue;
+				}
 				assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), peer);
 				assert.equal(policy(h).mode, "off");
 				assert.equal(h.entries.filter(entry => entry.customType === SNAPSHOT_ENTRY_TYPE).length, 0);
@@ -7891,6 +7883,12 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			writeFileSync(life.runtime, JSON.stringify(metadata));
 			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
 			await h.commands.get("state-flow-active")!.handler("", h.ctx);
+			if (refusal === "lost-acquired" || refusal === "future") {
+				// Unreadable lifecycle is quarantined visibly and Start continues from empty session memory.
+				assert.ok(h.notifications.some(message => /self-healed: session memory was unreadable/.test(message)), refusal);
+				assert.equal(policy(h).mode, "active");
+				continue;
+			}
 			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
 			assert.equal(policy(h).mode, "off");
 			assert.equal(h.entries.filter(entry => entry.customType === SNAPSHOT_ENTRY_TYPE).length, 0);
@@ -8070,6 +8068,13 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 			try { await h.handlers.get("session_start")!({ reason: fault === "capture" ? "new" : "resume" }, h.ctx); }
 			finally { h.entries.push = push; }
+			if (fault === "subset") {
+				// A readable boundary whose stored memory is missing restarts visibly from empty memory.
+				assert.ok(h.notifications.some(message => /self-healed: session memory files were missing/.test(message)));
+				assert.equal(h.statuses.at(-1), "<accent>state-flow</accent> <dim>active</dim>");
+				assert.deepEqual(policy(h).scopes, ["cwd"], "healing never widens the captured choice");
+				continue;
+			}
 			assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/, fault);
 			const operation = new AbortController();
 			await h.inferenceContext([{ role: "user", content: [{ type: "text", text: "must not infer native fallback" }], timestamp: 1 }], operation);
@@ -8078,15 +8083,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			await assert.rejects(h.tools.get("state_flow_patch")!.execute("blocked", { session: { tactics: { no: true } } }, undefined, undefined, h.ctx), /unavailable|off/);
 			await h.commands.get("state-flow-off")!.handler("", h.ctx);
 			assert.equal(policy(h).mode, "off", "explicit Off must remain a memory-inert escape from failed admission");
-			if (fault === "subset") assert.deepEqual(policy(h).scopes, ["cwd"], "Off retains a recognized gated scope choice");
 			await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
 			const offOperation = new AbortController(); await h.inferenceContext([], offOperation);
 			assert.equal(offOperation.signal.aborted, false);
-			if (fault === "subset") {
-				await h.commands.get("state-flow-active")!.handler("", h.ctx);
-				assert.equal(policy(h).mode, "off", "mode-only Start cannot widen a captured gated choice");
-				assert.deepEqual(policy(h).scopes, ["cwd"]);
-			}
 			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), before);
 		}
 	});
@@ -8235,17 +8234,16 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		}
 	});
 
-	test("required private loss never falls back to shared model context and excluded native selection never widens", async () => {
+	test("required private loss heals visibly before shared projection and excluded native selection never widens", async () => {
 		const h = harness({ initializeRepository: false }); await start(h);
+		await h.tools.get("state_flow_patch")!.execute("private", { session: { tactics: { lost: true } } }, undefined, undefined, h.ctx);
 		const paths = temporalScopePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), "session", h.repositoryRoot);
 		writeFileSync(paths.checkpoint, "not-json");
-		const before = readFileSync(paths.checkpoint, "utf8");
 		await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
-		assert.throws(() => h.readState(0, "session"), /unavailable/);
+		assert.ok(h.notifications.some(message => /self-healed: session memory was unreadable/.test(message)));
+		assert.equal(h.readState(0, "session").tactics?.lost, undefined, "the unreadable private layer is never partially revived");
 		await h.commands.get("state-flow-passive")!.handler("", h.ctx);
-		const context = await h.handlers.get("context")!({ messages: [] }, h.ctx);
-		assert.equal((JSON.stringify(context) ?? "").includes("passive memory"), false);
-		assert.equal(readFileSync(paths.checkpoint, "utf8"), before);
+		assert.notEqual(existsSync(paths.checkpoint) ? readFileSync(paths.checkpoint, "utf8") : undefined, "not-json");
 		const subset = harness({ initializeRepository: false });
 		subset.entries.push({ type: "custom", customType: "state-flow-passive-stop", data: {
 			version: 2, owner: subset.ctx.sessionManager.getSessionId(), mode: "passive", scopes: ["cwd"],

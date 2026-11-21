@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.28.0: Visible Self-Healing Memory
+
+- `Visible self-healing`: An owner whose canonical files cannot be decoded, or a boundary whose session memory is missing, no longer blocks forever. After a failed acquisition, State Flow quarantines the exact bytes privately in `<store>-quarantine/`, resets only that owner to empty memory, retries once and tells the operator, the model and the local log. Healthy owners stay untouched; filesystem, lock, cancellation and foreign-identity failures stay fail-closed.
+- `Empty stores read as empty`: A branch without accepted memory reads absent shared values as `null` instead of an unavailable runtime; an uncreated Session says the first accepted patch creates it.
+
 ## 0.27.6: Namespaced Memory Tools
 
 - `Canonical tool names`: Advertises `state_flow_read` and `state_flow_patch`, retaining explicit unadvertised `read_state`/`patch_state` dispatch compatibility without rewriting historical calls, stores or conversion policy. Skills, prompts, examples and packaged guidance use the canonical names.

@@ -2,6 +2,8 @@
 
 State Flow classifies absence separately from partial or malformed evidence. Recovery may derive bytes only from an authoritative surviving cohort or from a semantic default that the owner explicitly permits. It never invents history, ownership, provenance, or external success.
 
+The "fails closed" rules below describe what a single operation does with partial or malformed evidence. They are not permanent: the next acquisition heals an unrecoverable owner visibly; see [self-healing](#self-healing).
+
 ## Resource rules
 
 ### Global `checkpoint.json` + `patches.jsonl`
@@ -138,3 +140,15 @@ Every semantic repair follows the ordinary transaction path:
 - Authored `state_flow_patch` operations select this basis under the awaited store lock and publish only after complete validation. A rejected first patch never leaves separately published empty initialization.
 - Raw precomputed replay targeting a disappeared selected basis still fails closed.
 - Discarded history is unavailable and is never reconstructed or promoted back into current shared memory.
+
+## Self-healing
+
+`lib/healing.ts` is the single owner allowed to remove canonical bytes outside publication. It runs only after an acquisition (startup, reload, resume, tree navigation, Start, Passive, pre-runtime shared observation) has failed, so healthy stores pay nothing and keep their existing lock timing.
+
+1. Take the store publication lock without waiting; a live writer means the store is in use, so healing defers to a later attempt.
+2. Decode each selected shared owner alone, then the session lifecycle, then the complete selected cohort.
+3. For an owner that fails with a semantic decode/validation error, write one private exact-byte record (`<parent-of-store>/<store-name>-quarantine/<time>-<scope>-<digest>.json`, directory 0700, file 0600, verified by reading back), then delete that owner's canonical files so it becomes wholly absent. A cohort-level lineage contradiction resets the session (the lineage anchor), never healthy shared owners.
+4. Retry the failed acquisition once. A session that is now absent, or a boundary whose session memory was missing, restarts from empty memory under the branch's captured mode and selection.
+5. Announce every reset to the operator (warning), the model (one projected notice until a run that saw it settles) and the local diagnostic log (always, independent of `logging`).
+
+Never healed: filesystem errors, lock or busy states, cancellation, and identity mismatches that indicate another owner's data. Those keep failing closed. Quarantine records are recovery evidence for manual restoration, not an automatic fallback.

@@ -225,7 +225,7 @@ The default store is `~/.pi/agent/state-flow/`, independent of registered source
 - A new session gets its own private layer only when Session acquisition is admitted; shared-only selections create no hidden private semantics.
 - Supported native forks inherit captured policy and copy parent-**current** Session memory into a fresh child owner when admitted, without changing parent-private data. Off or Session-excluded forks defer private acquisition; an acquired child never recopies.
 - Explicit Active or Passive accepts the validated current memory of that same session; modes stay stable.
-- Missing, malformed or contradictory current files, unsafe fork copying and concurrent writes remain fenced and are never replaced by empty or foreign memory.
+- Missing, malformed or contradictory current files self-heal visibly: the broken owner's bytes are quarantined, only that owner restarts empty, and both operator and agent are told. Unsafe fork copying, concurrent writes and foreign-owner evidence remain fenced and are never replaced by foreign memory.
 
 See [fork support](docs/usage.md#fork-support-and-limits) and [storage recovery](docs/usage.md#storage-and-recovery).
 

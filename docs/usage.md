@@ -290,22 +290,24 @@ See the [storage contract](architecture.md#storage-and-identity) for the exact l
 
 **Wholly absent shared files.** A checkpoint and its tail are one semantic pair. If both live files of a global or CWD scope disappear, State Flow treats that complete absence as current empty shared reality. An authored `state_flow_patch` applies to that empty basis under exclusion, and normal file-cohort CAS creates the accepted pair without resurrecting cold values or orphaned compilation evidence. Raw precomputed replay still refuses a removed selected target rather than replaying stale normalized changes.
 
-**Corruption fails closed.** These are never replaced:
+**Unrecoverable owners self-heal, visibly.** When startup, reload, resume, tree navigation, Start or Passive cannot accept memory, State Flow examines each selected owner once:
 
-- exactly one surviving pair member;
-- present malformed JSON or unsupported checkpoint envelopes;
-- semantic/metadata boundary mismatches and identity contradictions;
-- partial session runtime evidence.
+- An owner that cannot be decoded (exactly one surviving pair member, malformed JSON, unsupported envelopes, semantic/metadata boundary mismatches, partial or contradictory session runtime evidence) has its exact bytes copied to a private record in `<parent-of-store>/<store-name>-quarantine/` and is then reset to wholly absent, which is empty memory. Healthy owners are untouched; a cross-owner lineage contradiction resets the private session anchor, not shared memory.
+- A boundary whose stored session memory is missing restarts that session from empty memory too.
+- Every reset is announced: a terminal/Telegram warning names the owner, the cause and the quarantine record; the next model request carries a notice asking the agent to tell the user; the local diagnostic log records it even when `logging` is off.
+- Healing never waits behind a live writer, and filesystem errors, lock problems, cancellation and foreign-owner identity mismatches are not healed: they keep the fail-closed behavior below.
 
-Memory never depends on the Pi step, so an old or expired branch checkpoint is not a failure: attachment always uses the current same-session files. State Flow does not substitute Git history, empty memory or another session's files.
+Memory never depends on the Pi step, so an old or expired branch checkpoint is not a failure: attachment always uses the current same-session files. State Flow does not substitute Git history or another session's files.
 
-**When current session memory is unreadable** (missing, corrupt, partial or contradictory files):
+**When current session memory stays unavailable** (an unhealable cause):
 
-- Under Active, the selected mode remains Active and the indicator shows `active (blocked)`. Live inference is aborted before the provider instead of silently sending native history under an inactive fallback. Reload/resume retains this fence. Repair the files and choose Active/Passive; explicit Off permits native context without reading memory. Signal-less inspection remains observational.
-- Global/CWD memory stays readable; the unavailable session layer is never replaced by an empty one.
+- Under Active, the selected mode remains Active and the indicator shows `active (blocked)`. Live inference is aborted before the provider instead of silently sending native history under an inactive fallback. Reload/resume retains this fence. Fix the cause and choose Active/Passive; explicit Off permits native context without reading memory. Signal-less inspection remains observational.
+- Global/CWD memory stays readable; the unavailable session layer is never silently replaced.
 - Session reads and every `state_flow_patch` refuse without changing canonical files or appending substitute checkpoints.
-- **Modes are stable.** Explicit Passive accepts validated current same-session memory exactly like Active, keeping Passive policy. Only while current memory is still unreadable or unpublishable does Passive keep native inference with paused writes and report the cause. Off records native policy only.
+- **Modes are stable.** Explicit Passive accepts validated current same-session memory exactly like Active, keeping Passive policy. Only while current memory is still unavailable or unpublishable does Passive keep native inference with paused writes and report the cause. Off records native policy only.
 - Status distinguishes a write fence from unavailable materialization.
+
+**Empty stores read as empty.** On a branch without accepted memory, `state_flow_read` returns `null` for absent shared values instead of reporting an unavailable runtime; a selected but not yet created Session reports that the first accepted `state_flow_patch` creates it.
 
 **Explicit Start uses current memory.**
 
@@ -313,9 +315,8 @@ Memory never depends on the Pi step, so an old or expired branch checkpoint is n
 - Expired active/passive pointers and unfinished runtime work do not block activation. A pre-runtime selection also keeps current accepted same-session memory instead of resetting it.
 - Start bootstraps the conversation available on the selected Pi branch, without resurrecting an old unfinished specification or claiming that expired historical private state was restored.
 - Independently advanced shared scopes may require a new temporal origin; unavailable history is never invented.
-- Exact-cohort CAS rejects a concurrent writer, and incomplete or corrupt storage stays untouched.
+- Exact-cohort CAS rejects a concurrent writer; incomplete or corrupt storage is changed only by visible self-healing.
 - An unaccepted native fork retries copying its parent's current memory rather than inventing child memory.
-- When evidence is missing, repair it or open a genuinely new Pi session.
 
 **Artifact evidence and replication:**
 

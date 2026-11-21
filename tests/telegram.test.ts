@@ -220,7 +220,9 @@ for (const recovery of ["active", "passive", "off"] as const) test(`failed Activ
 	const files = () => captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const runtimePath = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).runtime;
 	const original = readFileSync(runtimePath);
-	writeFileSync(runtimePath, "malformed runtime");
+	// Foreign-owner evidence is unhealable: it stays blocked rather than being reset.
+	const foreign = JSON.parse(original.toString());
+	writeFileSync(runtimePath, JSON.stringify({ ...foreign, identity: { ...foreign.identity, cwd: "/foreign/owner" } }));
 	let before = files();
 	await h.handlers.get("session_tree")!({}, h.ctx);
 	const section = modules.sections[0];

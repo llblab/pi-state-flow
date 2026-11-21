@@ -3575,16 +3575,14 @@ test("real Pi old-step navigation keeps current memory; Passive and Active stay 
 	assert.ok(retained.id, "the older retained selection remains native history only");
 });
 
-test("real Pi refuses contradictory session files without passive substitution and retries the repaired selection", { timeout: 30_000 }, async (t) => {
+test("real Pi visibly quarantines contradictory session files and continues from empty private memory", { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	writeGlobalState({ ...emptyState(), tactics: { shared: "retained" } }, f.repositoryRoot);
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	f.faux.setResponses(sessionResponses({ tactics: { owner: "A" } }, "Saved A."));
 	await session.prompt("Remember session A");
-	const selected = snapshots(session).at(-1)!;
 	const a = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
-	const original = (["checkpoint", "patches", "meta"] as const).map((key) => ({ path: a[key], bytes: readFileSync(a[key]) }));
 	const b = new TemporalRuntime(f.cwd, "foreign-b", f.repositoryRoot);
 	const other = emptySnapshot("active");
 	b.initialize(other, true);
@@ -3595,41 +3593,20 @@ test("real Pi refuses contradictory session files without passive substitution a
 	b.publish(other, true, createAcceptedTransition(before, next));
 	const bp = temporalScopePaths(f.cwd, "foreign-b", "session", f.repositoryRoot);
 	for (const key of ["checkpoint", "patches", "meta"] as const) writeFileSync(a[key], readFileSync(bp[key]));
-	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
-	const mixed = files();
-	const acceptedStep = latestSnapshot(session, selected.data).meta.step;
+	const mixed = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session))
+		.filter(file => file.bytes !== undefined && file.path.startsWith(a.directory));
 	await session.reload();
-	assert.ok(f.notifications.some((message) => /Conflicting State Flow temporal lineage/.test(message)));
-	assert.throws(() => f.readState(session, 0, "global"), /selected branch is unavailable/);
-	assert.throws(() => f.readState(session, 0, "session"), /selected branch is unavailable/);
-	assert.deepEqual(files(), mixed, "failed restoration preserves contradictory canonical bytes");
+	const notice = f.notifications.find((message) => /self-healed: session memory was unreadable \(Conflicting State Flow temporal lineage\)/.test(message));
+	assert.ok(notice, "contradictory private files are reset visibly, never silently");
+	const record = JSON.parse(readFileSync(/quarantined at (\S+\.json)/.exec(notice)![1]!, "utf8"));
+	const quarantined = new Map(record.files.map((file: { path: string; bytes: string }) => [join(f.repositoryRoot, file.path), Buffer.from(file.bytes, "base64")]));
+	for (const file of mixed) assert.deepEqual(quarantined.get(file.path), Buffer.from(file.bytes!), "quarantine keeps the exact contradictory bytes");
+	assert.equal(f.readState(session, 0, "global").tactics.shared, "retained", "healthy shared memory survives");
+	assert.equal(f.readState(session, 0, "session").tactics?.owner, undefined, "neither contradictory owner is revived");
 	const calls = f.faux.state.callCount;
-	await session.prompt("Must not infer from contradictory Active restoration");
-	assert.equal(f.faux.state.callCount, calls);
-	assert.match(f.notifications.at(-1)!, /inference blocked/);
-	const notices = f.notifications.length;
-	await session.prompt("/state-flow-active");
-	assert.equal(f.notifications.length, notices + 1, "a refused activation emits only one final error");
-	assert.match(f.notifications.at(-1)!, /activation failed.*Conflicting State Flow temporal lineage/);
-	assert.doesNotMatch(f.notifications.at(-1)!, /\n/);
-	assert.ok(f.notifications.at(-1)!.length <= 220);
-	await session.prompt("/state-flow-passive");
-	assert.deepEqual(snapshots(session).at(-1), selected);
-	assert.deepEqual(files(), mixed, "failed selection cannot publish a passive replacement");
-	assert.equal(f.faux.state.callCount, calls, "refused mode choices never request provider fallback or repair");
-	for (const { path, bytes } of original) writeFileSync(path, bytes);
-	const repaired = files();
-	await session.prompt("/state-flow-active");
-	assert.equal(f.readState(session, 0, "session").tactics.owner, "A");
-	assert.equal(f.readState(session, 0, "global").tactics.shared, "retained");
-	assert.equal(latestSnapshot(session).config.mode, "active");
-	assert.equal(latestSnapshot(session).meta.step, acceptedStep, "repair accepts current memory without rewind");
-	const runtime = sessionRuntimePaths(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)).runtime;
-	assert.deepEqual(files().filter(({ path }) => path !== runtime), repaired.filter(({ path }) => path !== runtime),
-		"accepted Start may update bootstrap lifecycle, but cannot rewrite repaired semantics, provenance or config");
-	const priorRuntime = JSON.parse(repaired.find(({ path }) => path === runtime)!.content!);
-	assert.deepEqual(JSON.parse(readFileSync(runtime, "utf8")), { ...priorRuntime, bootstrap: true });
-	assert.equal(f.faux.state.callCount, calls);
+	f.faux.setResponses([fauxAssistantMessage("Continuing from healed memory")]);
+	await session.prompt("Continue after healing");
+	assert.equal(f.faux.state.callCount, calls + 1, "healed memory no longer blocks inference");
 });
 
 test("real Pi explicit Start on a pre-runtime selection retains current same-session memory and shared streams", async (t) => {
