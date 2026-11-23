@@ -24,6 +24,13 @@ export type StateReadResult = {
     patch: RecentScopePatch["patch"];
 };
 export type StateReadProjection = "value" | "keys" | "patch";
+type ReadPathErrorCode = "invalid_path" | "scope_excluded" | "scope_unavailable" | "history_unavailable" | "path_not_found" | "invalid_selector";
+export declare class StateReadPathError extends Error {
+    readonly code: ReadPathErrorCode;
+    constructor(code: ReadPathErrorCode, message?: string);
+}
+type KeysAbsence = "absent" | "unavailable";
+export type CurrentReadAvailability = Partial<Record<StateScope | "effective", KeysAbsence>>;
 type StateReadMeta = {
     type: "object";
     size: number;
@@ -34,7 +41,7 @@ type StateReadMeta = {
     type: "string";
     length: number;
 } | {
-    type: "number" | "boolean";
+    type: "number" | "boolean" | KeysAbsence;
 };
 type StateReadKeys = Record<string, string> | [];
 export interface StateReadHint {
@@ -43,8 +50,10 @@ export interface StateReadHint {
     paths: string[];
 }
 export type ProjectedStateRead = {
-    value: JsonValue | JsonValue[];
+    value: JsonValue;
     hint?: StateReadHint[];
+} | {
+    values: JsonValue[];
 } | {
     meta: StateReadMeta | StateReadMeta[];
     keys: StateReadKeys | StateReadKeys[];
@@ -67,6 +76,9 @@ type ValueSelector = {
     start: number;
     end: number;
 };
+/** Recognize patch-history syntax only; effective still fails temporal validation. */
+export declare function patchHistoryRoot(path: string): StateScope | "effective" | "flat" | undefined;
+export declare function flatSemanticRoot(path: string): string | undefined;
 /** Resolve a projection root without repeating the tool name in every path. */
 export declare function parseStateReadPath(path: string, historyLimit?: number): StateReadQuery;
 export declare function readStatePath(view: ReadableTemporalState, path: string, historyLimit?: number): StateReadResult;
@@ -80,6 +92,10 @@ export declare function findStateReferenceSources(view: ReadableTemporalState, p
     sources: StateReferenceSource[];
     truncated: boolean;
 };
-/** Project exact current/historical state paths without exposing temporal metadata. */
-export declare function readProjectedState(view: ReadableTemporalState, paths: readonly string[], projection?: StateReadProjection, historyLimit?: number): ProjectedStateRead;
+/** Preserve input slots. Only typed locator failures are collected; an invalid read basis still rejects the batch. */
+export declare function readValueBatch(view: ReadableTemporalState | undefined, paths: readonly string[], normalizePath: (path: string) => string, availability: CurrentReadAvailability, historyLimit?: number): {
+    values: JsonValue[];
+};
+/** Project exact paths; the caller may supply current catalog statuses without inventing temporal streams. */
+export declare function readProjectedState(view: ReadableTemporalState | undefined, paths: readonly string[], projection?: StateReadProjection, historyLimit?: number, availability?: CurrentReadAvailability): ProjectedStateRead;
 export {};

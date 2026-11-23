@@ -1,29 +1,8 @@
-# Semantic memory baseline trial
+# Semantic memory trial
 
-## Status and evidence boundary
+This opt-in linked-task trial compares Native Pi, State Flow Passive and State Flow Active. It uses the same controlled fixture and exact inputs in each condition. The [runner](semantic-memory.mjs) implements isolation, scripted calibration and measurement; neither scripted results nor the five [worked handoff patches](../docs/semantic-layers.md#offline-bundle-patch-corpus) establish model quality. No live comparison has run. [BACKLOG.md](../BACKLOG.md#external-validation-and-evaluation) owns remaining execution and acceptance work.
 
-**Deferred post-implementation comparison — no live baseline executed.** Following the owner's 2026-10-24 implementation-first direction, this trial no longer gates M1–M5 implementation. Preserve the baseline source and fixed corpus for later comparison, disclose any model/provider drift, and never relabel calibration as model behavior. This run sheet specifies one small reproducible linked-task trial and its oracles. The opt-in [runner](../benchmarks/semantic-memory.mjs) now implements the isolated fixture/measurement mechanics and offline scripted calibration; it is not a live model result or evidence that the proposed semantic names improve quality. [BACKLOG.md](../BACKLOG.md#external-validation-and-evaluation) owns remaining execution and acceptance work.
-
-The existing [performance workloads](performance.md) and [benchmark guide](../benchmarks/README.md) are synthetic transport/performance evidence. The current [semantic handoff evidence](semantic-handoff-contract.md#source-bound-validation-evidence) is an old-name in-memory preservation probe. Neither is a replacement for the model observations defined here.
-
-### Historical M0 local preflight result
-
-The preparation inspected only SDK/tool metadata and repository source, without live canonical-store access:
-
-- Source commit: `4494fee9da8258cdf5f02c42672a0eb9866a512a`, package 0.26.5; runtime/test source unchanged during M0 preparation.
-- Node: 26.8.1; repository-local coding-agent, agent-core, AI, and TUI packages: all 1.0.0.
-- Current session metadata: provider `openai`, model ID `gpt-6.1-sol`. The offline CLI catalogue includes that identity.
-- A credential-free `ModelRuntime` with `InMemoryCredentialStore` and no initial refresh resolved that model as `openai-responses`, context 420,000, maximum output 128,000. Those are catalogue limits, not a trial token budget or measured usage.
-- No inherited `OPENAI_API_KEY` was present. This does not establish that the configured profile/provider lacks another usable authentication route.
-- No profile credential file was opened/copied, no key/token was printed, no authentication refresh/login was performed, and no live inference request was made by this slice. Catalogue presence is not credential-bearing readiness or provider availability.
-
-Reproducible non-inference metadata checks are `node -v`, repository-local SDK package version inspection, and:
-
-```bash
-PI_OFFLINE=1 pi --no-extensions --no-mcp --no-skills --no-context-files --list-models gpt-6.1-sol
-```
-
-**Execution gate:** Supply an authorized credential-capable model runtime, or explicitly authorize using the existing configured provider through its normal inference API without exporting credentials. Pin the selected model/provider, reasoning settings, and bounded request/token/time limits before trial execution. Do not scrape/copy profile credentials or invoke auth-print commands to bypass this gate. M0.4 remains open until the live trial and report exist.
+**Execution gate.** Live use requires explicit authorization for a credential-capable model runtime through its normal inference API. Pin model/provider, reasoning settings and request/token/time limits before execution. Do not scrape or copy profile credentials or use auth-print commands to bypass authorization. The [original run sheet and historical evidence](https://github.com/llblab/pi-state-flow/blob/a19ef008f4557c7037dfd0c8ff88c677b6b386ea/docs/semantic-memory-evaluation.md) remain byte-for-byte in Git; their environment observations are not current readiness.
 
 ## Initial comparison, not a research platform
 
@@ -149,18 +128,6 @@ Do not count a faux/scripted provider, the five-example mapped replay, a dry run
 
 ## Offline calibration and remaining execution boundary
 
-Run the [calibration commands](../benchmarks/README.md#semantic-memory-trial-calibration) from a source checkout. Optional report output uses exclusive file creation; stdout always carries the JSON result and no existing file is overwritten. Source identity covers the runner, this corpus document, package/lockfile, `index.ts`, and all runtime `lib/*.ts` files; before/after equality is checked. No temporary native sessions, reasoning trace, or canonical store is kept after cleanup.
+Use the [offline calibration commands](README.md#semantic-memory-trial-calibration) from a source checkout. Source identity covers this specification, the runner, the package and lockfile, `index.ts` and the runtime `lib/*.ts` files. The runner checks it for changes during execution. The input digest separately identifies the four prompts. Moving the specification changes the source digest, not the corpus.
 
-Calibration on the M0 source/SDK stack exercised four native user runs per condition with actual State Flow source and scripted provider messages:
-
-- Native: 11 stream admissions; Passive: 15; Active: 15. All 41 provider calls were faux, and output limits reached the faux provider options.
-- All controlled fixture tools actually completed. The default-index isolation check failed as expected, embedded isolation/coverage checks passed for the final artifact, and final fixture success was independently true in all conditions.
-- Active's Run 4 admission contained zero prior native user prompts; Native/Passive retained three. Passive had no captured semantic response on every run; Active did. Intent-owned working memory closed without losing requirements, rejection reasons, or the durable conclusion.
-- A one-request limit produced `incomplete` reports and nonzero CLI exit while preserving the partial evidence and cleaning temporary stores.
-- A deliberately stalled faux response under a 25-ms timeout produced timeout/incomplete results and cleanup in all three conditions. This is a native cancellation calibration, not a claim about remote-provider timeout behavior.
-- A scripted model claiming only “Done” completed all four user inputs but produced fixture success `false` in all conditions. This proves that assistant claims do not replace validation receipts.
-- An attempted API call without calibration or explicit live authorization rejected before session creation. No implicit real-provider request, credential discovery, or profile write was introduced.
-
-These observations validate harness mechanics only. They are not behavioral rubric scores, live token charges, physical network-isolation proof, or provider cache measurements. The raw public usage fields in faux reports must not be interpreted as live-provider cost evidence.
-
-After functional implementation and deterministic validation, M0.4b requires the authorized credential-capable route and bounded execution settings stated above. Execute comparable baseline/target real-model conditions where reproducible, review the semantic rubric, and retain the compact source-bound report. The canonical backlog retains this deferred remainder separately from 0.27.2 release-local cleanup; missing model observations do not reopen completed runtime implementation. Do not treat calibration or missing baseline observations as completed model evidence or an agent-quality improvement.
+Historical scripted calibration demonstrated only mechanics. It does not establish a live result, behavioral rubric score, token charges, physical network isolation or cache savings. Current calibration and live execution status are tracked in the [backlog](../BACKLOG.md#external-validation-and-evaluation).

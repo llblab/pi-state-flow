@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
-	captureTemporalFileBases, classifyScopeStream, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath,
+	captureOwnedFileBases, captureTemporalFileBases, classifyScopeStream, cwdScopeKey, getDurableRepositoryRoot, isStateFlowOwnedPath,
 	loadScopeStream, parseScopeProvenance, parseScopeStream, resolveSessionAddress, serializeScopeMetadata, serializeScopeProvenance, serializeScopeStream, sessionScopeKey, sessionStorageKey,
 	temporalScopePaths, temporalStateFileUpdates, writeOwnedFileUpdates,
 } from "../lib/durable.ts";
@@ -21,6 +22,29 @@ function fixture() {
 function temporalFixture(): TemporalState {
 	return createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
 }
+
+test("owned-file rollback restores opaque original bytes after a later replacement fails", t => {
+	const { repository, cleanup } = fixture();
+	t.after(cleanup);
+	const checkpoint = join(repository, "checkpoint.json"), patches = join(repository, "patches.jsonl");
+	const opaque = Buffer.from([0xff, 0xfe, 0x00]);
+	writeFileSync(checkpoint, opaque);
+	writeFileSync(patches, "");
+	const base = captureOwnedFileBases([checkpoint, patches], repository);
+	const rename = fs.renameSync;
+	const failure = t.mock.method(fs, "renameSync", (...args: Parameters<typeof fs.renameSync>) => {
+		if (args[1] === patches) throw new Error("injected tail replacement failure");
+		return rename(...args);
+	});
+	syncBuiltinESMExports();
+	try {
+		assert.throws(() => writeOwnedFileUpdates([
+			{ path: checkpoint, content: '{}\n' }, { path: patches, content: '{"response":"New"}\n' },
+		], base, repository), /injected tail replacement failure/);
+	} finally { failure.mock.restore(); syncBuiltinESMExports(); }
+	assert.deepEqual(readFileSync(checkpoint), opaque);
+	assert.equal(readFileSync(patches, "utf8"), "");
+});
 
 test("string codec entrypoints reject lossy UTF-8 source encoding but preserve escaped values and valid surrogate pairs", () => {
 	for (const version of [3]) {

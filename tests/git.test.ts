@@ -10,7 +10,8 @@ import test from "node:test";
 import { awaitInFlightBackupPushes, backupCurrentStateFlowFiles, pushCurrentStateFlowBackup, SettledTurnBackup, startStateFlowBackupPush } from "../lib/git.ts";
 import { captureTemporalFileBases, isStateFlowOwnedPath, temporalScopePaths } from "../lib/durable.ts";
 import { withStorageTransaction } from "../lib/storage.ts";
-import { createAcceptedTransition } from "../lib/history.ts";
+import { DEFAULT_SCOPE_SELECTION } from "../lib/selection.ts";
+import { commitSelectedTransition, stageSelectedScopePatches } from "../lib/transition.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import "./git-environment.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
@@ -294,17 +295,14 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 	git(root, "commit", "-m", "baseline");
 	const cwd = join(root, "project");
 	const a = new TemporalRuntime(cwd, "writer-a", root);
-	const snapshot = emptySnapshot("active");
-	a.initialize(snapshot, true);
+	await a.withSelectedFirstPatchTransaction(DEFAULT_SCOPE_SELECTION, emptySnapshot("active"), tx => tx.publish(tx.snapshot), () => {}, undefined, true);
 	const baseline = (await backupCurrentStateFlowFiles(root))!;
-	const publish = (generation: number) => {
-		const before = a.states();
-		const next = structuredClone(before);
-		for (const scope of ["global", "cwd", "session"] as const) next[scope].tactics.generation = generation;
-		snapshot.meta.step++;
-		a.publish(snapshot, true, createAcceptedTransition(before, next));
-	};
-	publish(1);
+	const publish = (generation: number) => a.withSelectedPatchTransaction(tx => {
+		const patch = { tactics: { generation } };
+		const stage = stageSelectedScopePatches(tx, { global: patch, cwd: patch, session: patch }, [], tx.causalBasis);
+		commitSelectedTransition(tx.snapshot, tx, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+	}, () => {});
+	await publish(1);
 	const capturedBefore = captureTemporalFileBases(cwd, a.sessionId, root);
 	writeFileSync(join(root, "notes.txt"), "staged caller version\n");
 	git(root, "add", "notes.txt");
@@ -351,9 +349,9 @@ for (const [phase, fail] of [["read-tree", false], ["add", false], ["add", true]
 	try {
 		const [ready] = await once(child, "message", { signal: AbortSignal.timeout(15_000) });
 		assert.equal((ready as any).phase, "paused", JSON.stringify(ready));
-		publish(2);
+		await publish(2);
 		const later = new TemporalRuntime(join(root, "later-project"), "later-session", root);
-		later.initialize(emptySnapshot("active"), true);
+		await later.withSelectedFirstPatchTransaction(DEFAULT_SCOPE_SELECTION, emptySnapshot("active"), tx => tx.publish(tx.snapshot), () => {}, undefined, true);
 		capturedAfter = [...captureTemporalFileBases(cwd, a.sessionId, root), ...captureTemporalFileBases(later.cwd, later.sessionId, root)];
 	} finally {
 		writeFileSync(release, "resume\n");
@@ -408,7 +406,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`backup awaits a parti
 	git(root, "config", "user.name", "State Flow Test");
 	git(root, "config", "user.email", "state-flow@example.invalid");
 	const local = new TemporalRuntime(join(root, "project"), "local", root);
-	local.initialize(emptySnapshot("active"), true);
+	await local.withSelectedFirstPatchTransaction(DEFAULT_SCOPE_SELECTION, emptySnapshot("active"), tx => tx.publish(tx.snapshot), () => {}, undefined, true);
 	const baseline = (await backupCurrentStateFlowFiles(root))!;
 	const index = readFileSync(join(root, ".git", "index"));
 	const cwd = join(root, "new-project");
@@ -417,7 +415,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`backup awaits a parti
 		import { syncBuiltinESMExports } from "node:module";
 		import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
 		import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
-		import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+		import { stageSelectedScopePatches, commitSelectedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
 		const { root, cwd, partial, release, pauseAt } = JSON.parse(process.argv[1]);
 		const rename = fs.renameSync;
 		let paused = false;
@@ -433,13 +431,13 @@ for (const outcome of ["accept", "cancel"] as const) test(`backup awaits a parti
 			}
 		};
 		syncBuiltinESMExports();
-		await new TemporalRuntime(cwd, "foreign", root).withPatchTransaction((tx) => {
-			const stage = stageAtomicScopePatches(tx.states, {
+		await new TemporalRuntime(cwd, "foreign", root).withSelectedFirstPatchTransaction(["global", "cwd", "session"], emptySnapshot("active"), (tx) => {
+			const stage = stageSelectedScopePatches(tx, {
 				global: { tactics: { cohort: "foreign" } }, cwd: { tactics: { cohort: "new-cwd" } },
 				session: { tactics: { cohort: "new-session" } },
 			}, [], tx.causalBasis);
-			commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
-		});
+			commitSelectedTransition(tx.snapshot, tx, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+		}, () => {}, undefined, true);
 	`, JSON.stringify({ root, cwd, partial, release, pauseAt: temporalScopePaths(cwd, "foreign", "global", root).patches })], { stdio: ["ignore", "ignore", "inherit"] });
 	closed = once(child, "close");
 	const deadline = Date.now() + 8_000;

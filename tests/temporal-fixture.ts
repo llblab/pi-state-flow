@@ -1,12 +1,49 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { ArtifactProvenanceRegistry } from "../lib/artifact.ts";
-import { emptySnapshot, prepareRetainedPolicyMigration, type Snapshot } from "../lib/snapshot.ts";
+import { emptySnapshot, parseBaselineLifecycle, prepareRetainedPolicyMigration, type PrivateAcquisition, type Snapshot } from "../lib/snapshot.ts";
+import { temporalCausalWitnesses, type TemporalState } from "../lib/temporal.ts";
 import { captureSelectedNativeMarker } from "../lib/session.ts";
 import { DEFAULT_SCOPE_SELECTION } from "../lib/selection.ts";
-import { loadScopeStream, parseScopeProvenance, temporalScopePaths, type captureTemporalFileBases } from "../lib/durable.ts";
+import { loadScopeStream, parseScopeProvenance, serializeScopeMetadata, serializeScopeStream, sessionRuntimePaths, temporalScopePaths, type captureTemporalFileBases } from "../lib/durable.ts";
 import { applyPatch, isObject, type JsonObject } from "../lib/json.ts";
 import { overlayStates, type StateScope } from "../lib/state.ts";
+
+/** Lay down a known numeric predecessor in a temporary test store without invoking any lifecycle writer. */
+export function writeNumericLifecycleFixture(cwd: string, sessionId: string, root: string, view: TemporalState,
+	version: 1 | 2 = 2, privateAcquisition: PrivateAcquisition = "acquired",
+) {
+	const scopes = privateAcquisition === "acquired" ? DEFAULT_SCOPE_SELECTION : ["global", "cwd"] as const;
+	assert.ok(version === 2 || privateAcquisition === "acquired");
+	const lifecycle = sessionRuntimePaths(cwd, sessionId, root);
+	mkdirSync(dirname(lifecycle.config), { recursive: true });
+	writeFileSync(lifecycle.config, JSON.stringify({ mode: "active", ...(version === 2 ? { scopes } : {}) }));
+	writeFileSync(lifecycle.runtime, JSON.stringify({
+		version, identity: { cwd: resolve(cwd), sessionId }, step: 0, lineage: view.lineage,
+		...(version === 2 ? { privateAcquisition, causalWitnesses: temporalCausalWitnesses(view, 100) } : {}),
+	}));
+	for (const scope of scopes) {
+		const paths = temporalScopePaths(cwd, sessionId, scope, root);
+		const cwdIdentity = scope === "cwd" ? cwd : undefined;
+		const stream = view.scopes[scope], sources = serializeScopeStream(stream, scope, cwdIdentity);
+		mkdirSync(paths.directory, { recursive: true });
+		writeFileSync(paths.checkpoint, sources.checkpoint);
+		writeFileSync(paths.patches, sources.patches);
+		writeFileSync(paths.meta, serializeScopeMetadata(undefined, stream, scope, cwdIdentity));
+	}
+}
+
+/** Create explicit predecessor evidence from a coherent Baseline test cohort, never a live store. */
+export function rewriteBaselineLifecycleAsNumeric(cwd: string, sessionId: string, root: string, version: 1 | 2) {
+	const paths = sessionRuntimePaths(cwd, sessionId, root);
+	const { config, meta } = parseBaselineLifecycle(readFileSync(paths.config, "utf8"), readFileSync(paths.runtime, "utf8"), cwd, sessionId);
+	if (version === 1) {
+		const { identity, lineage, step } = meta;
+		writeFileSync(paths.config, JSON.stringify({ mode: config.mode }));
+		writeFileSync(paths.runtime, JSON.stringify({ version, identity, lineage, step }));
+	} else writeFileSync(paths.runtime, JSON.stringify(meta));
+}
 
 /** Explicit test-only projection of the lifecycle a Pi checkpoint records; it never selects a memory revision. */
 export function resolveCheckpoint(data: unknown, _cwd: string, _sessionId: string, _root: string, _sessionKey?: string): Snapshot {

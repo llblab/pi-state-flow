@@ -7,7 +7,7 @@ import { canonicalJson } from "./json.js";
 import { RetiredSemanticFormatError } from "./migration.js";
 import { sessionRuntimePaths, temporalScopePaths } from "./durable.js";
 import { captureScopeSelection } from "./selection.js";
-import { RevisionUnavailableError } from "./snapshot.js";
+import { RevisionUnavailableError, UnsupportedLifecycleFormatError } from "./snapshot.js";
 import { assertStorageDirectory, PublicationBusyError, withStorageTransaction } from "./storage.js";
 /**
  * Only semantic decoding/validation failures are healable. Filesystem, lock, cancellation and
@@ -16,7 +16,8 @@ import { assertStorageDirectory, PublicationBusyError, withStorageTransaction } 
 export function isHealableCorruption(error) {
     if (!(error instanceof Error))
         return false;
-    if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError || error instanceof RetiredSemanticFormatError)
+    if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError
+        || error instanceof RetiredSemanticFormatError || error instanceof UnsupportedLifecycleFormatError)
         return false;
     if (error.name === "AbortError")
         return false;
@@ -104,13 +105,14 @@ export function healSelectedStoreLocked(storage, request, signal) {
         if (result)
             healed.push(result);
     };
+    // An incompatible lifecycle must refuse before any selected shared owner can be reset.
+    let lifecycle;
+    const lifecycleFailure = probe(() => { lifecycle = storage.inspectSelectedLifecycle(cwd, sessionId, wanted, root, sessionKey); }, signal);
     for (const scope of wanted.filter(owner => owner !== "session")) {
         const failure = probe(() => storage.observeSelectedShared(cwd, captureScopeSelection([scope]), root), signal);
         if (failure)
             reset(scope, failure);
     }
-    let lifecycle;
-    const lifecycleFailure = probe(() => { lifecycle = storage.inspectSelectedLifecycle(cwd, sessionId, wanted, root, sessionKey); }, signal);
     if (lifecycleFailure) {
         reset("session", lifecycleFailure);
         return { healed, lifecycleAbsent: true };

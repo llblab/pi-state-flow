@@ -4,8 +4,7 @@ import { captureOwnedFileBases, resolveSessionAddress, sessionRuntimePaths } fro
 import { MAX_HISTORY_LIMIT } from "./history.ts";
 import { diagnosticText } from "./protocol.ts";
 import { DEFAULT_SCOPE_SELECTION } from "./selection.ts";
-import { prepareSessionPolicyMigration } from "./snapshot.ts";
-import { withStorageTransaction } from "./storage.ts";
+import { decodeLifecycleFilePair, withStorageTransaction } from "./storage.ts";
 
 export type ContinuationTransport = "local" | "sdk" | "telegram" | string;
 
@@ -230,8 +229,7 @@ export async function inspectStateFlowContinuationProvenance(
 		if (!lstatSync(root, { throwIfNoEntry: false })) return absent;
 		const result = await withStorageTransaction(root, (tx) => {
 			const lifecycleFiles = captureOwnedFileBases([paths.config, paths.runtime], root);
-			const files = new Map(lifecycleFiles.map(file => [file.path, file.content]));
-			const policy = prepareSessionPolicyMigration(files.get(paths.config), files.get(paths.runtime), selected.cwd, selected.id, DEFAULT_SCOPE_SELECTION);
+			const policy = decodeLifecycleFilePair(lifecycleFiles[0]!, lifecycleFiles[1]!, selected.cwd, selected.id);
 			if (!policy) {
 				// Confirm absence/private presence without reading any shared or private semantic body.
 				if (tx.hasSelectedCurrentAuthority(selected.cwd, selected.id, DEFAULT_SCOPE_SELECTION, root, sessionKey)) throw new Error("State Flow lifecycle changed during inspection");

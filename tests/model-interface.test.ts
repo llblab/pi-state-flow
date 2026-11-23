@@ -147,9 +147,11 @@ test("read validation keeps temporal and array selectors distinct, aliases narro
 		if (selected.length > 1) {
 			assert.equal(normalizeModelReadPath("tactics.items[1]", selected), "tactics.items[1]");
 			assert.equal(normalizeModelReadPath("effective[1].tactics.x", selected), "effective[1].tactics.x");
+			assert.equal(normalizeModelReadPath(`${selected[0]}.tactics.patches[1]`, selected), `${selected[0]}.tactics.patches[1]`);
 			assert.throws(() => normalizeModelReadPath("patches[0]", selected));
-			assert.throws(() => normalizeModelReadPath("effective.patches[0]", selected));
+			assert.throws(() => normalizeModelReadPath("effective.patches[0]", selected), /requires an explicit scope/);
 			for (const owner of selected) assert.equal(projectModelReadPath(`${owner}.tactics.x`, selected), `${owner}.tactics.x`);
+			for (const owner of owners.filter(x => !selected.includes(x))) assert.throws(() => normalizeModelReadPath(`${owner}.patches[0]`, selected), /excluded/);
 		}
 	}
 });

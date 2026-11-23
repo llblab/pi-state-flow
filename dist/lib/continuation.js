@@ -4,8 +4,7 @@ import { captureOwnedFileBases, resolveSessionAddress, sessionRuntimePaths } fro
 import { MAX_HISTORY_LIMIT } from "./history.js";
 import { diagnosticText } from "./protocol.js";
 import { DEFAULT_SCOPE_SELECTION } from "./selection.js";
-import { prepareSessionPolicyMigration } from "./snapshot.js";
-import { withStorageTransaction } from "./storage.js";
+import { decodeLifecycleFilePair, withStorageTransaction } from "./storage.js";
 /**
  * Preserve host-owned explicit session intent and consult State Flow only for
  * an ordinary default launch. The recommender is a read-only advisory port;
@@ -143,8 +142,7 @@ export async function inspectStateFlowContinuationProvenance(header, repositoryR
             return absent;
         const result = await withStorageTransaction(root, (tx) => {
             const lifecycleFiles = captureOwnedFileBases([paths.config, paths.runtime], root);
-            const files = new Map(lifecycleFiles.map(file => [file.path, file.content]));
-            const policy = prepareSessionPolicyMigration(files.get(paths.config), files.get(paths.runtime), selected.cwd, selected.id, DEFAULT_SCOPE_SELECTION);
+            const policy = decodeLifecycleFilePair(lifecycleFiles[0], lifecycleFiles[1], selected.cwd, selected.id);
             if (!policy) {
                 // Confirm absence/private presence without reading any shared or private semantic body.
                 if (tx.hasSelectedCurrentAuthority(selected.cwd, selected.id, DEFAULT_SCOPE_SELECTION, root, sessionKey))

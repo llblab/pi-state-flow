@@ -14,6 +14,8 @@ node --experimental-strip-types --test --test-name-pattern='^two-process' benchm
 
 `benchmark.ts` coordinates measurements and reports. `benchmark-session.ts` owns shared workload/metrics; `benchmark-resume.ts` probes copied sessions; `benchmark-writer.ts` runs an IPC-owned publisher. These workloads reuse synthetic fixtures from `tests/`, not production sessions or stores.
 
+The two-process workload stages patches under the same selected transaction as Pi and writes Baseline. It checks persisted per-writer counters, Session isolation and the final Global value. It measures current-basis authoring, not stale precomputed replay; do not compare its timings with the former V1 publisher.
+
 Correctness regressions for the benchmark remain in `tests/benchmark.test.ts` and `tests/benchmark-session.test.ts` and run through `npm test`. Typechecking includes this directory.
 
 Configuration uses positive integers unless noted:
@@ -36,7 +38,7 @@ Its v3 `trajectory` entries cover active mode, ordinary passive memory and the p
 
 ## Semantic-memory trial calibration
 
-`semantic-memory.mjs` is a separate, opt-in M0 evaluation runner. It uses unmodified State Flow source, isolated temporary stores, and controlled in-memory task tools. It does not modify the normal tests, load production memory, expose filesystem/shell tools to the trial model, or discover credentials. See the [trial specification](../docs/semantic-memory-evaluation.md) for the fixed four-run corpus, rubric, and execution gate.
+`semantic-memory.mjs` is a separate, opt-in M0 evaluation runner. It uses unmodified State Flow source, isolated temporary stores, and controlled in-memory task tools. It does not modify the normal tests, load production memory, expose filesystem/shell tools to the trial model, or discover credentials. See the [trial specification](semantic-memory-trial.md) for the fixed four-run corpus, rubric, and execution gate.
 
 Run offline scripted calibration from the repository root:
 
@@ -44,7 +46,7 @@ Run offline scripted calibration from the repository root:
 PI_OFFLINE=1 PI_TELEMETRY=0 node --experimental-strip-types benchmarks/semantic-memory.mjs --calibrate
 ```
 
-Optional `--report /absolute/new-file.json` writes an exclusive new report file; existing files are never overwritten. Default calibration uses eight stream admissions per user run, a 2,048-token output limit per request, and a 20-second per-run timeout. It asserts 11 native and 15 each Passive/Active admissions, real task-tool completion, actual current response isolation, intent-owned closure, context boundaries, and temporary-directory cleanup. All 41 provider calls are faux/scripted, not live behavioral observations or provider billing evidence.
+Optional `--report /absolute/new-file.json` writes an exclusive new report file; existing files are never overwritten. Default calibration uses eight stream admissions per user run, a 2,048-token output limit per request, and a 20-second per-run timeout. A successful run checks 11 native and 15 each Passive/Active admissions, task-tool completion, response isolation, intent-owned closure, context boundaries and cleanup. These counts are scripted-provider expectations, not real-model behavior or billing evidence. End-of-run snapshots use the selected runtime's read-only observer, not its legacy reader. The [backlog](../BACKLOG.md#external-validation-and-evaluation) records the separate live-execution gate.
 
 The negative budget witness must exit nonzero while returning an `incomplete` report and cleaning its temporary stores:
 

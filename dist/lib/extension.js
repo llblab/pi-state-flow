@@ -20,7 +20,7 @@ import { StateFlowModuleHost } from "./module-registry.js";
 import { prepareModuleContext } from "./semantic-module.js";
 import { assistantToolCallCount, conciseDiagnostic, diagnosticText, finalizedAssistantResponse, formatPatchStateArguments, passiveMemoryProtocol, RESPONSE_PATCH_GUIDELINE, SCOPE_PARTICIPATION_GUIDELINE, separatedFailure, separatedOutput, stateFlowProtocol } from "./protocol.js";
 import { OwnedOperationSlot, RenewableLifetime } from "./operation.js";
-import { readProjectedState, readStatePath } from "./query.js";
+import { patchHistoryRoot, readProjectedState, readStatePath, readValueBatch } from "./query.js";
 import { selectedBoundaryFailure, selectRetainedCheckpoint, waitForRecovery } from "./recovery.js";
 import { TemporalRuntime } from "./runtime.js";
 import { prepareSelectedBranchPolicy, captureSelectedNativeMarker, NativeToolRequestCorrelation, SelectedPolicyLifetime, discoverSnapshotData, findAssistantToolBatch, hasPriorConversation, hasUncheckpointedConversation, isNewSession, retainsPhysicalSessionProjection, SNAPSHOT_ENTRY_TYPE } from "./session.js";
@@ -1035,17 +1035,18 @@ export default function stateFlowExtension(pi, options = {}) {
         }
     }
     function readStateDefinition(name) {
+        const locatorInput = Type.Union([Type.String(), Type.Array(Type.String(), { minItems: 1 })], { description: "One semantic path or an ordered, nonempty list. Supply exactly one of path or paths." });
         return defineTool({
             name,
             ...(name === LEGACY_READ_STATE_TOOL_NAME ? { prepareLoadout: () => ({ hiddenDeclarations: [name] }) } : {}),
             label: "Read State",
-            description: "Read exact State Flow values or historical semantic patches with one path or an ordered path list. With one participating owner, semantic paths and structured references are scope-free, effective[N] selects that owner's historical boundary, and patches[N] selects its retained owner patch. With multiple owners, unscoped paths use the effective overlay and owner patch history requires an explicit owner. Optional global/cwd/session roots may address only participating available owners. Array selectors are zero-based indices or half-open [start..end] ranges, never temporal offsets inside a semantic value. Projection value returns data; keys returns minimal structure; patch intersects the selected path at its boundary. Path object keys must be ASCII identifiers ([A-Za-z_$][A-Za-z0-9_$-]*); non-ASCII keys cannot be addressed.",
+            description: "Read exact State Flow values or historical semantic patches with one path or an ordered path list. With one participating owner, semantic paths and structured references are scope-free, effective[N] selects that owner's historical boundary, and patches[N] selects its retained owner patch. With multiple owners, unscoped paths use the effective overlay and owner patch history requires an explicit owner. Explicit global/cwd/session roots require participation. Array selectors are zero-based indices or half-open [start..end] ranges, never temporal offsets inside a semantic value. Projection value returns data; keys returns minimal structure and marks absent current owner roots or built-in planes with meta.type absent, or an unacquired Session with unavailable. Patch intersects the selected path at its boundary. Path object keys must be ASCII identifiers ([A-Za-z_$][A-Za-z0-9_$-]*); non-ASCII keys cannot be addressed.",
             promptSnippet: "Read exact state values, structures, or historical semantic patches",
             promptGuidelines: [SCOPE_PARTICIPATION_GUIDELINE],
             parameters: Type.Object({
-                path: Type.Optional(Type.String({ description: "One semantic path. One owner: flat planes, effective[N] history or retained patches[N]. Multiple owners: effective overlay or explicit participating owner; patch history needs owner.patches[N]. Nested array selectors stay ordinary indices/ranges." })),
-                paths: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Ordered query paths evaluated as one all-or-error read" })),
-                projection: Type.Optional(StringEnum(["value", "keys", "patch"], { description: "Value snapshot by default, structural keys with minimal meta, or the selected historical semantic patch" })),
+                path: Type.Optional(locatorInput),
+                paths: Type.Optional(locatorInput),
+                projection: Type.Optional(StringEnum(["value", "keys", "patch"], { description: 'Value (default) returns "value" for one path or ordered "values" for multiple paths. Multi-path values use null for confirmed absence and [null, {"code": "..."}] for a path error. Keys and patch stay all-or-error. Read retained owner patches one path at a time.' })),
             }, { additionalProperties: false }),
             async execute(toolCallId, params, signal, _onUpdate, ctx) {
                 try {
@@ -1078,25 +1079,66 @@ export default function stateFlowExtension(pi, options = {}) {
                     if (params.path !== undefined && params.paths !== undefined)
                         throw new Error("state_flow_read accepts path or paths, not both");
                     {
-                        const requestedPaths = [...(params.paths ?? [params.path])];
-                        const paths = requestedPaths.map(path => normalizeModelReadPath(path, wanted, config.historyLimit));
+                        const input = params.path ?? params.paths;
+                        if (typeof input !== "string" && (!Array.isArray(input) || !input.length || [...input].some(path => typeof path !== "string"))) {
+                            throw new Error("state_flow_read path or paths must be a string or a nonempty array of strings");
+                        }
+                        const requestedPaths = typeof input === "string" ? [input] : input;
+                        const multiple = requestedPaths.length > 1;
+                        const projection = params.projection ?? "value";
+                        const normalize = (path) => normalizeModelReadPath(path, wanted, config.historyLimit);
+                        const reply = (result, view) => {
+                            const output = wanted.length === 1 ? projectModelReferences(result, wanted, Object.keys(view?.scopes[wanted[0]]?.modules ?? {})) : result;
+                            check();
+                            return {
+                                content: [{ type: "text", text: `\n${JSON.stringify(output)}` }],
+                                details: { ...(multiple ? { paths: requestedPaths } : { path: requestedPaths[0] }), projection },
+                            };
+                        };
+                        const valueBatch = multiple && projection === "value";
+                        // An invalid path belongs to its slot only in a value batch.
+                        const paths = valueBatch ? requestedPaths : requestedPaths.map(normalize);
                         check();
-                        const view = readableView(selected) ?? emptyPreRuntimeView(wanted);
-                        // Wanted policy was checked by normalization; an observational subset is not an exclusion.
+                        const pending = branchRestoration.current?.awaitingAcceptance;
+                        if (valueBatch && pending)
+                            throw new Error("State Flow branch restoration is pending");
+                        const observed = readableView(selected);
+                        const keys = projection === "keys";
+                        const availability = {};
+                        if ((keys || projection === "value") && !pending) {
+                            for (const scope of selected.observedAbsentSharedScopes())
+                                availability[scope] = "absent";
+                            if (keys || valueBatch) {
+                                if (snapshot.config.mode === "passive" && wanted.includes("session") && !observed?.selection.includes("session") && !forkInitialization) {
+                                    availability.session = "unavailable";
+                                }
+                                if (!observed && wanted.every(scope => availability[scope] !== undefined))
+                                    availability.effective = "absent";
+                            }
+                        }
+                        if (valueBatch) {
+                            if (!observed && !Object.values(availability).includes("absent"))
+                                throw new Error("State Flow temporal runtime is unavailable");
+                            return reply(readValueBatch(observed, paths, normalize, availability, config.historyLimit), observed);
+                        }
+                        const view = observed ?? (keys ? undefined : emptyPreRuntimeView(wanted));
+                        // Normalization already rejected excluded owners; a read-only observation can prove absence without a stream.
                         for (const path of paths) {
                             const owner = /^(global|cwd|session)(?=\.|\[|$)/.exec(path)?.[1];
-                            if (owner && !view?.selection.includes(owner))
-                                throw new Error(`State Flow ${owner}: selected, unavailable${branchStartsWithoutRuntime
+                            if (owner && !view?.selection.includes(owner) && availability[owner] === undefined) {
+                                throw new Error(`State Flow ${owner}: selected, unavailable${!keys && branchStartsWithoutRuntime
                                     ? "; no memory is stored for it yet, and an accepted state_flow_patch creates it" : ""}`);
+                            }
                         }
-                        if (!view)
-                            throw new Error("State Flow temporal runtime is unavailable");
                         check();
                         if (paths.some((path) => /^session(?:\.|\[|$)/.test(path)))
                             assertSelectedBranchAvailable();
-                        if (paths.length === 1 && /^(?:global|cwd|session)\.patches(?:\[\d+\])?$/.test(paths[0])) {
-                            if (params.projection !== undefined && params.projection !== "value")
+                        // Normalization admits patch history only with a participating owner root.
+                        if (!multiple && patchHistoryRoot(paths[0]) !== undefined) {
+                            if (projection !== "value")
                                 throw new Error("Scope patch paths support only the value projection");
+                            if (!view)
+                                throw new Error("State Flow temporal runtime is unavailable");
                             const result = readStatePath(view, paths[0], config.historyLimit);
                             if (!("patch" in result))
                                 throw new Error("Expected a scope patch path");
@@ -1107,13 +1149,7 @@ export default function stateFlowExtension(pi, options = {}) {
                                 details: { path: requestedPaths[0], transitionId: result.boundary.id },
                             };
                         }
-                        const result = readProjectedState(view, paths, params.projection, config.historyLimit);
-                        const output = wanted.length === 1 ? projectModelReferences(result, wanted, wanted.flatMap(scope => Object.keys(view.scopes[scope]?.modules ?? {}))) : result;
-                        check();
-                        return {
-                            content: [{ type: "text", text: `\n${JSON.stringify(output)}` }],
-                            details: { ...(params.path === undefined ? { paths: requestedPaths } : { path: requestedPaths[0] }), projection: params.projection ?? "value" },
-                        };
+                        return reply(readProjectedState(view, paths, projection, config.historyLimit, availability), view);
                     }
                 }
                 catch (error) {
@@ -1222,9 +1258,16 @@ export default function stateFlowExtension(pi, options = {}) {
                         }, transaction.causalBasis, { finalizeRun: false });
                         snapshot = nextSnapshot;
                         installScopeStates();
+                        let checkpointWarning;
                         if (publication?.changed) {
                             recordPublication();
-                            appendCheckpoint();
+                            // Canonical acceptance is final; a native bookmark failure cannot reject the patch.
+                            try {
+                                appendCheckpoint();
+                            }
+                            catch (error) {
+                                checkpointWarning = { code: "native_checkpoint_failed", message: `Memory was accepted, but the Pi checkpoint could not be recorded: ${conciseDiagnostic(error)}` };
+                            }
                         }
                         clearAcceptedAcquisitions(new Set(acquiredArtifacts.map(({ path }) => path)));
                         updateUi(ctx);
@@ -1233,9 +1276,11 @@ export default function stateFlowExtension(pi, options = {}) {
                             ? `\nState materialized atomically at ${scopes.join("+")} scope${scopes.length === 1 ? "" : "s"}.`
                             : "\nState already current.";
                         return { content: [
-                                { type: "text", text: acknowledgement + stage.missingDeletions.map(deletion => projectModelMissingDeletion(deletion, wanted)).map(({ path, unavailablePath }) => `\n\nHint: deletion skipped at ${path}; target absent. First unavailable component: ${unavailablePath}. Check the path if you expected an existing value.`).join("") },
+                                { type: "text", text: acknowledgement + (checkpointWarning ? `\n\nWarning: ${checkpointWarning.message}` : "")
+                                        + stage.missingDeletions.map(deletion => projectModelMissingDeletion(deletion, wanted)).map(({ path, unavailablePath }) => `\n\nHint: deletion skipped at ${path}; target absent. First unavailable component: ${unavailablePath}. Check the path if you expected an existing value.`).join("") },
                                 ...(updates ? [{ type: "text", text: `\n${presentationJson({ state_updates: updates })}` }] : []),
-                            ], details: { scopes, step: snapshot.meta.step, changed, missingDeletions: stage.missingDeletions } };
+                            ], details: { scopes, step: snapshot.meta.step, changed, missingDeletions: stage.missingDeletions,
+                                ...(checkpointWarning ? { warnings: [checkpointWarning] } : {}) } };
                     };
                     if (!firstAuthoring)
                         return await selected.withSelectedPatchTransaction(author, check, signal);

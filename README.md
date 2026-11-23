@@ -1,267 +1,109 @@
 # Pi State Flow
 
-![pi-state-flow banner](https://raw.githubusercontent.com/llblab/pi-state-flow/main/banner.jpg)
+![Pi State Flow wordmark beside a sequence of processing stages](https://raw.githubusercontent.com/llblab/pi-state-flow/main/banner.jpg)
 
-**Incremental scoped context/memory compiler for Pi.**
+**Keep the decisions. Keep Pi’s tool loop.**
 
-When enabled, State Flow maintains explicit state across requests and sessions. Instead of carrying every completed exchange into the next request, the agent incrementally compiles requirements, decisions, findings and source knowledge into durable memory.
-
-The idea comes from the explicit-state approach of [SKILL.state](https://arxiv.org/html/2608.26263v2), combined with Pi's native conversation context:
-
-- **State carries continuity between user runs.**
-- **Pi's native context carries the working trajectory within a run.**
-
-The conversation is not reset after each model response or tool call. Pi keeps ownership of execution, session navigation and the full inspectable trace.
-
-## How it works
-
-In Active mode, each user run starts with the effective memory plus the new request. The agent works through Pi's ordinary inference/tool loop, updates memory when useful information changes, and returns an ordinary answer. The next run receives the accepted state and compact recent transitions instead of the completed conversation history.
-
-```text
-Current state + Request
-          ↓
-Pi's native tool loop
-          ↓
-Patched state + Answer
-          ↓
-Updated state
-```
-
-What the model sees during a run:
-
-- The request, intermediate responses, tool results and steering stay in context.
-- The initial memory head stays byte-stable. Accepted changes arrive in patch results, and changing runtime notices are appended at the tail without moving earlier messages.
-- Projection IDs tell current updates apart from retained historical results.
-- A state patch neither rewrites the head nor discards the working trajectory.
-- Persistent context-bearing messages from other extensions are preserved.
-
-Passive memory uses the same approach across ordinary user turns and rebases only at native or mode boundaries.
-
-Why this helps:
-
-- It reduces reliance on repeated model-generated summaries of a growing transcript.
-- Keeping the current trajectory lets prompt caches be reused while the relevant prefix is unchanged.
-- Avoiding summary calls and repeated prompt processing can improve responsiveness. The effect depends on the model, provider, workload and how often state changes; there is no fixed latency guarantee.
-
-Native compaction remains available for long runs. State Flow may also request a completed-history boundary without another model summary, keeping the complete latest accepted run. Neither mechanism deletes Pi's append-only session trace. See [lifecycle behavior](docs/usage.md#session-behavior) and [performance evidence](docs/performance.md).
+State Flow gives Pi durable memory across requests and sessions. Active mode carries accepted memory forward instead of completed conversation. Pi still runs the tools and keeps the inspectable session trace.
 
 ## Installation and activation
 
-Requires **Pi 1.0.0+** and **Node.js 22.19.0+**. See [SDK compatibility](docs/compatibility.md) for tested stacks and verification limits.
+Requires **Pi 1.0.0+** and **Node.js 22.19.0+**. If you already have a store, check [supported formats and backups](docs/usage.md#moving-a-store-and-supported-formats) before upgrading.
 
-From NPM:
+Install from npm in your shell:
 
 ```bash
 pi install npm:@llblab/pi-state-flow
 ```
 
-From Git:
-
-```bash
-pi install git:github.com/llblab/pi-state-flow
-```
-
-Enable active State Flow on the current branch:
+New sessions default to **Off**. To enable Active for this session, run this in Pi:
 
 ```text
 /state-flow-active
 ```
 
-Starting in an existing conversation keeps its context for one complete bootstrap run, so the agent can compile what matters.
-
-Commands:
-
-- `/state-flow-active`: Select the active, state-driven iteration workflow.
-- `/state-flow-passive`: Select ordinary conversation with both memory tools and existing-memory projection.
-- `/state-flow-off`: Remove both memory tools and all State Flow model context, without deleting memory.
-- `/state-flow-status`: Inspect effective state, retained history and known recovery issues without scanning sources or changing state.
-
-New sessions default to **Off**. Choose Passive for ordinary conversation with memory tools, or Active for state-driven episodes. A mode change affects only the current session; the global default applies only to new sessions. See [mode semantics](docs/usage.md#active-passive-and-configured-off), [configuration](docs/usage.md#configuration) and [status and controls](docs/usage.md#status-and-controls).
+Starting Active in an existing conversation keeps its available context for one run so the agent can record what matters. Inspect memory with `/state-flow-status`.
 
 ### Active, passive, off
 
-- `Active`: Memory tools are available, and the agent consolidates necessary final state changes before completing an iteration. Later iterations use accepted state and new input rather than completed prior reasoning.
-- `Passive`: Both memory tools are available, and existing state except `response` is projected once a validated memory view is available. The agent patches on demand, and ordinary conversation context continues without State Flow's active iteration reset.
-- `Off`: The model sees neither memory tool nor any State Flow context, including a frozen passive handoff.
-  - Startup, reload and tree attachment do not read or restore memory.
-  - Selecting Off cancels pending memory waits and records only native policy/bookmarks.
-  - Choosing Passive or Active later acquires memory.
-  - Stored memory and Pi's native trace stay intact.
+- **Active — `/state-flow-active`:** Carry accepted memory into the next run. The current request, tool results and steering stay in Pi’s ordinary working context while the run is underway.
+- **Passive — `/state-flow-passive`:** Keep ordinary conversation continuity. Read or update memory as needed; validated memory can also appear in context.
+- **Off — `/state-flow-off`:** Remove State Flow tools and context without deleting stored memory or Pi history.
 
-Modes select agent behavior, not different storage algorithms. Off defers memory acquisition; selected-scope policy independently determines whether a fork may copy private Session memory. Final consolidation needs no empty ceremonial patch, and context projection does not delete native history. See [mode semantics and bootstrap terminology](docs/usage.md#active-passive-and-configured-off).
+Mode changes are local to the session. See [new-session defaults](docs/usage.md#configuration), [mode behavior](docs/usage.md#active-passive-and-configured-off) and [Telegram controls](docs/usage.md#telegram-controls).
+
+## How it works
+
+The explicit-state idea comes from [SKILL.state](https://arxiv.org/html/2608.26263v2). State Flow separates what carries forward from what the agent needs while working:
+
+- **During the run:** Pi keeps the working conversation and tool trajectory. The agent patches memory when something worth keeping changes; it returns an ordinary answer, not a separate finalization call.
+- **Between Active runs:** Accepted memory and compact recent changes carry continuity. Completed text leaves model context, not the native trace. Native compaction remains available.
+
+This can reduce repeated transcript processing without guaranteeing lower latency or cost. See [what enters model context](docs/architecture.md#model-context-presentation) and [performance evidence](docs/performance.md).
 
 ## State model
 
 ### Scopes and effective memory
 
-Memory has three ownership scopes:
+- `global` — Across projects, such as stable user preferences.
+- `cwd` — Across sessions in one working directory, such as a project’s checks.
+- `session` — Private to the current session, such as its next action.
 
-- `global`: Knowledge and preferences shared across projects.
-- `cwd`: Knowledge shared by sessions in the same working directory.
-- `session`: State belonging to the current session and its selected branch.
+Participating scopes form one **effective view**: Global → CWD → Session. More specific values override broader ones; deleting a local value can reveal an inherited one. Effective is a view, not a writable fourth scope.
 
-Participation is configured with a nonempty `scopes` array in [global configuration](docs/usage.md#configuration); omission selects all three. Wanted means selected by captured policy, available means a validated read view exists, and excluded means outside that policy; [usage](docs/usage.md#lifecycle-operations) owns the distinctions and the `selected, unavailable` read diagnostic. Selection never moves data between owners. Each native branch captures that choice once, and forks inherit it. All seven nonempty selections use the same runtime. The existing mode commands accept optional whitespace-separated owners, for example `/state-flow-active session`, `/state-flow-passive cwd global`, or `/state-flow-off cwd`. Blank/mode-only commands and Telegram controls preserve the captured choice. Duplicate/unknown tokens reject before changing policy; Off records a new choice without canonical memory I/O. No settings chooser is required. Excluded owners receive no automatic memory contribution or semantic writes; new answers are stored only when Active and Session participates. Mode-only Telegram buttons retain that choice; explicit operator inspection is separate from model participation. See the [functional boundary and legacy proof dependencies](docs/scope-selection-contract.md#functional-acceptance-boundary).
-
-Participating owners compose recursively in **global → CWD → session** order:
-
-- More-specific values override broader ones, while object fields merge.
-- Removing a local value can reveal an inherited value again.
-
-The agent receives the **effective view** of this composition, not three unrelated memory dumps. It can read that view, or inspect one scope when ownership matters. `effective` is a computed view, not a fourth storage scope. Scope precedence does not turn memory into system-level instructions.
-
-With one captured owner, current same-owner structured references in Active/Passive heads and projection-bound updates are relative, lazy navigation points to `lazy`, and Active recent context records use `{id,at,patch}` without an owner wrapper. Multi-owner records stay explicit. Canonical storage, internal comparisons and causal IDs remain scoped; provenance and historical/cross-owner/resource references retain their identities. Skill acquisition targets and deletion text also follow wanted arity; new Stop/reload/bootstrap handoffs render eligible refs relatively. Source keys and canonical provenance/compiler diagnostics retain their identities, not extra flat patch wrappers. These DTOs are data, not authoring permission. See the [context presentation boundary](docs/single-scope-interface-contract.md#runtime-context-presentation).
+All three scopes participate by default. To choose only project memory, use `/state-flow-active cwd`. Omitting scope arguments keeps the session’s captured choice; selecting a scope never moves data into it. See [scope selection and availability](docs/usage.md#lifecycle-operations).
 
 ### Semantic planes
 
-Runtime views provide these documented planes:
+- **Working memory:** `strategy` for decisions and constraints, `intents` for chosen actions, `tactics` for progress and blockers, `artifacts` for source-addressed knowledge.
+- **On demand:** `lazy` holds supporting detail outside automatic context. Read it when needed.
+- **Runtime-owned:** `response` holds the latest accepted answer captured in Active when Session participates.
 
-- `intents`: The queue of chosen actions. Work from intents: a structured `{"$ref"}` inside an intent owns a same-scope `strategy`/`tactics`/`lazy` object key. Fixed phases ignore JSON insertion order: intents first, ownership cleanup with final remaining/new intents protecting direct and ancestor/descendant targets, then remaining authored planes and existing compilation/normalization/atomic publication. Rewrite survivors at the same/new path in that patch; cleared targets start fresh without old fields. Textual `$path` mentions only use; unowned entries remain legal.
-- `strategy`: Binding requirements, accepted approaches/plans, decisions, rejected alternatives and interface commitments. A proposal is not a commitment.
-- `tactics`: Temporary execution context: verified progress, consequential failures, blockers, uncertainties and next checks.
-- `artifacts`: Source-addressed descriptions and compiled knowledge.
-- `response`: The exact latest accepted answer, including an empty string. The runtime captures it only in Session; Global/CWD receive no newly accepted answers, and stored scopes may omit it entirely. Effective uses the highest-priority nonempty value. Active automatically projects it; Passive omits it from automatic context while keeping storage and explicit reads intact.
-- `lazy`: Supporting memory available through explicit reads; its body is omitted from baseline model context.
-
-Every plane is optional on disk:
-
-- Stored checkpoints and patches may omit any documented plane, including `intents`, `lazy` or `response`.
-- Current and historical views assemble present built-in fields and metadata v4-declared external roots from the selected scopes; absent fields are not filled in. Empty `response` counts as absent.
-- Declared external roots and retained history survive missing or incompatible definitions under the [public module contract](docs/public-module-contract.md). Unrelated unknown roots are not supported semantic fields. Retired `contract`/`working` roots explicitly reject in the target format; nested ordinary keys remain unrestricted.
-- Reading or starting never rewrites data just to normalize it, and a missing field is not a storage-format error.
-
-These planes organize ordinary JSON; there is no project-specific schema. The model updates every plane except `response`, which is runtime-owned.
-
-Revisions:
-
-- Global and CWD revisions are shared by their canonical stores; Session has its own revision.
-- Effective combines participating owners: with multiple owners its identity is their revision vector (for example `g#c#s#` when all three participate), not one universal revision. Excluded owners do not become fabricated vector entries.
-- One atomic patch advances each materially changed scope once.
-
-Memory remains fallible: storing an observation does not make it current or correct.
-
-Registered Pi Skills may be compiled into source-addressed artifacts when durable guidance is useful. Pi's resource provenance decides the owner: user Skills map to global, project Skills to CWD and temporary Skills to session. A matching source hash needs no update. An uncompiled read stays ordinary volatile context and does not block unrelated patches.
+See [Semantic Layers and worked examples](docs/semantic-layers.md) and [progressive lazy reads](docs/lazy-state.md).
 
 ## Incremental updates and history
 
-The advertised tools are `state_flow_read` and `state_flow_patch`. Legacy `read_state` and `patch_state` calls still dispatch the same operations but are not advertised as extra model tools. Both spellings share scope/owner admission, schemas, refusals and the single Active mutation barrier, including mixed-name batches. No store or history conversion is involved. SDK hosts using an explicit allowlist must include the canonical names for new requests and the legacy names if historical calls must execute; see [tool-name compatibility](docs/compatibility.md#tool-name-compatibility).
-
-`state_flow_patch` uses the captured wanted interface, not the number of currently available views. With **one participating owner**, supply semantic planes directly, without an owner wrapper:
-
-```json
-{ "strategy": { "verification": { "command": "npm test" } } }
-```
-
-With **multiple participating owners**, name the supplied owners explicitly; they commit atomically. Canonical ownership remains explicit internally in both cases:
-
-- It waits cancelably for the store lock, then applies authored Global/CWD patches to the current canonical values, so other writers' untouched fields survive.
-- Overlapping assignments follow successful acceptance order. Correct repeats succeed without new semantic revisions.
-- Session remains private.
-- Object patches merge recursively, and `null` deletes an object key instead of being stored.
-- Accepted supplied scopes recursively drop empty object fields and planes, including explicit `{}`; empty ancestors disappear. Array slots and empty arrays stay intact. Cleanup is scope-local and may reveal inherited values. Model context hides legacy empty branches, but reading never rewrites history. See [patch semantics](docs/architecture.md#model-tools).
-
-Multi-owner example, requiring CWD and Session to participate:
+**Example:** Tell the agent, “Remember for this project: run `npm test` before publishing.” With multiple participating scopes including CWD, the agent can call `state_flow_patch` with:
 
 ```json
 {
   "cwd": {
-    "strategy": { "verification": { "command": "npm test" } }
-  },
-  "session": {
-    "intents": { "verify": { "action": "Run the checks before publishing" } },
-    "tactics": { "checks": "Pending" }
+    "strategy": {
+      "releaseCheck": "Run npm test"
+    }
   }
 }
 ```
 
-During an active episode, a material patch is an inference barrier: sibling tool calls are blocked, and the next inference sees the accepted effective state. Ordinary completion needs no finalization patch or extra State Flow reasoning loop.
-
-`state_flow_read` accepts flat ordinary paths with one owner (for example `{ "path": "tactics" }`); `effective[N]` selects that owner's retained temporal boundary and scalar `patches[N]` its retained patch. Current same-owner structured refs may use `{ "$ref": "lazy.plan" }`; persistence anchors them to the exact owner. Never reinterpret different-owner/historical/effective refs, resources or text as local permission.
-
-With multiple owners, unscoped reads use the effective overlay. This multi-owner example requires every explicit owner to participate:
+To check the rule, read `cwd.strategy.releaseCheck` with `state_flow_read`:
 
 ```json
-{ "paths": ["effective.strategy", "cwd.tactics", "session.intents"] }
+{"path":"cwd.strategy.releaseCheck"}
 ```
 
-- `tactics`: Current sole-owner memory, or the effective overlay when multiple owners participate.
-- `effective[1].tactics`: Working memory at the preceding accepted transition boundary, when retained.
-- `cwd.patches[0]`: The latest retained CWD semantic patch.
-- `effective.lazy.memory[0..3]`: A bounded slice of a stored collection.
+A successful read returns `{ "value": "Run npm test" }`. With only CWD selected, omit the `cwd` wrapper from the patch and the `cwd.` prefix from the path.
 
-How much history is kept:
-
-- Historical materializations and scope patch histories use the configurable **`historyLimit`**, from **0 to 100**, default **7**.
-- Offsets count accepted semantic transitions, not user messages or a separate counter per scope.
-- Requested history must still exist in the active lineage; raising the limit cannot recreate discarded history.
-- Older patches fold into the checkpoint without removing current values.
-
-Array ranges, structural `keys` reads and path-intersected `patch` projections let the agent explore memory without loading whole collections. See [progressive memory](docs/lazy-state.md) and [tool contracts](docs/architecture.md#model-tools).
+Patches commit atomically across supplied owners, and a semantic no-op advances no history. `effective[1].strategy` reads the preceding accepted boundary when retained; offsets count accepted semantic changes, not chat messages. See [tool contracts and examples](docs/architecture.md#model-tools), including [legacy tool names](docs/compatibility.md#tool-name-compatibility).
 
 ## Persistence, backups and continuity
 
-The default store is `~/.pi/agent/state-flow/`, independent of registered source files. Each scope keeps its state, retained changes and metadata in canonical `checkpoint.json`, `patches.jsonl` and `meta.json` files. Session configuration and runtime identity are stored separately.
+The default store is `~/.pi/agent/state-flow/`. Resume and tree navigation use current same-session memory, not an old revision at the selected Pi step. When a fork acquires Session, it copies the parent’s **current** private memory once, not an older native step. See [fork support](docs/usage.md#fork-support-and-limits) and [storage recovery](docs/usage.md#storage-and-recovery).
 
-**Persistence is optimistic across abrupt shutdown.**
-
-- Short publication exclusion keeps independent shared fields from cooperating writers; on overlap, the last accepted write wins.
-- Per-file atomic replacement does not guarantee power-loss survival or crash-atomic recovery.
-- This is an [accepted limitation](docs/filesystem-recovery.md#power-loss-durability), not a release gate; no additional recovery journal or storage format is planned.
-
-**Git backups are optional.** When the store is a configured Git repository:
-
-- Accepted active turns may create versioned backups of State Flow-owned files.
-- If the store is busy and Pi provides no cancellable settlement wait, the backup is explicitly deferred. A later accepted turn retries, without changing memory or blocking native Abort.
-- If the attached branch has an explicitly configured remote, State Flow then pushes the exact current backup commit there, asynchronously and without force.
-- Within one Pi process, at most one push per repository runs at a time. Overlapping attempts are skipped, and a later accepted turn pushes the latest backup.
-- Off cancels pending captures and its admitted push, without rolling back accepted state or backup commits; canceled work emits no late memory warnings.
-- Shutdown cancels owned pushes and waits for that repository's active push to close or time out.
-- Commit failures warn locally. Repeated push failures produce one concise warning until a push succeeds, with redacted Git detail kept in the local diagnostic log. Neither failure rejects or rolls back accepted memory.
-- Backup needs a Git commit identity; accepting and persisting state does not.
-- Git history can be inspected separately, but it is not the authority for `state_flow_read` or for restoring memory.
-
-**Resume, tree navigation and forks:**
-
-- **State Flow does not depend on the Pi step.** Memory is the current JSON state of each scope and changes only through accepted `state_flow_patch` calls and run lifecycle. Resume and tree navigation restore the branch's mode, never an older memory revision; Off defers acquisition. Past values stay readable through `state_flow_read` offsets within retained history.
-- A new session gets its own private layer only when Session acquisition is admitted; shared-only selections create no hidden private semantics.
-- Supported native forks inherit captured policy and copy parent-**current** Session memory into a fresh child owner when admitted, without changing parent-private data. Off or Session-excluded forks defer private acquisition; an acquired child never recopies.
-- Explicit Active or Passive accepts the validated current memory of that same session; modes stay stable.
-- Missing, malformed or contradictory current files self-heal visibly: the broken owner's bytes are quarantined, only that owner restarts empty, and both operator and agent are told. Unsafe fork copying, concurrent writes and foreign-owner evidence remain fenced and are never replaced by foreign memory.
-
-See [fork support](docs/usage.md#fork-support-and-limits) and [storage recovery](docs/usage.md#storage-and-recovery).
-
-**For SDK and launcher integrations:**
-
-- [Advisory continuation APIs](docs/architecture.md#session-continuation) inspect provenance and build candidates asynchronously with host cancellation. They neither open native sessions nor install automatic resume.
-- Run preparation and missing-artifact maintenance wait cancelably before inference; embeddings can also use the [transaction APIs](docs/architecture.md#asynchronous-storage-transaction).
-
-How mode changes interact with storage:
-
-- Selecting Passive switches local policy/context immediately and awaits runtime-only persistence. Passive keeps independently owned attachment/fork work. If its persistence fails, local policy stays and publication is fenced until a later accepted Active or Passive selection.
-- Off cancels owned memory waits and saves only native mode/continuation/fork bookkeeping, without validating or rewriting canonical storage. It also cancels restoration/fork work and defers later acquisition.
-- Explicit Off inspection may read current stored values through a disposable validated reader. It does not activate memory, install cache or change pending fork acquisition. Missing private authority stays unavailable.
-- Active waits for a coherent capture and acceptance; another mode or selection can withdraw its wait.
-
-Core-only scope metadata v3 and external-module metadata v4 use `strategy` and `tactics`; v4 also retains declared external objects/descriptors independently of definition lifetimes. Supported v1/v2 cohorts read through declared translation; owned acceptance may convert supported formats only after a verified exact-byte backup outside canonical authority. Upgrade/quiesce all writers first; unsupported layouts are not repaired. See the [format and backup boundary](docs/usage.md#moving-a-store-and-supported-formats) before upgrading or moving a store.
+Optional Git backup is not memory authority. Writes use per-file atomic replacement, not power-loss-safe or crash-atomic storage. If Active reports `active (blocked)`, fix the reported cause before retrying Active or Passive; choose Off for native chat without memory access. See [recovery and durability](docs/filesystem-recovery.md).
 
 ## Operational boundaries
 
-State Flow adds memory, not another agent controller. It does not add background reasoning, a scheduler, automatic reference hydration or rollback of external tool effects. State and the current trajectory are not size-capped; performance depends on how much useful information the agent retains.
-
-The packaged `state-flow-guide` Skill covers concrete operations and recovery. `state-flow-memory` supports explicitly requested curation, for example: **“Review and clean State Flow state”** Normal handoffs reconcile the memory they touch; dedicated cleanup is not an automatic audit after each task.
-
-Treat state, diagnostic logs and backups as private data. Revalidate consequential observations before acting, and verify a transfer's destination before deleting its source. Removing a value from current state does not erase older histories or remote copies.
+State Flow adds memory, not a scheduler, background inference or automatic reference loading. It neither caps the size of state or the current trajectory nor undoes external tool effects. Stored observations can be wrong or stale; revalidate them before consequential actions. Treat stored state, logs and backups as private. Removing a current value does not erase older history or copies. Dedicated memory cleanup runs only on request.
 
 ## Documentation and development
 
-- [Usage and recovery](docs/usage.md) — Configuration, lifecycle, diagnostics and storage operations.
-- [Architecture](docs/architecture.md) — Semantic model, temporal boundaries, artifacts and integration contracts.
-- [SDK compatibility](docs/compatibility.md) — Tested stacks and verification limits.
-- [Performance](docs/performance.md) — Measurements, workload definitions and limits.
-- [Acceptance map](docs/temporal-acceptance.md) — Properties tied to concrete tests.
-- [Documentation index](docs/README.md) — All maintained guides.
+- [Documentation index](docs/README.md) — Start here to find the guide or governing contract.
+- [Usage and recovery](docs/usage.md) — Configure, inspect or recover memory.
+- [State Flow Skill](skills/state-flow/SKILL.md) — The in-Pi guide, available as `/skill:state-flow`.
+- [SDK compatibility](docs/compatibility.md) — Supported hosts, library APIs and verification limits.
+- [Public modules](docs/public-module-contract.md) — Trusted companion-extension callbacks, not sandboxed plugins.
+- [Acceptance map](docs/temporal-acceptance.md) — Guarantees tied to deterministic tests, not live-model or installed-client claims.
 
-The six built-in planes use an [internal semantic-module contract](docs/semantic-module-contract.md) for authoring policy, mode-aware context and isolated producer evaluation. Since 0.27.0, the published [`@llblab/pi-state-flow/modules` entry](docs/public-module-contract.md) also supports trusted companion-extension registration, retained metadata v4 external roots, existing read/patch tools, Active/Passive context and atomic Active producer replacements. Pi remains the loader; callbacks are trusted JavaScript, not sandboxed plugins or autonomous background reasoning. The public contract owns registration, retention and currentness requirements; [compatibility](docs/compatibility.md) separates deterministic integration evidence from installed-client and live-model claims.
+To install from Git instead of npm, use `pi install git:github.com/llblab/pi-state-flow`.
 
-For development, run `npm install` and `npm run validate`. `npm run benchmark` is opt-in and separate from the normal suite; see `benchmarks/README.md` in a source checkout.
-
-Project context: [AGENTS.md](AGENTS.md), [BACKLOG.md](BACKLOG.md), [CHANGELOG.md](CHANGELOG.md).
+From a source checkout, run `npm install` and `npm run validate`. See `benchmarks/README.md` for opt-in measurements. Project context: [AGENTS.md](AGENTS.md), [BACKLOG.md](BACKLOG.md), [CHANGELOG.md](CHANGELOG.md).

@@ -7,7 +7,7 @@ import { canonicalJson } from "./json.ts";
 import { RetiredSemanticFormatError } from "./migration.ts";
 import { sessionRuntimePaths, temporalScopePaths } from "./durable.ts";
 import { captureScopeSelection, type ScopeSelection } from "./selection.ts";
-import { RevisionUnavailableError } from "./snapshot.ts";
+import { RevisionUnavailableError, UnsupportedLifecycleFormatError } from "./snapshot.ts";
 import type { StateScope } from "./state.ts";
 import { assertStorageDirectory, PublicationBusyError, withStorageTransaction, type StorageTransaction } from "./storage.ts";
 
@@ -41,7 +41,8 @@ export interface HealRequest {
  */
 export function isHealableCorruption(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
-	if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError || error instanceof RetiredSemanticFormatError) return false;
+	if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError
+		|| error instanceof RetiredSemanticFormatError || error instanceof UnsupportedLifecycleFormatError) return false;
 	if (error.name === "AbortError") return false;
 	if (typeof (error as NodeJS.ErrnoException).code === "string") return false;
 	if (/identity mismatch/i.test(error.message)) return false;
@@ -114,12 +115,13 @@ export function healSelectedStoreLocked(storage: StorageTransaction, request: He
 		const result = quarantineScope(request, scope, error.message);
 		if (result) healed.push(result);
 	};
+	// An incompatible lifecycle must refuse before any selected shared owner can be reset.
+	let lifecycle: ReturnType<StorageTransaction["inspectSelectedLifecycle"]>;
+	const lifecycleFailure = probe(() => { lifecycle = storage.inspectSelectedLifecycle(cwd, sessionId, wanted, root, sessionKey); }, signal);
 	for (const scope of wanted.filter(owner => owner !== "session")) {
 		const failure = probe(() => storage.observeSelectedShared(cwd, captureScopeSelection([scope]), root), signal);
 		if (failure) reset(scope, failure);
 	}
-	let lifecycle: ReturnType<StorageTransaction["inspectSelectedLifecycle"]>;
-	const lifecycleFailure = probe(() => { lifecycle = storage.inspectSelectedLifecycle(cwd, sessionId, wanted, root, sessionKey); }, signal);
 	if (lifecycleFailure) {
 		reset("session", lifecycleFailure);
 		return { healed, lifecycleAbsent: true };

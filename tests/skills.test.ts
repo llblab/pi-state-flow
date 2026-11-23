@@ -46,51 +46,48 @@ function recordRead(h: ReturnType<typeof harness>, source: string, id = "skill-1
 	h.handlers.get("tool_execution_end")!({ toolCallId: id, toolName: "read", result: {}, isError: false }, h.ctx);
 }
 
-test("discovers distinct operational and memory-curation Skills without diagnostics", () => {
-	const root = join(import.meta.dirname, "..", "skills");
-	const result = loadSkillsFromDir({ dir: root, source: "package:pi-state-flow" });
-	assert.deepEqual(result.diagnostics, []);
-	assert.deepEqual(result.skills.map((skill) => skill.name).sort(), ["state-flow-guide", "state-flow-memory"]);
-	const guide = result.skills.find((skill) => skill.name === "state-flow-guide")!;
-	const memory = result.skills.find((skill) => skill.name === "state-flow-memory")!;
-	assert.match(guide.description, /concrete read, patch, inheritance/);
-	assert.match(guide.description, /not for memory audits or unsolicited cleanup/);
-	const guideBody = readFileSync(guide.filePath, "utf8");
-	assert.match(guideBody, /installed runtime protocol and schemas take precedence/);
-	assert.match(guideBody, /ordinary completion requires no finalization patch/);
-	assert.doesNotMatch(guideBody, /final:true|fallback/);
-	assert.match(guideBody, /Missing history is not empty history/);
-	assert.match(guideBody, /`\$`-prefixed `state_flow_read` paths inside ordinary strings/);
-	assert.match(guideBody, /Neither form proves authority or existence/);
-	assert.match(guideBody, /Never scan or resolve references merely to test them/);
-	assert.match(guideBody, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
-	assert.match(guideBody, /top-level diagnostic metadata/);
-	assert.match(guideBody, /proves provenance rather than staleness/);
-	assert.match(guideBody, /Never edit backing files, `response`, configuration, provenance, or runtime metadata/);
-	assert.match(memory.description, /only on explicit user request/);
-	assert.doesNotMatch(memory.description, /active State Flow feature/);
-	assert.match(memory.description, /Not for routine turns, automatic phase-boundary audits, usage help, or background maintenance/);
-	const memoryBody = readFileSync(memory.filePath, "utf8");
-	assert.match(memoryBody, /Never give an assistant conclusion user authority/);
-	assert.match(memoryBody, /Final remaining\/new same-scope intents protect direct, ancestor and descendant targets/);
-	for (const body of [guideBody, memoryBody]) {
-		assert.match(body, /Work from intents/);
-		assert.match(body, /a textual `\$path` mention only uses it/);
-		assert.match(body, /reasons for abandoned work to `strategy` as rejected approaches/);
-		assert.match(body, /[Uu]nowned entries remain legal/);
-		assert.match(body, /only intent ownership.* has a deletion consequence/);
-	}
-	assert.match(memoryBody, /Keep `lazy` shallow and priority-ordered/);
-	assert.match(memoryBody, /`\$`-prefixed `state_flow_read` paths inside ordinary strings/);
-	assert.match(memoryBody, /Never scan or resolve references merely to find broken ones/);
-	assert.match(memoryBody, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
-	assert.match(memoryBody, /top-level hint as conditional navigation and provenance/);
-	assert.match(memoryBody, /one atomic multi-scope `state_flow_patch` for destination and source changes/);
-	assert.match(memoryBody, /Write and verify accepted content plus a content-bound revision or receipt/);
-	assert.match(memoryBody, /before deleting or narrowing the State Flow source in a later patch/);
-	assert.match(memoryBody, /Preserve it when acceptance is ambiguous/);
-	assert.match(memoryBody, /fresh executor must recover constraints, results, open questions, commitments, and the next action/);
-	assert.match(memoryBody, /Stop after this review, including when nothing needs changing/);
+test("discovers one State Flow Skill with operational and explicitly requested curation guidance", () => {
+	const root = join(import.meta.dirname, "..");
+	const discover = (dir: string) => {
+		const result = loadSkillsFromDir({ dir: join(root, dir), source: "package:pi-state-flow" });
+		assert.deepEqual(result.diagnostics, []);
+		assert.deepEqual(result.skills.map(entry => entry.name), ["state-flow"]);
+		return result.skills[0]!;
+	};
+	const skill = discover("skills");
+	const compiled = discover("dist/skills");
+	const body = readFileSync(skill.filePath, "utf8");
+	assert.equal(readFileSync(compiled.filePath, "utf8"), body);
+	assert.match(skill.description, /concrete read, patch, inheritance/);
+	assert.match(skill.description, /retrieving relevant lazy detail for the current task/);
+	assert.match(skill.description, /only on explicit user request/);
+	assert.match(skill.description, /Not for routine tool calls, automatic phase-boundary audits, or background maintenance/);
+	assert.match(body, /installed runtime protocol and schemas take precedence/);
+	assert.match(body, /ordinary completion requires no finalization patch/);
+	assert.doesNotMatch(body, /final:true|fallback/);
+	assert.match(body, /Missing history is not empty history/);
+	assert.match(body, /`\$`-prefixed `state_flow_read` paths inside ordinary strings/);
+	assert.match(body, /Neither form proves authority or existence/);
+	assert.match(body, /Never scan or resolve references merely to test them/);
+	assert.match(body, /\{value:null, hint:\[\{type:"dangling-reference", message, paths\}\]\}/);
+	assert.match(body, /top-level diagnostic metadata/);
+	assert.match(body, /proves provenance rather than staleness/);
+	assert.match(body, /Never edit backing files, `response`, configuration, provenance, or runtime metadata/);
+	assert.match(body, /## Requested curation\n\nRun one bounded review \*\*only on explicit user request\*\*/);
+	assert.match(body, /Never give an assistant conclusion user authority/);
+	assert.match(body, /Final remaining and newly added same-scope intents protect targets they reference directly or through ancestors\/descendants/);
+	assert.match(body, /Work from intents/);
+	assert.match(body, /a textual `\$path` mention only uses it/);
+	assert.match(body, /reasons for abandoned work to `strategy` as rejected approaches/);
+	assert.match(body, /Unowned entries remain legal/);
+	assert.match(body, /only intent ownership.* has a deletion consequence/);
+	assert.match(body, /Keep `lazy` shallow and priority-ordered/);
+	assert.match(body, /one atomic multi-scope `state_flow_patch` for destination and source changes/);
+	assert.match(body, /Write and verify accepted content plus a content-bound revision or receipt/);
+	assert.match(body, /before deleting or narrowing the State Flow source in a later patch/);
+	assert.match(body, /preserve it when acceptance is ambiguous/);
+	assert.match(body, /Keep what the next executor needs.*open questions, pending interaction, commitments and next checks/);
+	assert.match(body, /Stop after this review, including when nothing needs changing/);
 });
 
 test("requested curation compiles an acquired Skill with one atomic scope move", async () => {
@@ -114,7 +111,7 @@ test("requested curation compiles an acquired Skill with one atomic scope move",
 	const owners = await readState.execute("verify-owners", {
 		paths: ["global.strategy", "cwd.strategy"],
 	}, undefined, undefined, h.ctx);
-	assert.deepEqual(JSON.parse(owners.content[0].text).value, [null, { projectRule: "project-only" }]);
+	assert.deepEqual(JSON.parse(owners.content[0].text).values, [null, { projectRule: "project-only" }]);
 	assert.equal(h.readState(1, "global").strategy.projectRule, "project-only");
 	assert.equal(h.readState(1, "cwd").strategy.projectRule, undefined);
 	assert.deepEqual(h.readState(0, "cwd").artifacts[source], compilerOutput("Curate one requested cohort"));

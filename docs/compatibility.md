@@ -26,11 +26,11 @@ Since 0.27.6 the advertised tools are `state_flow_read` and `state_flow_patch`. 
 
 ## Canonical scope format admission
 
-Core-only canonical scope metadata remains **version 3**, with `strategy` and `tactics` fields. The implemented **version 4** codec additionally retains external object-plane descriptors and opaque values independently of loaded definitions; absent internal `modules` metadata keeps existing v3 output. Since **1.0.0**, retired versions **1/2** are refused explicitly instead of translated, and target-format `contract`/`working` roots stay reserved; nested domain keys remain ordinary JSON. Unsupported versions fail closed. These scope versions are distinct from selection-aware Session lifecycle v2 and public module API v1; supported legacy lifecycle-v1 admission retains its complete-cohort proof requirements. External-root tools, captured Active/Passive context and Active producers shipped in 0.27.0; see the [public module boundary](public-module-contract.md).
+Core-only canonical scope metadata remains **version 3**, with `strategy` and `tactics` fields. The implemented **version 4** codec additionally retains external object-plane descriptors and opaque values independently of loaded definitions; absent internal `modules` metadata keeps existing v3 output. Since **1.0.0**, retired versions **1/2** are refused explicitly instead of translated, and target-format `contract`/`working` roots stay reserved; nested domain keys remain ordinary JSON. Unsupported versions fail closed. These scope versions are distinct from Session lifecycle and public module API v1. External-root tools, captured Active/Passive context and Active producers shipped in 0.27.0; see the [public module boundary](public-module-contract.md).
 
-A retired cohort needs one State Flow 0.x Active/Start acceptance before upgrading. Owned acceptance there converted only admitted owner scopes, after complete target-cohort/identity validation, exact source CAS and a verified private backup outside canonical authority; conversion added no learning transition. Descriptor upgrades and legacy lifecycle conversion still follow that same guarded path. Opaque capture/rollback preserves arbitrary original bytes while semantic interpretation requires valid UTF-8. See [migration proof and support limits](semantic-compatibility-decision.md#guarded-publication-and-support-boundary) and [backup/recovery guidance](usage.md#moving-a-store-and-supported-formats).
+Existing exported names use Strategy/Tactics fields, callbacks, schemas and paths, not old-field aliases. Quiesce unsupported writers: current version checks cannot retrofit already-deployed unsafe low-level callers. See [operator recovery](usage.md#moving-a-store-and-supported-formats) for the supported 0.x conversion route and exact-byte backup rules.
 
-This breaking semantic API/storage change shipped in **0.27.0** and is retained in **0.27.1**. Existing exported names remain where applicable but their fields, callbacks, schemas and paths use Strategy/Tactics; no permanent old-field aliases are provided. Upgrade/quiesce old consumers before deployment: already-deployed unsafe low-level callers cannot be universally fenced. No active store was operated on during development.
+Current descriptor and supported lifecycle upgrades require owned semantic acceptance; inspection and runtime-only mode persistence cannot publish them. The serialized scope preflight rejects invalid UTF-8 and preserves exact bytes of an already-target cohort when no descriptor change is requested. A detached preflight result is not filesystem, private-session, or publication authority. Opaque backup and rollback preserve original bytes without admitting them as semantic state.
 
 ## Public host seams
 
@@ -65,6 +65,12 @@ An embedding must deliver the native lifecycle, not merely construct or dispose 
 
 **Continuation.** Active boundary continuation receives accepted memory even without a new `before_agent_start`. A completed specification is not resurrected, and State Flow does not own the host's continuation scheduler.
 
+### Patch tool declaration refresh
+
+Keep the patch tool name when refreshing its declaration. Cache the desired parameter shape on the unregistered definition template and pass Pi a fresh copy for each registration; `getAllTools()` can omit host-denied tools and is not a registration cache. For built-in planes, only flat↔multi changes alter the shape; mode-only and same-arity changes do not. Host binding and public module registration can also refresh declarations: flat schemas include the registered mutable roots, while read parameters stay structurally stable. [Native admission](architecture.md#model-tools) still checks the original request, including when Pi executes an older wrapper.
+
+The local SDK probes in `tests/pi-compatibility.test.ts` explain why the patch tool does not advertise one union of both grammars. OpenAI Responses and Google preserve the tested alternatives; ordinary non-strict Anthropic Messages drops the top-level object's exclusivity rules and loses the field vocabulary altogether for an object-root union. Separate flat/scoped object shapes retain their applicable fields on all three paths, but do not restore constraints the adapter drops. Native validation remains authoritative. These captured requests test local serialization, not remote acceptance, constrained sampling or model quality.
+
 ## Pre-inference cancellation
 
 On the tested SDK, `before_agent_start` precedes the low-level agent's `prompt`; `ExtensionContext.signal` is undefined there.
@@ -82,17 +88,20 @@ Native tests prove no provider call before coherent acceptance, cancellation whi
 **Preferred representation:**
 
 - Global `config.json` accepts `mode: "active" | "passive" | "off"`, defaulting to Off, and a nonempty unique `scopes` array, defaulting to all three owners. These are initial defaults, not overrides of captured branch policy.
-- Accepted Session lifecycle v2 configuration stores concrete `{mode, scopes}`. Before canonical acceptance, owner-bound native v2 policy records capture the same choice without semantic storage. Commands and Telegram do not edit global defaults; mode-only actions preserve captured scopes.
+- Selected Session configuration stores concrete `{mode, scopes}`. New selected origins write Baseline runtime metadata; readable numeric V2 stays V2 through observation, no-op scope writes and mode-only persistence. Native v2 policy records remain a separate Pi bookkeeping format, not semantic storage. Mode-only actions preserve captured scopes.
 - [Usage](usage.md#lifecycle-operations) defines wanted, available and excluded owners and the 0.27.1 diagnostic. A wanted unacquired Session is unavailable, not excluded; inspection/observation never acquires it. [Scope selection](scope-selection-contract.md#functional-acceptance-boundary) owns legacy proof, deferred forks and request-lifetime requirements.
 
-**Legacy readable mode representations.** The following are compatibility inputs, not alternative current policy formats. Decoding is read-only; current accepted lifecycle writers use v2 concrete policy, without inspection-triggered conversion or semantic normalization. Malformed explicit scope evidence rejects rather than falling through to a wider mode-only fallback.
+**Baseline wire format.** Selected admission refuses retired lifecycle V1 and unknown formats without resetting or converting them. Use a previous compatible release for a V1 session. The package-root runtime and Pi use this same admission path.
+
+**Compact lifecycle proof.** The runtime header uses `format: "baseline"`. Each lineage entry stores its boundary once and may carry the canonical owner claim beside it; the retained private basis uses the same encoding. Missing optional owner claims are not inferred from a boundary ID. Actual selected replay must substantiate any required claim, and retained private proof must still be complete. Unknown ancillary lifecycle metadata is preserved. An owned acceptance that publishes a material semantic/provenance change or acquires an existing V2 origin can convert V2 only with the complete admitted source basis, verified exact-byte backup and CAS; failed publication preserves canonical bytes. Global/CWD/Session semantic metadata versions are independent.
+
+**Legacy readable mode representations.** The following are compatibility inputs, not alternative current policy formats. Decoding is read-only. Malformed explicit scope evidence rejects rather than falling through to a wider mode-only fallback.
 
 - Without explicit global mode, absence of all flag-based mode settings means Off.
 - `autoStart: true` means Active. With any flag-based mode setting present, `passiveBootstrap: false` together with `passiveTools: false` means Off; otherwise the fallback is Passive.
 - Explicit global mode overrides valid flags; invalid values still fail validation.
-- Session `enabled:true` means Active, and `enabled:false` means non-active.
-- Native inactive checkpoints without an explicit mode use the configured inactive fallback, never an Active default.
-- Session config and native checkpoints reject mixed `mode`/`enabled` representations, even when apparently consistent, rather than choosing between two stored policies.
+- Legacy native checkpoints can decode `enabled:true` as Active and `enabled:false` as the configured inactive fallback. Legacy inactive checkpoints without explicit mode never default to Active.
+- Native checkpoints reject mixed `mode`/`enabled` evidence. Baseline and numeric V2 canonical config require explicit `mode` and `scopes`, not an `enabled` alias.
 
 To use Passive, select it in the current session or set global `mode: "passive"` for new sessions.
 
@@ -107,14 +116,7 @@ To use Passive, select it in the current session or set global `mode: "passive"`
 - Uses current memory; branch checkpoints never select a past revision.
 - Native tests prove current shared plus local-private memory at the next provider, and actual Abort withdrawal for in-run Start with an operation signal.
 
-**Passive:**
-
-- Selects local tools/context policy before waiting for persistence.
-- For accepted memory, publishes lifecycle metadata without rewriting semantic/provenance files. Pending inactive choices share one acceptance of the latest mode.
-- Keeps independently owned current-memory attachment, Active-default initialization and fork copying; the latest inactive policy is applied at acceptance.
-- Read-only recovery preserves an intervening Passive choice and its write fence.
-- Selection, shutdown and accepted Start cancel obsolete Stop persistence; rejected Start does not.
-- Genuine persistence failure retains readable memory and native context while fencing writes until accepted Start or a later explicit Passive that successfully accepts current memory. A Passive retry that still fails adds no duplicate fence marker.
+**Passive:** [Local policy, mode-only persistence and fenced recovery](architecture.md#passive-persistence) are separate. A host must not interpret local control success or a readable view as publication authority. Independently owned attachment, Active-default initialization and fork copy can still finish under the latest requested inactive policy.
 
 **Off:**
 
@@ -164,32 +166,21 @@ Adapter tests establish these contracts with isolated transport fixtures; they a
 
 ## State Flow library API compatibility
 
-The package root exports `TemporalRuntime`. The Pi registration shim is a separate default-only entrypoint, not the named library API.
+The package root exports `TemporalRuntime`. The Pi registration shim is a separate default-only entrypoint. Both use the same selected Baseline lifecycle. The former V1 methods are removed; these are replacements by intent, not signature-compatible aliases:
 
-**Awaited runtime operations:**
+- **Observe:** `refreshSelectedShared` or `refreshSelectedCurrent`; neither grants publication authority.
+- **Accept the current head / activate an existing owner:** `withSelectedCurrentTransaction`.
+- **Author over accepted memory:** `withSelectedPatchTransaction`.
+- **Replay against the accepted selected basis:** `publishSelected`.
+- **Persist Passive over exactly accepted bytes:** `persistSelectedPassive`.
+- **Create a new origin with its first patch:** `withSelectedFirstPatchTransaction`, with explicit creation permission.
+- **Acquire Session or copy a parent's current Session:** `withSelectedSessionAcquisitionTransaction` or `withSelectedForkCopyTransaction`, with independent authority.
 
-- **Shared inspection — `refreshShared`:** read-only; no initialization or revision advance.
-- **Current private recovery — `refreshCurrentMemory`:** read-only; no publication authority.
-- **Authored semantic patch — `withPatchTransaction`:** current shared basis and selected private authority; one atomic acceptance.
-- **Accepted-runtime lifecycle — `withLifecycleTransaction`:** config/runtime only; cannot initialize or repair semantic storage.
-- **Current-head activation — `withStartTransaction`:** origin creation defaults off and requires explicit authorization.
-- **Child creation — `withForkTransaction(source, lifecycle, …)`:** the parent's current memory copied into an unoccupied independent child; `lifecycle` supplies only mode/bootstrap.
+Pass the exact nonempty selection to operations that take one (use `["global", "cwd", "session"]` only when all three participate). The host must recheck the authority it owns after waiting. Stage and publish synchronously using the callback's capability once, and install host state only after acceptance. Keep inference, source acquisition and Git outside exclusion. See [transaction contracts](architecture.md#runtime-transaction-apis).
 
-Await completion before consuming results. Transaction callbacks:
+Use `selectedView()` for accepted memory, `observedSelectedView()` for a read-only observation, and `selectedStates()` for exact present owners. `clearCache()` withdraws cache-dependent access and leases; it does not forget known private acquisition or allow a new origin. Memory never rewinds to a native checkpoint.
 
-1. Recheck caller selection/policy after waiting.
-2. Stage and publish synchronously, using their publication capability once within its lifetime.
-3. Install host state only after acceptance.
-
-Keep inference, source acquisition and Git outside canonical exclusion. Raw precomputed replay retains its selected-basis guards.
-
-Continuation inspection/candidate building and Git backup also return Promises. Await them rather than treating a Promise as a boolean or accessing a result before completion. Continuation inspection is advisory: it cannot initialize, restore or select a session on the host's behalf.
-
-**Synchronous runtime methods:** `loadPassive` and `initialize`. Version 0.26.0 removed the boundary-restoration APIs (`withRestoreTransaction`, `prepareBoundaryRestore`, `restoreBoundary`, `acceptRestoredOrigin`, `prepareBoundaryFork`) and `HistoryBoundaryExpiredError`; memory never rewinds to an older boundary.
-
-- They are supported for library consumers and local tests/benchmarks; production lifecycle wiring uses the awaited APIs.
-- They are not signature-compatible substitutes and do not acquire the awaited APIs' cancellation behavior.
-- Their presence is not permission to bypass ownership, retained-history or raw-replay checks.
+Continuation inspection/candidate building and Git backup also return Promises. Continuation inspection is advisory: it cannot initialize, restore or select a session on the host's behalf.
 
 ## Validation procedure
 

@@ -4,30 +4,29 @@ import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSy
 import { once } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 import { fixture as selectedCurrentFixture } from "./current-fixture.ts";
 import * as originFixture from "./origin-fixture.ts";
-import * as legacyPublicationFixture from "./legacy-publication-fixture.ts";
 import * as lifecycleFixture from "./lifecycle-fixture.ts";
 import * as sessionAcquisitionFixture from "./session-acquisition-fixture.ts";
 import * as deferredForkFixture from "./deferred-fork-fixture.ts";
 import * as readObservationFixture from "./read-observation-fixture.ts";
-import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER } from "../lib/artifact.ts";
-import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths, writeOwnedFileUpdates } from "../lib/durable.ts";
-import { hashJson } from "../lib/json.ts";
+import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
+import { rewriteBaselineLifecycleAsNumeric, writeNumericLifecycleFixture } from "./temporal-fixture.ts";
 import { stageSelectedScopePatches } from "../lib/transition.ts";
 import { createAcceptedTransition } from "../lib/history.ts";
 import type { AcceptedTransition } from "../lib/history.ts";
-import { createSessionRuntime, emptySnapshot, RevisionUnavailableError } from "../lib/snapshot.ts";
-import { emptyState, type StateScope } from "../lib/state.ts";
-import { captureScopeSelection } from "../lib/selection.ts";
+import { emptySnapshot, RevisionUnavailableError } from "../lib/snapshot.ts";
+import type { StateScope } from "../lib/state.ts";
+import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "../lib/selection.ts";
+import { TemporalRuntime } from "../lib/runtime.ts";
 import {
-	assertSelectedFileCohortBasis, captureTemporalFileBase, initializeFileStore, isFileRevision, loadSelectedFileCohort,
-	loadTemporalFileRevision, PublicationBusyError, publishSelectedTemporalStateToFiles, publishTemporalStateToFiles, withStoragePublicationLock, withStorageTransaction, type SelectedFileCohort, type SelectedModuleAdditions, type SelectedPublicationRequest, type SelectedReadObservation, type StorageTransaction,
+	assertSelectedFileCohortBasis, initializeFileStore, loadSelectedFileCohort, PublicationBusyError, publishSelectedTemporalStateToFiles,
+	withStorageTransaction, type SelectedFileCohort, type SelectedModuleAdditions, type SelectedPublicationRequest, type SelectedReadObservation, type StorageTransaction,
 } from "../lib/storage.ts";
-import { advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalState, readTemporalView, temporalCausalWitnesses, temporalScopeRevisions } from "../lib/temporal.ts";
+import { advanceTemporalState, constrainTemporalState, createTemporalState, readTemporalView, temporalScopeRevisions } from "../lib/temporal.ts";
 
 test("selected module additions require genuine scoped first content through original replay authority", async t => {
 	const modules = { x_public_notes: { schemaVersion: 2, immutable: false } };
@@ -176,17 +175,19 @@ test("first selected module writes remain cohort-atomic for every owner subset a
 	}
 });
 
-test("metadata4 conversion preserves foreign edits during guarded rollback instead of overwriting opaque bytes", t => {
+test("metadata4 conversion preserves foreign edits during guarded rollback instead of overwriting opaque bytes", async t => {
 	const parent = mkdtempSync(join(tmpdir(), "state-flow-external-foreign-"));
 	t.after(() => rmSync(parent, { recursive: true, force: true }));
 	const root = join(parent, "store"), cwd = join(parent, "workspace"), id = "owner";
-	initializeFileStore(root);
-	const view = createTemporalState({ global: {}, cwd: {}, session: { strategy: { old: true } } }, "foreign-origin");
-	const runtime = createSessionRuntime(emptySnapshot("active"), cwd, id, view.lineage);
-	publishTemporalStateToFiles(cwd, id, view, ["global", "cwd", "session"], captureTemporalFileBase(cwd, id, root), root, runtime);
-	const base = captureTemporalFileBase(cwd, id, root), paths = temporalScopePaths(cwd, id, "session", root);
-	view.scopes.session.modules = { x_acme_archive: { schemaVersion: 1, immutable: true } };
-	const next = advanceTemporalState(view, [{ scope: "session", patch: { x_acme_archive: { empty: {} } } }], "foreign-external");
+	writeNumericLifecycleFixture(cwd, id, root, createTemporalState({ global: {}, cwd: {}, session: { strategy: { old: true } } }, "foreign-origin"));
+	const paths = temporalScopePaths(cwd, id, "session", root);
+	writeFileSync(paths.checkpoint, readFileSync(paths.checkpoint, "utf8") + " ");
+	const base = (await loadSelectedFileCohort(cwd, id, ["session"], root))!;
+	const modules = { x_acme_archive: { schemaVersion: 1, immutable: true } };
+	const view = structuredClone(base.view);
+	view.scopes.session!.modules = modules;
+	const transition: AcceptedTransition = { id: "foreign-external", transitions: [{ scope: "session", patch: { x_acme_archive: { empty: {} } } }] };
+	const next = advanceTemporalState(view, transition.transitions, transition.id);
 	const rename = fs.renameSync, foreign = '{"foreign":"must survive"}\n';
 	let injected = false;
 	fs.renameSync = (from, to) => {
@@ -196,8 +197,9 @@ test("metadata4 conversion preserves foreign edits during guarded rollback inste
 	};
 	syncBuiltinESMExports();
 	try {
-		assert.throws(() => publishTemporalStateToFiles(cwd, id, next, ["session"], base, root,
-			createSessionRuntime(emptySnapshot("active"), cwd, id, next.lineage)), error => {
+		await assert.rejects(publishSelectedTemporalStateToFiles(cwd, id, {
+			view: next, transition, historyLimit: 7, moduleAdditions: { session: modules },
+		}, base, root), error => {
 			assert.ok(error instanceof AggregateError);
 			assert.match(String(error.errors[1]), /file conflict.*concurrent bytes preserved/);
 			return true;
@@ -205,87 +207,84 @@ test("metadata4 conversion preserves foreign edits during guarded rollback inste
 	} finally { fs.renameSync = rename; syncBuiltinESMExports(); }
 	assert.equal(injected, true);
 	assert.equal(readFileSync(paths.checkpoint, "utf8"), foreign);
-	for (const file of base.files) if (file.bytes && file.path !== paths.checkpoint) assert.deepEqual(readFileSync(file.path), file.bytes);
+	for (const file of base.basis.files) if (file.bytes && file.path !== paths.checkpoint) assert.deepEqual(readFileSync(file.path), file.bytes);
 	assert.equal(readdirSync(`${root}-migration-backups`).length, 1);
 });
 
 test("metadata4 owned conversion uses exact-byte backup/CAS/rollback and selected replay/fork retain opaque descriptors", async t => {
-	// Retired v1/v2 semantic cohorts are refused, so only the supported v3 baseline converts here.
-	for (const version of [3]) {
-		const parent = mkdtempSync(join(tmpdir(), "state-flow-external-upgrade-"));
-		t.after(() => rmSync(parent, { recursive: true, force: true }));
-		const root = join(parent, "store"), cwd = join(parent, "workspace"), id = "parent";
-		initializeFileStore(root);
-		let view = createTemporalState({ global: {}, cwd: {}, session: { strategy: { plan: "retained" } } }, "upgrade-origin");
-		view = advanceTemporalState(view, [{ scope: "session", patch: { tactics: { old: true } } }], "upgrade-old");
-		const runtime = () => createSessionRuntime(emptySnapshot("active"), cwd, id, view.lineage);
-		publishTemporalStateToFiles(cwd, id, view, ["global", "cwd", "session"], captureTemporalFileBase(cwd, id, root), root, runtime());
-		const paths = temporalScopePaths(cwd, id, "session", root);
-		if (version < 3) {
-			for (const path of [paths.checkpoint, paths.patches]) writeFileSync(path, readFileSync(path, "utf8").replaceAll('"strategy":', '"contract":').replaceAll('"tactics":', '"working":'));
-			writeFileSync(paths.meta, JSON.stringify({ ...JSON.parse(readFileSync(paths.meta, "utf8")), version }));
-		}
-		let base = captureTemporalFileBase(cwd, id, root);
-		// Observation and a real runtime-only publication do not adopt a new semantic epoch.
-		assert.ok(await loadSelectedFileCohort(cwd, id, ["session"], root));
-		const policy = createSessionRuntime(emptySnapshot("passive"), cwd, id, view.lineage);
-		publishTemporalStateToFiles(cwd, id, view, [], base, root, policy, id, undefined, true);
-		assert.equal(JSON.parse(readFileSync(paths.meta, "utf8")).version, version);
-		assert.equal(existsSync(`${root}-migration-backups`), false);
-		base = captureTemporalFileBase(cwd, id, root);
-		const modules = { x_acme_archive: { schemaVersion: 1, immutable: true } };
-		view.scopes.session.modules = modules;
-		const opaque = JSON.parse('{"empty":{},"slots":[{},[]],"__proto__":{"constructor":{}},"a/b~c":{"remove":true,"keep":{}}}');
-		view = advanceTemporalState(view, [{ scope: "session", patch: { x_acme_archive: opaque } }], "upgrade-external");
-		const publish = () => publishTemporalStateToFiles(cwd, id, view, ["session"], base, root, runtime());
-		const rename = fs.renameSync;
-		let injected = false;
-		fs.renameSync = (from, to) => { if (!injected && to === paths.patches) { injected = true; throw new Error("injected metadata4 publication failure"); } rename(from, to); };
-		syncBuiltinESMExports();
-		try { assert.throws(publish, /injected metadata4 publication failure/); }
-		finally { fs.renameSync = rename; syncBuiltinESMExports(); }
-		assert.equal(injected, true);
-		for (const file of base.files) if (file.bytes) assert.deepEqual(readFileSync(file.path), file.bytes);
-		const result = publish();
-		assert.ok(result.migrationBackup);
-		const manifest = JSON.parse(readFileSync(result.migrationBackup, "utf8"));
-		assert.equal(manifest.targetVersion, 4);
-		assert.deepEqual(manifest.convertedScopes, ["session"]);
-		assert.equal(readdirSync(`${root}-migration-backups`).length, 1, "completed exact backup reused after rollback");
-		for (const file of base.files) {
-			const receipt = manifest.files.find((item: { path: string }) => item.path === relative(root, file.path));
-			assert.equal(receipt.identity, file.identity);
-			assert.deepEqual(receipt.bytes === null ? undefined : Buffer.from(receipt.bytes, "base64"), file.bytes);
-		}
-		assert.throws(publish, /changed concurrently/);
-		let selected = (await loadSelectedFileCohort(cwd, id, ["session"], root))!;
-		assert.deepEqual(selected.view.scopes.session, view.scopes.session);
-		// No registry or definition is involved. Accepted external replay remains raw, model admission does not widen.
-		const second = advanceTemporalState(view, [{ scope: "session", patch: { x_acme_archive: { "a/b~c": { remove: null, revision: 2 } } } }], "upgrade-external-2");
-		publishTemporalStateToFiles(cwd, id, second, ["session"], result.base, root, createSessionRuntime(emptySnapshot("active"), cwd, id, second.lineage));
-		selected = (await loadSelectedFileCohort(cwd, id, ["session"], root))!;
-		const before = readTemporalView(selected.view, 0, "session");
-		const stage = stageSelectedScopePatches({ selection: ["session"], states: { session: before } }, { session: { tactics: { core: "unrelated" } } }, [], "metadata4");
-		const accepted = createAcceptedTransition({ session: before }, stage.nextStates, "upgrade-core")!;
-		const next = advanceTemporalState(selected.view, accepted.transitions, accepted.id);
-		const saved = await publishSelectedTemporalStateToFiles(cwd, id, { view: next, transition: accepted, historyLimit: 7 }, selected, root);
-		assert.equal(saved.migrationBackup !== undefined, true, "only legacy lifecycle1 converts here");
-		assert.deepEqual(readTemporalView(saved.cohort.view, 0, "session").x_acme_archive, before.x_acme_archive);
-		await withStorageTransaction(root, transaction => {
-			const passive = transaction.persistSelectedPassive(cwd, id, saved.cohort, root);
-			assert.deepEqual(passive.cohort.view.scopes.session!.modules, modules);
-		});
-		const parentBytes = captureTemporalFileBase(cwd, id, root);
-		const fork = await withStorageTransaction(root, transaction => transaction.copySelectedFork(cwd, "child", {
-			kind: "fork-new", source: { id, key: id }, selection: ["session"], snapshot: emptySnapshot("active"), historyLimit: 7,
-		}, root));
-		assert.deepEqual(fork.cohort.view.scopes.session!.modules, modules);
-		assert.deepEqual(readTemporalView(fork.cohort.view, 0, "session"), readTemporalView(saved.cohort.view, 0, "session"));
-		assert.equal(fork.cohort.view.scopes.session!.revision, saved.cohort.view.scopes.session!.revision);
-		assert.throws(() => readTemporalView(fork.cohort.view, 1), /predates/);
-		for (const file of parentBytes.files) if (file.bytes) assert.deepEqual(readFileSync(file.path), file.bytes);
-		assert.equal(JSON.parse(readFileSync(paths.meta, "utf8")).version, 4);
+	const parent = mkdtempSync(join(tmpdir(), "state-flow-external-upgrade-"));
+	t.after(() => rmSync(parent, { recursive: true, force: true }));
+	const root = join(parent, "store"), cwd = join(parent, "workspace"), id = "parent";
+	const origin = createTemporalState({ global: {}, cwd: {}, session: { strategy: { plan: "retained" } } }, "upgrade-origin");
+	const old = advanceTemporalState(origin, [{ scope: "session", patch: { tactics: { old: true } } }], "upgrade-old");
+	writeNumericLifecycleFixture(cwd, id, root, old);
+	const paths = temporalScopePaths(cwd, id, "session", root);
+	const base = await withStorageTransaction(root, tx => {
+		const loaded = tx.prepareSelected(cwd, id, ["session"], root)!;
+		return tx.persistSelectedPassive(cwd, id, loaded, root).cohort;
+	});
+	assert.equal(base.lifecycle.sourceVersion, 2);
+	assert.equal(JSON.parse(readFileSync(paths.meta, "utf8")).version, 3);
+	assert.equal(existsSync(`${root}-migration-backups`), false);
+	const modules = { x_acme_archive: { schemaVersion: 1, immutable: true } };
+	const view = structuredClone(base.view);
+	view.scopes.session!.modules = modules;
+	const opaque = JSON.parse('{"empty":{},"slots":[{},[]],"__proto__":{"constructor":{}},"a/b~c":{"remove":true,"keep":{}}}');
+	const upgrade: AcceptedTransition = { id: "upgrade-external", transitions: [{ scope: "session", patch: { x_acme_archive: opaque } }] };
+	const publish = () => publishSelectedTemporalStateToFiles(cwd, id, {
+		view: advanceTemporalState(view, upgrade.transitions, upgrade.id), transition: upgrade, historyLimit: 7, moduleAdditions: { session: modules },
+	}, base, root);
+	const rename = fs.renameSync;
+	let injected = false;
+	fs.renameSync = (from, to) => { if (!injected && to === paths.patches) { injected = true; throw new Error("injected metadata4 publication failure"); } rename(from, to); };
+	syncBuiltinESMExports();
+	try { await assert.rejects(publish(), /injected metadata4 publication failure/); }
+	finally { fs.renameSync = rename; syncBuiltinESMExports(); }
+	assert.equal(injected, true);
+	for (const file of base.basis.files) if (file.bytes) assert.deepEqual(readFileSync(file.path), file.bytes);
+	const result = await publish();
+	assert.ok(result.migrationBackup);
+	const manifest = JSON.parse(readFileSync(result.migrationBackup, "utf8"));
+	assert.equal(manifest.targetVersion, 4);
+	assert.deepEqual(manifest.convertedScopes, ["session"]);
+	assert.equal(readdirSync(`${root}-migration-backups`).length, 1, "completed exact backup reused after rollback");
+	for (const file of base.basis.files) {
+		const receipt = manifest.files.find((item: { path: string }) => item.path === relative(root, file.path));
+		assert.equal(receipt.identity, file.identity);
+		assert.deepEqual(receipt.bytes === null ? undefined : Buffer.from(receipt.bytes, "base64"), file.bytes);
 	}
+	await assert.rejects(publish(), /changed concurrently/);
+	rewriteBaselineLifecycleAsNumeric(cwd, id, root, 2);
+	const v2 = (await loadSelectedFileCohort(cwd, id, ["session"], root))!;
+	assert.deepEqual(v2.view.scopes.session, result.cohort.view.scopes.session);
+	// No registry or definition is involved. Accepted external replay remains raw.
+	const transition: AcceptedTransition = { id: "upgrade-external-2", transitions: [{ scope: "session", patch: { x_acme_archive: { "a/b~c": { remove: null, revision: 2 } } } }] };
+	const nextV2 = advanceTemporalState(v2.view, transition.transitions, transition.id);
+	const acceptedV2 = await publishSelectedTemporalStateToFiles(cwd, id, { view: nextV2, transition, historyLimit: 7 }, v2, root);
+	assert.ok(acceptedV2.migrationBackup);
+	const selected = (await loadSelectedFileCohort(cwd, id, ["session"], root))!;
+	assertSelectedFileCohortBasis(selected, acceptedV2.cohort);
+	const before = readTemporalView(selected.view, 0, "session");
+	const stage = stageSelectedScopePatches({ selection: ["session"], states: { session: before } }, { session: { tactics: { core: "unrelated" } } }, [], "metadata4");
+	const accepted = createAcceptedTransition({ session: before }, stage.nextStates, "upgrade-core")!;
+	const next = advanceTemporalState(selected.view, accepted.transitions, accepted.id);
+	const saved = await publishSelectedTemporalStateToFiles(cwd, id, { view: next, transition: accepted, historyLimit: 7 }, selected, root);
+	assert.equal(saved.migrationBackup, undefined, "Baseline replay does not repeat conversion");
+	assert.deepEqual(readTemporalView(saved.cohort.view, 0, "session").x_acme_archive, before.x_acme_archive);
+	await withStorageTransaction(root, transaction => {
+		const passive = transaction.persistSelectedPassive(cwd, id, saved.cohort, root);
+		assert.deepEqual(passive.cohort.view.scopes.session!.modules, modules);
+	});
+	const parentBytes = captureTestBasis(cwd, id, root);
+	const fork = await withStorageTransaction(root, transaction => transaction.copySelectedFork(cwd, "child", {
+		kind: "fork-new", source: { id, key: id }, selection: ["session"], snapshot: emptySnapshot("active"), historyLimit: 7,
+	}, root));
+	assert.deepEqual(fork.cohort.view.scopes.session!.modules, modules);
+	assert.deepEqual(readTemporalView(fork.cohort.view, 0, "session"), readTemporalView(saved.cohort.view, 0, "session"));
+	assert.equal(fork.cohort.view.scopes.session!.revision, saved.cohort.view.scopes.session!.revision);
+	assert.throws(() => readTemporalView(fork.cohort.view, 1), /predates/);
+	for (const file of parentBytes.files) if (file.bytes) assert.deepEqual(readFileSync(file.path), file.bytes);
+	assert.equal(JSON.parse(readFileSync(paths.meta, "utf8")).version, 4);
 });
 
 {
@@ -293,19 +292,16 @@ test("metadata4 owned conversion uses exact-byte backup/CAS/rollback and selecte
 		const parent = mkdtempSync(join(tmpdir(), "state-flow-selected-store-"));
 		t.after(() => rmSync(parent, { recursive: true, force: true }));
 		const root = join(parent, "store"), cwd = join(parent, "workspace"), sessionId = "owner";
-		initializeFileStore(root);
 		let view = createTemporalState({ global: { strategy: { marker: "global-only-value" } }, cwd: { strategy: { marker: "cwd-only-value" } }, session: {} }, "store-origin");
 		view = advanceTemporalState(view, [{ scope: "global", patch: { tactics: { step: 1 } } }], "store-global");
 		view = advanceTemporalState(view, [{ scope: "cwd", patch: { tactics: { step: 2 } } }], "store-cwd");
 		if (acquisition === "acquired") view = advanceTemporalState(view, [{ scope: "session", patch: { strategy: { marker: "session-only-value" } } }], "store-session");
-		const runtime = createSessionRuntime(emptySnapshot("active"), cwd, sessionId, view.lineage);
-		publishTemporalStateToFiles(cwd, sessionId, view, ["global", "cwd", "session"], captureTemporalFileBase(cwd, sessionId, root), root, runtime);
+		writeNumericLifecycleFixture(cwd, sessionId, root, view, version, acquisition);
 		const paths = sessionRuntimePaths(cwd, sessionId, root);
 		const privatePaths = temporalScopePaths(cwd, sessionId, "session", root);
 		if (version === 2) {
-			writeFileSync(paths.config, JSON.stringify({ mode: "active", scopes: acquisition === "acquired" ? ["global", "cwd", "session"] : ["global", "cwd"] }));
-			writeFileSync(paths.runtime, JSON.stringify({ ...runtime.meta, version: 2, privateAcquisition: acquisition, causalWitnesses: temporalCausalWitnesses(view), opaqueParent: "/not-a-parent-to-read" }));
-			if (acquisition !== "acquired") for (const path of [privatePaths.checkpoint, privatePaths.patches, privatePaths.meta]) rmSync(path);
+			const metadata = JSON.parse(readFileSync(paths.runtime, "utf8"));
+			writeFileSync(paths.runtime, JSON.stringify({ ...metadata, opaqueParent: "/not-a-parent-to-read" }));
 		}
 		const load = (selection: readonly StateScope[], signal?: AbortSignal) => loadSelectedFileCohort(cwd, sessionId, captureScopeSelection(selection), root, sessionId, signal);
 		return { root, cwd, sessionId, paths, privatePaths, view, load };
@@ -332,7 +328,7 @@ test("metadata4 owned conversion uses exact-byte backup/CAS/rollback and selecte
 	test("v2 selected admission covers every subset with exact dependencies and no excluded body reads or writes", async (t) => {
 		const f = fixture(t);
 		const order = ["global", "cwd", "session"] as const;
-		const original = captureTemporalFileBase(f.cwd, f.sessionId, f.root);
+		const original = captureTestBasis(f.cwd, f.sessionId, f.root);
 		for (let mask = 1; mask < 8; mask++) {
 			const selection = order.filter((_, bit) => mask & (1 << bit));
 			const { result: cohort, reads } = await observeReads(() => f.load(selection));
@@ -379,7 +375,9 @@ test("metadata4 owned conversion uses exact-byte backup/CAS/rollback and selecte
 		assert.deepEqual(cohort.view.causalBasis.map((witness) => witness.owners), [["global"], ["session"]]);
 		assert.equal(reads.includes(f.privatePaths.checkpoint), false);
 		assert.equal(reads.includes(f.privatePaths.meta), false);
-		await assert.rejects(f.load(["session"]));
+		const before = captureTestBasis(f.cwd, f.sessionId, f.root);
+		await assert.rejects(f.load(["session"]), /encoded data|UTF-8/i);
+		assert.deepEqual(captureTestBasis(f.cwd, f.sessionId, f.root), before);
 		rmSync(f.privatePaths.patches);
 		await assert.rejects(f.load(["cwd"]), /Acquired.*incomplete/);
 	});
@@ -399,18 +397,12 @@ test("metadata4 owned conversion uses exact-byte backup/CAS/rollback and selecte
 		await assert.rejects(f.load(["session"]), /identity/);
 	});
 
-	test("legacy lifecycle admission derives witnesses only after validating its complete all-owner cohort", async (t) => {
+	test("retired V1 refuses before any selected or excluded semantic body is read", async t => {
 		const f = fixture(t, "acquired", 1);
-		const { result: cohort, reads } = await observeReads(() => f.load(["cwd"]));
-		assert.ok(cohort);
-		assert.equal(cohort.basis.files.length, 11);
-		assert.equal(cohort.lifecycle.sourceVersion, 1);
-		assert.deepEqual(cohort.view.causalBasis.map((witness) => witness.owners), [["global"], ["session"]]);
-		assert.equal(reads.includes(f.privatePaths.checkpoint), true);
-		const differentlySelected = (await f.load(["global"]))!;
-		assert.throws(() => assertSelectedFileCohortBasis(cohort, differentlySelected), /policy changed/);
-		writeFileSync(f.privatePaths.checkpoint, "invalid-private-legacy-body");
-		await assert.rejects(f.load(["cwd"]));
+		const before = captureTemporalFileBases(f.cwd, f.sessionId, f.root);
+		const { reads } = await observeReads(async () => assert.rejects(f.load(["cwd"]), /lifecycle V1 is retired/));
+		assert.deepEqual(reads.filter(path => /(?:checkpoint\.json|patches\.jsonl|meta\.json)$/.test(path)), []);
+		assert.deepEqual(captureTemporalFileBases(f.cwd, f.sessionId, f.root), before);
 	});
 
 	test("selected basis checks include lifecycle/selected bytes and existence dependencies, not unrelated excluded bytes", async (t) => {
@@ -471,205 +463,62 @@ test("metadata4 owned conversion uses exact-byte backup/CAS/rollback and selecte
 function fixture(t: TestContext) {
 	const parent = mkdtempSync(join(tmpdir(), "state-flow-files-"));
 	t.after(() => rmSync(parent, { recursive: true, force: true }));
-	const root = join(parent, "store");
+	const root = join(parent, "store"), cwd = join(parent, "project"), sessionId = "file-session";
 	initializeFileStore(root);
-	const cwd = join(parent, "project");
-	const sessionId = "file-session";
-	const snapshot = emptySnapshot("active");
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const runtime = createSessionRuntime(snapshot, cwd, sessionId, view.lineage);
-	const base = captureTemporalFileBase(cwd, sessionId, root);
-	return { parent, root, cwd, sessionId, snapshot, view, runtime, base };
+	return { parent, root, cwd, sessionId, base: captureTestBasis(cwd, sessionId, root) };
 }
 
-function actualReference(cwd: string, sessionId: string, root: string): string {
-	return `file:${hashJson({ root, files: captureTemporalFileBases(cwd, sessionId, root).map(({ path, identity }) => [relative(root, path), identity]) })}`;
+function captureTestBasis(cwd: string, sessionId: string, root: string) {
+	return { files: captureTemporalFileBases(cwd, sessionId, root) };
 }
 
-
-test("file cohorts persist sparse hot history, terminal responses, and config-only stop without executing Git", (t) => {
+async function seededStore(t: TestContext, selection = DEFAULT_SCOPE_SELECTION) {
 	const f = fixture(t);
-	const spawn = childProcess.spawnSync;
-	childProcess.spawnSync = (() => assert.fail("file publication/recovery must not spawn any command")) as typeof spawn;
+	const runtime = new TemporalRuntime(f.cwd, f.sessionId, f.root);
+	const first = await runtime.withSelectedFirstPatchTransaction(selection, emptySnapshot("active"), tx => tx.publish(tx.snapshot), () => {}, undefined, true);
+	return { ...f, runtime, first };
+}
+
+test("Baseline reloads bounded sparse history and terminal response, and persists Passive without Git", async t => {
+	const spawn = t.mock.method(childProcess, "spawnSync", () => assert.fail("canonical publication and inspection must not spawn a command"));
 	syncBuiltinESMExports();
-	try {
-		writeFileSync(join(f.root, "unrelated.md"), "retained\n");
-		let publication = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
-		assert.ok(isFileRevision(publication.revision));
-		assert.equal("commit" in publication, false);
-		assert.equal("push" in publication, false);
-		const firstReference = publication.revision;
-		const retained = [readTemporalState(f.view)];
-		for (let n = 1; n <= 10; n++) {
-			const scope = n % 3 === 0 ? "global" : n % 2 === 0 ? "cwd" : "session";
-			f.view = advanceTemporalState(f.view, [{ scope, patch: {
-				tactics: { [scope]: n },
-				...(n === 1 ? { intents: { current: "Persist in file-only mode" } } : {}),
-			} }], `T${n}`);
-			f.snapshot.meta.step = n;
-			f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
-			publication = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [scope], publication.base, f.root, f.runtime);
-			retained.push(readTemporalState(f.view));
-			const restarted = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, publication.revision);
-			assert.deepEqual(restarted.view, f.view);
-			for (let offset = 0; offset < restarted.view.lineage.length; offset++) assert.deepEqual(readTemporalState(restarted.view, offset), retained.at(-1 - offset));
-			for (const stream of Object.values(restarted.view.scopes)) assert.ok(stream.patches.length <= 7);
-		}
-		assert.equal(readTemporalState(f.view).intents.current, "Persist in file-only mode");
-		assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, firstReference), /unavailable/);
-		f.view = advanceTemporalState(f.view, [{ scope: "session", patch: { response: "Final answer" } }], "terminal");
-		f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
-		publication = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["session"], publication.base, f.root, f.runtime);
-		assert.equal(readTemporalState(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, publication.revision).view).response, "Final answer");
-		const noOp = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], publication.base, f.root, f.runtime);
-		assert.equal(noOp.changed, false);
-		assert.equal(noOp.revision, publication.revision);
-		const semantics = publication.base.files.filter(({ path }) => path.endsWith("checkpoint.json") || path.endsWith("patches.jsonl"));
-		f.snapshot.config.mode = "passive";
-		f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
-		const stopped = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], publication.base, f.root, f.runtime, f.sessionId, undefined, true);
-		const restored = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, stopped.revision);
-		assert.notEqual(restored.runtime.config.mode, "active");
-		assert.deepEqual(restored.view, f.view);
-		for (const file of semantics) assert.deepEqual(readFileSync(file.path), file.bytes);
-		assert.equal(readFileSync(join(f.root, "unrelated.md"), "utf8"), "retained\n");
-		assert.equal(existsSync(join(f.root, ".git")), false);
-	} finally {
-		childProcess.spawnSync = spawn;
-		syncBuiltinESMExports();
+	t.after(() => { spawn.mock.restore(); syncBuiltinESMExports(); });
+	const f = await seededStore(t);
+	const load = async () => (await loadSelectedFileCohort(f.cwd, f.sessionId, DEFAULT_SCOPE_SELECTION, f.root))!;
+	writeFileSync(join(f.root, "unrelated.md"), "retained\n");
+	const retained = [f.runtime.readView()];
+	for (let step = 1; step <= 11; step++) {
+		const scope = step === 11 ? "session" : DEFAULT_SCOPE_SELECTION[(step - 1) % 3]!;
+		const patch = step === 11 ? { response: "Final answer" } : { tactics: { [scope]: step } };
+		const accepted = await f.runtime.withSelectedPatchTransaction(tx => tx.publish(
+			{ ...tx.snapshot, meta: { step } }, { id: `T${step}`, transitions: [{ scope, patch }] },
+		), () => {});
+		retained.push(f.runtime.readView());
+		const restarted = await load();
+		assertSelectedFileCohortBasis(restarted, accepted.cohort);
+		assert.equal(restarted.lifecycle.sourceVersion, "baseline");
+		assert.equal(restarted.view.lineage.length, Math.min(step, 7) + 1);
+		for (let offset = 0; offset < restarted.view.lineage.length; offset++) assert.deepEqual(readTemporalView(restarted.view, offset), retained.at(-1 - offset));
 	}
-});
-
-test("file cohorts persist scope provenance beside semantic state and reload it exactly", (t) => {
-	const f = fixture(t);
-	const artifactPath = join(f.parent, "knowledge", "a.md");
-	mkdirSync(dirname(artifactPath), { recursive: true });
-	writeFileSync(artifactPath, "guidance\n");
-	const sourceHash = hashArtifactSource("guidance\n");
-	f.view = advanceTemporalState(f.view, [{ scope: "global", patch: { artifacts: { [artifactPath]: { description: "Guidance" } } } }], "T1");
-	f.snapshot.meta.step = 1;
-	const provenance = {
-		global: { [artifactPath]: { sourceHash, compilerRevision: ORDINARY_ARTIFACT_COMPILER } },
-		cwd: {},
-		session: {},
-	};
-	f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage, provenance.session);
-	const first = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime, f.sessionId, provenance);
-	const loaded = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, first.revision);
-	assert.deepEqual(loaded.provenance, provenance);
-	const globalMeta = temporalScopePaths(f.cwd, f.sessionId, "global", f.root).meta;
-	assert.deepEqual(JSON.parse(readFileSync(globalMeta, "utf8")), {
-		version: 3, artifacts: provenance.global,
-		temporal: { revision: 1, checkpoint: f.view.scopes.global.checkpoint.through, patches: f.view.scopes.global.patches.map((record) => record.transition) },
-	});
-	assert.equal(existsSync(temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root).meta), true);
-	// A provenance-only change is still one durable cohort without a semantic transition.
-	const refreshed = {
-		global: { [artifactPath]: { sourceHash: hashArtifactSource("guidance two\n"), compilerRevision: ORDINARY_ARTIFACT_COMPILER } },
-		cwd: {},
-		session: {},
-	};
-	const second = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], first.base, f.root, f.runtime, f.sessionId, refreshed);
-	assert.equal(second.changed, true);
-	assert.notEqual(second.revision, first.revision);
-	assert.deepEqual(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, second.revision).provenance, refreshed);
-	assert.deepEqual(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, second.revision).view, f.view);
-});
-
-test("file references bind exact bytes, complete runtime identities and lineage, never Git pointers", (t) => {
-	const f = fixture(t);
-	const p = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
-	for (const revision of ["HEAD", "a".repeat(40), "file:" + "A".repeat(64)]) assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, revision), /exact file revision/);
-	assert.throws(() => loadTemporalFileRevision(f.cwd, "foreign", f.root, p.revision), /unavailable/);
-	assert.throws(() => loadTemporalFileRevision(join(f.cwd, "other"), f.sessionId, f.root, p.revision), /unavailable/);
-	const copy = join(f.parent, "copied");
-	fs.cpSync(f.root, copy, { recursive: true });
-	assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, copy, p.revision), /unavailable/);
-	const paths = sessionRuntimePaths(f.cwd, f.sessionId, f.root);
-	const original = readFileSync(paths.runtime);
-	writeFileSync(paths.runtime, Buffer.concat([original, Buffer.from("\n")]));
-	assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, p.revision), /unavailable/);
-	for (const mutate of [
-		(meta: any) => { meta.identity.sessionId = "foreign"; },
-		(meta: any) => { meta.lineage = [{ id: "foreign", parent: null, position: 0 }]; },
-	]) {
-		const meta = JSON.parse(original.toString());
-		mutate(meta);
-		writeFileSync(paths.runtime, JSON.stringify(meta));
-		assert.throws(() => loadTemporalFileRevision(f.cwd, f.sessionId, f.root, actualReference(f.cwd, f.sessionId, f.root)), /identity|lineage|boundary|provenance|historical|origin|reachable/i);
-	}
-});
-
-test("file CAS rejects stale and foreign bases and omitted changes before writes", (t) => {
-	const f = fixture(t);
-	assert.throws(() => publishTemporalStateToFiles(f.cwd, "foreign", f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime), /scope identity changed/);
-	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["session"], f.base, f.root, f.runtime), /omitted a changed stream/);
-	const p = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
-	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], f.base, f.root, f.runtime), /changed concurrently/);
-	const accepted = captureTemporalFileBases(f.cwd, f.sessionId, f.root);
-	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global"], p.base, f.root, f.runtime, f.sessionId, undefined, true), /Runtime-only publication cannot write/);
-	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], p.base, f.root, f.runtime, f.sessionId, { global: {}, cwd: {}, session: {} }, true), /Runtime-only publication cannot write/);
-	assert.deepEqual(captureTemporalFileBases(f.cwd, f.sessionId, f.root), accepted);
-	const path = temporalScopePaths(f.cwd, f.sessionId, "global", f.root).patches;
-	const concurrent = Buffer.from([0xff, 0xfe, 0x0a]);
-	writeFileSync(path, concurrent);
-	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, [], p.base, f.root, f.runtime), /changed concurrently/);
-	assert.deepEqual(readFileSync(path), concurrent);
-});
-
-test("lazy corruption and stale-basis publication fail before damaging retained hot state", (t) => {
-	const f = fixture(t);
-	const initialized = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
-	const peer = advanceTemporalState(f.view, [{ scope: "session", patch: { lazy: { owner: "peer" } } }], "lazy-peer");
-	const peerRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, peer.lineage);
-	const accepted = publishTemporalStateToFiles(f.cwd, f.sessionId, peer, ["session"], initialized.base, f.root, peerRuntime);
-
-	const corrupt = structuredClone(peer);
-	corrupt.scopes.session.checkpoint.state.lazy = null as never;
-	assert.throws(
-		() => publishTemporalStateToFiles(f.cwd, f.sessionId, corrupt, ["session"], accepted.base, f.root, peerRuntime),
-		/Invalid temporal materialized semantic state/,
-	);
-
-	const stale = advanceTemporalState(f.view, [{ scope: "session", patch: { tactics: { hot: "stale" }, lazy: { owner: "stale" } } }], "lazy-stale");
-	const staleRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, stale.lineage);
-	assert.throws(
-		() => publishTemporalStateToFiles(f.cwd, f.sessionId, stale, ["session"], initialized.base, f.root, staleRuntime),
-		/changed concurrently/,
-	);
-	const retained = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, actualReference(f.cwd, f.sessionId, f.root)).view;
-	assert.deepEqual(readTemporalState(retained, 0, "session").lazy, { owner: "peer" });
-	assert.equal(readTemporalState(retained, 0, "session").tactics.hot, undefined);
-});
-
-
-test("publication waits for a brief cooperating live owner", async (t) => {
-	const f = fixture(t);
-	const lock = join(f.root, ".state-flow-publication.lock");
-	const child = childProcess.spawn(process.execPath, ["-e", `
-		const fs = require("node:fs");
-		const path = process.argv[1];
-		fs.writeFileSync(path, process.pid + "\\n", { flag: "wx", mode: 0o600 });
-		process.stdout.write("ready\\n");
-		setTimeout(() => { fs.rmSync(path); }, 150);
-	`, lock], { stdio: ["ignore", "pipe", "inherit"] });
-	t.after(() => { if (child.exitCode === null) child.kill(); });
-	await once(child.stdout!, "data");
-	let entered = false;
-	withStoragePublicationLock(f.root, () => { entered = true; });
-	assert.equal(entered, true);
-	assert.equal(existsSync(lock), false);
-	if (child.exitCode === null) await once(child, "exit");
+	assert.equal(f.runtime.readView().response, "Final answer");
+	const before = await load();
+	const noOp = await f.runtime.withSelectedPatchTransaction(tx => tx.publish(tx.snapshot), () => {});
+	assert.equal(noOp.changed, false);
+	await f.runtime.persistSelectedPassive(() => {});
+	const after = await load(), config = sessionRuntimePaths(f.cwd, f.sessionId, f.root).config;
+	assert.equal(after.lifecycle.runtime.config.mode, "passive");
+	assert.deepEqual(after.view, before.view);
+	assert.deepEqual(after.basis.files.filter(({ path }) => path !== config), before.basis.files.filter(({ path }) => path !== config));
+	assert.equal(readFileSync(join(f.root, "unrelated.md"), "utf8"), "retained\n");
+	assert.equal(existsSync(join(f.root, ".git")), false);
 });
 
 test("async store transactions wait through a partial foreign publication without blocking the event loop", { timeout: 15_000 }, async (t) => {
-	const f = fixture(t);
-	publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
-	const next = advanceTemporalState(f.view, (["global", "cwd", "session"] as const).map((scope) => ({
+	const f = await seededStore(t);
+	const transition: AcceptedTransition = { id: "foreign", transitions: DEFAULT_SCOPE_SELECTION.map(scope => ({
 		scope, patch: { tactics: { cohort: "foreign" } },
-	})), "foreign");
-	f.snapshot.meta.step = 1;
-	const nextRuntime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, next.lineage);
+	})) };
+	const next = advanceTemporalState(f.first.cohort.view, transition.transitions, transition.id);
 	const partial = join(f.parent, "partial");
 	const release = join(f.parent, "release");
 	const receipt = join(f.parent, "receipt.json");
@@ -677,7 +526,7 @@ test("async store transactions wait through a partial foreign publication withou
 		import fs from "node:fs";
 		import { syncBuiltinESMExports } from "node:module";
 		import { withStorageTransaction } from ${JSON.stringify(new URL("../lib/storage.ts", import.meta.url).href)};
-		const { cwd, sessionId, root, view, runtime, partial, release, receipt, pauseAt } = JSON.parse(process.argv[1]);
+		const { cwd, sessionId, root, view, transition, partial, release, receipt, pauseAt } = JSON.parse(process.argv[1]);
 		const rename = fs.renameSync;
 		let paused = false;
 		fs.renameSync = (from, to) => {
@@ -693,11 +542,11 @@ test("async store transactions wait through a partial foreign publication withou
 		};
 		syncBuiltinESMExports();
 		await withStorageTransaction(root, (tx) => {
-			const base = tx.capture(cwd, sessionId, root);
-			const result = tx.publish(cwd, sessionId, view, ["global", "cwd", "session"], base, root, runtime);
-			fs.writeFileSync(receipt, JSON.stringify({ revision: result.revision, files: result.base.files.map(({ path, identity }) => ({ path, identity })) }));
+			const base = tx.prepareSelected(cwd, sessionId, ["global", "cwd", "session"], root);
+			const result = tx.publishSelected(cwd, sessionId, { view, transition, historyLimit: 7 }, base, root);
+			fs.writeFileSync(receipt, JSON.stringify(result.cohort.basis.files.map(({ path, identity }) => ({ path, identity }))));
 		});
-	`, JSON.stringify({ cwd: f.cwd, sessionId: f.sessionId, root: f.root, view: next, runtime: nextRuntime,
+	`, JSON.stringify({ cwd: f.cwd, sessionId: f.sessionId, root: f.root, view: next, transition,
 		partial, release, receipt, pauseAt: temporalScopePaths(f.cwd, f.sessionId, "global", f.root).patches })], { stdio: ["ignore", "ignore", "inherit"] });
 	t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
 	const closed = once(child, "close");
@@ -709,7 +558,7 @@ test("async store transactions wait through a partial foreign publication withou
 	let entered = false;
 	const observed = withStorageTransaction(f.root, (tx) => {
 		entered = true;
-		return tx.capture(f.cwd, f.sessionId, f.root).files.map(({ path, identity }) => ({ path, identity }));
+		return tx.prepareSelected(f.cwd, f.sessionId, DEFAULT_SCOPE_SELECTION, f.root)!;
 	});
 	let settled = false;
 	observed.then(() => { settled = true; }, () => { settled = true; });
@@ -718,13 +567,12 @@ test("async store transactions wait through a partial foreign publication withou
 	assert.equal(settled, false, "ordinary live contention must still be waiting, not a failed model call");
 	assert.equal(readFileSync(join(f.root, ".state-flow-publication.lock"), "utf8").trim(), String(child.pid));
 	writeFileSync(release, "continue");
-	const files = await observed;
+	const loaded = await observed;
 	assert.equal((await closed)[0], 0);
-	const accepted = JSON.parse(readFileSync(receipt, "utf8"));
-	assert.deepEqual(files, accepted.files, "reader must see the complete checkpoint/tail/metadata/runtime cohort");
-	const loaded = loadTemporalFileRevision(f.cwd, f.sessionId, f.root, accepted.revision);
+	assert.deepEqual(loaded.basis.files.map(({ path, identity }) => ({ path, identity })), JSON.parse(readFileSync(receipt, "utf8")),
+		"reader must see the complete accepted cohort");
 	assert.deepEqual(loaded.view, next);
-	for (const scope of ["global", "cwd", "session"] as const) assert.equal(readTemporalState(loaded.view, 0, scope).tactics.cohort, "foreign");
+	for (const scope of DEFAULT_SCOPE_SELECTION) assert.equal(readTemporalView(loaded.view, 0, scope).tactics!.cohort, "foreign");
 });
 
 test("store transactions serialize local waiters, cancel without stealing, and expire borrowed operations", async (t) => {
@@ -740,7 +588,7 @@ test("store transactions serialize local waiters, cancel without stealing, and e
 	const first = withStorageTransaction(f.root, async (tx) => {
 		borrowed.push(tx);
 		order.push("first");
-		assert.throws(() => tx.capture(f.cwd, f.sessionId, join(f.parent, "other")), /different store/);
+		assert.throws(() => tx.observeSelectedShared(f.cwd, ["cwd"], join(f.parent, "other")), /different store/);
 		await assert.rejects(withStorageTransaction(f.root, () => assert.fail("recursive acquisition")), /Recursive/);
 		enter();
 		await gate;
@@ -761,8 +609,10 @@ test("store transactions serialize local waiters, cancel without stealing, and e
 	await Promise.all([first, second]);
 	assert.deepEqual(order, ["first", "released", "second"]);
 	assert.equal(existsSync(lock), false);
-	assert.throws(() => borrowed[0]!.capture(f.cwd, f.sessionId, f.root), /has ended/);
-	assert.throws(() => borrowed[0]!.publish(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime), /has ended/);
+	assert.throws(() => borrowed[0]!.observeSelectedShared(f.cwd, ["cwd"], f.root), /has ended/);
+	assert.throws(() => borrowed[0]!.initializeSelectedSharedOrigin(f.cwd, f.sessionId, {
+		selection: ["cwd"], snapshot: emptySnapshot("active"), historyLimit: 7,
+	}, f.root), /has ended/);
 	await assert.rejects(withStorageTransaction(f.root, () => assert.fail("aborted before acquisition"), AbortSignal.abort()), { name: "AbortError" });
 	assert.equal(existsSync(lock), false);
 });
@@ -780,7 +630,9 @@ test("nonwaiting admission distinguishes occupied locks from invalid evidence wi
 		assert.equal(readFileSync(lock, "utf8"), contents);
 		rmSync(lock);
 	}
-	assert.deepEqual(await withStorageTransaction(f.root, (tx) => tx.capture(f.cwd, f.sessionId, f.root), undefined, false), f.base);
+	const empty = await withStorageTransaction(f.root, tx => tx.observeSelectedShared(f.cwd, ["cwd"], f.root), undefined, false);
+	assert.equal(empty.view, undefined);
+	assert.deepEqual(captureTestBasis(f.cwd, f.sessionId, f.root), f.base);
 	assert.equal(existsSync(lock), false);
 });
 
@@ -823,47 +675,42 @@ test("invalid or interrupted locks remain explicit and untouched, including empt
 	syncBuiltinESMExports();
 	const unavailable = (error: unknown) => error instanceof RevisionUnavailableError && error.cause === denied;
 	try {
-		assert.throws(() => withStoragePublicationLock(f.root, () => assert.fail("unreadable lock admitted")), unavailable);
 		await assert.rejects(withStorageTransaction(f.root, () => assert.fail("unreadable lock admitted")), unavailable);
 	} finally { fs.readFileSync = read; syncBuiltinESMExports(); }
 	assert.equal(readFileSync(lock, "utf8"), "unreadable owner\n");
 	assert.deepEqual(captureTemporalFileBases(f.cwd, f.sessionId, f.root), f.base.files);
 });
 
-test("transaction cancellation and failed publication preserve canonical bytes and release exclusion", async (t) => {
-	const f = fixture(t);
-	await withStorageTransaction(f.root, (tx) => {
-		const base = tx.capture(f.cwd, f.sessionId, f.root);
-		tx.publish(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], base, f.root, f.runtime);
-	});
-	const before = captureTemporalFileBases(f.cwd, f.sessionId, f.root);
-	const next = advanceTemporalState(f.view, [{ scope: "session", patch: { tactics: { accepted: true } } }], "next");
-	const runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, next.lineage);
+test("transaction cancellation and failed Baseline publication preserve canonical bytes and release exclusion", async t => {
+	const f = await seededStore(t, ["session"]);
+	const transition: AcceptedTransition = { id: "next", transitions: [{ scope: "session", patch: { tactics: { accepted: true } } }] };
+	const view = advanceTemporalState(f.first.cohort.view, transition.transitions, transition.id);
+	const request = { view, transition, historyLimit: 7 };
+	const before = captureTestBasis(f.cwd, f.sessionId, f.root);
 	const controller = new AbortController();
-	await assert.rejects(withStorageTransaction(f.root, (tx) => {
-		const base = tx.capture(f.cwd, f.sessionId, f.root);
+	await assert.rejects(withStorageTransaction(f.root, tx => {
+		const base = tx.prepareSelected(f.cwd, f.sessionId, ["session"], f.root)!;
 		controller.abort();
-		tx.publish(f.cwd, f.sessionId, next, ["session"], base, f.root, runtime);
+		tx.publishSelected(f.cwd, f.sessionId, request, base, f.root);
 	}, controller.signal), { name: "AbortError" });
+	assert.deepEqual(captureTestBasis(f.cwd, f.sessionId, f.root), before);
+	const patches = temporalScopePaths(f.cwd, f.sessionId, "session", f.root).patches;
 	const rename = fs.renameSync;
 	let failed = false;
 	fs.renameSync = (from, to) => {
-		if (to === temporalScopePaths(f.cwd, f.sessionId, "session", f.root).patches) { failed = true; throw new Error("injected transaction rename failure"); }
+		if (to === patches) { failed = true; throw new Error("injected transaction rename failure"); }
 		rename(from, to);
 	};
 	syncBuiltinESMExports();
-	try {
-		await assert.rejects(withStorageTransaction(f.root, (tx) => {
-			tx.publish(f.cwd, f.sessionId, next, ["session"], tx.capture(f.cwd, f.sessionId, f.root), f.root, runtime);
-		}), /injected transaction rename failure/);
-	} finally { fs.renameSync = rename; syncBuiltinESMExports(); }
+	const publish = () => publishSelectedTemporalStateToFiles(f.cwd, f.sessionId, request, f.first.cohort, f.root);
+	try { await assert.rejects(publish(), /injected transaction rename failure/); }
+	finally { fs.renameSync = rename; syncBuiltinESMExports(); }
 	assert.equal(failed, true);
-	assert.deepEqual(captureTemporalFileBases(f.cwd, f.sessionId, f.root), before);
+	assert.deepEqual(captureTestBasis(f.cwd, f.sessionId, f.root), before);
 	assert.equal(existsSync(join(f.root, ".state-flow-publication.lock")), false);
-	await withStorageTransaction(f.root, (tx) => {
-		tx.publish(f.cwd, f.sessionId, next, ["session"], tx.capture(f.cwd, f.sessionId, f.root), f.root, runtime);
-	});
-	assert.equal(loadTemporalFileRevision(f.cwd, f.sessionId, f.root, actualReference(f.cwd, f.sessionId, f.root)).view.lineage.at(-1)!.id, "next");
+	const accepted = await publish();
+	assertSelectedFileCohortBasis(accepted.cohort, (await loadSelectedFileCohort(f.cwd, f.sessionId, ["session"], f.root))!);
+	assert.equal(accepted.cohort.view.lineage.at(-1)!.id, "next");
 });
 
 test("transaction release preserves replaced or overwritten lock ownership and both failure causes", async (t) => {
@@ -884,49 +731,6 @@ test("transaction release preserves replaced or overwritten lock ownership and b
 		rmSync(lock);
 	}
 });
-
-test("file preparation rollback restores opaque originals and preserves conflicting external output", (t) => {
-	const f = fixture(t);
-	f.view.scopes.session.checkpoint.state.tactics = { raw: "\ufffd" };
-	const first = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["global", "cwd", "session"], f.base, f.root, f.runtime);
-	const paths = temporalScopePaths(f.cwd, f.sessionId, "session", f.root);
-	const source = readFileSync(paths.checkpoint, "utf8");
-	const opaque = Buffer.concat([Buffer.from(source.split("\ufffd")[0]!), Buffer.from([0xff]), Buffer.from(source.split("\ufffd")[1]!)]);
-	writeFileSync(paths.checkpoint, opaque);
-	let base = captureTemporalFileBase(f.cwd, f.sessionId, f.root);
-	f.view = advanceTemporalState(f.view, [{ scope: "session", patch: { response: "New" } }], "T1");
-	f.runtime = createSessionRuntime(f.snapshot, f.cwd, f.sessionId, f.view.lineage);
-	assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["session"], base, f.root, f.runtime), /encoded data|UTF-8/i);
-	const rename = fs.renameSync;
-	let injected = false;
-	fs.renameSync = (from, to) => {
-		if (!injected && to === paths.patches) { injected = true; throw new Error("injected rename failure"); }
-		rename(from, to);
-	};
-	syncBuiltinESMExports();
-	try {
-		assert.throws(() => writeOwnedFileUpdates([{ path: paths.checkpoint, content: source }, { path: paths.patches, content: '{"response":"New"}\n' }], base.files, f.root), /injected rename failure/);
-	} finally { fs.renameSync = rename; syncBuiltinESMExports(); }
-	assert.equal(injected, true);
-	assert.deepEqual(readFileSync(paths.checkpoint), opaque);
-	assert.deepEqual(readFileSync(paths.patches), first.base.files.find(({ path }) => path === paths.patches)!.bytes);
-	// Semantic publication rejects invalid UTF-8; exercise post-publication conflict handling from a valid basis.
-	writeFileSync(paths.checkpoint, source);
-	base = captureTemporalFileBase(f.cwd, f.sessionId, f.root);
-	const concurrent = Buffer.from([0xfe, 0xff]);
-	injected = false;
-	fs.renameSync = (from, to) => {
-		rename(from, to);
-		if (!injected && to === paths.patches) { injected = true; writeFileSync(paths.checkpoint, concurrent); }
-	};
-	syncBuiltinESMExports();
-	try {
-		assert.throws(() => publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["session"], base, f.root, f.runtime), AggregateError);
-	} finally { fs.renameSync = rename; syncBuiltinESMExports(); }
-	assert.deepEqual(readFileSync(paths.checkpoint), concurrent);
-	assert.equal(existsSync(join(f.root, ".state-flow-publication.lock")), false);
-});
-
 
 test("file directory creation preserves nonempty directories and rejects symlink ancestors", (t) => {
 	const f = fixture(t);
@@ -1034,12 +838,10 @@ test("selected shared origin preparation is store-bound and expires with its tra
 		unchanged(before);
 	});
 
-	test("matching legacy lifecycle candidates cannot authorize Passive-only conversion", async t => {
+	test("retired V1 cannot be used as a Passive lifecycle source", async t => {
 		const { f, before, bodies } = await legacyLifecycle(t);
 		await withStorageTransaction(f.root, async transaction => {
-			const legacy = transaction.prepareSelected(f.cwd, f.id, ["cwd"], f.root)!;
-			assert.equal(legacy.lifecycle.sourceVersion, 1);
-			await withoutBodies(bodies, () => assert.rejects(async () => transaction.persistSelectedPassive(f.cwd, f.id, legacy, f.root), /requires lifecycle v2 and semantic v3/));
+			await withoutBodies(bodies, () => assert.rejects(async () => transaction.prepareSelected(f.cwd, f.id, ["cwd"], f.root), /lifecycle V1 is retired/));
 		});
 		unchanged(before);
 	});
@@ -1055,34 +857,28 @@ test("selected Session acquisition rejects a mismatched storage transaction root
 });
 
 {
-	function fixture(t: TestContext, version: 1 | 2 = 1, acquisition: "acquired" | "unacquired" | "deferred" = "acquired") {
+	function fixture(t: TestContext, acquisition: "acquired" | "unacquired" | "deferred" = "acquired") {
 		const parent = mkdtempSync(join(tmpdir(), "state-flow-selected-publish-"));
 		t.after(() => rmSync(parent, { recursive: true, force: true }));
 		const root = join(parent, "store"), cwd = join(parent, "workspace"), sessionId = "owner";
-		initializeFileStore(root);
 		let view = createTemporalState({ global: { strategy: { marker: "global" } }, cwd: { strategy: { marker: "cwd" } }, session: {} }, "publish-origin");
 		view = advanceTemporalState(view, [{ scope: "global", patch: { tactics: { step: 1 } } }], "publish-global");
 		view = advanceTemporalState(view, [{ scope: "cwd", patch: { tactics: { step: 2 } } }], "publish-cwd");
 		if (acquisition === "acquired") view = advanceTemporalState(view, [{ scope: "session", patch: { strategy: { marker: "private" } } }], "publish-session");
-		const runtime = createSessionRuntime(emptySnapshot("active"), cwd, sessionId, view.lineage);
-		publishTemporalStateToFiles(cwd, sessionId, view, ["global", "cwd", "session"], captureTemporalFileBase(cwd, sessionId, root), root, runtime);
+		writeNumericLifecycleFixture(cwd, sessionId, root, view, 2, acquisition);
 		const paths = sessionRuntimePaths(cwd, sessionId, root);
 		const privatePaths = temporalScopePaths(cwd, sessionId, "session", root);
-		const metadata = { ...runtime.meta, foreign: { retained: "$session.working.opaque" } };
-		writeFileSync(paths.runtime, JSON.stringify(version === 1 ? metadata : { ...metadata, version: 2, privateAcquisition: acquisition, causalWitnesses: temporalCausalWitnesses(view) }));
-		if (version === 2) {
-			writeFileSync(paths.config, JSON.stringify({ mode: "active", scopes: acquisition === "acquired" ? ["global", "cwd", "session"] : ["global", "cwd"] }));
-			if (acquisition !== "acquired") for (const path of [privatePaths.checkpoint, privatePaths.patches, privatePaths.meta]) rmSync(path);
-		}
+		const metadata = JSON.parse(readFileSync(paths.runtime, "utf8"));
+		writeFileSync(paths.runtime, JSON.stringify({ ...metadata, foreign: { retained: "$session.working.opaque" } }));
 		for (const scope of ["global", "cwd", "session"] as const) {
 			const path = temporalScopePaths(cwd, sessionId, scope, root).meta;
 			if (existsSync(path)) writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), foreign: { keep: scope }, artifacts: { "future-note": { retained: "opaque" } } }));
 		}
-		const original = captureTemporalFileBase(cwd, sessionId, root);
+		const original = captureTestBasis(cwd, sessionId, root);
 		const backupDir = `${root}-migration-backups`;
 		const load = async (selection: readonly StateScope[]) => (await loadSelectedFileCohort(cwd, sessionId, captureScopeSelection(selection), root))!;
 		const publish = (base: SelectedFileCohort, request: SelectedPublicationRequest, signal?: AbortSignal) => publishSelectedTemporalStateToFiles(cwd, sessionId, request, base, root, sessionId, signal);
-		return { root, cwd, sessionId, paths, privatePaths, view, original, backupDir, load, publish };
+		return { root, cwd, sessionId, paths, privatePaths, original, backupDir, load, publish };
 	}
 
 	function request(base: SelectedFileCohort, transition?: AcceptedTransition, historyLimit = 7): SelectedPublicationRequest {
@@ -1097,35 +893,59 @@ test("selected Session acquisition rejects a mismatched storage transaction root
 		}
 	}
 
-	test("lifecycle-only v1→v2 publication backs up the complete exact source before changes; scope selection changes no semantic revision", async (t) => {
+	test("V2 observation, accepted no-op and mode-only persistence do not convert", async t => {
+		const f = fixture(t);
+		const selection = ["global", "cwd", "session"] as const;
+		const observer = new TemporalRuntime(f.cwd, f.sessionId, f.root);
+		await observer.refreshSelectedCurrent(selection, () => {});
+		unchanged(f);
+		assert.equal(existsSync(f.backupDir), false);
+		const owner = new TemporalRuntime(f.cwd, f.sessionId, f.root);
+		const noOp = await owner.withSelectedCurrentTransaction(selection, (_snapshot, publish) => publish(), () => {});
+		assert.equal(noOp.cohort.lifecycle.sourceVersion, 2);
+		assert.equal(noOp.migrationBackup, undefined);
+		const before = captureTestBasis(f.cwd, f.sessionId, f.root);
+		await owner.persistSelectedPassive(() => {});
+		assert.equal(JSON.parse(readFileSync(f.paths.runtime, "utf8")).version, 2);
+		assert.equal(JSON.parse(readFileSync(f.paths.config, "utf8")).mode, "passive");
+		for (const file of before.files) if (file.path !== f.paths.config && file.path !== f.paths.runtime) assert.deepEqual(readFileSync(file.path), file.bytes);
+		await withStorageTransaction(f.root, tx => {
+			const base = tx.prepareSelectedCurrent(f.cwd, f.sessionId, selection, 0, f.root);
+			const folded = tx.acceptSelectedCurrent(f.cwd, f.sessionId, { selection, historyLimit: 0 }, base, f.root);
+			assert.equal(folded.changed, true);
+			assert.equal(folded.cohort.view.lineage.length, 1);
+			assert.equal(folded.cohort.lifecycle.sourceVersion, 2, "representation-only folding must not convert");
+		});
+		assert.equal(existsSync(f.backupDir), false);
+	});
+
+	test("V2 conversion refuses an invalid backup directory and restores exact bytes on a later publication failure", async t => {
 		const f = fixture(t);
 		const base = await f.load(["cwd"]);
-		const result = await f.publish(base, request(base));
-		assert.ok(result.migrationBackup);
-		const manifest = JSON.parse(readFileSync(result.migrationBackup, "utf8"));
-		assert.deepEqual(manifest.convertedScopes, []);
-		assert.deepEqual(manifest.lifecycleConversion, { sourceVersion: 1, targetVersion: 2 });
-		assert.equal(manifest.files.length, 11);
-		for (const file of f.original.files) assert.equal(manifest.files.find((entry: any) => entry.path === relative(f.root, file.path)).bytes, file.bytes === undefined ? null : Buffer.from(file.bytes).toString("base64"));
-		assert.deepEqual(manifest.updatedPaths.sort(), [relative(f.root, f.paths.config), relative(f.root, f.paths.runtime)].sort());
-		assert.equal(fs.statSync(result.migrationBackup).mode & 0o777, 0o600);
-		assert.equal(fs.statSync(f.backupDir).mode & 0o777, 0o700);
-		unchanged(f, [f.paths.config, f.paths.runtime]);
-		assert.deepEqual(temporalScopeRevisions(result.cohort.view), temporalScopeRevisions(base.view));
-		assert.deepEqual(result.cohort.view.lineage, base.view.lineage);
-		assert.equal(result.cohort.lifecycle.sourceVersion, 2);
-		assert.equal(result.cohort.lifecycle.runtime.meta.privateAcquisition, "acquired");
-		assert.deepEqual(result.cohort.lifecycle.runtime.config.scopes, ["cwd"]);
-		assert.equal(result.cohort.basis.files.length, 5);
-		assertSelectedFileCohortBasis(result.cohort, await f.load(["cwd"]));
-		const again = await f.publish(result.cohort, request(result.cohort));
-		assert.equal(again.changed, false);
-		assert.equal(again.migrationBackup, undefined);
+		const next = request(base, { id: "first-baseline", transitions: [{ scope: "cwd", patch: { tactics: { check: true } } }] });
+		mkdirSync(f.backupDir, { mode: 0o755 });
+		await assert.rejects(f.publish(base, next), /backup directory must be private/);
+		unchanged(f);
+		fs.chmodSync(f.backupDir, 0o700);
+		const rename = fs.renameSync;
+		let injected = false;
+		fs.renameSync = (from, to) => {
+			if (!injected && to === f.paths.runtime) { injected = true; throw new Error("injected Baseline publication failure"); }
+			rename(from, to);
+		};
+		syncBuiltinESMExports();
+		try { await assert.rejects(f.publish(base, next), /injected Baseline publication failure/); }
+		finally { fs.renameSync = rename; syncBuiltinESMExports(); }
+		assert.equal(injected, true);
+		unchanged(f);
 		assert.equal(readdirSync(f.backupDir).length, 1);
+		const retry = await f.publish(base, next);
+		assert.equal(retry.cohort.lifecycle.sourceVersion, "baseline");
+		assert.equal(readdirSync(f.backupDir).length, 1, "retry reuses the same verified backup");
 	});
 
 	test("selected replay publishes exact next receipts, increments only changed owners and preserves excluded bytes/opaque metadata", async (t) => {
-		const f = fixture(t, 2);
+		const f = fixture(t);
 		const base = await f.load(["global", "cwd"]);
 		const transition: AcceptedTransition = { id: "selected-accepted", transitions: [
 			{ scope: "global", patch: { strategy: { chosen: "yes" } } }, { scope: "cwd", patch: { tactics: { progress: "verified" } } },
@@ -1134,8 +954,17 @@ test("selected Session acquisition rejects a mismatched storage transaction root
 		next.lifecycle = { config: { mode: "passive" }, meta: { step: 1, specification: "continue" } };
 		const result = await f.publish(base, next);
 		assert.equal(result.changed, true);
-		assert.equal(result.migrationBackup, undefined);
-		assert.equal(existsSync(f.backupDir), false);
+		assert.equal(result.cohort.lifecycle.sourceVersion, "baseline");
+		const wire = JSON.parse(readFileSync(f.paths.runtime, "utf8"));
+		assert.equal(wire.format, "baseline");
+		assert.equal(Object.hasOwn(wire, "causalWitnesses"), false);
+		assert.deepEqual(wire.lineage.at(-1).owners, ["global", "cwd"]);
+		assert.ok(result.migrationBackup);
+		const manifest = JSON.parse(readFileSync(result.migrationBackup, "utf8"));
+		assert.deepEqual(manifest.lifecycleConversion, { sourceVersion: 2, targetVersion: "baseline" });
+		assert.deepEqual(manifest.convertedScopes, []);
+		assert.equal(manifest.files.length, base.basis.files.length);
+		for (const file of base.basis.files) assert.equal(manifest.files.find((entry: any) => entry.path === relative(f.root, file.path)).bytes, file.bytes === undefined ? null : Buffer.from(file.bytes).toString("base64"));
 		assertSelectedFileCohortBasis(result.cohort, await f.load(["global", "cwd"]));
 		assert.deepEqual(temporalScopeRevisions(result.cohort.view), { global: base.view.scopes.global!.revision + 1, cwd: base.view.scopes.cwd!.revision + 1 });
 		assert.equal(result.cohort.lifecycle.runtime.meta.step, 1);
@@ -1151,12 +980,14 @@ test("selected Session acquisition rejects a mismatched storage transaction root
 		const noop = request(result.cohort, transition);
 		const repeated = await f.publish(result.cohort, noop);
 		assert.equal(repeated.changed, false);
+		assert.equal(repeated.migrationBackup, undefined);
+		assert.equal(readdirSync(f.backupDir).length, 1);
 	});
 
 	test("every selected subset publishes one atomic replay and only selected Session can retain its authored response", async (t) => {
 		const order = ["global", "cwd", "session"] as const;
 		for (let mask = 1; mask < 8; mask++) {
-			const f = fixture(t, 2);
+			const f = fixture(t);
 			const selection = order.filter((_, bit) => mask & (1 << bit));
 			const base = await f.load(selection);
 			const transition: AcceptedTransition = { id: `subset-${mask}`, transitions: selection.map((scope) => ({ scope, patch: {
@@ -1198,20 +1029,21 @@ test("selected Session acquisition rejects a mismatched storage transaction root
 
 	test("already-admitted shared-only unacquired/deferred owners can publish but never acquire/create Session", async (t) => {
 		for (const acquisition of ["unacquired", "deferred"] as const) {
-			const f = fixture(t, 2, acquisition);
+			const f = fixture(t, acquisition);
 			const base = await f.load(["cwd"]);
 			const next = request(base, { id: "shared-only-next", transitions: [{ scope: "cwd", patch: { tactics: { check: true } } }] });
 			const result = await f.publish(base, next);
 			assert.equal(result.cohort.lifecycle.runtime.meta.privateAcquisition, acquisition);
 			for (const path of [f.privatePaths.checkpoint, f.privatePaths.patches, f.privatePaths.meta]) assert.equal(existsSync(path), false);
 			await assert.rejects(f.load(["session"]), /requires explicit private acquisition/);
-			assert.equal(existsSync(f.backupDir), false);
+			assert.ok(result.migrationBackup);
+			assert.equal(result.cohort.lifecycle.sourceVersion, "baseline");
 		}
 	});
 
 	test("folding limits 0/1/7/100 preserve exact replay and revisions without folding disabled streams", async (t) => {
 		for (const limit of [0, 1, 7, 100]) {
-			const f = fixture(t, 2);
+			const f = fixture(t);
 			const base = await f.load(["cwd"]);
 			const next = request(base, { id: `limit-${limit}`, transitions: [{ scope: "cwd", patch: { tactics: { limit } } }] }, limit);
 			const result = await f.publish(base, next);
@@ -1226,13 +1058,17 @@ test("selected Session acquisition rejects a mismatched storage transaction root
 	});
 
 	test("stale bytes/presence and cancellation cannot publish or create recovery backups", async (t) => {
-		const f = fixture(t);
-		const base = await f.load(["cwd"]);
-		const foreign = `${readFileSync(f.paths.runtime, "utf8")} `;
-		writeFileSync(f.paths.runtime, foreign);
-		await assert.rejects(f.publish(base, request(base)), /changed concurrently/);
-		assert.equal(readFileSync(f.paths.runtime, "utf8"), foreign);
-		assert.equal(existsSync(f.backupDir), false);
+		for (const target of ["runtime", "scope"] as const) {
+			const f = fixture(t);
+			const base = await f.load(["cwd"]);
+			const path = target === "runtime" ? f.paths.runtime : temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root).checkpoint;
+			const foreign = `${readFileSync(path, "utf8")} `;
+			writeFileSync(path, foreign);
+			await assert.rejects(f.publish(base, request(base)), /changed concurrently/);
+			assert.equal(readFileSync(path, "utf8"), foreign);
+			unchanged(f, [path]);
+			assert.equal(existsSync(f.backupDir), false);
+		}
 		const missing = fixture(t);
 		const missingBase = await missing.load(["cwd"]);
 		rmSync(missing.privatePaths.checkpoint);
@@ -1251,57 +1087,6 @@ test("selected Session acquisition rejects a mismatched storage transaction root
 			assert.equal(existsSync(canceled.backupDir), false);
 			assert.equal(existsSync(lock), true);
 		} finally { rmSync(lock); }
-	});
-
-	test("backup privacy/failure precedes writes and interrupted publication rolls back exactly while retaining/reusing its completed backup", async (t) => {
-		const blocked = fixture(t);
-		const blockedBase = await blocked.load(["cwd"]);
-		fs.mkdirSync(blocked.backupDir, { mode: 0o755 });
-		fs.chmodSync(blocked.backupDir, 0o755);
-		await assert.rejects(blocked.publish(blockedBase, request(blockedBase)), /backup directory must be private/);
-		unchanged(blocked);
-		assert.deepEqual(readdirSync(blocked.backupDir), []);
-		const f = fixture(t);
-		const base = await f.load(["cwd"]);
-		const next = request(base, { id: "interrupted-next", transitions: [{ scope: "cwd", patch: { tactics: { verified: true } } }] });
-		const target = temporalScopePaths(f.cwd, f.sessionId, "cwd", f.root).patches;
-		const rename = fs.renameSync;
-		let injected = false;
-		fs.renameSync = (from, to) => { if (!injected && to === target) { injected = true; throw new Error("injected selected publication failure"); } rename(from, to); };
-		syncBuiltinESMExports();
-		try { await assert.rejects(f.publish(base, next), /injected selected publication failure/); }
-		finally { fs.renameSync = rename; syncBuiltinESMExports(); }
-		assert.equal(injected, true);
-		unchanged(f);
-		assert.equal(readdirSync(f.backupDir).length, 1);
-		const result = await f.publish(base, next);
-		assert.ok(result.migrationBackup);
-		assert.equal(readdirSync(f.backupDir).length, 1);
-	});
-
-	test("a selected publication converts only a legacy lifecycle and never touches omitted owners", async (t) => {
-		const converted = fixture(t, 1);
-		const convertedBase = await converted.load(["cwd"]);
-		const convertedResult = await converted.publish(convertedBase, request(convertedBase));
-		assert.ok(convertedResult.migrationBackup);
-		const manifest = JSON.parse(readFileSync(convertedResult.migrationBackup, "utf8"));
-		// Semantic files are already v3; only the legacy lifecycle representation still converts.
-		assert.deepEqual(manifest.convertedScopes, []);
-		assert.deepEqual(manifest.lifecycleConversion, { sourceVersion: 1, targetVersion: 2 });
-		assert.deepEqual(convertedResult.cohort.view, convertedBase.view);
-		assert.deepEqual(temporalScopeRevisions(convertedResult.cohort.view), temporalScopeRevisions(convertedBase.view));
-		for (const scope of ["global", "session"] as const) {
-			const omitted = temporalScopePaths(converted.cwd, converted.sessionId, scope, converted.root);
-			for (const path of [omitted.checkpoint, omitted.patches, omitted.meta]) {
-				assert.deepEqual(readFileSync(path), converted.original.files.find((file) => file.path === path)!.bytes);
-			}
-		}
-		assertSelectedFileCohortBasis(convertedResult.cohort, await converted.load(["cwd"]));
-		const current = fixture(t, 2);
-		const currentBase = await current.load(["cwd"]);
-		const currentResult = await current.publish(currentBase, request(currentBase));
-		assert.equal(currentResult.migrationBackup, undefined, "a current lifecycle needs no recovery backup");
-		assert.equal(existsSync(current.backupDir), false);
 	});
 
 	test("uncooperative runtime edits during publication survive guarded rollback, not stale overwrite", async (t) => {
@@ -1368,33 +1153,5 @@ test("deferred fork storage capability is store-bound, single-use and transactio
 			assert.equal(transaction.persistSelectedPassive(f.cwd, f.id, base, f.root).cohort.lifecycle.runtime.config.mode, "passive");
 		});
 		assert.throws(escaped, /transaction has ended/);
-	});
-}
-
-{
-	const fixture = legacyPublicationFixture.fixture;
-
-	test("a version-only publication writes nothing and converts no omitted shared owner", (t) => {
-		const f = fixture(t);
-		// Semantic files are already v3, so an unchanged republish publishes no replacement bytes at all.
-		const result = publishTemporalStateToFiles(f.cwd, f.sessionId, f.view, ["session"], f.base, f.root, f.runtime);
-		assert.equal(result.migrationBackup, undefined);
-		assert.equal(result.changed, false);
-		for (const scope of ["global", "cwd"] as const) {
-			const paths = temporalScopePaths(f.cwd, f.sessionId, scope, f.root);
-			for (const path of [paths.checkpoint, paths.patches, paths.meta]) {
-				assert.deepEqual(readFileSync(path), Buffer.from(f.base.files.find((file) => file.path === path)!.bytes!));
-			}
-		}
-	});
-
-	test("stale source CAS cannot create migration writes or backups", (t) => {
-		const stale = fixture(t);
-		const global = temporalScopePaths(stale.cwd, stale.sessionId, "global", stale.root);
-		writeFileSync(global.checkpoint, `${readFileSync(global.checkpoint, "utf8")} `);
-		const foreign = readFileSync(global.checkpoint);
-		assert.throws(() => publishTemporalStateToFiles(stale.cwd, stale.sessionId, stale.view, ["global", "cwd", "session"], stale.base, stale.root, stale.runtime), /changed concurrently/);
-		assert.deepEqual(readFileSync(global.checkpoint), foreign);
-		assert.equal(existsSync(stale.backupDir), false);
 	});
 }

@@ -2,7 +2,15 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
-## Unreleased
+## 2.0.0: One Baseline Lifecycle
+
+- `Breaking: one lifecycle`: Pi and the public `TemporalRuntime` now share Baseline. The former V1 methods, writer and codec are removed; library callers must switch to selected transactions. V1 sessions require a previous compatible release. V1 and unknown lifecycle formats refuse without repair, even beside malformed config bytes.
+- `Numeric V2 compatibility`: V2 remains readable. Eligible owned acceptance converts to Baseline only with a verified exact-byte backup and compare-and-swap; observation, no-ops and mode-only writes do not convert. Baseline stores each lineage boundary and its optional owner claim together. Scope metadata versions v3/v4 are unchanged.
+- `Flexible reads and explicit availability`: Either `path` or `paths` takes a string or nonempty list. Value reads return `value` for one path and ordered `values` for several: `null` means proven absence, and `[null, {"code":"…"}]` a failed path. Current `keys` discovery can show an unacquired Passive Session as unavailable without initializing it. Keys and patch retain all-or-error behavior for genuine path failures.
+- `Accepted patch checkpoint warnings`: If Pi checkpointing fails after canonical publication, the patch reports successful acceptance with a warning. Pre-acceptance failures and atomic publication are unchanged.
+- `Telegram inspection by line`: Rich inspection shows complete JSON when it fits. Oversized previews retain whole lines and identify the first omitted line without truncating stored memory or model reads.
+- `One State Flow Skill`: `/skill:state-flow` replaces the Guide and Memory entrypoints. It covers memory operations and task-driven lazy reads without eager loading; dedicated memory review still requires an explicit request.
+- `Documentation and evaluation`: The README leads with setup and a worked read/write example. Semantic Layers owns handoff and internal module rules; the acceptance map points to concrete tests. Benchmarks use Baseline, and the opt-in semantic-memory trial retains its fixed inputs and rubric. Scripted calibration is not a live-model result.
 
 ## 1.0.2: Readable Scope Contract
 

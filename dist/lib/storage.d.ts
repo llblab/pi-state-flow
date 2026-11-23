@@ -1,38 +1,25 @@
 import { type DurableFileBase, type OwnedFileUpdate, type OwnedFilePresence, type SessionAddress } from "./durable.ts";
 import { type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { type AcceptedTransition } from "./history.ts";
-import { type FileRevision, type SessionRuntime, type SessionPolicyMigrationCandidate, type Snapshot } from "./snapshot.ts";
-export { isFileRevision, type FileRevision } from "./snapshot.ts";
+import { type SelectedLifecycleDocument, type Snapshot } from "./snapshot.ts";
 import type { StateScope } from "./state.ts";
-import { type TemporalState, type SelectedTemporalState, type ExcludedTransitionWitness, type ScopeStream } from "./temporal.ts";
+import { type SelectedTemporalState, type ExcludedTransitionWitness } from "./temporal.ts";
 import { type ScopeSelection } from "./selection.ts";
 import { type RetainedModules } from "./semantic-module.ts";
 export interface TemporalFileBase {
     files: DurableFileBase[];
 }
-type FilePublication = {
-    base: TemporalFileBase;
-    revision: FileRevision;
-    changed: boolean;
-    migrationBackup?: string;
-};
-/** Opaque CAS capture stays byte-exact; semantic consumers alone require lossless text. */
 export declare function temporalFileContents(base: TemporalFileBase): Map<string, string | undefined>;
+export declare function decodeLifecycleFilePair(config: DurableFileBase, runtime: DurableFileBase, cwd: string, sessionId: string): SelectedLifecycleDocument | undefined;
 export declare function assertStorageDirectory(path: string): void;
 /** Explicit creation only; existing bytes and unrelated files are never adopted or rewritten here. */
 export declare function initializeFileStore(root: string): void;
-/** Wait only for a cooperating live owner; interrupted or malformed locks remain explicit recovery errors. */
-export declare function acquirePublicationLock(path: string, unavailable: (cause: unknown) => Error): number;
-/** Canonical writers and bounded backup capture share exclusion; no Git work runs under this lock. */
-export declare function withStoragePublicationLock<T>(repositoryRoot: string, action: (root: string) => T): T;
 export interface StorageTransaction {
-    readonly capture: typeof captureTemporalFileBase;
-    readonly publish: typeof publishTemporalStateToFiles;
     readonly prepareSelected: (cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey?: string) => SelectedFileCohort | undefined;
     readonly observeSelectedShared: (cwd: string, selection: ScopeSelection, root: string) => SelectedReadObservation;
     readonly persistSelectedPassive: (cwd: string, sessionId: string, base: SelectedFileCohort, root: string, sessionKey?: string) => SelectedFilePublication;
     readonly hasSelectedCurrentAuthority: (cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey?: string) => boolean;
-    readonly inspectSelectedLifecycle: (cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey?: string) => SessionPolicyMigrationCandidate | undefined;
+    readonly inspectSelectedLifecycle: (cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey?: string) => SelectedLifecycleDocument | undefined;
     readonly prepareSelectedCurrent: (cwd: string, sessionId: string, selection: ScopeSelection, historyLimit: number, root: string, sessionKey?: string, expectedLifecycle?: TemporalFileBase) => SelectedCurrentCandidate;
     readonly acceptSelectedCurrent: (cwd: string, sessionId: string, request: SelectedCurrentRequest, base: SelectedCurrentCandidate, root: string, sessionKey?: string) => SelectedFilePublication;
     readonly publishSelected: (cwd: string, sessionId: string, request: SelectedPublicationRequest, base: SelectedFileCohort, root: string, sessionKey?: string) => SelectedFilePublication;
@@ -51,11 +38,6 @@ export declare function withFilePublicationLock<T>(lockPath: string, action: () 
 /** Await store-wide exclusion, then capture/apply/publish through callback-scoped operations. */
 export declare function withStorageTransaction<T>(repositoryRoot: string, action: (transaction: StorageTransaction) => T | Promise<T>, signal?: AbortSignal, waitForLock?: boolean): Promise<T>;
 export declare function assertTemporalFileBase(expected: TemporalFileBase, current: TemporalFileBase): void;
-/** Plan exact canonical updates; lifecycle-only writes exclude semantic files and provenance. */
-export declare function planTemporalPublication(cwd: string, sessionId: string, view: TemporalState, scopes: readonly StateScope[], current: TemporalFileBase, root: string, runtime?: SessionRuntime, runtimeOnly?: boolean, sessionKey?: string, provenance?: Readonly<Record<StateScope, ArtifactProvenanceRegistry>>): {
-    updates: OwnedFileUpdate[];
-    changedScopes: StateScope[];
-};
 /** The accepted basis comes from prepared outputs, never a post-publication worktree reread. */
 export declare function temporalFileReceipts(current: TemporalFileBase, updates: readonly OwnedFileUpdate[]): DurableFileBase[];
 export interface SelectedFileCohort {
@@ -63,7 +45,7 @@ export interface SelectedFileCohort {
     basis: TemporalFileBase;
     /** Separate existence/type dependencies, not byte-CAS receipts or write permission. */
     presence: OwnedFilePresence[];
-    lifecycle: SessionPolicyMigrationCandidate;
+    lifecycle: SelectedLifecycleDocument;
     view: SelectedTemporalState;
     witnesses: ExcludedTransitionWitness[];
     provenance: Partial<Record<StateScope, ArtifactProvenanceRegistry>>;
@@ -138,19 +120,3 @@ export declare function publishSelectedTemporalStateToFiles(cwd: string, session
 export declare function loadSelectedFileCohort(cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey?: string, signal?: AbortSignal): Promise<SelectedFileCohort | undefined>;
 /** Exact recapture comparison; future selected publishers must repeat both dependency checks under exclusion. */
 export declare function assertSelectedFileCohortBasis(expected: SelectedFileCohort, current: SelectedFileCohort): void;
-export declare function captureTemporalFileBase(cwd: string, sessionId: string, root: string, sessionKey?: string): TemporalFileBase;
-/** Current-only reference: exact bytes, complete identities and lineage, no aliases or history store. */
-export declare function loadTemporalFileRevision(cwd: string, sessionId: string, root: string, revision: string, sessionKey?: string): {
-    runtime: SessionRuntime;
-    view: {
-        scopes: Record<StateScope, ScopeStream>;
-        lineage: import("./temporal.ts").TransitionBoundary[];
-    };
-    provenance: Record<StateScope, ArtifactProvenanceRegistry>;
-    base: {
-        files: DurableFileBase[];
-    };
-    revision: `file:${string}`;
-};
-/** Publish a validated canonical cohort; runtimeOnly owns only session config/runtime files. */
-export declare function publishTemporalStateToFiles(cwd: string, sessionId: string, view: TemporalState, scopes: readonly StateScope[], base: TemporalFileBase, root: string, runtime: SessionRuntime, sessionKey?: string, provenance?: Readonly<Record<StateScope, ArtifactProvenanceRegistry>>, runtimeOnly?: boolean): FilePublication;

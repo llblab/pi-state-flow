@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { TemporalRuntime } from "../lib/runtime.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
 import { sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { captureScopeSelection, type ScopeSelection } from "../lib/selection.ts";
+import { rewriteBaselineLifecycleAsNumeric } from "./temporal-fixture.ts";
 
 const scopes = ["global", "cwd", "session"] as const;
 const selections = Array.from({ length: 7 }, (_, mask) => captureScopeSelection(scopes.filter((_, bit) => ((mask + 1) & (1 << bit)) !== 0)));
@@ -47,9 +48,8 @@ async function withoutBodies<T>(paths: string[], action: () => Promise<T>): Prom
 async function legacyLifecycle(t: TestContext) {
 	const f = await fixture(t, scopes);
 	await f.runtime.withSelectedCurrentTransaction(["cwd"], (_s, publish) => publish(), () => {});
-	const life = sessionRuntimePaths(f.cwd, f.id, f.root), metadata = JSON.parse(readFileSync(life.runtime, "utf8"));
-	metadata.version = 1; delete metadata.privateAcquisition; delete metadata.causalWitnesses; delete metadata.privateCausalBasis;
-	writeFileSync(life.config, JSON.stringify({ mode: "active" })); writeFileSync(life.runtime, JSON.stringify(metadata));
+	const life = sessionRuntimePaths(f.cwd, f.id, f.root);
+	rewriteBaselineLifecycleAsNumeric(f.cwd, f.id, f.root, 1);
 	const before = files(f), bodies = before.map(([path]) => path).filter(path => path !== life.config && path !== life.runtime);
 	return { f, before, bodies };
 }

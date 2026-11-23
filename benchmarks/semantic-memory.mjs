@@ -10,9 +10,10 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialSto
 import stateFlowExtension from "../lib/extension.ts";
 import { resolveSessionAddress } from "../lib/durable.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
+import { DEFAULT_SCOPE_SELECTION } from "../lib/selection.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const trialDoc = join(root, "docs/semantic-memory-evaluation.md");
+const trialSpec = "benchmarks/semantic-memory-trial.md";
 const conditions = ["native", "passive", "active"];
 const hostSettings = { compaction: { enabled: true, keepRecentTokens: 20000 }, retry: { enabled: false } };
 const manifest = { dependencies: ["alpha@1", "beta@2"], credentialEnvironment: [], networkPolicy: "deny", bundledVerifier: "v1" };
@@ -22,13 +23,13 @@ const textOf = (message) => typeof message.content === "string" ? message.conten
 const positive = (value) => Number.isSafeInteger(value) && value > 0;
 
 function inputs() {
-	const prompts = [...readFileSync(trialDoc, "utf8").matchAll(/^> (.+)$/gm)].map((match) => match[1]);
+	const prompts = [...readFileSync(join(root, trialSpec), "utf8").matchAll(/^> (.+)$/gm)].map((match) => match[1]);
 	assert.equal(prompts.length, 4, "the trial document must contain exactly four user prompts");
 	return prompts;
 }
 
 function sourceIdentity() {
-	const paths = ["index.ts", "package.json", "package-lock.json", "benchmarks/semantic-memory.mjs", "docs/semantic-memory-evaluation.md",
+	const paths = ["index.ts", "package.json", "package-lock.json", "benchmarks/semantic-memory.mjs", trialSpec,
 		...readdirSync(join(root, "lib")).filter((path) => path.endsWith(".ts")).map((path) => `lib/${path}`)].sort();
 	return { digest: identity(paths.map((path) => [path, digest(readFileSync(join(root, path)))])), paths };
 }
@@ -67,10 +68,17 @@ function fixture() {
 }
 
 async function semanticSnapshot(cwd, manager, store) {
-	const address = resolveSessionAddress(manager.getSessionFile(), manager.getSessionId(), manager.getHeader()?.timestamp);
+	const currentAddress = () => resolveSessionAddress(manager.getSessionFile(), manager.getSessionId(), manager.getHeader()?.timestamp);
+	const address = currentAddress();
 	const reader = new TemporalRuntime(cwd, address, store);
-	if (!await reader.refreshCurrentMemory()) return null;
-	const state = Object.fromEntries(["global", "cwd", "session"].map((scope) => [scope, reader.readView(0, scope)]));
+	const check = () => assert.deepEqual(currentAddress(), address, "the isolated trial session changed during observation");
+	const lifecycle = await reader.inspectSelectedLifecycle(DEFAULT_SCOPE_SELECTION, check);
+	if (!lifecycle) return null;
+	assert.deepEqual(lifecycle.selection, DEFAULT_SCOPE_SELECTION, "the trial must keep its declared all-owner selection");
+	await reader.refreshSelectedCurrent(lifecycle.selection, check);
+	const observed = reader.observedSelectedView();
+	assert.deepEqual(observed?.selection, lifecycle.selection, "the trial snapshot requires all declared owners");
+	const state = Object.fromEntries(observed.selection.map((scope) => [scope, reader.readView(0, scope)]));
 	const bytes = Object.fromEntries(Object.entries(state).map(([scope, value]) => [scope,
 		Object.fromEntries(Object.entries(value).map(([plane, body]) => [plane, Buffer.byteLength(JSON.stringify(body))]))]));
 	return { state, bytes };

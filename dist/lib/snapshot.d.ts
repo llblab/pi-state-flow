@@ -1,4 +1,3 @@
-import { type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { type JsonObject } from "./json.ts";
 import { type ExcludedTransitionWitness, type TransitionBoundary } from "./temporal.ts";
 import { type ScopeSelection } from "./selection.ts";
@@ -48,20 +47,6 @@ interface LifecycleMetadata extends SnapshotMeta {
     lineage: TransitionBoundary[];
     [key: string]: unknown;
 }
-interface SessionRuntimeMetadata extends LifecycleMetadata {
-    /** Runtime-owned artifact compilation evidence; never projected as semantic state. */
-    artifacts?: ArtifactProvenanceRegistry;
-    temporal?: {
-        checkpoint: TransitionBoundary;
-        patches: TransitionBoundary[];
-    };
-}
-export interface SessionRuntime {
-    config: SnapshotConfig;
-    meta: SessionRuntimeMetadata & {
-        version: 1;
-    };
-}
 export type PrivateAcquisition = "unacquired" | "deferred" | "acquired";
 export interface PrivateCausalBasis {
     lineage: TransitionBoundary[];
@@ -79,31 +64,27 @@ export interface SelectedSessionRuntime {
         privateCausalBasis?: PrivateCausalBasis;
     };
 }
-export declare function validateSessionRuntime(value: unknown, cwd: string, sessionId: string): asserts value is SessionRuntime;
-export declare function createSessionRuntime(snapshot: Snapshot, cwd: string, sessionId: string, lineage: readonly TransitionBoundary[], _artifacts?: ArtifactProvenanceRegistry): SessionRuntime;
-export declare function serializeSessionRuntime(runtime: SessionRuntime, cwd: string, sessionId: string): {
-    config: string;
-    runtime: string;
-};
-/** Legacy `enabled:false` decodes as non-active; native checkpoints, not this file, select branch policy. */
-export declare function parseSessionRuntime(config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string): SessionRuntime | undefined;
-export interface SessionPolicyMigrationCandidate {
-    sourceVersion: 1 | 2;
-    targetVersion: 2;
-    requiresConversion: boolean;
-    /** Original strings, not file observations or publication authority. */
-    source: {
-        config: string;
-        runtime: string;
-    };
+export interface SelectedLifecycleDocument {
+    sourceVersion: 2 | "baseline";
     runtime: SelectedSessionRuntime;
+    /** Bytes in the admitted format, not file observations or publication authority. */
     target: {
         config: string;
         runtime: string;
     };
 }
-/** Detached lifecycle preflight only; current native readers/writers still admit version 1 exclusively. */
-export declare function prepareSessionPolicyMigration(config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string, legacySelection: ScopeSelection): SessionPolicyMigrationCandidate | undefined;
+/** Recognized incompatible evidence is not corrupt memory and must never trigger a reset. */
+export declare class UnsupportedLifecycleFormatError extends Error {
+}
+/** Decode Baseline or V2; classify a retired/unknown runtime before decoding captured config bytes. */
+export declare function parseSelectedLifecycle(configSource: string | undefined | (() => string | undefined), runtimeSource: string | undefined, cwd: string, sessionId: string): SelectedLifecycleDocument | undefined;
+/** Pure wire codec. Missing owner claims stay missing; only the storage owner can admit their replay. */
+export declare function parseBaselineLifecycle(config: string, source: string, cwd: string, sessionId: string): SelectedSessionRuntime;
+/** Serialize selected lifecycle proof without repeating transition identities. No file authority. */
+export declare function serializeBaselineLifecycle(runtime: SelectedSessionRuntime, cwd: string, sessionId: string): {
+    config: string;
+    runtime: string;
+};
 export declare function emptySnapshot(mode?: StateFlowMode): Snapshot;
 export type RetainedBoundaryCheckpoint = {
     boundary: string;
@@ -117,8 +98,6 @@ export type PreRuntimeCheckpoint = {
     mode: InactiveMode;
 };
 export type RetainedPiCheckpoint = RetainedBoundaryCheckpoint | PreRuntimeCheckpoint;
-export type FileRevision = `file:${string}`;
-export declare function isFileRevision(value: unknown): value is FileRevision;
 /** Encode branch lifecycle against one retained temporal identity without semantic or backup data. */
 export declare function retainedBoundaryCheckpoint(snapshot: Snapshot, boundary: string): RetainedBoundaryCheckpoint;
 /** Encode an explicit inactive choice on a branch that has no accepted runtime. */

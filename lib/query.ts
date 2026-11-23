@@ -1,7 +1,7 @@
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT, type RecentScopePatch } from "./history.ts";
 import { isObject, sameJson, type JsonObject, type JsonValue } from "./json.ts";
 import { emptyState, projectSemanticPatch, projectStateForRead, type SemanticState, type StateScope } from "./state.ts";
-import { readTemporalView, validateSelectedTemporalState, type SelectedTemporalState, type ScopeStream, type TemporalState, type TransitionBoundary } from "./temporal.ts";
+import { readTemporalView, validateSelectedTemporalState, validateTemporalState, type SelectedTemporalState, type ScopeStream, type TemporalState, type TransitionBoundary } from "./temporal.ts";
 import { captureScopeSelection, DEFAULT_SCOPE_SELECTION, type ScopeSelection } from "./selection.ts";
 
 type ReadableTemporalState = TemporalState | SelectedTemporalState;
@@ -37,7 +37,17 @@ export type StateReadResult =
 	| { path: string; boundary: TransitionBoundary; patch: RecentScopePatch["patch"] };
 
 export type StateReadProjection = "value" | "keys" | "patch";
-type StateReadMeta = { type: "object"; size: number } | { type: "array"; length: number } | { type: "string"; length: number } | { type: "number" | "boolean" };
+type ReadPathErrorCode = "invalid_path" | "scope_excluded" | "scope_unavailable" | "history_unavailable" | "path_not_found" | "invalid_selector";
+export class StateReadPathError extends Error {
+	readonly code: ReadPathErrorCode;
+	constructor(code: ReadPathErrorCode, message: string = code) {
+		super(message);
+		this.code = code;
+	}
+}
+type KeysAbsence = "absent" | "unavailable";
+export type CurrentReadAvailability = Partial<Record<StateScope | "effective", KeysAbsence>>;
+type StateReadMeta = { type: "object"; size: number } | { type: "array"; length: number } | { type: "string"; length: number } | { type: "number" | "boolean" | KeysAbsence };
 type StateReadKeys = Record<string, string> | [];
 export interface StateReadHint {
 	type: "dangling-reference";
@@ -46,7 +56,8 @@ export interface StateReadHint {
 }
 
 export type ProjectedStateRead =
-	| { value: JsonValue | JsonValue[]; hint?: StateReadHint[] }
+	| { value: JsonValue; hint?: StateReadHint[] }
+	| { values: JsonValue[] }
 	| { meta: StateReadMeta | StateReadMeta[]; keys: StateReadKeys | StateReadKeys[] }
 	| { patch: JsonValue | JsonValue[] };
 
@@ -62,6 +73,18 @@ const MAX_REFERENCE_SCAN_NODES = 10_000;
 type ValueSelector = { kind: "key"; key: string } | { kind: "index"; index: number } | { kind: "range"; start: number; end: number };
 
 const PATH_PATTERN = /^(effective|global|cwd|session)(?:\[(\d+)\])?(?:\.patches(?:\[(\d+)\])?)?$/;
+const PATCH_HISTORY_LOCATOR = /^(?:(effective|global|cwd|session)\.)?patches(?:\[\d+\])?$/;
+const FLAT_SEMANTIC_ROOT = /^(?:artifacts|strategy|tactics|intents|response|lazy|x_[a-z][a-z0-9_]*)(?=\.|\[|$)/;
+
+/** Recognize patch-history syntax only; effective still fails temporal validation. */
+export function patchHistoryRoot(path: string): StateScope | "effective" | "flat" | undefined {
+	const match = PATCH_HISTORY_LOCATOR.exec(path);
+	return match ? (match[1] as StateScope | "effective" | undefined) ?? "flat" : undefined;
+}
+
+export function flatSemanticRoot(path: string): string | undefined {
+	return FLAT_SEMANTIC_ROOT.exec(path)?.[0];
+}
 
 /** Resolve a projection root without repeating the tool name in every path. */
 export function parseStateReadPath(path: string, historyLimit = DEFAULT_HISTORY_LIMIT): StateReadQuery {
@@ -69,12 +92,12 @@ export function parseStateReadPath(path: string, historyLimit = DEFAULT_HISTORY_
 		throw new Error(`State Flow history limit must be an integer from 0 to ${MAX_HISTORY_LIMIT}`);
 	}
 	const match = PATH_PATTERN.exec(path);
-	if (!match) throw new Error("Invalid State Flow read path");
+	if (!match) throw new StateReadPathError("invalid_path", "Invalid State Flow read path");
 	const [, root, rootOffset, patchOffset] = match;
-	if (path.includes(".patches") && rootOffset !== undefined) throw new Error("Index patches after .patches, not after the scope");
-	if (path.includes(".patches") && root === "effective") throw new Error("Patch history requires an explicit scope");
+	if (path.includes(".patches") && rootOffset !== undefined) throw new StateReadPathError("invalid_path", "Index patches after .patches, not after the scope");
+	if (path.includes(".patches") && root === "effective") throw new StateReadPathError("invalid_path", "Patch history requires an explicit scope");
 	const offset = Number(patchOffset ?? rootOffset ?? "0");
-	if (!Number.isSafeInteger(offset) || offset < 0 || offset > historyLimit) throw new Error(`State Flow read path index must be an integer from 0 to ${historyLimit}`);
+	if (!Number.isSafeInteger(offset) || offset < 0 || offset > historyLimit) throw new StateReadPathError("invalid_path", `State Flow read path index must be an integer from 0 to ${historyLimit}`);
 	if (patchOffset !== undefined || path.endsWith(".patches")) {
 		return { kind: "patch", path, offset, scope: root as StateScope };
 	}
@@ -97,9 +120,9 @@ export function readStatePath(view: ReadableTemporalState, path: string, history
 /** Parse semantic locator syntax without resolving values, authority or target existence. */
 export function parseValuePath(path: string): { root: string; selectors: ValueSelector[] } {
 	const explicitRoot = /^(?:effective|global|cwd|session)(?:\[\d+\])?(?=\.|$)/.exec(path)?.[0];
-	const implicitRoot = /^(?:artifacts|strategy|tactics|intents|response|lazy|x_[a-z][a-z0-9_]*)(?=\.|\[|$)/.exec(path)?.[0];
+	const implicitRoot = flatSemanticRoot(path);
 	if (explicitRoot === undefined && implicitRoot === undefined) {
-		throw new Error("State Flow read path requires a semantic path or an effective, global, cwd, or session root");
+		throw new StateReadPathError("invalid_path", "State Flow read path requires a semantic path or an effective, global, cwd, or session root");
 	}
 	const root = explicitRoot ?? "effective";
 	const selectors: ValueSelector[] = implicitRoot === undefined ? [] : [{ kind: "key", key: implicitRoot }];
@@ -123,7 +146,7 @@ export function parseValuePath(path: string): { root: string; selectors: ValueSe
 			rest = rest.slice(index[0].length);
 			continue;
 		}
-		throw new Error("Invalid State Flow read path selector; object keys must match [A-Za-z_$][A-Za-z0-9_$-]* (ASCII), array selectors use [N] or [start..end]");
+		throw new StateReadPathError("invalid_path", "Invalid State Flow read path selector; object keys must match [A-Za-z_$][A-Za-z0-9_$-]* (ASCII), array selectors use [N] or [start..end]");
 	}
 	return { root, selectors };
 }
@@ -132,17 +155,17 @@ function selectValue(root: JsonValue, selectors: readonly ValueSelector[], path:
 	let value = root;
 	for (const selector of selectors) {
 		if (selector.kind === "key") {
-			if (!isObject(value) || !Object.hasOwn(value, selector.key)) throw new Error(`State Flow read path does not exist: ${path}`);
+			if (!isObject(value) || !Object.hasOwn(value, selector.key)) throw new StateReadPathError("path_not_found", `State Flow read path does not exist: ${path}`);
 			value = value[selector.key]!;
 			continue;
 		}
-		if (!Array.isArray(value)) throw new Error(`State Flow array selector requires an array: ${path}`);
+		if (!Array.isArray(value)) throw new StateReadPathError("invalid_selector", `State Flow array selector requires an array: ${path}`);
 		if (selector.kind === "index") {
-			if (selector.index >= value.length) throw new Error(`Index ${selector.index} is outside ${path} with length ${value.length}`);
+			if (selector.index >= value.length) throw new StateReadPathError("invalid_selector", `Index ${selector.index} is outside ${path} with length ${value.length}`);
 			value = value[selector.index]!;
 			continue;
 		}
-		if (selector.start > selector.end || selector.end > value.length) throw new Error(`Range [${selector.start}:${selector.end}] is outside ${path} with length ${value.length}`);
+		if (selector.start > selector.end || selector.end > value.length) throw new StateReadPathError("invalid_selector", `Range [${selector.start}:${selector.end}] is outside ${path} with length ${value.length}`);
 		value = value.slice(selector.start, selector.end);
 	}
 	return structuredClone(value);
@@ -155,7 +178,7 @@ function valueKind(value: JsonValue): string {
 }
 
 function referenceCandidates(path: string): string[] {
-	if (/^(?:artifacts|strategy|tactics|intents|response|lazy|x_[a-z][a-z0-9_]*)(?=\.|\[|$)/.test(path)) return [path, `effective.${path}`];
+	if (flatSemanticRoot(path)) return [path, `effective.${path}`];
 	return [path];
 }
 
@@ -221,8 +244,8 @@ function missingReferenceHint(view: ReadableTemporalState, path: string, history
 	}];
 }
 
-function projectValue(value: JsonValue, projection: StateReadProjection): ProjectedStateRead {
-	if (projection === "value") return { value: structuredClone(value) };
+function projectKeys(value: JsonValue | undefined): { meta: StateReadMeta; keys: StateReadKeys } {
+	if (value === undefined) return { meta: { type: "absent" }, keys: {} };
 	if (isObject(value)) {
 		return {
 			meta: { type: "object", size: Object.keys(value).length },
@@ -298,38 +321,105 @@ function diffObjects(previous: JsonValue, current: JsonValue): JsonValue {
 	return patch;
 }
 
-/** Project exact current/historical state paths without exposing temporal metadata. */
-export function readProjectedState(view: ReadableTemporalState, paths: readonly string[], projection: StateReadProjection = "value", historyLimit = DEFAULT_HISTORY_LIMIT): ProjectedStateRead {
+function resolveProjectedPath(path: string, historyLimit: number) {
+	const { root, selectors } = parseValuePath(path);
+	const query = parseStateReadPath(root, historyLimit);
+	if (query.kind !== "state") throw new Error("Value and keys projections require a state path");
+	const field = selectors.length === 1 && selectors[0]?.kind === "key" ? selectors[0].key : undefined;
+	return { query, selectors, field, builtIn: field !== undefined && Object.hasOwn(emptyState(), field) };
+}
+
+interface MaterializedReadRoot {
+	raw: SemanticState;
+	modules: ReturnType<typeof retainedQueryModules>;
+	visible?: SemanticState;
+}
+
+function materializeReadRoot(view: ReadableTemporalState, query: Extract<StateReadQuery, { kind: "state" }>, historyLimit: number): MaterializedReadRoot {
+	return { raw: readTemporalView(view, query.offset, query.scope, historyLimit), modules: retainedQueryModules(view, query.scope) };
+}
+
+function selectStatePath(root: MaterializedReadRoot, path: string, resolved: ReturnType<typeof resolveProjectedPath>, projection: "keys" | "value"): JsonValue | undefined {
+	const { query, selectors, field, builtIn } = resolved;
+	const { raw, modules } = root;
+	const state = selectors[0]?.kind === "key" && selectors[0].key === "lazy" ? raw : (root.visible ??= projectStateForRead(raw, {}, modules));
+	if (field !== undefined && !Object.hasOwn(state, field)) {
+		if (projection === "value" && (builtIn || /^x_[a-z][a-z0-9_]*$/.test(field))) return undefined;
+		if (projection === "keys" && query.offset === 0 && (builtIn || (modules && Object.hasOwn(modules, field)))) return undefined;
+	}
+	return selectValue(state, selectors, path);
+}
+
+/** Preserve input slots. Only typed locator failures are collected; an invalid read basis still rejects the batch. */
+export function readValueBatch(view: ReadableTemporalState | undefined, paths: readonly string[], normalizePath: (path: string) => string,
+	availability: CurrentReadAvailability, historyLimit = DEFAULT_HISTORY_LIMIT): { values: JsonValue[] } {
+	if (paths.length < 2) throw new Error("A State Flow value batch requires at least two paths");
+	const owners: readonly StateScope[] = view ? queryOwners(view) : [];
+	if (view) {
+		if ("selection" in view) validateSelectedTemporalState(view, historyLimit);
+		else validateTemporalState(view, historyLimit);
+	}
+	// Reuse adjacent successful roots without retaining every historical materialization in a batch.
+	let last: { scope: StateScope | undefined; offset: number; root: MaterializedReadRoot } | undefined;
+	return { values: paths.map((requested): JsonValue => {
+		try {
+			const path = normalizePath(requested);
+			const patchRoot = patchHistoryRoot(path);
+			if (patchRoot !== undefined && patchRoot !== "flat" && patchRoot !== "effective") throw new StateReadPathError("invalid_path");
+			const resolved = resolveProjectedPath(path, historyLimit);
+			const { query: { scope, offset }, selectors, builtIn } = resolved;
+			if (availability[scope ?? "effective"] === "absent") {
+				if (offset !== 0) throw new StateReadPathError("history_unavailable");
+				if (selectors.length === 0 || builtIn) return null;
+				throw new StateReadPathError("path_not_found");
+			}
+			if (!view || (scope !== undefined && !owners.includes(scope))) throw new StateReadPathError("scope_unavailable");
+			if (offset >= view.lineage.length) throw new StateReadPathError("history_unavailable");
+			if (!last || last.scope !== scope || last.offset !== offset) last = { scope, offset, root: materializeReadRoot(view, resolved.query, historyLimit) };
+			return selectStatePath(last.root, path, resolved, "value") ?? null;
+		} catch (error) {
+			if (!(error instanceof StateReadPathError)) throw error;
+			return [null, { code: error.code }];
+		}
+	}) };
+}
+
+/** Project exact paths; the caller may supply current catalog statuses without inventing temporal streams. */
+export function readProjectedState(view: ReadableTemporalState | undefined, paths: readonly string[], projection: StateReadProjection = "value", historyLimit = DEFAULT_HISTORY_LIMIT, availability: CurrentReadAvailability = {}): ProjectedStateRead {
 	if (paths.length === 0) throw new Error("state_flow_read requires at least one path");
-	queryOwners(view);
+	if (view) queryOwners(view);
 	if (projection === "patch") {
+		if (!view) throw new Error("State Flow temporal runtime is unavailable");
 		const patches = paths.map((path) => {
 			const { root, selectors } = parseValuePath(path);
 			return patchAtPath(view, root, selectors, path, historyLimit);
 		});
 		return { patch: patches.length === 1 ? patches[0]! : patches };
 	}
-	const projected = paths.map((path) => {
+	const projected = paths.map((path): ProjectedStateRead => {
 		try {
-			const { root, selectors } = parseValuePath(path);
-			const query = parseStateReadPath(root, historyLimit);
-			if (query.kind !== "state") throw new Error("Value and keys projections require a state path");
-			const readsLazy = selectors[0]?.kind === "key" && selectors[0].key === "lazy";
-			const raw = readTemporalView(view, query.offset, query.scope, historyLimit);
-			const state = readsLazy ? raw : projectStateForRead(raw, {}, retainedQueryModules(view, query.scope));
-			const field = selectors.length === 1 && selectors[0]?.kind === "key" ? selectors[0].key : undefined;
-			if (projection === "value" && field !== undefined && (Object.hasOwn(emptyState(), field) || /^x_[a-z][a-z0-9_]*$/.test(field)) && !Object.hasOwn(state, field)) return { value: null };
-			return projectValue(selectValue(state, selectors, path), projection);
+			const resolved = resolveProjectedPath(path, historyLimit);
+			const { query, selectors, builtIn } = resolved;
+			const status = availability[query.scope ?? "effective"];
+			if (status === "absent" || (projection === "keys" && status !== undefined)) {
+				if (query.offset === 0 && (selectors.length === 0 || builtIn)) {
+					return projection === "keys" ? { meta: { type: status }, keys: {} } : { value: null };
+				}
+				if (query.scope) throw new Error(`State Flow ${query.scope}: selected, unavailable for this path`);
+			}
+			if (!view) throw new Error("State Flow temporal runtime is unavailable");
+			const value = selectStatePath(materializeReadRoot(view, query, historyLimit), path, resolved, projection);
+			return projection === "keys" ? projectKeys(value) : { value: value ?? null };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const missing = /does not exist| is outside /.test(message);
-			const hint = missing && projection === "value" && paths.length === 1 ? missingReferenceHint(view, path, historyLimit) : undefined;
+			const hint = view && missing && projection === "value" && paths.length === 1 ? missingReferenceHint(view, path, historyLimit) : undefined;
 			if (hint) return { value: null, hint };
 			throw new Error(message, error instanceof Error ? { cause: error } : undefined);
 		}
 	});
 	if (projected.length === 1) return projected[0]!;
-	if (projection === "value") return { value: projected.map((result) => (result as { value: JsonValue }).value) };
+	if (projection === "value") return { values: projected.map((result) => (result as { value: JsonValue }).value) };
 	return {
 		meta: projected.map((result) => (result as Extract<ProjectedStateRead, { meta: unknown }>).meta),
 		keys: projected.map((result) => (result as Extract<ProjectedStateRead, { meta: unknown }>).keys),

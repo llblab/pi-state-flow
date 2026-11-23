@@ -2,14 +2,11 @@
 // Excludes: SDK schemas, mode, acquisition, existence checks, storage and request/publication authority.
 import { isJsonValue, isObject, type JsonObject, type JsonValue, type MissingDeletion } from "./json.ts";
 import { DEFAULT_HISTORY_LIMIT } from "./history.ts";
-import { parseStateReadPath, parseValuePath } from "./query.ts";
+import { flatSemanticRoot, parseStateReadPath, parseValuePath, patchHistoryRoot, StateReadPathError } from "./query.ts";
 import { captureScopeSelection, type ScopeSelection } from "./selection.ts";
 import type { AtomicScopePatches, StateScope } from "./state.ts";
 
 import { MODEL_PLANE_NAMES } from "./planes.ts";
-
-const SEMANTIC_ROOT = /^(?:intents|strategy|tactics|artifacts|response|lazy|x_[a-z][a-z0-9_]*)(?=\.|\[|$)/;
-const PATCH_PATH = /^(?:effective|global|cwd|session)\.patches(?:\[\d+\])?$/;
 
 function dense(value: JsonValue): boolean {
 	if (Array.isArray(value)) {
@@ -35,7 +32,7 @@ function translateReferences(value: JsonValue, translate: (ref: string) => strin
 }
 
 function semanticReference(path: string, external?: readonly string[]): boolean {
-	const root = SEMANTIC_ROOT.exec(path)?.[0];
+	const root = flatSemanticRoot(path);
 	if (!root || root.startsWith("x_") && external !== undefined && !external.includes(root)) return false;
 	try { parseValuePath(path); return true; } catch { return false; }
 }
@@ -106,8 +103,10 @@ export function projectModelMissingDeletion(deletion: MissingDeletion, scopes: S
 }
 
 function validateReadPath(path: string, selected: ScopeSelection, historyLimit: number): void {
-	const query = PATCH_PATH.test(path) ? parseStateReadPath(path, historyLimit) : parseStateReadPath(parseValuePath(path).root, historyLimit);
-	if (query.scope !== undefined && !selected.includes(query.scope)) throw new Error("Model read scope is excluded");
+	const patchRoot = patchHistoryRoot(path);
+	const root = patchRoot !== undefined && patchRoot !== "flat" ? path : parseValuePath(path).root;
+	const query = parseStateReadPath(root, historyLimit);
+	if (query.scope !== undefined && !selected.includes(query.scope)) throw new StateReadPathError("scope_excluded", "Model read scope is excluded");
 }
 
 /** Sole-owner locators bind to that exact owner; multi-owner effective aliases keep their existing meaning. */
@@ -116,8 +115,7 @@ export function normalizeModelReadPath(path: string, scopes: ScopeSelection, his
 	if (typeof path !== "string") throw new Error("Model read path must be a string");
 	let canonical = path;
 	if (selected.length === 1) {
-		if (/^patches(?:\[\d+\])?$/.test(path)) canonical = `${selected[0]}.${path}`;
-		else if (SEMANTIC_ROOT.test(path)) canonical = `${selected[0]}.${path}`;
+		if (flatSemanticRoot(path) || patchHistoryRoot(path) === "flat") canonical = `${selected[0]}.${path}`;
 		else if (/^effective(?=\.|\[|$)/.test(path)) canonical = selected[0] + path.slice("effective".length);
 	}
 	validateReadPath(canonical, selected, historyLimit);
@@ -129,7 +127,9 @@ export function projectModelReadPath(path: string, scopes: ScopeSelection, histo
 	const selected = captureScopeSelection(scopes), canonical = normalizeModelReadPath(path, selected, historyLimit);
 	if (selected.length !== 1) return canonical;
 	const prefix = `${selected[0]}.`;
-	if (canonical.startsWith(prefix) && /^patches(?:\[\d+\])?$/.test(canonical.slice(prefix.length))) return canonical.slice(prefix.length);
-	if (canonical.startsWith(prefix) && semanticReference(canonical.slice(prefix.length))) return canonical.slice(prefix.length);
+	if (canonical.startsWith(prefix)) {
+		const relative = canonical.slice(prefix.length);
+		if (patchHistoryRoot(relative) === "flat" || semanticReference(relative)) return relative;
+	}
 	return "effective" + canonical.slice(selected[0].length);
 }

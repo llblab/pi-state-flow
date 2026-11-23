@@ -8,7 +8,7 @@ import { TemporalRuntime } from "../lib/runtime.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
 import { nativePolicyMarker, assertNativeModeOnlyChange, assertTreePolicyCheckpoint } from "./temporal-fixture.ts";
 import { captureScopeSelection, DEFAULT_SCOPE_SELECTION, type ScopeSelection } from "../lib/selection.ts";
-import { commitScopedTransition, stageAtomicScopePatches, commitSelectedTransition, stageSelectedScopePatches } from "../lib/transition.ts";
+import { commitSelectedTransition, stageSelectedScopePatches } from "../lib/transition.ts";
 import {
 	buildStateFlowSectionView,
 	createStateFlowTelegramAdapter,
@@ -540,12 +540,12 @@ for (const active of [false, true]) test(`Telegram inspection awaits a current c
 	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 	await new Promise((resolve) => setImmediate(resolve));
 	if (active) await h.tools.get("state_flow_patch")!.execute("private", { session: { tactics: { private: "LOCAL" } } }, undefined, undefined, h.ctx);
-	await new TemporalRuntime(h.ctx.cwd, "peer", h.repositoryRoot).withPatchTransaction((tx) => {
-		const stage = stageAtomicScopePatches(tx.states, {
+	await new TemporalRuntime(h.ctx.cwd, "peer", h.repositoryRoot).withSelectedFirstPatchTransaction(DEFAULT_SCOPE_SELECTION, emptySnapshot("active"), (tx) => {
+		const stage = stageSelectedScopePatches(tx, {
 			global: { tactics: { global: "LATEST-G" } }, cwd: { tactics: { cwd: "LATEST-C" } }, session: { tactics: { private: "FOREIGN-PRIVATE" } },
 		}, [], tx.causalBasis);
-		commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
-	});
+		commitSelectedTransition(tx.snapshot, tx, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+	}, () => {}, undefined, true);
 	const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
 	const entries = structuredClone(h.entries);
 	const release = await holdInspectionStorage(t, h.repositoryRoot);
@@ -787,65 +787,44 @@ test("Rich state inspection omits absent fields and empty responses instead of i
 	assert.doesNotMatch(JSON.stringify(visible), /response|artifacts|lazy/);
 });
 
-test("Rich inspection renders JSON once and keeps truncation notices outside the preview", () => {
+test("Rich state inspection keeps complete literal JSON when it fits the message", () => {
 	const revisions = { global: 1, cwd: 2, session: 3 };
-	const values = [
-		{ note: 'Real newline:\nQuote: " and backslash: \\ 🌀' },
-		{ telegramBacklog: { plan: ["Проверить состояние"], detail: "long ".repeat(2_000) } },
-		Object.fromEntries(Array.from({ length: 2_000 }, (_, index) => [`key${index}`, true])),
-		...['"', "\\", "\n", "🌀"].flatMap((char) => [char.repeat(900), char.repeat(40_000)]),
-	];
-	for (const value of values) {
+	for (const value of [{ note: 'Newline:\nQuote: " and backslash: \\ 🌀', detail: "long ".repeat(2_000) }, '"'.repeat(900), "🌀".repeat(8_000)]) {
 		const state = { lazy: value };
 		const before = structuredClone(state);
 		const message = renderStateFlowRichState("effective", revisions, state);
 		const field = message.blocks[1]!;
 		assert.equal(field.type, "details");
-		if (field.type !== "details") throw new Error("Expected details");
-		const preview = field.blocks[0]!;
-		assert.equal(preview.type, "pre");
-		if (preview.type !== "pre" || typeof preview.text !== "string") throw new Error("Expected literal pre text");
-		const json = JSON.stringify(value, null, 2);
-		assert.ok(preview.text.length > 0);
-		assert.equal(preview.text, json.slice(0, preview.text.length));
-		assert.ok(JSON.stringify(preview.text).length <= 3_000);
-		assert.doesNotMatch(preview.text, /[\uD800-\uDBFF]$/);
-		if (preview.text.length === json.length) {
-			assert.deepEqual(JSON.parse(preview.text), value);
-			assert.equal(field.blocks.length, 1);
-		} else {
-			assert.deepEqual(field.blocks[1], {
-				type: "pre", text: `Truncated preview — ${json.length - preview.text.length} characters omitted.`,
-			});
-			assert.equal(field.blocks.length, 2);
-		}
+		if (field.type !== "details") assert.fail("Expected details");
+		assert.deepEqual(field.blocks, [{ type: "pre", language: "json", text: JSON.stringify(value, null, 2) }]);
 		assert.deepEqual(state, before);
 	}
 });
 
-test("Rich state rendering bounds unbounded semantic fields with explicit truncation", () => {
-	const message = renderStateFlowRichState("global", { global: 12, cwd: 7, session: 9 }, {
-		artifacts: { huge: "x".repeat(40_000) },
-		strategy: { huge: "y".repeat(40_000) },
-		tactics: { huge: "z".repeat(40_000) },
-		intents: { huge: "i".repeat(40_000) },
-		response: "r".repeat(40_000),
-		lazy: { rules: "l".repeat(40_000), memory: {}, projects: {}, soul: {}, vision: {} },
-	});
-	const serialized = JSON.stringify(message);
-	assert.ok(serialized.length < 32_768);
-	assert.equal((serialized.match(/Truncated preview — \d+ characters omitted\./g) ?? []).length, 5);
-	assert.doesNotMatch(serialized, /omittedChars|\\"preview\\"/);
-	assert.ok(serialized.includes('\\"rules\\"'));
-	for (const hostile of ['"', "\\", "\n", "🌀"]) {
-		const hostileMessage = renderStateFlowRichState("effective", { global: 12, cwd: 7, session: 9 }, {
-			artifacts: { huge: hostile.repeat(40_000) },
-			strategy: { huge: hostile.repeat(40_000) },
-			tactics: { huge: hostile.repeat(40_000) },
-			intents: { huge: hostile.repeat(40_000) },
-			response: hostile.repeat(40_000),
+test("Oversized Rich state preserves complete JSON lines and reports the first omitted line", () => {
+	for (const char of ['"', "\\", "\n", "🌀"]) {
+		const strategy = { note: char.repeat(1_500) };
+		const lazy = Object.fromEntries(Array.from({ length: 2_000 }, (_, index) => [`key${index}`, char.repeat(40)]));
+		const message = renderStateFlowRichState("effective", { global: 12, cwd: 7, session: 9 }, {
+			strategy, tactics: { first: true, huge: char.repeat(40_000) }, response: char.repeat(40_000), lazy,
 		});
-		assert.ok(JSON.stringify(hostileMessage).length < 32_768, JSON.stringify(hostile));
+		assert.ok(JSON.stringify(message).length <= 32_768, JSON.stringify(char));
+		const [strategyField, tacticsField, responseField, lazyField] = message.blocks.slice(1);
+		for (const field of [strategyField, tacticsField, responseField, lazyField]) assert.equal(field?.type, "details");
+		if (strategyField?.type !== "details" || tacticsField?.type !== "details" || responseField?.type !== "details" || lazyField?.type !== "details") assert.fail("Expected state fields");
+		assert.deepEqual(strategyField.blocks, [{ type: "pre", language: "json", text: JSON.stringify(strategy, null, 2) }]);
+		assert.deepEqual(tacticsField.blocks, [
+			{ type: "pre", language: "json", text: '{\n  "first": true,' },
+			{ type: "pre", text: "Truncated preview — omitted from line 3." },
+		]);
+		assert.deepEqual(responseField.blocks, [{ type: "pre", text: "Truncated preview — omitted from line 1." }]);
+		const [preview, notice] = lazyField.blocks;
+		if (preview?.type !== "pre" || typeof preview.text !== "string") assert.fail("Expected literal JSON preview");
+		const shown = preview.text.split("\n");
+		const full = JSON.stringify(lazy, null, 2).split("\n");
+		assert.ok(shown.length > 2 && shown.length < full.length);
+		assert.deepEqual(shown, full.slice(0, shown.length));
+		assert.deepEqual(notice, { type: "pre", text: `Truncated preview — omitted from line ${shown.length + 1}.` });
 	}
 });
 

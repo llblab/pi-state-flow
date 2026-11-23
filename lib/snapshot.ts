@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
+import { parseArtifactProvenanceRegistry } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
 import { canonicalJson, isJsonValue, isObject, type JsonObject } from "./json.ts";
 import { captureTemporalWitnesses, validateTemporalLineage, type ExcludedTransitionWitness, type TransitionBoundary } from "./temporal.ts";
@@ -84,17 +84,6 @@ interface LifecycleMetadata extends SnapshotMeta {
 	[key: string]: unknown;
 }
 
-interface SessionRuntimeMetadata extends LifecycleMetadata {
-	/** Runtime-owned artifact compilation evidence; never projected as semantic state. */
-	artifacts?: ArtifactProvenanceRegistry;
-	temporal?: { checkpoint: TransitionBoundary; patches: TransitionBoundary[] };
-}
-
-export interface SessionRuntime {
-	config: SnapshotConfig;
-	meta: SessionRuntimeMetadata & { version: 1 };
-}
-
 export type PrivateAcquisition = "unacquired" | "deferred" | "acquired";
 export interface PrivateCausalBasis {
 	lineage: TransitionBoundary[];
@@ -117,22 +106,18 @@ export interface SelectedSessionRuntime {
 	meta: LifecycleMetadata & { version: 2; privateAcquisition: PrivateAcquisition; privateCausalBasis?: PrivateCausalBasis };
 }
 
-export function validateSessionRuntime(value: unknown, cwd: string, sessionId: string): asserts value is SessionRuntime {
-	validateRuntimeVersion(value, cwd, sessionId, 1);
-}
-
-/** Shared syntax checks do not widen native admission or prove private-stream acquisition. */
-function validateRuntimeVersion(value: unknown, cwd: string, sessionId: string, expectedVersion: 1 | 2): void {
+/** Validate normalized authority syntax; file presence and replay are checked by storage. */
+function validateSelectedSessionRuntime(value: unknown, cwd: string, sessionId: string): asserts value is SelectedSessionRuntime {
 	if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "config,meta"
 		|| !isObject(value.config) || !isObject(value.meta)) throw new Error("Invalid State Flow session runtime envelope");
 	const { version, identity, lineage, artifacts, temporal: _temporalScope, ...fields } = value.meta;
-	if (!Object.hasOwn(value.meta, "version") || version !== expectedVersion) throw new Error("Unsupported State Flow runtime provenance format");
+	if (!Object.hasOwn(value.meta, "version") || version !== 2) throw new Error("Unsupported State Flow runtime provenance format");
 	if (artifacts !== undefined) parseArtifactProvenanceRegistry(artifacts, "State Flow session artifact provenance");
-	if (expectedVersion === 2 && (!Object.hasOwn(value.meta, "privateAcquisition") || !["unacquired", "deferred", "acquired"].includes(value.meta.privateAcquisition as string))) {
+	if (!Object.hasOwn(value.meta, "privateAcquisition") || !["unacquired", "deferred", "acquired"].includes(value.meta.privateAcquisition as string)) {
 		throw new Error("Invalid State Flow private acquisition provenance");
 	}
 	if (Object.hasOwn(value.meta, "privateCausalBasis")) {
-		if (expectedVersion !== 2 || value.meta.privateAcquisition !== "acquired") throw new Error("Invalid State Flow private causal basis provenance");
+		if (value.meta.privateAcquisition !== "acquired") throw new Error("Invalid State Flow private causal basis provenance");
 		capturePrivateCausalBasis(value.meta.privateCausalBasis);
 	}
 	if (!isObject(identity) || Object.keys(identity).sort().join(",") !== "cwd,sessionId"
@@ -151,105 +136,125 @@ function validateRuntimeVersion(value: unknown, cwd: string, sessionId: string, 
 	};
 	if (runtimeFields.bootstrap === false) normalized.meta.bootstrap = false;
 	if (runtimeFields.step === Number.MAX_SAFE_INTEGER) normalized.meta.step = Number.MAX_SAFE_INTEGER;
-	if (expectedVersion === 2 && !Object.hasOwn(value.config, "scopes")) throw new Error("State Flow lifecycle v2 requires explicit scopes");
-	const scopes = expectedVersion === 2 ? captureScopeSelection(value.config.scopes) : undefined;
-	const normalizedConfig = scopes === undefined ? normalized.config : { ...normalized.config, scopes };
-	const suppliedConfig = scopes === undefined ? value.config : { ...value.config, scopes };
+	if (!Object.hasOwn(value.config, "scopes")) throw new Error("State Flow lifecycle requires explicit scopes");
+	const scopes = captureScopeSelection(value.config.scopes);
+	const normalizedConfig = { ...normalized.config, scopes };
+	const suppliedConfig = { ...value.config, scopes };
 	if (canonicalJson({ config: normalizedConfig, meta: normalized.meta }) !== canonicalJson({ config: suppliedConfig, meta: runtimeFields })) {
 		throw new Error("Invalid State Flow runtime configuration or counters");
 	}
 }
 
-export function createSessionRuntime(
-	snapshot: Snapshot,
-	cwd: string,
-	sessionId: string,
-	lineage: readonly TransitionBoundary[],
-	_artifacts: ArtifactProvenanceRegistry = {},
-): SessionRuntime {
-	const fields = snapshot.meta;
-	const runtime: SessionRuntime = {
-		config: structuredClone(snapshot.config),
-		meta: {
-			...Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as SnapshotMeta,
-			version: 1,
-			identity: { cwd: resolve(cwd), sessionId },
-			lineage: structuredClone([...lineage]),
-		},
-	};
-	validateSessionRuntime(runtime, cwd, sessionId);
-	return runtime;
-}
-
-export function serializeSessionRuntime(
-	runtime: SessionRuntime, cwd: string, sessionId: string,
-): { config: string; runtime: string } {
-	validateSessionRuntime(runtime, cwd, sessionId);
-	const { temporal: _retiredTemporal, artifacts: _legacyArtifacts, ...runtimeMeta } = runtime.meta;
-	return { config: `${canonicalJson(runtime.config)}\n`, runtime: `${canonicalJson(runtimeMeta)}\n` };
-}
-
-/** Legacy `enabled:false` decodes as non-active; native checkpoints, not this file, select branch policy. */
-export function parseSessionRuntime(
-	config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string,
-): SessionRuntime | undefined {
-	if (config === undefined && runtimeSource === undefined) return undefined;
-	if (config === undefined || runtimeSource === undefined) throw new Error("Incomplete State Flow config/runtime pair");
-	let runtime: unknown;
-	try {
-		const settings: unknown = JSON.parse(config);
-		runtime = { config: legacySessionConfig(settings), meta: JSON.parse(runtimeSource) };
-	} catch (error) {
-		if (error instanceof SyntaxError) throw new Error("State Flow session runtime contains invalid JSON");
-		throw error;
-	}
-	validateSessionRuntime(runtime, cwd, sessionId);
-	const { temporal: _legacyTemporal, ...runtimeMeta } = runtime.meta;
-	return { config: { mode: runtime.config.mode }, meta: runtimeMeta };
-}
-
-function legacySessionConfig(settings: unknown): SnapshotConfig {
-	const mode = isObject(settings) && Object.keys(settings).length === 1 ? readCheckpointMode(settings, "passive") : undefined;
-	if (mode === undefined) throw new Error("Invalid State Flow runtime configuration or counters");
-	return { mode };
-}
-
-export interface SessionPolicyMigrationCandidate {
-	sourceVersion: 1 | 2;
-	targetVersion: 2;
-	requiresConversion: boolean;
-	/** Original strings, not file observations or publication authority. */
-	source: { config: string; runtime: string };
+export interface SelectedLifecycleDocument {
+	sourceVersion: 2 | "baseline";
 	runtime: SelectedSessionRuntime;
+	/** Bytes in the admitted format, not file observations or publication authority. */
 	target: { config: string; runtime: string };
 }
 
-/** Detached lifecycle preflight only; current native readers/writers still admit version 1 exclusively. */
-export function prepareSessionPolicyMigration(
-	config: string | undefined, runtimeSource: string | undefined, cwd: string, sessionId: string, legacySelection: ScopeSelection,
-): SessionPolicyMigrationCandidate | undefined {
-	if (config === undefined && runtimeSource === undefined) return undefined;
-	if (config === undefined || runtimeSource === undefined) throw new Error("Incomplete State Flow config/runtime pair");
-	const metadata = parsePolicyDocument(runtimeSource);
-	if (!isObject(metadata) || !Object.hasOwn(metadata, "version") || (metadata.version !== 1 && metadata.version !== 2)) throw new Error("Unsupported State Flow runtime provenance format");
-	const sourceVersion = metadata.version;
-	const settings = parsePolicyDocument(config);
-	if (sourceVersion === 1 && (Object.hasOwn(metadata, "privateAcquisition") || Object.hasOwn(metadata, "causalWitnesses") || Object.hasOwn(metadata, "privateCausalBasis") || (isObject(settings) && Object.hasOwn(settings, "scopes")))) {
-		throw new Error("Target State Flow policy fields in legacy lifecycle format");
+/** Recognized incompatible evidence is not corrupt memory and must never trigger a reset. */
+export class UnsupportedLifecycleFormatError extends Error {}
+
+/** Decode Baseline or V2; classify a retired/unknown runtime before decoding captured config bytes. */
+export function parseSelectedLifecycle(
+	configSource: string | undefined | (() => string | undefined), runtimeSource: string | undefined, cwd: string, sessionId: string,
+): SelectedLifecycleDocument | undefined {
+	const readConfig = () => typeof configSource === "function" ? configSource() : configSource;
+	if (runtimeSource === undefined) {
+		if (readConfig() === undefined) return undefined;
+		throw new Error("Incomplete State Flow config/runtime pair");
 	}
-	const sourceValue = { config: sourceVersion === 1 ? legacySessionConfig(settings) : settings, meta: metadata };
-	validateRuntimeVersion(sourceValue, cwd, sessionId, sourceVersion);
-	const scopes = captureScopeSelection(sourceVersion === 1 ? legacySelection : (settings as JsonObject).scopes);
+	const metadata = parsePolicyDocument(runtimeSource);
+	if (isObject(metadata) && metadata.version === 1) {
+		throw new UnsupportedLifecycleFormatError("State Flow lifecycle V1 is retired; use a previous State Flow release to open this session or start a new session");
+	}
+	if (!isObject(metadata)) throw new Error("Invalid State Flow session runtime envelope");
+	const baseline = metadata.format === "baseline";
+	if (baseline && (Object.hasOwn(metadata, "version") || Object.hasOwn(metadata, "causalWitnesses"))) refuseMixedBaseline();
+	if (!baseline && metadata.version !== 2) {
+		throw new UnsupportedLifecycleFormatError("Unsupported State Flow lifecycle format; keep the files and use a release that supports it");
+	}
+	const config = readConfig();
+	if (config === undefined) throw new Error("Incomplete State Flow config/runtime pair");
+	if (baseline) {
+		const runtime = decodeBaselineLifecycle(config, metadata, cwd, sessionId);
+		return { sourceVersion: "baseline", runtime, target: { config: `${canonicalJson(runtime.config)}\n`, runtime: runtimeSource } };
+	}
+	const runtime: unknown = { config: parsePolicyDocument(config), meta: metadata };
+	validateSelectedSessionRuntime(runtime, cwd, sessionId);
+	runtime.config.scopes = captureScopeSelection(runtime.config.scopes);
+	return { sourceVersion: 2, runtime, target: { config: `${canonicalJson(runtime.config)}\n`, runtime: `${canonicalJson(runtime.meta)}\n` } };
+}
+
+function encodeBaselineLineage(lineage: TransitionBoundary[], evidence: unknown): unknown[] {
+	const witnesses = new Map(captureTemporalWitnesses(lineage, evidence, MAX_HISTORY_LIMIT)
+		.map(({ transition, owners }) => [transition.id, owners]));
+	return lineage.map(boundary => {
+		const owners = witnesses.get(boundary.id);
+		return owners === undefined ? boundary : { ...boundary, owners };
+	});
+}
+
+function decodeBaselineLineage(value: unknown): PrivateCausalBasis {
+	if (!Array.isArray(value)) throw new Error("Invalid State Flow Baseline lineage");
+	const causalWitnesses: unknown[] = [];
+	const lineage: unknown = value.map((row, index) => {
+		if (!isObject(row) || Object.keys(row).some(key => !["id", "position", "parent", "owners"].includes(key))) {
+			throw new Error("Invalid State Flow Baseline transition");
+		}
+		const { owners, ...transition } = row;
+		if (Object.hasOwn(row, "owners")) {
+			if (index === 0) throw new Error("State Flow Baseline anchor cannot claim transition owners");
+			causalWitnesses.push({ transition, owners });
+		}
+		return transition;
+	});
+	validateTemporalLineage(lineage, MAX_HISTORY_LIMIT);
+	return { lineage, causalWitnesses: captureTemporalWitnesses(lineage, causalWitnesses, MAX_HISTORY_LIMIT) };
+}
+
+/** Pure wire codec. Missing owner claims stay missing; only the storage owner can admit their replay. */
+export function parseBaselineLifecycle(config: string, source: string, cwd: string, sessionId: string): SelectedSessionRuntime {
+	return decodeBaselineLifecycle(config, parsePolicyDocument(source), cwd, sessionId);
+}
+
+function decodeBaselineLifecycle(config: string, raw: unknown, cwd: string, sessionId: string): SelectedSessionRuntime {
+	if (!isObject(raw) || raw.format !== "baseline" || Object.hasOwn(raw, "version") || Object.hasOwn(raw, "causalWitnesses")) {
+		refuseMixedBaseline();
+	}
+	const { format: _format, lineage, privateCausalBasis, ...fields } = raw;
+	const temporal = decodeBaselineLineage(lineage);
+	const privateBasis = Object.hasOwn(raw, "privateCausalBasis")
+		? { privateCausalBasis: capturePrivateCausalBasis(decodeBaselineLineage(privateCausalBasis)) } : {};
 	const runtime = {
-		config: { ...(sourceValue.config as SnapshotConfig), scopes },
-		meta: { ...metadata, version: 2, ...(sourceVersion === 1 ? { privateAcquisition: "acquired" } : {}) },
-	} as SelectedSessionRuntime;
-	validateRuntimeVersion(runtime, cwd, sessionId, 2);
-	return {
-		sourceVersion, targetVersion: 2, requiresConversion: sourceVersion === 1,
-		source: { config, runtime: runtimeSource }, runtime,
-		target: { config: `${canonicalJson(runtime.config)}\n`, runtime: `${canonicalJson(runtime.meta)}\n` },
+		config: parsePolicyDocument(config),
+		meta: { ...fields, ...temporal, ...privateBasis, version: 2 },
 	};
+	validateSelectedSessionRuntime(runtime, cwd, sessionId);
+	runtime.config.scopes = captureScopeSelection(runtime.config.scopes);
+	return runtime;
+}
+
+/** Serialize selected lifecycle proof without repeating transition identities. No file authority. */
+export function serializeBaselineLifecycle(runtime: SelectedSessionRuntime, cwd: string, sessionId: string): { config: string; runtime: string } {
+	validateSelectedSessionRuntime(runtime, cwd, sessionId);
+	const { version: _version, lineage, causalWitnesses, privateCausalBasis, ...fields } = runtime.meta;
+	if (Object.hasOwn(fields, "format")) throw new Error("State Flow Baseline format collides with retained lifecycle metadata");
+	const privateBasis = privateCausalBasis === undefined ? {} : {
+		privateCausalBasis: encodeBaselineLineage(privateCausalBasis.lineage, privateCausalBasis.causalWitnesses),
+	};
+	const metadata = {
+		...fields, ...privateBasis, format: "baseline",
+		lineage: encodeBaselineLineage(lineage, Object.hasOwn(runtime.meta, "causalWitnesses") ? causalWitnesses : []),
+	};
+	return {
+		config: `${canonicalJson({ ...runtime.config, scopes: captureScopeSelection(runtime.config.scopes) })}\n`,
+		runtime: `${canonicalJson(metadata)}\n`,
+	};
+}
+
+function refuseMixedBaseline(): never {
+	throw new UnsupportedLifecycleFormatError("Unsupported or mixed State Flow Baseline lifecycle format; canonical files were not accepted");
 }
 
 function parsePolicyDocument(source: string): unknown {
@@ -309,11 +314,6 @@ export type RetainedBoundaryCheckpoint = {
 /** A proven pre-runtime branch retains only its explicit inactive choice, never semantic storage. */
 export type PreRuntimeCheckpoint = { mode: InactiveMode };
 export type RetainedPiCheckpoint = RetainedBoundaryCheckpoint | PreRuntimeCheckpoint;
-export type FileRevision = `file:${string}`;
-
-export function isFileRevision(value: unknown): value is FileRevision {
-	return typeof value === "string" && /^file:[0-9a-f]{64}$/.test(value);
-}
 
 /** Encode branch lifecycle against one retained temporal identity without semantic or backup data. */
 export function retainedBoundaryCheckpoint(snapshot: Snapshot, boundary: string): RetainedBoundaryCheckpoint {

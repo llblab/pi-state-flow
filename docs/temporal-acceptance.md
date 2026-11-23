@@ -10,15 +10,49 @@ The seven-facility group in `tests/extension.test.ts` natively creates registrat
 
 The seven-cancellation group in `tests/extension.test.ts` admits each selected Start, then uses a fixture-owned native Off-tree scope DATA adapter for ABA to prove withdrawal before lock release and fresh-owner recovery. The seven-publication-cancellation group in `tests/extension.test.ts` uses actual tool/message events to hold each selected patch/response publication; public Off cancels owned waits while preserving earlier accepted preparation, native answer delivery and independent fresh work. The native scope-lifetime group in `tests/extension.test.ts` separately proves same-mode pending-restoration ABA and equal-policy observation without awaiting a newly enabled replacement while retaining its required exclusion. These are bounded exact-path/SDK functional witnesses, not model-quality, confidentiality or universal syscall/ancestry proofs.
 
+See [origin, acquisition and observation](#origin-acquisition-and-observation) for first-Session and pre-runtime native cases, and item 32 for raw fork provenance and parent copy.
+
 ## Public scope controls and mode-only Telegram
 
 The public-scope group in `tests/extension.test.ts` proves public command tokens, not policy-DATA adapters, select all seven sets from configured Off/all-three; malformed inputs fail atomically, defaults remain unchanged and mode-only/reload retain choice. The public-scope-lifetime group in `tests/extension.test.ts` adds actual public scope ABA, equal canonical held-patch preservation, Off exact-canonical-path I/O guards, different-selection inactive-persistence withdrawal, both late Passive observation kinds and acquired/deferred/fenced refusal. `tests/selection.test.ts` owns full-prefix unused-owner completion; `tests/extension.test.ts` owns parser-before-effects command registration. Requested status and available materialization remain separate exact proofs.
 
-`tests/native-telegram-selection.test.ts` publicly captures each of the seven sets, creates native original-ID memory, then invokes the actual optional registered section handlers for mode-only Passive/Off/Active before and after default changes/reload. Mode payload text cannot become a selector; excluded bytes/private absence, native model tools/context, response ownership and explicit disposable Off inspection remain correct. Only the presentation registry/edit/ack/Rich callbacks are fake; native SDK/mode owners/storage are real. Assertions on collected provider inputs/results run outside callbacks.
+The “native Telegram mode-only selection” cases in `tests/extension.test.ts` publicly capture each of the seven sets, create native original-ID memory, then invoke the actual optional registered section handlers for mode-only Passive/Off/Active before and after default changes/reload. Mode payload text cannot become a selector; excluded bytes/private absence, native model tools/context, response ownership and explicit disposable Off inspection remain correct. Only the presentation registry/edit/ack/Rich callbacks are fake; native SDK/mode owners/storage are real. Assertions on collected provider inputs/results run outside callbacks.
 
 The native-telegram-lifetime group in `tests/extension.test.ts` adds seven held-Start → Telegram Off withdrawals with exact canonical-path guards, seven accepted-Passive receipt → public scope-ABA stale-menu refusals, and two real busy native-operation deferrals (accepted same choice versus newer Off changing scopes). One pure copy/radio-layout property distinguishes operator Effective from participating model owners without adding a chooser. `tests/telegram.test.ts` retains optional registration/failure/inspection/fence/lifetime checks; its CAS-failure inspector now explicitly observes the peer's newer field without installing cache or clearing the write fence. No real Telegram delivery or rendered-device claim follows.
 
-See the [M2 functional boundary](scope-selection-contract.md#functional-acceptance-boundary) for the complete property/owner map, legacy-v1 full-cohort dependency, acquired-private presence requirement and explicit-operator exception. These deterministic fixtures are not exhaustive interleavings or universal alias/async filesystem nonaccess.
+See the [scope admission matrix](scope-selection-contract.md#functional-acceptance-boundary) for eligible owner bodies and proof dependencies. The V2 admission and Baseline publication cases in `tests/storage.test.ts` check excluded bytes, acquired-private presence and exact backup/rollback, while `tests/snapshot.test.ts` checks the compact lineage encoding and preserved private proof. These deterministic fixtures are not exhaustive interleavings or universal alias/async filesystem nonaccess.
+
+## Model interface and linked handoff
+
+`tests/model-interface.test.ts` checks detached shape, locator and reference translation; `tests/integration.test.ts` checks canonical staging, replay and ref/cascade round trips. These lower tests do not establish native authority. `tests/extension.test.ts` checks admitted flat/multi tools, stale wrappers and same-arity owner changes, host-denied registration, and model context across the seven choices. Its “native linked handoff/checkpoint” cases check exact retained patch IDs and canonical replay, then follow the linked handoff across reload. This is deterministic SDK evidence, not live-model comprehension or task performance. [SDK compatibility](compatibility.md#patch-tool-declaration-refresh) owns the separate serializer evidence.
+
+## Selected read and projection witnesses
+
+- `tests/temporal.test.ts` and `tests/query.test.ts` cover all owner subsets, exact retained boundaries, excluded-only witnesses, forged/missing proof, no invented history, and no-op versus folded-delta refusal. Effective deltas keep own special keys. Disabled locators and reference lookups fail before excluded getters; excluded values never become diagnostic hints.
+- `tests/status.test.ts` checks exact selected keys, count/revision validation, unavailable observations with no payload access, disabled notice getters, and lineage depth when visible patch count is smaller. Its footprint witness verifies present planes and same-owner intent targets without adding ownership or mutating retained shared response data.
+- `tests/context.test.ts` checks selected re-projection, omitted lazy bodies, cascade receipts and excluded recent getters; `tests/runtime.test.ts` separates detached observations, accepted caches, excluded proof and cache withdrawal. The [native seven-selection](#native-seven-selection-integration) and [request-lifetime](#native-request-ownership-and-correlation) witnesses supplement these lower tests.
+- `tests/telegram.test.ts` checks stale excluded/singleton Effective callbacks before readers, independently validated Off inspection and unavailable data/revisions without fallback. That does not certify installed delivery or erasure of retained native context.
+
+## Origin, acquisition and observation
+
+- `tests/runtime.test.ts` distinguishes wholly absent, partial and remembered origins, covers all selected first-authoring modes/windows and checks that invalid or cancelled drafts leave no origin. A valid no-op may accept lifecycle only; escaped publishers cannot accept afterward. `tests/snapshot.test.ts` covers closed run-field capture, including undefined optional completion fields.
+- Native first-Session Start, first-mutation and Passive observation cases in `tests/extension.test.ts` distinguish authority from availability. They check actual request/caller admission, run fields, header/cancellation checks, exact-base conflicts, post-acceptance checkpoint failure and shared memory reaching the first provider before private acquisition. Baseline/V2 acquisition and backup receipts have lower storage/runtime witnesses.
+- The acquired-private tests in `tests/runtime.test.ts` separate an absent CWD origin from independent shared drift. Re-enabling Session after either must retain genuine private proof and bytes across cold reopen, shared folding, Passive and another accepted private write/exclusion. Missing proof, contradictory private replay, absent required files or false witnesses cannot be replaced by shared/current evidence.
+- Observed caches and header-only inspection cannot become acceptance. The runtime/extension cases cover stale or cancelled installation, omitted planned-empty shared owners and same-policy Passive no-op preserving a queued semantic owner. `tests/continuation.test.ts` separately checks the read-only startup advisory boundary.
+
+## Storage classification and healing
+
+- `tests/runtime.test.ts` distinguishes wholly absent shared triples from partial/orphan files and lost acquired private authority. In `tests/extension.test.ts`, “Passive keys discover present, absent and unacquired owners” proves the different model results without storage writes.
+- `tests/healing.test.ts` checks exact-byte quarantine of damaged owners, unchanged healthy owners, Session anchoring of lineage contradictions, convergence, and the notice lifetime. A held lock, cancellation or foreign identity produces no reset. Retired/unknown lifecycle tests preserve all owners even with an invalid config or damaged shared body.
+- `tests/extension.test.ts` checks operator/model notice and empty restart after healable loss; its blocked Active cases check public Abort and explicit Off without a native-history fallback. See [filesystem recovery](filesystem-recovery.md#self-healing) for admission, not just the tested examples.
+
+## Native request ownership and correlation
+
+- `tests/session.test.ts` checks detached policy, equal/lifetime changes, synchronous reentry, finalized matching IDs, nested parent proof and phase-bound preparation leases. `tests/operation.test.ts` checks that Abort listeners can claim replacement work without losing it to stale release or drain.
+- In the pinned SDK, `turn_start` precedes preparation and awaited assistant `message_end` precedes tool execution. The real Pi ABA, later-permission and nested-call cases in `tests/extension.test.ts` cover stale-argument denial, explicit parent admission and Active versus Passive barriers without claiming transport-specific correlation.
+- The caller fault cases in `tests/extension.test.ts` vary native ID, CWD, storage key, runtime identity at the same key, and lazy operation-signal getters. They cover early denial before body access, valid cloned contexts, same-owner observed reads behind a Passive write fence, foreign end callbacks preserving the rightful response, and actual `turn_end` answer edits. These are deliberately injected adapter cases, not proof that Pi ordinarily emits foreign contexts.
+- The same suite checks foreign Passive/current and frozen-handoff projection, transport guards without payload reads, a stale request after a later context handler, and withdrawal during Off/Passive/Start/tree changes. The guard's Abort cannot stop independent control work; the real in-run Start Abort witness in `tests/integration.test.ts` still requires user cancellation to return while another process holds the store.
+- `tests/protocol.test.ts` checks all seven Active/bootstrap/Passive owner sets and the all-owner tool-spelling oracle. Protocol body checks are not whole provider-request equivalence, model quality, transcript erasure or host authentication. Earlier raw-body hashes and staged build probes live in the pinned [M2 record](README.md#historical-semantic-evidence).
 
 ## Required properties and witnesses
 
@@ -109,8 +143,8 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
 
 ### 19. Stop changes policy, not semantic history
 
-- `tests/runtime.test.ts` lifecycle-only witnesses use a separate process to advance global/CWD semantics or provenance, including wider foreign retention, then prove exact semantic/sidecar preservation, unchanged steps, idempotent Stop, and same-session/stale-evidence refusal.
-- Native Stop/new-request witnesses verify the accepted shared view reaches handoff/inference without a lifecycle semantic write, while the current-head native witness accepts a shared write racing after inference and retains its actual accepted predecessor.
+- `tests/runtime.test.ts` checks mode-only Passive across selections and retention windows: exact semantic/provenance preservation, refusal on stale shared bytes/removal or lost private presence, lifecycle mismatch before body reads, and cache/lease preservation on an exact no-op. `tests/storage.test.ts` also checks the lifecycle-only write set and preservation of numeric V2.
+- In `tests/extension.test.ts`, “native mode-only Passive refuses shared drift” proves unchanged bytes on failure, a native fence, read-only visibility of the peer value after resume, and restored writes only after explicit current acceptance. Pending Stop tests check immediate projection changes, independent attachment and faults after canonical acceptance. The separate current-head native witness accepts shared drift after inference and retains its actual predecessor.
 - Mid-tool Stop tests preserve ordinary/bootstrap trajectories through tree, reload, resume, and restart.
 - The native “real Pi retains a native split-turn continuation through late tools” Stop/no-Stop controls actually remove the original user with native threshold compaction, then require summary, paired reads and foreign context in model input.
 - The Stop case also checks frozen semantics/step, unchanged trace prefix, tree/reload/cold resume/bootstrap restart, no resurrection of discarded input, and persistent foreign context after the next active run.
@@ -121,14 +155,14 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
 - Native “real Pi failed Stop stays passive through late tools, tree, reload and resume” cases verify provider inputs, rejected tool calls, untouched trace prefixes, private memory, current foreign writes, and recovery through explicit Start.
 - A native fork witness retains disabled policy without inheriting the parent's fence.
 - Session tests bind fence lifetime to owner/reset/accepted-checkpoint evidence; runtime current-head tests prove read-only loading changes no canonical bytes.
-- `tests/storage.test.ts` fences lifecycle-only writes to config/runtime files; `tests/extension.test.ts` covers idle and marker-based cutoffs and new/fork boundaries.
+- `tests/extension.test.ts` covers idle and marker-based cutoffs and new/fork boundaries. See [Passive persistence](architecture.md#passive-persistence) for the current contract.
 
 ### 20. Compact mode, inspectable revisions
 
 - `tests/status.test.ts` proves Active/Passive terminal indicators omit revisions, Off alone hides the indicator, and `/state-flow-status` retains the effective `g#c#s#` vector with blank lines between top-level JSON planes.
 - `tests/telegram.test.ts` verifies mode-only section labels, capitalized radio options with one mode-specific selected marker and ⚫️ inactive markers, direct scope buttons, owner Rich headings with `#revision` and Effective with `g#c#s#`.
 - Telegram can inspect existing shared memory even in Off without initializing or mutating storage.
-- Failure-fenced inspection retains accepted cached memory without overwriting another writer.
+- Fenced Telegram inspection validates and can show the peer’s current canonical value without replacing the accepted cache or clearing the write fence.
 
 ### 21. Independent revisions survive folding and foreign writers
 
@@ -139,9 +173,9 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
 ### 22. Current-head atomic model publication
 
 - `tests/runtime.test.ts` applies authored independent/overlapping assignments, deletion and arrays to current shared values, preserves another owner's private files, and derives the predecessor/revisions from that basis.
-- Compilation witnesses replace complete cards with matching provenance, preserve untouched evidence, accept repeats and refuse orphaned evidence after semantic-pair disappearance.
-- Partial/malformed shared evidence and concurrent/unselected private authority stay fenced.
-- Fault injection rolls back a mixed publication without installing the candidate's shared adoption or private draft.
+- Runtime cases distinguish fresh locked authoring, captured producer targets and precomputed replay under independent shared drift/removal. They check cancelled waits, cache ABA, detached inputs, refusal without implicit adoption, and explicit current acceptance before retry. Failure leaves the prior cache, including when mixed writes roll back.
+- `tests/transition.test.ts` checks exact stage/commit and retained replay across selections, Session-only capture, excluded-access guards and rejection on changed state or causal basis. Runtime provenance witnesses check atomic compilation, metadata-only updates, and registration deletion without discarding unbound or opaque evidence.
+- `tests/storage.test.ts` checks independently derived successor/receipt equality, forged values and hidden-owner no-ops, spent and expired publishers, exact byte/presence CAS, pre-write backup failure and rollback with foreign bytes preserved. V2/descriptor upgrades keep excluded owners untouched. See [transaction APIs](architecture.md#runtime-transaction-apis) for the contract.
 - Extension tests reject a first passive patch without publishing empty setup, and recheck acquired-source freshness after lock waiting.
 - Native “real Pi awaits foreign publication” cases hold an independent process for over two seconds, verify responsive waiting/cancellation with unchanged canonical bytes, and require the next provider to see accepted current Global/CWD plus its own Session, never the foreign private layer.
 
@@ -196,9 +230,9 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
 
 ### 29. Awaited Stop preserves immediate policy and accepted authority
 
-- Extension tests cover all inactive-choice pairs: immediate Passive projection or complete Off withdrawal, one runtime-only acceptance of the latest pending choice, current shared adoption with unchanged semantic/provenance bytes, and lifecycle derivation after an intervening same-instance passive patch.
+- Extension tests distinguish immediate Passive projection from complete Off withdrawal. Repeated pending Passive requests share the operation; accepted local changes can supersede its captured basis. The [mode-only drift and recovery witnesses](#19-stop-changes-policy-not-semantic-history) distinguish refusal from current acceptance.
 - Operation cancellation keeps the selected inactive mode and fences writes; selection/shutdown/accepted Start withdraw obsolete work without later mutation, while rejected Start leaves Stop pending.
-- Publication faults roll back config/runtime without installing shared adoption; native checkpoint faults after acceptance do not roll back or retry writes.
+- Publication faults roll back config/runtime without installing a candidate; native checkpoint faults after acceptance do not roll back or retry writes.
 - Native “real Pi off keeps local mode off while awaiting a partial foreign publication without private leakage” holds an independent writer for over two seconds, proves accepted shared/local memory through inspection and verifies that Off injects no shared-memory values or handoff into the next provider request.
 - Telegram controls acknowledge early, await results, escape late errors and suppress revoked/navigated/disposed views; synchronous controls remain compatible.
 
@@ -220,14 +254,10 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
 
 ### 32. Awaited fork copies current parent memory and preserves parent and child authority
 
-- Runtime fork cases cover limits 0/1/12 from an old step, current artifact provenance and contradictory lineage.
-- An independent partial writer held over two seconds proves responsive cancellation, pinned source identity/checkpoint, current shared adoption and private copying without parent/foreign-private changes. The extension pins the parent's current head, so native fork copies never depend on the fork step.
-- Competing child acceptances prove post-wait checks.
-- Every occupied child file, unsupported storage evidence, invalid/missing parent authority and parent/child byte races refuse publication.
-- Fault injection proves rollback/retry; expired/single-use capabilities and post-acceptance checkpoint failure cannot replace accepted child memory.
-- Child lifecycle resets step and unfinished specification while retaining selected mode/bootstrap; later child writes leave the parent unchanged.
-- Shared unknown metadata and unrelated provenance survive.
-- Native fork caller evidence is item 35.
+- `tests/runtime.test.ts` covers all Session-containing selections, Baseline/V2 parents, first exclusion and retained private proof, incompatible evidence, occupied targets, competing children and recaptured parent bytes. A held wait can be cancelled; escaped or consumed capabilities cannot publish. Failed copy rolls back the child without mutating its parent; retry reads the current source.
+- Eager/deferred copy retains raw artifact evidence, including malformed, opaque and special-key entries, and distinguishes absent versus explicitly empty registries. A raw-only change can invalidate the source before publication.
+- Shared-only deferral covers three selections, four retention windows and both enabled modes. The mode sampler preserves captured run fields, cannot publish after a reentrant Abort, and is never invoked on a cancelled wait. The header-only inspection matrix crosses stored/requested selections without opening semantic bodies or granting new authority.
+- `tests/storage.test.ts` checks store/lifetime/single-use deferral guards and retained module descriptors. `tests/extension.test.ts` checks cold pending, deferred-to-acquired run-field preservation, refusal of independent unacquired evidence, checkpoint/reset failure, and acquired child-current without parent reads. `tests/integration.test.ts` exercises current parent/recent shared state, exact real parent identity/CWD refusal and retry; items 35, 37 and 40 map the native lifetime witnesses.
 
 ### 33. Awaited current-memory recovery stays read-only
 
@@ -267,8 +297,7 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
 
 - The extension native-fork/Start-retry × warm/cold × retained/expired matrix holds exclusion while Stop selects passive policy.
 - The copy must remain pending rather than be cancelled, including when Stop withdraws its Start waiter.
-- After release, retained source memory is accepted once with disabled policy, passive patching changes child-owned memory without enabling the mode, and native trace reopening through `SessionManager.open` preserves that child state.
-- Expired source history refuses canonical publication and substitute checkpoints.
+- After release, the copy uses the parent's then-current state even if the native fork step expired. Passive patching updates child-owned state without enabling Active, and reopening through `SessionManager.open` preserves it.
 - The separate public SDK control/next-provider witness is item 40; installed UI reachability remains unverified.
 
 ### 38. Stop cannot manufacture a restoration failure
@@ -295,7 +324,7 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
 - During a held-store `runtime.fork`, it calls the child's public `prompt('/state-flow-passive')`; an optional subsequent Start waits for memory acceptance.
 - Stop returns while the fork remains pending.
 - After release, the child has a distinct identity, selected private memory and the requested passive/active policy.
-- Its next provider sees selected rather than later-parent private state, successfully patches child memory and leaves all parent-private files unchanged.
+- Its next provider sees the admitted child copy, successfully patches child memory and leaves all parent-private files unchanged.
 - This certifies the embedding route on the tested SDK, not whether the installed CLI or Telegram exposes that child before its runtime replacement completes.
 
 ### 41. Automatic history does not hydrate lazy memory
@@ -346,7 +375,7 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
 
 ## Additional preservation boundaries
 
-- `tests/continuation.test.ts` independently advances global/CWD at limits 0/7, then proves read-only eligibility agrees with actual restore and preserves the session layer, including shared-only transitions.
+- `tests/continuation.test.ts` independently advances Global/CWD at limits 0/7 in both Baseline and V2, then proves read-only eligibility and current observation preserve the Session layer without converting the lifecycle.
   - `tests/temporal.test.ts` covers sparse/inherited session lineage, conflicting checkpoint/tail identities and parents, future patches, and immutable inputs.
   - The runtime restore/fork contradiction witnesses preserve source/target files rather than accepting a new origin over mixed session files.
   - The native “real Pi refuses contradictory session files without passive substitution and retries the repaired selection” witness retains shared access, fences private access and publication, permits local Stop without a substitute checkpoint, and succeeds after exact-source repair.
@@ -363,8 +392,7 @@ See the [M2 functional boundary](scope-selection-contract.md#functional-acceptan
   - No-op/unowned-only initial backups skip; Git/index failures preserve canonical acceptance and caller data.
   - `tests/episode.test.ts` proves one diagnostic-only attempt at `agent_before_settle`, without answer changes or an automatic retry.
 - `tests/integration.test.ts` native new/resume/fork witnesses preserve canonical files and retained boundaries.
-  - Fork witnesses cover selected private state over current shared layers, fresh child ownership, reload/resume, disabled-source fencing, identity/CWD refusal, retry, and expired-boundary refusal.
-  - `tests/runtime.test.ts` restore/fork provenance witnesses preserve current-head, untouched-path, and shared evidence while discarding evidence for later-changed private artifacts, including change-away-and-back.
+  - See item 32 for fork identity, current-memory and provenance witnesses; a native fork point supplies no historical memory or artifact registry.
   - The test-only provenance reader is checked against nonempty canonical `meta.json` evidence in every scope before and after reload; native restore/fork tests verify missing-evidence invalidation, explicit recompilation, parent preservation, and provenance across reload.
 - `tests/recovery.test.ts` and `tests/runtime.test.ts` distinguish malformed checkpoints from expired retained boundaries, prevent fallthrough or newer-state substitution, and require detached single-use restoration followed by canonical origin acceptance.
 - `tests/extension.test.ts` — “tool preflight walks only the selected native suffix for matching calls, without rebuilding a branch” uses real in-memory `SessionManager` trees with zero/two hundred prior request-answer pairs, intervening custom/results, and a later unselected assistant reusing a call ID.

@@ -5,7 +5,7 @@ import test from "node:test";
 import { sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { HealNotice, healSelectedStore, isHealableCorruption } from "../lib/healing.ts";
 import type { ScopeSelection } from "../lib/selection.ts";
-import { RevisionUnavailableError } from "../lib/snapshot.ts";
+import { RevisionUnavailableError, UnsupportedLifecycleFormatError } from "../lib/snapshot.ts";
 import { PublicationBusyError, withStorageTransaction } from "../lib/storage.ts";
 import { fixture } from "./current-fixture.ts";
 
@@ -71,8 +71,8 @@ test("a cross-owner contradiction resets the private lifecycle anchor, not healt
 	const runtime = sessionRuntimePaths(f.cwd, f.id, f.root);
 	const value = JSON.parse(readFileSync(runtime.runtime, "utf8"));
 	// Internally valid lifecycle whose lineage no longer matches the owners' accepted transitions.
+	assert.equal(value.format, "baseline");
 	value.lineage[1].id = "forged";
-	value.causalWitnesses[0].transition.id = "forged";
 	writeFileSync(runtime.runtime, JSON.stringify(value));
 	const shared = snapshotFiles(["global", "cwd"].flatMap(scope => scopeFiles(f, scope as "global" | "cwd")));
 	const result = await heal(f);
@@ -102,6 +102,22 @@ test("unhealable failures, cancellation and live writers never quarantine", asyn
 	release(); await holder;
 	assert.equal(existsSync(quarantineDirectory(f.root)), false);
 	assert.deepEqual((await heal(f, ["global"])).healed.map(item => item.scope), ["global"]);
+});
+
+test("retired and unrecognized lifecycle formats stop healing before any owner is touched", async t => {
+	for (const runtimeHeader of [{ version: 1 }, { format: "future" }, { format: "baseline", version: 2 }]) for (const config of ["absent", "invalid UTF-8"]) {
+		const f = await fixture(t);
+		const life = sessionRuntimePaths(f.cwd, f.id, f.root);
+		if (config === "absent") unlinkSync(life.config);
+		else writeFileSync(life.config, Buffer.from([0xff, 0xfe]));
+		writeFileSync(life.runtime, JSON.stringify(runtimeHeader));
+		writeFileSync(temporalScopePaths(f.cwd, f.id, "cwd", f.root).checkpoint, "corrupt but not authorized for healing");
+		const before = snapshotFiles(ALL.flatMap(scope => scopeFiles(f, scope)));
+		await assert.rejects(heal(f), UnsupportedLifecycleFormatError);
+		assert.deepEqual(snapshotFiles([...before.keys()]), before);
+		assert.equal(existsSync(quarantineDirectory(f.root)), false);
+		assert.equal(existsSync(`${f.root}-migration-backups`), false);
+	}
 });
 
 test("only semantic decode failures classify as healable corruption", () => {

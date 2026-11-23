@@ -134,18 +134,15 @@ test("runtime and Skill guidance preserve reported ordinary and provenance-deriv
 		assert.match(protocol, /user→global, project→cwd, temporary→session/);
 		assert.match(protocol, /never blocks patches/);
 	}
-	const guide = readFileSync(new URL("../skills/state-flow-guide/SKILL.md", import.meta.url), "utf8");
-	assert.match(guide, /reported scope/);
-	assert.doesNotMatch(guide, /Ordinary artifacts need exact-path descriptions in `global\.artifacts`/);
-	assert.match(guide, /one atomic multi-scope patch to relocate/);
-	assert.match(guide, /user Skills target global, project Skills target CWD and temporary Skills target session/);
-	assert.match(guide, /unrelated semantic patch may proceed/);
-	const memory = readFileSync(new URL("../skills/state-flow-memory/SKILL.md", import.meta.url), "utf8");
-	assert.match(memory, /only on explicit user request/);
-	assert.doesNotMatch(memory, /or once at an active State Flow|phase-boundary curation/);
-	assert.match(memory, /one atomic multi-scope `state_flow_patch`/);
-	assert.match(memory, /pending optional Skill acquisition does not block unrelated curation/);
-	assert.match(memory, /External transfers require confirmed destination and write authority/);
+	const skill = readFileSync(new URL("../skills/state-flow/SKILL.md", import.meta.url), "utf8");
+	assert.match(skill, /reported scope/);
+	assert.doesNotMatch(skill, /Ordinary artifacts need exact-path descriptions in `global\.artifacts`/);
+	assert.match(skill, /one atomic multi-scope `state_flow_patch` for destination and source changes/);
+	assert.match(skill, /user Skills target global, project Skills target CWD and temporary Skills target session/);
+	assert.match(skill, /unrelated semantic patch may proceed/);
+	assert.match(skill, /only on explicit user request/);
+	assert.doesNotMatch(skill, /or once at an active State Flow|phase-boundary curation/);
+	assert.match(skill, /External transfers require confirmed destination and write authority/);
 });
 
 test("protocol presents semantic planes once in intentional intent-first order", () => {
@@ -214,15 +211,13 @@ test("active, bootstrap and passive history policy is task-driven rather than fo
 		assert.match(protocol, /Past values are evidence, not current state/);
 		assert.match(protocol, /never automatically restore deleted memory/);
 	}
-	for (const name of ["state-flow-guide", "state-flow-memory"]) {
-		const skill = readFileSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url), "utf8");
-		assert.match(skill, /Missing paths or runtime hints alone do not require historical search/);
-		assert.match(skill, /agent may choose a targeted historical read/);
-		assert.match(skill, /without separate user permission/);
-		assert.match(skill, /never automatically restore deleted memory/);
-		assert.match(skill, /not verified new locations of the target/);
-		assert.match(skill, /Do not scan all offsets, hydrate automatically or request repair inference/);
-	}
+	const skill = readFileSync(new URL("../skills/state-flow/SKILL.md", import.meta.url), "utf8");
+	assert.match(skill, /Missing paths or runtime hints alone do not require historical search/);
+	assert.match(skill, /agent may choose a targeted historical read/);
+	assert.match(skill, /without separate user permission/);
+	assert.match(skill, /never automatically restore deleted memory/);
+	assert.match(skill, /not verified new locations of the target/);
+	assert.match(skill, /Do not scan all offsets, hydrate automatically or request repair inference/);
 });
 
 test("successful patch formatting separates intents and lazy sections", () => {

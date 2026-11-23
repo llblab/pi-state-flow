@@ -14,20 +14,20 @@ The extension owns durable memory while enabled. The native bridge admits all se
 - `config`: read-only load-time repository defaults, including immutable configured scope data. [Native capture](scope-selection-contract.md#configured-scope-defaults-and-native-capture) freezes defaults once into branch policy, without itself granting memory authority.
 - `selection`: pure immutable nonempty owner selections and command-token parsing. Value capture grants no mode, lifecycle authority, I/O or storage participation by itself; see the [selection boundary](scope-selection-contract.md#internal-value-boundary-and-lifecycle-encoding-direction).
 - `temporal`, `history`: causal boundaries, checkpoint/tail folding and hot history. Internal [selected temporal algebra](scope-selection-contract.md#selected-temporal-value-algebra) retains only participating streams and metadata-only excluded-step witnesses; algebra alone grants no native storage/runtime admission.
-- `migration`: temporary pure legacy-to-target conversion, root-name guards, reference translation and serialized preflight. `durable` consumes it before known-field filtering; `storage` alone owns backup and guarded conversion publication. It does not own I/O or lifecycle; see the [migration boundary](semantic-compatibility-decision.md#serialized-owner-cohort-preflight).
-- `durable`, `storage`, `git`: canonical codecs and identity, exact file-cohort CAS/exclusion/guarded rollback, and optional settled-turn backup (`SettledTurnBackup`). Selected admission separates semantic bodies from required private/layout evidence; origin/current/fork publication remains explicitly authorized. The [scope contract](scope-selection-contract.md#functional-acceptance-boundary) owns selected/private proof and its historical implementation checkpoints; the storage and backup sections below own transaction/durability limits.
+- `migration`: pure v3/v4 codec and descriptor-upgrade preflight. It validates the complete owner triple, CWD identity, replay and retired-root reservations before selecting semantic fields, returning detached target data and exact-byte evidence. It grants no lifecycle or publication authority; `storage` owns backup and guarded publication. See [format admission](compatibility.md#canonical-scope-format-admission).
+- `durable`, `storage`, `git`: canonical codecs and identity, exact file-cohort CAS/exclusion/guarded rollback, and optional settled-turn backup (`SettledTurnBackup`). Selected admission separates semantic bodies from required private/layout evidence; origin/current/fork publication remains explicitly authorized. The [scope contract](scope-selection-contract.md#functional-acceptance-boundary) owns selected/private proof and the admission matrix; the storage and backup sections below own transaction/durability limits.
 - `snapshot`, `session`, `runtime`, `recovery`, `episode`: branch/run lifecycle, captured v2 policy, revocable native request receipts and accepted/read-only runtime views. Policy candidates and observation grant no private acquisition or publication. The same selection lifetime binds requests, context, tools and answers across all seven choices; current-memory attachment, private deferral and legacy dependencies follow the [scope contract](scope-selection-contract.md).
 - `transition`, `ownership`, `context`: inference barriers, turn resolution, intent-ownership cascades, passive projection, and response reconciliation. Internal [selected semantic staging/commit](scope-selection-contract.md#selected-semantic-staging-and-commit) reuses the same engine without disabled owners; native response/policy composition uses the same seven-selection bridge. Session-excluded completion finalizes lifecycle without a semantic response transition or hidden private owner.
-- `semantic-module`, `planes`: detached internal context/producer evaluation and the six static built-in bindings; see the [internal contract](semantic-module-contract.md). They do not publish or acquire memory.
+- `semantic-module`, `planes`: detached internal context/producer evaluation and the six static built-in bindings; see the [internal contract](semantic-layers.md#internal-semantic-modules). They do not publish or acquire memory.
 - `module-registry`: revocable native-host registration/catalog lifetimes for the published `./modules` entry. The [public contract](public-module-contract.md) owns trusted callback admission, retained external identities and runtime currentness; a catalog is not publication authority.
 - `query`: current/historical value projection and shared semantic-locator syntax; parsing alone resolves no target and confers no authority.
-- `model-interface`: Detached flat/canonical locator/ref and typed target/pointer presentation, consuming existing query/selection/JSON contracts, never storage/native authority. Actual native sole-flat/multi-explicit read/patch callers use it after original M2 admission. Arity-only schema refresh and fresh SDK definitions preserve old wrapper identity; the [deterministic functional interface](single-scope-interface-contract.md#deterministic-m3-checkpoint) is accepted, not live-model quality.
+- `model-interface`: Detached translation between the [model interface](#model-tools) and canonical patches, locators and references. Owns typed presentation, not native, source or storage authority.
 - `compaction`: completed-history compaction planning and per-request marker state (`StateFlowCompactionRequests`).
 - `operation`: `OwnedOperationSlot`, the single-owner cancellation slot used by Start, inactive-mode persistence, branch restoration, inference preparation and response reconciliation; identity-guarded release keeps late completions from clearing newer work. `RenewableLifetime` owns the shared-inspection and memory-tool cancellation lifetimes and underpins internal selected policy requests. Slot cancellation/lifetime renewal expose replacement ownership before synchronous abort dispatch so reentrant listeners cannot erase newer work.
 - `artifact`, `acquisition`, `skills`, `rehydration`: source routing and compilation; `ArtifactAcquisitionState` owns the selected branch's invalidation plan, model hints and correlated read candidates.
 - `memory`: memory-bearing scope diagnostics; explicit selection returns only present selected flags while the legacy no-selection signature retains all-three behavior.
 - `continuation`: native-header discovery, runtime-provenance inspection, deterministic recommendation, and host startup precedence.
-- `protocol`, `logging`: Model/tool presentation and bounded diagnostic persistence. Existing trusted plain renderers/private snippets and their context/extension trust boundaries are evaluated in the [protocol composition decision](protocol-composition-decision.md), without moving semantic execution into prompt hooks.
+- `protocol`, `logging`: [Trusted prompt and tool presentation](#protocol-section-and-continuations) and bounded diagnostic persistence.
 - `status`, `telegram`, `extension`: observational operator projection, optional fail-open Telegram presentation and native lifecycle composition. Status distinguishes wanted policy from available owners/revisions without fabricated values or acquisition; Telegram mode controls preserve scopes and inspection follows wanted targets. [Usage](usage.md#status-and-controls) owns operator behavior; the [scope acceptance map](scope-selection-contract.md#functional-acceptance-boundary) records proof limits.
 
 Test placement is checked in both directions by `tests/invariants.test.ts`: LIB modules have same-named mirrors, and every suite has an exact production owner or a reasoned cross-domain exception. The benchmark suites mirror `benchmarks/benchmark.ts` and `benchmarks/benchmark-session.ts` rather than being exceptions. The four exception reasons live in the invariant itself. Shared fixture modules may set up, read and assert, but cannot be hidden suites: the source-hygiene check erases TypeScript types before checking literal test-runner/suite dependencies and direct registration forms. This is not an arbitrary-code sandbox or a proof of semantic case ownership; independent organization review remains necessary.
@@ -47,9 +47,7 @@ Runtime views select these built-in semantic planes when present, plus metadata 
 }
 ```
 
-- `intents` is the queue of chosen actions, not a planner, scheduler, task manager or execution loop. An intent may own same-scope `strategy`/`tactics`/`lazy` object keys by structured reference; see [model tools](#model-tools).
-- `strategy` retains binding requirements, accepted approaches/plans, decisions, interfaces and rejected alternatives. Proposals remain distinguishable from commitments; operational contradiction does not silently cancel a binding requirement.
-- `tactics` is the temporary working context of those actions: verified current facts, results and uncertainties.
+- `intents`, `strategy`, and `tactics` are the core [handoff planes](semantic-layers.md#handoff). An intent may own same-scope object keys through [structured references](lazy-state.md#intent-ownership).
 - `artifacts` maps exact source paths to compiled routing metadata.
 - `response` is owned only by the session scope and stores the exact latest accepted assistant answer, including the empty string. Global/CWD do not receive newly accepted answers, and stored scopes may omit response entirely. An explicit nonempty Session answer overrides inherited values; an empty or absent response contributes nothing to Active projection. Automatic Passive context omits the response plane, including frozen Stop handoffs and state-update receipts. Canonical storage, explicit reads and native answer text are unchanged.
 - `lazy` is an optional stored object root for ordinary JSON detail. It defaults to `{}` only in internal compatibility views, is omitted from baseline model state and is read explicitly.
@@ -67,13 +65,13 @@ Later scopes win. A scope-local `null` deletion removes only that scope's key an
 
 **Sparse state.** Missing planes are valid sparse semantics, not incomplete storage.
 
-- Checkpoint/tail codecs admit declared versions before interpreting fields. The [migration contract](semantic-compatibility-decision.md) owns v1/v2 translation, v3/v4 admission, raw collision refusal, retired-root support timing and backed-up owned conversion. The [public module contract](public-module-contract.md) owns metadata v4 descriptors and opaque retention through missing definitions, unrelated writes, folding and forks. Retention and callback activation are distinct responsibilities; both shipped in 0.27.0.
+- Checkpoint/tail codecs apply [format admission](compatibility.md#canonical-scope-format-admission) before interpreting fields. The [public module contract](public-module-contract.md) owns metadata v4 descriptors and opaque retention through missing definitions, unrelated writes, folding and forks. Retention is independent of callback activation.
 - Retained record identities and positions survive even when filtering leaves an empty patch.
 - `readTemporalView` selects present known fields at the requested boundary, then overlays scopes without inventing fields.
 - Empty and absent responses mean the same for Active projection; clearing a nonempty response projects as a deletion. Passive omits the plane regardless of its value.
-- Explicit reads of absent documented top-level fields return `null`.
+- Value reads return `null` for proven absence at eligible locators; see the [model-tool contract](#model-tools) for unavailable views and projection-specific results.
 - `readTemporalState` and the embedding callback keep default-bearing compatibility views for internal registry consumers. Those defaults never become stored overrides or model context.
-- Passive reads and Start do not fill checkpoint fields or create revisions for normalization; missing shared pairs initialize as empty objects.
+- Passive reads never initialize. Start does not fill missing planes or create revisions for normalization; authorized acceptance can initialize a wholly absent selected shared triple.
 
 **Staging and replay.** Authored staging uses raw scope presence and derives runtime-normalized replay from the writes actually accepted, including complete artifact replacement; replay must reproduce accepted state exactly. Each supplied scope (and Session on response reconciliation) recursively omits empty object fields, including explicit `{}` and empty planes, before intent ownership and after cascades/compilation. The scope root remains `{}`; array slots and empty arrays remain, while object fields inside array elements are pruned. Untouched scopes are not normalized. Existing empty branches in a supplied scope become explicit accepted deletions and may advance its revision once; clean repeats create none. Model projection hides legacy empty object fields without changing stored state, exact current/historical reads or replay.
 
@@ -89,7 +87,7 @@ Global availability is not a feature switch, and it does not authorize secrets, 
 
 ## Temporal model
 
-All scopes take part in one active causal lineage:
+Participating owners share one composed causal lineage:
 
 - One accepted semantic transition receives one opaque identity, shared by every changed scope.
 - A branch-local position may order identities but never substitutes for a global counter or merges forks. Origin adoption is not an invented semantic transition or retry loop.
@@ -112,7 +110,7 @@ checkpoint.json + patches.jsonl
 **History offsets versus revisions.**
 
 - `effective[n]`, `global[n]`, `cwd[n]` and `session[n]` resolve the same nth previous causal boundary. The history index is a composed-lineage offset, not a scope revision.
-- Separately, each materially changed owner advances its persisted semantic revision once. Global and CWD counters are shared across their canonical writers, Session stays private, and Effective is identified by the current `g#c#s#` revision vector.
+- Separately, each materially changed owner advances its persisted semantic revision once. Global and CWD counters are shared across their canonical writers, Session stays private, and Effective uses the current materialized-owner revision vector in canonical order (for example, `g7c4s2` when all three are present).
 - The top-level `state` segment is rejected. Pre-origin history is unavailable rather than empty.
 - Once enough accepted transitions are proven, offsets zero through the configured `historyLimit` stay addressable at their shared causal boundaries.
 
@@ -131,6 +129,14 @@ checkpoint.json + patches.jsonl
 3. It validates and publishes one atomic cohort. Replay, history and revisions use that actual basis; correct repeats create no semantic transition.
 4. It then acts as an inference barrier: Pi executes no sibling tools from the same assistant response, and the next inference sees the rematerialized current effective state.
 
+### Model context presentation
+
+The context domain compares canonical data first and translates only known output fields using the admitted request's captured owner choice. This is presentation, not an authoring or acquisition grant.
+
+- Active/Passive heads, projection-bound updates and new Stop/reload/bootstrap handoffs follow [single-owner reference translation](lazy-state.md#semantic-references). The effective overlay is not flattened again.
+- The lazy catalog points to `lazy` for one wanted owner and `effective.lazy` for several; neither exposes lazy bodies. Active recent records keep their accepted `id` and branch-local `at`, omit empty or lazy-only records, and use `{id,at,patch}` for one wanted owner or explicit `transitions` for several. Passive does not gain Active recent history.
+- Skill acquisition hints use `artifacts["exact source key"]` for one owner and `owner.artifacts["exact source key"]` for several, quoting the exact opaque path as a JSON string. This is compilation-target syntax, not a read locator. Compiler errors and operator details keep canonical provenance; a foreign owner named in an error is not a patch wrapper or permission to compile there.
+
 ### `state_updates` receipts
 
 A successful native tool result may include a `state_updates` block, separate from the compact acknowledgement used by interactive rendering. The context domain owns this projection, not storage or the lifecycle composition root.
@@ -142,7 +148,7 @@ A successful native tool result may include a `state_updates` block, separate fr
 - Indexed-array patch selectors become numeric update paths only against a communicated in-bounds array basis. Object keys with the same spelling are literal.
 - Artifact cards use the normal metadata filter, and touched cards replace their whole projected entry.
 - Lazy bodies never enter this block; a changed bounded `lazy_navigation` may accompany it.
-- An optional `cascaded` array lists owner-scoped paths cleared in the intermediate ownership phase, even if remaining authored planes recreate them, including nested lazy targets that do not change the top-level navigation. It contains paths only, never values, and is absent when no target cascaded.
+- An optional `cascaded` array lists paths cleared in the intermediate ownership phase, relative for one wanted owner and owner-scoped for several, even if remaining authored planes recreate them, including nested lazy targets that do not change the top-level navigation. It contains paths only, never values, and is absent when no target cascaded.
 - Unrelated unchanged branches are omitted. A result with nothing left to reconcile and no cascade has only the acknowledgement.
 
 **What is always included.** Entries conservatively cover changed scope fallbacks, masked or overlapping multi-scope touches, and projected changes since the last communicated view, including shared refreshes before or during the transaction. `cascaded` lists every target computed during accepted staging, in deterministic per-scope order across Global, CWD and Session. It is never elided as predictable: a receipt with only `cascaded` and an empty `effective` array still reaches the model. The owner path does not imply final absence; `effective` entries describe actual final values, including authored recreation or revealed fallback. Accepted history stores explicit net patches and never reruns cascade; existing strategy references affect future accepted intent deletions without rewriting history.
@@ -235,7 +241,7 @@ Explicit Start independently prepares the validated current same-session canonic
 
 **How acceptance works:**
 
-- `withStartTransaction` acquires exclusion before capture and binds private stream identity to the current runtime lineage, with one synchronous, single-use exact-cohort acceptance before installation. Pending repeats share the same operation.
+- `withSelectedCurrentTransaction` validates existing selected memory under exclusion; first authoring or a fork uses its own explicit origin authority. Each has one synchronous, single-use acceptance before installation. Pending repeats share the same operation.
 - After waiting, the current branch/physical identity, initialization permission and bootstrap context are rechecked. Stop, selection and shutdown withdraw an obsolete activation.
 - Only acceptance enables the new mode, clears Stop fences and cancels older Stop persistence.
 - Caches, preparation policy and one native checkpoint install before yielding, without a second persistence call; a later failure cannot roll them back.
@@ -252,32 +258,15 @@ Explicit Start independently prepares the validated current same-session canonic
 
 ### Passive persistence
 
-**Adopting shared drift.** For accepted runtimes, the Pi adapter's lifecycle-only Passive persistence reconciles valid live global/CWD drift before publishing the current session's config/runtime pair.
+Passive applies local tools/context policy and freezes the approved handoff before any wait, disabling Active response capture and compaction. It preserves independently owned attachment or fork work and records the newer mode without waiting for it; an observer cannot publish a checkpoint. With no runtime, an eligible branch [observes selected shared memory](#pre-runtime-branches) without initialization. Deferred acquisition and real reselection use their own authority checks, not mode-only persistence.
 
-- Changed shared streams establish a fresh proven origin, not a semantic transition. The runtime adopts their already-advanced owner revisions without incrementing them, while semantic files and all provenance files stay unchanged.
-- Cached reads may constrain wider tails left by another writer without rewriting them.
-- Same-session file races and explicitly requested stale provenance writes still fail closed under CAS.
-- The host refreshes its scope cache after adoption: Stop freezes the accepted view, and new-run registered-artifact maintenance runs against that view before inference.
+**Mode-only write.** With an accepted runtime, `persistSelectedPassive` captures the cache identity and, under exclusion, rechecks host policy and exact selected bytes/presence. Compare lifecycle bytes before decoding so a replacement cannot widen reads. Derive the update from recaptured run fields and allow writes only to lifecycle files. Semantic files, provenance, run fields, wire format and history stay unchanged; neither shared drift nor missing owners are adopted. An intervening patch that changes the accepted cache supersedes the captured basis. A correct no-op keeps cache identity and existing leases.
 
-**Order of operations.** Passive selection immediately applies the selected tools/context policy and disables active response/compaction behavior, before attempting canonical persistence. For accepted runtimes it then:
+Pending repeats share the operation. Off, session/tree selection, shutdown or accepted Start revoke it; failed Start does not. Stop-owned cancellation can combine with a Pi operation signal, when provided. Shutdown drains the canceled wait. After canonical acceptance the host completes its checkpoint and handoff; a later bookkeeping failure does not roll back acceptance or retry native writes.
 
-1. freezes the passive handoff immediately;
-2. awaits `withLifecycleTransaction` with Stop-owned cancellation and any available Pi operation signal (pending inactive choices share one acceptance of the latest mode);
-3. after acquisition, rechecks the runtime, physical owner and policy, and derives the snapshot from current lifecycle state, including an intervening same-instance passive patch;
-4. on successful publication, installs the adopted shared cache, final handoff and native checkpoint before yielding.
+**Write fence and recovery.** On failure, keep accepted memory and native context. The native passive-stop marker records `owner`, inactive `mode`, `persistenceError` and `preserveContext: true`. It is a same-session policy override and write fence, not a substitute semantic checkpoint. Off carries it without reading memory; if Pi's trace is unwritable, the local mode still applies but durable recording is not guaranteed.
 
-Off, session/tree selection, shutdown or an accepted Start revoke obsolete Passive persistence; a failed Start leaves it pending. Shutdown drains the canceled operation. A post-acceptance lifecycle failure never restores old metadata or retries native writes.
-
-**If persistence fails.** Accepted cached memory and all available native context are kept. The existing native passive-stop marker records `owner`, the selected inactive `mode`, `persistenceError` and `preserveContext: true`.
-
-- This is a same-session policy override and write fence, not semantic authority or a substitute checkpoint. No canonical failure is repaired by resetting memory. A later explicit Passive joins pending read-only recovery, then retries the shared current-memory acceptance used by Start; only accepted publication and its newer checkpoint clear the fence.
-- Memory-enabled tree/reload/resume with that pending marker use `TemporalRuntime.refreshCurrentMemory()` to validate and read current memory, without historical restoration or publication; unavailable evidence stays unavailable.
-- A later accepted checkpoint supersedes the fence while keeping the context boundary for bootstrap.
-- Repeating the same degraded choice is inert; another inactive choice updates only native policy and keeps the fence.
-- An in-flight read-only recovery keeps a repeated Passive choice; Off cancels it before further acquisition.
-- A successful explicit Start uses the same detached validation path under CAS before clearing the fence.
-- Status and inspection distinguish accepted cached/read-only memory from unavailable publication.
-- If Pi's own trace is unwritable, the local disablement still happens before the error, but the durable fallback cannot be guaranteed.
+Fenced tree/reload/resume use `refreshSelectedCurrent` without publishing, rewinding, clearing the fence or overriding a newer policy. An explicit Passive retry can join pending read-only recovery and then accept current memory through the same CAS path as Start. Only acceptance and its newer checkpoint supersede the fence, keeping the bootstrap boundary. This separate path may adopt validated shared drift without incrementing its existing revisions. A failed retry adds no duplicate marker. Off cancels further acquisition. See the [mode and fence witnesses](temporal-acceptance.md#19-stop-changes-policy-not-semantic-history).
 
 ### Off
 
@@ -308,6 +297,8 @@ The initial system prompt is composed at `before_agent_start`. Stop does not rew
 ### Protocol section and continuations
 
 The current user specification stays at user authority and appears only in synthetic user runtime context. State is fallible assistant-produced data.
+
+**Protocol source.** `lib/protocol.ts` renders ordered, package-owned text from validated owner choice and mode/bootstrap policy. Bootstrap adds a notice to the Active template; Passive shares common rules, not Active's reconciliation pressure. Semantic memory, file bodies and module callbacks are not inputs to this system text. Prompt rendering does not execute semantic hooks; Pi remains the loader. Native contributions must first satisfy the [captured request and caller boundary](scope-selection-contract.md#request-lifetime-and-native-correlation).
 
 **The owned system-prompt section:**
 
@@ -403,8 +394,8 @@ meta.json
 **The primitive.** `lib/storage.ts` supplies `withStorageTransaction(root, callback, signal?, waitForLock = true)`. The root must already exist.
 
 - One `.state-flow-publication.lock` covers every scope in that store.
-- The callback receives root-bound `capture` and `publish` operations and keeps exclusion until it finishes, including asynchronous completion. Capture happens after acquisition.
-- Publication reuses the validation, exact-byte CAS, receipts and guarded rollback of the synchronous adapter, without reacquiring the lock.
+- The callback receives root-bound observation and acceptance operations and keeps exclusion until it finishes, including asynchronous completion. Capture happens after acquisition.
+- Acceptance validates exact-byte and presence dependencies, returns detached receipts and uses guarded rollback without reacquiring the lock.
 - Borrowed operations expire when the callback completes and cannot address another store.
 
 **Waiting and cancellation:**
@@ -419,51 +410,25 @@ meta.json
 
 ### Runtime transaction APIs
 
-**`TemporalRuntime.withPatchTransaction`** routes `state_flow_patch` through this capability.
+Both Pi and the package-root `TemporalRuntime` use selected transactions over exact sparse scope semantics. Lifecycle evidence can establish current authority, not permission to acquire or replace it.
 
-- Its synchronous callback receives detached exact sparse scope semantics (without read defaults), their causal basis and provenance, plus one single-use `publish` operation. It cannot access selection or raw storage methods.
-- Shared drift is adopted before staging, not used to reject a stale agent. The exact accepted private cohort stays fenced against another physical writer or unselected history.
-- A new owner prepares an empty private origin without writing it separately. Validation failure leaves canonical files and accepted caches untouched.
-- Compiled cards and evidence publish together, and an absent semantic pair cannot confer orphaned compilation evidence on a new registration.
-- Host caches and the accepted native checkpoint update after publication, before yielding.
+- **`withSelectedPatchTransaction`:** A synchronous author receives the locked current selected states, run fields, causal basis and provenance. Ordinary authors may write against that live shared state, even after drift. Explicitly captured targets (for example, asynchronous module producers) are checked before authoring.
+- **`TemporalRuntime.publishSelected`:** Detaches replay, run fields and metadata deltas before waiting; it never silently restages them. Targeted shared stream/provenance drift rejects, including provenance-only targets. A wholly removed target raises `SharedScopeRemovalConflictError`; keep the prior cache and publish nothing. Explicit current acceptance can establish empty shared reality for a new authored patch, not recover lost private memory. Independently valid untargeted shared drift/removal may be adopted. Both routes fence exact private/lifecycle dependencies and required presence; partial/malformed evidence fails before authoring or publication.
+- **`withSelectedCurrentTransaction`:** Accepts validated same-session authority without relying on an old cache. It preserves provable aligned history within the configured limit or selects a fresh current origin when independent valid streams cannot be aligned. It cannot acquire a previously unacquired Session.
+- **First authoring and acquisition:** `withSelectedFirstPatchTransaction` makes origin acceptance and the first semantic change one publication, with explicit creation authority. A previously unacquired Session needs the separate `withSelectedSessionAcquisitionTransaction` path. An occupied, incomplete or contradictory owner never qualifies as a new origin.
+- **Mode and fork:** `persistSelectedPassive` is [mode-only](#passive-persistence). Child deferral and parent copying use the [fork contract](fork-contract.md).
 
-**`TemporalRuntime.withLifecycleTransaction(action, signal?)`** is the runtime-only counterpart.
-
-- It requires already accepted private authority both before and after waiting; passive reads and unaccepted restore candidates cannot initialize or authorize it.
-- Under one exclusion it captures current shared state and calls `action(publish)`. The caller must recheck selection/policy and derive its current lifecycle snapshot before invoking `publish(snapshot)` synchronously, once.
-- Only that session's config/runtime may change. Semantic files, scope provenance, scope revision counters and even wider foreign retained tails stay untouched.
-- No-op acceptance returns `changed: false` after validating the captured cohort. Failed or canceled publication installs no candidate; cancellation after acceptance cannot undo it.
-- The transaction APIs share the candidate/acceptance owner, with no nested lock acquisition or second persistence call.
-- The patch transaction's existing `publish` also uses runtime-only acceptance when there is no transition/provenance update and its accepted file cohort is complete. New private authority or wholly absent shared pairs instead require ordinary atomic initialization from the staged current values. Partial or malformed evidence stays rejected. No extra publisher capability or caller-selected storage mode is needed.
-
-**`TemporalRuntime.withStartTransaction(action, signal?, allowCreateOrigin = false)`** supplies `action(currentSnapshot, publish)`.
-
-- It validates the current same-session head instead of requiring the caller's cached private basis; the detached snapshot omits old unfinished specifications.
-- Root/private-origin creation is refused by default. When explicitly permitted, wholly absent private authority supplies `undefined`, and the caller must recheck branch permission after waiting before publishing its activated snapshot. Rejected staging never accepts empty setup separately.
-- Complete current memory preserves available aligned history, while independently valid shared streams can establish a fresh origin.
-- Start uses ordinary origin acceptance, including configured retention folding, not lifecycle-only semantic-byte preservation.
-- The synchronous prepared Start API keeps its selected-cohort CAS contract but has no production caller.
-
-Native startup, reload, resume and tree attachment use `withStartTransaction` over current same-session memory, applying the branch checkpoint's mode and run lifecycle. There is no API that rewinds memory to an older boundary.
-
-**`TemporalRuntime.withForkTransaction(source, lifecycle, action, signal?)`** pins the parent identity before waiting; `lifecycle` supplies only the child's mode and bootstrap.
-
-- Under one exclusion it loads the parent's current memory and captures an unoccupied child target, so the copy never depends on the native fork step.
-- The callback receives the child lifecycle (step zero, selected mode/bootstrap, no unfinished specification), rechecks native selection/policy, then publishes synchronously once.
-- Parent evidence is revalidated immediately before child publication, and the child's exact file cohort is CAS-protected. Only acceptance installs child memory.
-- Parent-private files stay untouched, shared provenance stays live, and configured folding still applies.
-- Missing, malformed or occupied evidence never becomes an empty or foreign copy.
-- Native fork adoption and Start's fork retry use it.
+Callbacks receive detached inputs and one synchronous publication capability, spent on first attempt even if it fails. Semantic routes check cancellation, captured cache identity and independent host authority before waiting, under exclusion and before publication; a change away and back does not revive old work. Cache identity cannot grant [native request admission](scope-selection-contract.md#request-lifetime-and-native-correlation). Failed publication installs nothing; durable acceptance installs a detached cache before yielding, and later failure cannot undo it. No native bookmark can rewind canonical memory. See [selected staging and publication](scope-selection-contract.md#publication-and-semantic-staging) for replay and provenance validation.
 
 ### Run preparation and answer reconciliation
 
 **Preparation before the first inference.** Native `before_agent_start` captures the prompt and contributes protocol without touching canonical storage. At the first active `context`, the adapter:
 
-1. combines Pi's operation signal with its preparation lifetime and awaits `withPatchTransaction`;
+1. combines Pi's operation signal with its preparation lifetime and awaits `withSelectedPatchTransaction`;
 2. rechecks selection/policy, clones the latest lifecycle snapshot and inspects exact registered paths from the locked states;
 3. removes proven-missing registrations and their provenance together with run metadata, in one acceptance. Source reappearance or unavailable metadata does not authorize deletion.
 
-Without removals on a complete accepted cohort, publication preserves semantic/provenance files and wider retained history. Wholly absent shared pairs initialize as current empty reality, without reviving old values or incrementing the step. Caches, revisions and one native checkpoint update before the provider is called; later context requests reuse the completed preparation instead of replaying the specification. Start can request maintenance without inventing a new user run.
+Without removals on a complete accepted cohort, publication preserves semantic/provenance files and wider retained history. Authorized acceptance can initialize a [wholly absent shared triple](filesystem-recovery.md#shared-scope-files) without reviving old values or incrementing the step. Caches, revisions and one native checkpoint update before the provider is called; later context requests reuse the completed preparation instead of replaying the specification. Start can request maintenance without inventing a new user run.
 
 **Withdrawal and failure:**
 
@@ -475,7 +440,7 @@ Without removals on a complete accepted cohort, publication preserves semantic/p
 
 **Unaccepted requests.** An unaccepted request may leave no canonical specification. Native conversation after the latest valid checkpoint is therefore conservative uncompiled-context evidence, not semantic authority. Stop preserves it even at idle, and same-physical-session restoration uses the existing bootstrap flag to keep available context through reload/tree. This also covers interrupted boundary continuation after completion removed the specification. No new persistence format, guessed run anchor or reconstruction of discarded transcript bodies is introduced.
 
-**Answer reconciliation.** Accepted-answer reconciliation also uses `withPatchTransaction`: `turn_end` awaits exclusion, stages the response over the current shared head, and atomically publishes it with a detached completed-run snapshot.
+**Answer reconciliation.** Accepted-answer reconciliation also uses `withSelectedPatchTransaction`: `turn_end` awaits exclusion, stages the response over the current shared head, and atomically publishes it with a detached completed-run snapshot.
 
 - Only acceptance installs the lifecycle/cache and native checkpoint; there is no second persistence call.
 - Its response-owned cancellation is combined with Pi's operation signal. Stop, new runs, session/tree selection, shutdown and superseding answers cancel obsolete waits; an old completion cannot clear a newer pending response or alter its snapshot/UI.
@@ -484,19 +449,9 @@ Without removals on a complete accepted cohort, publication preserves semantic/p
 
 ### Read-only refresh APIs
 
-**`TemporalRuntime.refreshShared(signal?)`** awaits the same exclusion for read-only shared inspection.
-
-- It captures one complete cohort after acquisition, keeping the selected private file basis or lazily constructing an empty private view when none is selected.
-- It never initializes an absent store, publishes or advances a semantic revision.
-- Parsing and provenance validation finish before cache installation; rejected or canceled reads keep the prior accepted view.
-
-**`TemporalRuntime.refreshCurrentMemory(signal?)`** supplies an awaited read-only recovery view of current same-session authority.
-
-- It shares current-memory validation with Start, but neither publishes nor accepts write authority: the returned policy is disabled and unfinished specifications are omitted.
-- Current private values, step, revisions, bootstrap and provenance stay available beside independently validated shared streams; retention is constrained only in memory.
-- Absence returns `undefined` without creation. Malformed evidence or cancellation (including during capture) leaves the prior cache unchanged.
-- Lifecycle/patch publication still requires accepted authority or explicit Start.
-- Native failed-Stop reload uses it and keeps the write fence.
+- **`refreshSelectedShared`** observes only present selected Global/CWD owners, without inspecting Session or creating a store.
+- **`refreshSelectedCurrent`** validates same-session authority and exact selected memory without publication. It returns detached current run fields, limits retained history in memory and omits shared owners known absent. Excluded bodies are not opened. Failed-Stop reload uses it without clearing the write fence.
+- Neither installs an accepted publication basis or substitutes empty values for missing authority. Invalid evidence or cancellation, including during capture, leaves the previous cache unchanged. Cache withdrawal does not discard known ownership or acquisition evidence.
 
 ### Branch attachment and restoration
 
@@ -511,10 +466,10 @@ Without removals on a complete accepted cohort, publication preserves semantic/p
 
 1. **Synchronous prelude.** It revokes older selection work and pins the session id, file, header timestamp and CWD. It reads the branch's newest supported checkpoint through the recovery domain's pure `selectRetainedCheckpoint` only for mode and run lifecycle (unfinished specification, bootstrap); its boundary is never a memory revision to rewind to. Revision pointers and unsupported envelopes fail closed.
 2. **While waiting,** the mode is the selected inactive policy, and private reads/publication report the pending selection.
-3. **Acceptance.** Same-session attachment accepts current memory through `withStartTransaction` under the checkpoint's mode; a fork copies the parent's current memory; a truly new auto-start origin uses `withStartTransaction` with creation authority (rechecking branch evidence after waiting); failed-Stop reload uses read-only recovery. Bootstrap and policy are derived after waiting and published in that single acceptance.
+3. **Acceptance.** Same-session attachment uses `withSelectedCurrentTransaction` under the checkpoint's mode. A fork copies the parent's current memory; a genuinely new auto-start uses first authoring with explicit creation permission. Failed-Stop reload uses read-only recovery. Bootstrap and policy are derived after checking branch evidence under the selected lifetime.
 4. **Installation.** Only the current lifetime installs memory, checkpoint, continuation, tools and UI before yielding; a later native-write failure only warns.
 
-**Failed Active selection.** Missing, corrupt, partial or contradictory current files first go through one visible [self-healing](filesystem-recovery.md#self-healing) attempt. Memory still unavailable after that (an unhealable cause), a failed fork copy or automatic Start failure retains the selected Active mode with unavailable-memory validation. The inference fence is derived from that mode and validation, not an independent flag under an inactive fallback. No Active lifecycle work or fabricated projection runs before validated acceptance; shared reads may remain available. Terminal and Telegram show `active (blocked)` with explicit recovery guidance. The live `context` hook calls public `ctx.abort()` before returning; merely throwing would let Pi continue with native history. Reloading while current memory stays unreadable reconstructs the fence. Accepted Start or accepted explicit Passive releases it; explicit Off permits native context but grants no memory authority. Signal-less inspection does not cancel or clear the fence.
+**Failed Active selection.** Failed current-memory acquisition may attempt [self-healing](filesystem-recovery.md#self-healing) once; only a proved, healable owner can reset visibly. Memory still unavailable after recovery, a failed fork copy or automatic Start failure retains the selected Active mode with unavailable-memory validation. The inference fence is derived from that mode and validation, not an independent flag under an inactive fallback. No Active lifecycle work or fabricated projection runs before validated acceptance; shared reads may remain available. Terminal and Telegram show `active (blocked)` with explicit recovery guidance. The live `context` hook calls public `ctx.abort()` before returning; merely throwing would let Pi continue with native history. Reloading while current memory stays unreadable reconstructs the fence. Accepted Start or accepted explicit Passive releases it; explicit Off permits native context but grants no memory authority. Signal-less inspection does not cancel or clear the fence.
 
 **Interaction with mode choices:**
 
@@ -527,8 +482,6 @@ Without removals on a complete accepted cohort, publication preserves semantic/p
 - Selection changes, shutdown and native operation cancellation still revoke obsolete work. Real validation/publication failures stay unavailable rather than becoming empty memory.
 - Start joins pending restoration, owns initial attachment and fork retry without cancelling itself, and is inert when the result is already active. A cancelled Start withdraws its join without cancelling independently owned restoration or Stop persistence.
 - Read-only recovery uses detached candidates and rechecks cancellation and physical identity before host installation. Passive attachment cannot overwrite a newer cache established by an intervening patch or inspection.
-
-Two synchronous runtime methods (`loadPassive`, `initialize`) remain supported for library consumers and local tests/benchmarks; production lifecycle wiring uses the awaited APIs. Their contracts and cancellation boundaries are documented in [library API compatibility](compatibility.md#state-flow-library-api-compatibility).
 
 **What stays outside critical sections.** The advisory [continuation-candidate reader](#session-continuation) also awaits coherent capture, and current-head activation on an attached branch uses the awaited Start transaction. Raw precomputed replay keeps its selected-target guard, unlike current-head authored patch staging. Model inference, source acquisition and Git commands do not belong inside a canonical critical section; artifact freshness validation stays part of publication validation.
 
@@ -582,14 +535,14 @@ After a successful backup attempt, State Flow resolves only the attached branch'
 
 **Canonical authority.** There are no durable push queues, publication workers, leases, retry generations, queue filesystem state or publication-policy metadata. `TemporalRuntime` provides neither Git revision restoration nor immutable-revision fork APIs. All initialization, passive loading, model patches, runtime-only persistence, retained-boundary restoration and retained-boundary forks use canonical files only.
 
-Unsupported checkpoint envelopes, combined session metadata, `state.json`, hashed layouts and semantic Pi checkpoints are unsupported and stay untouched. Missing documented planes, including `intents` and `lazy`, in canonical semantic objects are supported without migration.
+[Unsupported layouts and native boundaries](filesystem-recovery.md#unsupported-layouts-and-native-boundaries) are not canonical input. Missing documented planes, including `intents` and `lazy`, are valid sparse semantics, not a layout change.
 
 ## Artifact routing
 
 **Observation.** State Flow never discovers source directories. Before enabled inference, it inspects only exact source paths already registered as artifacts in global, CWD or session state.
 
 - Observation uses regular non-symlink file metadata `{size, mtimeNs}`, without reading bodies. Unregistered files are never observed.
-- Proven absence removes the artifact from each owning scope. Unavailable, relative, directory or symlink evidence is non-destructive.
+- Proven absence removes the artifact from each selected owning scope. Unavailable, relative, directory or symlink evidence is non-destructive. Invalidation planning overlays selected registrations before observation, so a narrower registration masks a broader path; missing-source maintenance considers each selected owner independently.
 
 A model-visible artifact entry requires only a non-empty description:
 
@@ -603,7 +556,7 @@ A model-visible artifact entry requires only a non-empty description:
 **Runtime-owned evidence.** Compilation evidence is kept per scope in `meta.json`. Current ordinary artifacts use `sourceFingerprint: {size, mtimeNs}` plus `compilerRevision`; retained `sourceHash`/`compiledAt` are transitional compatibility evidence.
 
 - At artifact-entry level, every model scope patch rejects authored `hash`, `compiler`, `compiled_at`, `sourceHash`, `sourceFingerprint`, `compilerRevision`, `compiledAt`, `source_hash_verified` and `hint` fields, including field-deletion markers, even without a preceding read.
-- Retained embedded evidence stays readable, but its embedded `hash`/`compiler`/`compiled_at` fields are omitted from model projection. Ordinary semantic edits and whole-artifact deletion stay valid.
+- Retained embedded evidence stays readable, but its embedded `hash`/`compiler`/`compiled_at` fields are omitted from model projection. Ordinary semantic edits and whole-artifact deletion stay valid. An accepted registration deletion removes its interpretable owned registry entry only when all present recognized fields validate. Unbound, empty, opaque or malformed entries remain raw; this is not a metadata cleanup pass.
 - Compiler output may add other finite non-null JSON metadata. Known optional semantic fields include `kind`, `tags` and `compilation`. Tags are unique trimmed non-empty strings that support deterministic candidate filtering, but never authorize reading.
 - The `strategy.compiled_skills` location is rejected. Skill compilations belong only in source-addressed artifacts, with no fabricated source hashes.
 
@@ -628,34 +581,18 @@ A model-visible artifact entry requires only a non-empty description:
 Skill acquisition applies only to exact registered Pi Skills.
 
 - **Ownership.** State Flow resolves identity and ownership through the public `getCommands()` inventory's `sourceInfo.scope`, not file-path conventions: Pi `user`, `project` and `temporary` source scopes map to State Flow `global`, `cwd` and `session`.
-- **When nothing is needed.** A successful read with a matching current source hash needs no new compilation. Otherwise the tool result names the exact optional target.
+- **When nothing is needed.** A successful selected Skill read with a matching current source hash needs no new compilation. Otherwise the tool result names the exact optional target. An independently requested native read of an excluded Skill remains legal; State Flow records only its path and provenance owner, without hashing, hinting or permitting relocation.
 - **Attempted output.** Durable output at the reported scope and path requires a non-empty description, `kind: "skill"` and a non-empty compilation describing applicability, constraints and failure conditions. An omitted output leaves the read volatile and blocks neither unrelated patches nor ordinary completion.
 - **Replacement.** The accepted compilation replaces the complete prior Skill card and provenance, storing runtime-owned `sourceHash` and `skill-artifact-v1` `compilerRevision`; obsolete evidence cannot survive a refresh. Source bodies do not persist in state.
 - **What provenance proves.** Matching provenance proves source-version consistency, not semantic fidelity, truth or higher instruction authority.
 
 ## Operational guidance and memory curation
 
-The packaged Skills deliberately separate two responsibilities:
-
-- `state-flow-guide` is the on-demand operational reference for concrete read, patch, inheritance, acquisition, completion and recovery questions. It does not start memory audits or unsolicited cleanup.
-- `state-flow-memory` performs one explicitly requested bounded curation over stale knowledge, commitments, continuation, ownership and external handoffs. Phase completion does not activate an audit.
+The packaged [State Flow Skill](../skills/state-flow/SKILL.md) is the on-demand reference for operations and recovery. Its separate curation section applies only to an explicitly requested bounded review of stale knowledge, commitments, continuation, ownership or transfers. Phase completion does not activate an audit.
 
 Curation may persist reusable guidance from a registered Skill at its provenance-derived scope.
 
-**Terminal state is a decision-relevant handoff, not a progress transcript:**
-
-- operational knowledge → source-addressed artifacts;
-- binding requirements, accepted plans/decisions and rejected approaches → strategy;
-- observations/failures/uncertainties and exact continuation → tactics;
-- only chosen active commitments → intents.
-
-Distinguish user requirements from assistant conclusions and hypotheses, and keep consequential negative evidence and reconsideration conditions. Do not:
-
-- silently overwrite established constraints when evidence conflicts;
-- treat tactical observations as live external facts;
-- infer success or absence of external effects from restored memory. After an interruption, inspect the relevant effects before repeating.
-
-These are model stewardship duties, not deterministic semantic gates.
+Curation preserves the [decision-relevant handoff](semantic-layers.md#handoff): reconcile touched branches without replacing requirements with hypotheses or treating retained observations as live external evidence.
 
 **Moves:**
 
@@ -700,7 +637,9 @@ The package exposes read-only host contracts that:
 
 ### Model tools
 
-**`state_flow_patch` grammar.** Captured WANTED participation, not the number of supplied targets or currently available owners, selects the model interface. One owner takes direct semantic planes without an owner wrapper; two/three owners take explicit participating `global`, `cwd` or `session` patches. See the [accepted interface boundary](single-scope-interface-contract.md#deterministic-m3-checkpoint); schema/selection DATA never grants source/private/publication authority.
+**`state_flow_patch` grammar.** Captured WANTED participation, not the number of supplied targets or currently available owners, selects the model interface. One owner takes direct semantic planes without an owner wrapper; two/three owners take explicit participating `global`, `cwd` or `session` patches.
+
+**Native admission.** Check the original tool receipt, physical caller/owner, captured policy and cancellation before normalizing arguments. A flat shape does not identify its owner, and Pi can still execute an older wrapper after schema replacement. Normalize a detached patch into the exact captured owner before the same canonical staging engine, not via SDK `prepareArguments`. No declaration or selection grants source, private or publication authority. See [SDK declaration refresh](compatibility.md#patch-tool-declaration-refresh).
 
 - Each supplied canonical owner patch contains object-valued `artifacts`, `strategy`, `tactics`, `intents` and `lazy`; in one-owner model arguments these planes are top-level. Nested values are ordinary JSON.
 - Recursive object merge updates fields, arrays/primitives replace, and nested object-key `null` deletes, including inside newly created objects. Deletion-only patches through absent ancestors create no empty parents. Accepted supplied scopes recursively omit empty object fields and empty planes: deleting the last child removes its empty ancestors, and explicit `{}` is not a retained value. Nonempty omitted fields persist; an object patch that turns a scalar/array into an empty object removes that field. Cleanup is scope-local and can reveal inherited values; it stops at the scope root and never removes array slots.
@@ -708,6 +647,7 @@ The package exposes read-only host contracts that:
 - Missing authored object-key deletions succeed with nonfatal hints in the acknowledgement, for both unchanged and mixed patches. Each hint gives the target and first unavailable component as escaped JSON Pointers: relative to the sole owner in text, owner-qualified for multi; result details retain canonical owner-qualified pointers; a non-object ancestor is also unavailable. These hints are presentation-only: no state fields, revisions, history records, automatic path correction or cascade warnings.
 - Rejected: materialized null within documented semantic planes, empty patches/supplied scopes, wrong flat/scoped root family, unknown top-level fields, model-authored `response`, and finalization or `{scope, patch}` / `unchanged` grammars. The semantic null rule does not apply to runtime envelopes such as an origin's null parent.
 - Correct repeated results succeed as `State already current.` without another semantic revision or history record; avoid gratuitous acknowledgment patches.
+- If canonical acceptance succeeds but the native Pi checkpoint fails, the patch result remains successful with a separate warning (`details.warnings` code `native_checkpoint_failed`). The warning does not authorize replay; errors before canonical acceptance still reject the patch.
 - Global/CWD overlap follows successful acceptance order, and unmentioned current fields survive. Session ownership is not a shared-memory merge.
 
 For exactly one wanted owner (for example Session):
@@ -722,38 +662,25 @@ For multiple wanted owners including Session (for example Global+Session), an ex
 {"session":{"intents":{"next":"Verify the corrected behavior"}}}
 ```
 
-**Intents and ownership.** `intents` is the hot plane for active commitments, not requirements, observations, alternatives or completed plans. Removing an intent does not remove its consequences; it removes only the state it owns. Intent ownership is the one reference with runtime meaning. Eligible flat current refs are anchored to their captured canonical sole owner before this algorithm; unscoped-target exclusions below describe canonical inputs, not a reason to add a model owner wrapper:
+**Intents and references.** `intents` keeps active commitments, not requirements, observations, alternatives or completed plans. Removing an intent does not undo its consequences. See [intent ownership](lazy-state.md#intent-ownership) for cleanup of its owned keys and [semantic references](lazy-state.md#semantic-references) for supported forms and single-owner translation.
 
-- When a patch deletes an intent key, structured `{"$ref"}` targets found anywhere inside the deleted value, naming an existing object key under `strategy`, `tactics` or `lazy` of the intent's own scope, are cleared after intents and before remaining authored planes, in the same atomic cohort and revision.
-- A target survives while a final remaining/new intent in that scope references it, an ancestor or a descendant, so one patch can supersede an intent by deleting it and re-referencing the same targets.
-- Writes after cleanup recreate a cleared target as fresh knowledge without old fields. Editing an intent to drop a reference leaves its target unowned; unowned entries remain legal.
-- Cross-scope, plane-root, array-element, unscoped, `effective`, historical and non-`strategy`/`tactics`/`lazy` targets, missing targets and textual `$path` mentions are skipped silently. Ownership never rejects, warns about or delays a patch.
-- The `ownership` domain computes the cascade by reading only that scope's `intents` plane. The accepted record stores explicit net patches, so replay never reruns cascade; existing strategy refs apply to future accepted intent deletions without rewriting history.
-- Deleted targets are not archived beyond ordinary retained history.
-
-Full details: [intent ownership](lazy-state.md#intent-ownership).
-
-**Reference forms.** Semantic-state references use either the optional structured `{"$ref":"cwd.lazy.plan"}` convention, or `$` immediately followed by one valid `state_flow_read` path inside ordinary text, for example `$effective.lazy.memory[7]`. The text prefix distinguishes references from incidental path-like prose and leaves a deterministic seam for possible future parsing. Resource paths, document locators, URIs, Skill identities and agent identities keep their native syntax.
-
-- State Flow stores all forms as ordinary JSON and, apart from intent ownership, does not parse or validate targets.
-- The agent resolves a relevant locator explicitly, through `state_flow_read` or the appropriate external tool. Presence alone creates no authority, existence proof, dependency, hydration, execution or completion semantics.
-
-**Reactive repair.** The agent never scans or resolves references merely to test them. Only after one requested value path is missing does the query domain perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` or `$path` matches. When matches exist, `state_flow_read` returns the explicit diagnostic sentinel `{value:null, hint:[{type:"dangling-reference", message, paths}]}`:
+**Reactive repair.** The agent never scans or resolves references merely to test them. Only after a one-path value read is missing does the query domain perform one bounded reverse lookup over current model-patchable semantic planes for exact structured `$ref` or `$path` matches. When matches exist, `state_flow_read` returns the explicit diagnostic sentinel `{value:null, hint:[{type:"dangling-reference", message, paths}]}`:
 
 - `hint` is a top-level sibling, not state data. Its message describes unavailability conditionally.
 - `paths` contains at most three runtime-verified current reference-owner addresses, not verified new locations of the requested data.
 - The hint contains no lazy bodies and does not prove prior existence, retention or relocation. The null sentinel is never returned alone for this case.
-- Keys, patch and multi-path reads keep all-or-error semantics, while no durable match keeps the ordinary missing-path error.
+- Keys, patch and value batches do not perform reverse lookup. A scalar read without a durable match keeps the ordinary missing-path error.
 - A match establishes durable semantic provenance, not staleness; no match does not prove invention. The agent may inspect ownership and patch a proven stale source when useful to the current task, without discarding surrounding meaning or resurrecting its target.
 
 **History is task-driven.** Missing paths or hints alone do not require historical search. The agent may independently choose targeted historical reading when a previous value is useful to the current task; no separate user permission is required. Historical values are evidence, not automatically current state or a reason to restore deleted memory. Runtime never scans history for reference owners, triggers repair inference or hydrates lazy bodies. Effective absence does not establish ownership, and unavailable history, external inaccessibility or a transient read failure does not prove a broken reference.
 
-**`state_flow_read` addressing.** It accepts exactly one of scalar `path` or ordered semantic `paths`, with `value`, `keys` or `patch` projection; batches stay all-or-error. One wanted owner's ordinary flat paths bind that owner; multi-owner flat paths use the effective overlay, even when the available view has only one owner.
+**`state_flow_read` addressing.** Supply exactly one of `path` or `paths`. Both accept a string or a nonempty ordered array of strings, with `value`, `keys` or `patch` projection. The response follows the number of paths, not the spelling or type of the argument. One wanted owner's ordinary flat paths bind that owner; multi-owner flat paths use the effective overlay, even when the available view has only one owner.
 
-- Explicit owner roots/examples below require that owner to participate and its requested current/historical authority to be available. Selection or an address alone does not acquire missing private memory.
+- The `value` projection returns `{"value":…}` for one semantic path, even when supplied in a one-element list or when the value itself is an array. For multiple paths it returns `{"values":[...]}` in input order. A missing top-level plane or a current root or built-in plane of a shared owner proven absent by observation returns `null`. Only in `values`, a path error is `[null, {"code":"…"}]` in its slot; a one-path read retains its scalar error and hint behavior. Stored values cannot contain `null`, so the tuple cannot be mistaken for stored data. The codes are `invalid_path`, `scope_excluded`, `scope_unavailable`, `history_unavailable`, `path_not_found`, and `invalid_selector`. Invalid request shape, cancellation, stale policy and failure to validate the read basis reject the call, not individual slots.
+- Explicit owner roots require participation. A current `keys` query of an owner root or a built-in top-level plane can report `{"meta":{"type":"absent"},"keys":{}}` when successful observation proved the shared owner absent, or `type: "unavailable"` when Passive has no validated Session view and restoration is not pending. A missing current top-level plane in a validated scope or overlay (built-in or metadata-declared) also reports `absent`. Catalog results grant no authority. Keys and patch batches still fail as a whole on a path error.
 - `effective == effective[0]` is the current effective materialization; `global == global[0]` (and the CWD/session equivalents) selects that scope at the same composed causal boundary.
 - For selected/available Global, `global.patches == global.patches[0]` reads its latest retained accepted patch; higher patch indices walk only that owner's retained accepted patches. Exactly one wanted owner also admits a single-locator `patches[N]` alias. Scope-patch reads are value-only, not mixed semantic/patch-history batches.
-- `effective[N]` selects a retained causal boundary; ordinary nested array `[N]` still indexes an array, not history.
+- `effective[N]` selects a retained causal boundary; ordinary nested array `[N]` still indexes an array, not history. With only CWD selected, `effective[1].tactics.items[0]` reads the same value as `cwd[1].tactics.items[0]`.
 - Indices are bounded by the configured `historyLimit`; unavailable pre-origin or pre-tail history is an error.
 - Resolver aliases are not literal JSON containers.
 - Object keys in paths must match `[A-Za-z_$][A-Za-z0-9_$-]*`. Both tool descriptions and the Skills ask the model to name keys in ASCII (values may use any language), and a non-ASCII key in a read path fails with that grammar in the error.
@@ -783,7 +710,7 @@ Ordered semantic reads use the same wanted-owner/effective rule:
 {"paths":["strategy","tactics"]}
 ```
 
-Current same-owner structured refs can render flat for one owner while storage retains canonical owners. Historical/cross-owner/effective/resource/text refs keep their identities; no read or projection ID is a publication capability.
+A read or projection ID is not a publication capability. A batch preserves duplicate paths and request order against one read basis; it does not echo locators or internal revisions.
 
 **Availability and responsibilities:**
 
@@ -850,7 +777,7 @@ Status is a projection of the selected runtime and semantic view, not a second s
 
 - Inspection may refresh live Global/CWD streams in memory so foreign accepted revisions become visible, but never publishes or increments a revision.
 - Memory-enabled inspection keeps its accepted-private/shared-refresh and failed-Passive cache rules.
-- Off inspection uses a fresh disposable `TemporalRuntime`. A single selected Global/CWD or selected shared-only Effective uses `refreshSelectedShared`; inspections requiring selected Session use `refreshSelectedCurrent` under existing private proof. Effective never widens to excluded owners. Missing/invalid private evidence cannot become an empty layer/revision or foreign private data; legacy lifecycle admission retains its documented full-proof dependency.
+- Off inspection uses a fresh disposable `TemporalRuntime`. A single selected Global/CWD or selected shared-only Effective uses `refreshSelectedShared`; inspections requiring selected Session use `refreshSelectedCurrent` under existing private proof. Effective never widens to excluded owners. Missing/invalid private evidence cannot become an empty layer/revision or foreign private data.
 - No reader installs the extension runtime/cache, changes native policy or canonical bytes, clears a carried write fence, acquires an unaccepted fork parent or replaces the selected historical target.
 - Branch steps never select a past memory revision; inspection and acquisition always use current stored memory.
 - `StateFlowTelegramSnapshot.scopes` supplies detached wanted selection DATA to rendering; omission preserves all-three legacy embedding behavior, while malformed explicit values reject. Buttons/help do not infer scope choice from available revisions or confer memory authority. The awaited `StateFlowTelegramInspectionPort` returns coherent state/revisions and an optional revocation signal. Target eligibility is checked before reader calls, selection is rechecked after acknowledgement/observation, and native inspection also revalidates its lifetime and physical owner before presentation.

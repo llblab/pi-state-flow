@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findStateReferenceSources, parseStateReadPath, readProjectedState, readStatePath, type StateReadResult } from "../lib/query.ts";
+import { findStateReferenceSources, parseStateReadPath, readProjectedState, readStatePath, readValueBatch, type StateReadResult } from "../lib/query.ts";
 import { emptyState, type SemanticState } from "../lib/state.ts";
 import { advanceTemporalState, adoptSelectedTemporalStreams, constrainTemporalState, createSelectedTemporalState, createTemporalState, selectTemporalState, type SelectedTemporalState } from "../lib/temporal.ts";
 import { captureScopeSelection, type ScopeSelection } from "../lib/selection.ts";
@@ -31,7 +31,7 @@ import { captureScopeSelection, type ScopeSelection } from "../lib/selection.ts"
 				} else assert.throws(() => readStatePath(view, `${scope}.patches`, limit), /predates retained/);
 			}
 			if (limit > 0) assert.deepEqual(readProjectedState(view, ["tactics"], "patch", limit), { patch: { done: selection.at(-1) } });
-			assert.deepEqual(readProjectedState(view, selection.map(scope => `${scope}.strategy.owner`), "value", limit), { value: selection.length === 1 ? selection[0] : [...selection] });
+			assert.deepEqual(readProjectedState(view, selection.map(scope => `${scope}.strategy.owner`), "value", limit), selection.length === 1 ? { value: selection[0] } : { values: [...selection] });
 		}
 	});
 
@@ -101,6 +101,9 @@ import { captureScopeSelection, type ScopeSelection } from "../lib/selection.ts"
 		assert.deepEqual(readProjectedState(view, ["cwd.strategy.remove"], "patch"), { patch: null });
 		const current = readProjectedState(view, ["strategy"]);
 		assert.equal("value" in current, true); if ("value" in current) (current.value as { keep: { one: boolean } }).keep.one = false;
+		const batch = readValueBatch(view, ["strategy.keep", "strategy.keep"], path => path, {});
+		(batch.values[0] as { one: boolean }).one = false;
+		assert.deepEqual(batch.values[1], { one: true }, "batch slots must not share mutable state");
 		const patch = readStatePath(view, "cwd.patches"); if ("patch" in patch) (patch.patch as { strategy: { remove: unknown } }).strategy.remove = "mutated";
 		assert.deepEqual(readProjectedState(view, ["strategy.keep.one"]), { value: true });
 		assert.deepEqual(readProjectedState(view, ["strategy.remove"], "patch"), { patch: null });
@@ -159,7 +162,11 @@ test("optimistic views omit absent and unknown planes across scopes and history,
 	let view = createTemporalState({ global: { extra: { ignored: null } }, cwd: {}, session: { response: "" } }, "empty");
 	assert.deepEqual(readProjectedState(view, ["effective"]), { value: {} });
 	assert.deepEqual(readProjectedState(view, ["effective"], "keys"), { meta: { type: "object", size: 0 }, keys: {} });
-	assert.deepEqual(readProjectedState(view, ["session.response", "cwd.lazy", "global.intents"]), { value: [null, null, null] });
+	assert.deepEqual(readProjectedState(view, ["session.response", "cwd.lazy", "global.intents"]), { values: [null, null, null] });
+	assert.deepEqual(readProjectedState(view, ["session.response", "cwd[0].lazy", "global.intents"], "keys"), {
+		meta: [{ type: "absent" }, { type: "absent" }, { type: "absent" }],
+		keys: [{}, {}, {}],
+	});
 	view = advanceTemporalState(view, [
 		{ scope: "global", patch: { tactics: { shared: true }, extra: { ignored: [1] } } },
 		{ scope: "session", patch: { response: "Answer" } },
@@ -175,7 +182,40 @@ test("optimistic views omit absent and unknown planes across scopes and history,
 	assert.ok("patch" in tail);
 	assert.deepEqual(tail.patch, { response: null });
 	assert.throws(() => readProjectedState(view, ["global.extra"]), /does not exist/);
+	for (const path of ["global.extra", "global.x_unknown", "cwd.lazy.nested", "cwd[1].lazy"]) {
+		assert.throws(() => readProjectedState(view, ["effective.tactics", path], "keys"), /does not exist/);
+	}
 	assert.deepEqual(view, before, "projection must not normalize or delete stored semantics");
+});
+
+test("value batches distinguish ordinary arrays from path errors and reject an invalid shared read basis", () => {
+	const data = [0, { code: "scope_unavailable" }];
+	const view = createSelectedTemporalState({ cwd: { tactics: { items: data } } }, ["cwd"], "origin");
+	const paths = ["cwd.tactics.items", "cwd.tactics.items[3]", "cwd[1].tactics", "cwd.tactics.items[0]", "cwd.patches"];
+	assert.deepEqual(readValueBatch(view, paths, path => path, {}), { values: [
+		data, [null, { code: "invalid_selector" }], [null, { code: "history_unavailable" }], 0, [null, { code: "invalid_path" }],
+	] });
+	const availability = { global: "absent", session: "unavailable" } as const;
+	assert.deepEqual(readValueBatch(view, ["global.strategy", "session.strategy"], path => path, availability), {
+		values: [null, [null, { code: "scope_unavailable" }]],
+	});
+	view.lineage.length = 0;
+	assert.throws(() => readValueBatch(view, ["malformed", "cwd"], path => path, {}), /lineage/i);
+});
+
+test("value batch reuses only the same owner and boundary without exposing lazy bodies through an owner root", () => {
+	let view = createSelectedTemporalState({ global: { tactics: { shared: "global" } }, cwd: { tactics: { shared: "old" }, lazy: { body: { keep: true } } } }, ["global", "cwd"], "origin");
+	view = advanceTemporalState(view, [{ scope: "cwd", patch: { tactics: { shared: "current" } } }], "head");
+	const paths = ["cwd.lazy.body", "cwd", "cwd.tactics.shared", "effective.tactics.shared", "global.tactics.shared", "cwd[1].tactics.shared", "cwd[1].lazy.body", "cwd.lazy.body"];
+	const read = (candidate: typeof view) => readValueBatch(candidate, paths, path => path, {});
+	const expected = [{ keep: true }, { tactics: { shared: "current" } }, "current", "current", "global", "old", { keep: true }, { keep: true }];
+	const first = read(view);
+	assert.deepEqual(first, { values: expected });
+	(first.values[0] as { keep: boolean }).keep = false;
+	assert.deepEqual(first.values.at(-1), { keep: true });
+	assert.deepEqual(read(view), { values: expected });
+	const next = advanceTemporalState(view, [{ scope: "cwd", patch: { tactics: { shared: "next" } } }], "next");
+	assert.deepEqual(read(next).values.slice(1, 6), [{ tactics: { shared: "next" } }, "next", "next", "global", "current"]);
 });
 
 test("current-as-zero projection roots resolve state on the shared causal lineage", () => {
@@ -399,7 +439,7 @@ test("patch projection intersects explicit and effective paths at one historical
 test("projected path batches preserve order and fail as one read", () => {
 	let view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "T0");
 	view = advanceTemporalState(view, [{ scope: "session", patch: { tactics: { first: "A", second: [1, 2] } } }], "T1");
-	assert.deepEqual(readProjectedState(view, ["session.tactics.second[1]", "session.tactics.first"]), { value: [2, "A"] });
+	assert.deepEqual(readProjectedState(view, ["session.tactics.second[1]", "session.tactics.first"]), { values: [2, "A"] });
 	assert.deepEqual(readProjectedState(view, ["session.tactics.second", "session.tactics"], "keys"), {
 		meta: [{ type: "array", length: 2 }, { type: "object", size: 2 }],
 		keys: [[], { first: "string", second: "array" }],

@@ -56,8 +56,7 @@ test("release verification requires the compiled package surfaces", async () => 
 	assert.match(workflow, /published\.pi\?\.extensions\?\.includes\("\.\/dist\/pi-state-flow\/index\.js"\)/);
 	assert.match(workflow, /published\.pi\?\.skills\?\.includes\("\.\/dist\/skills"\)/);
 	assert.match(workflow, /paths\.includes\("dist\/pi-state-flow\/index\.js"\)/);
-	assert.match(workflow, /paths\.includes\("dist\/skills\/state-flow-memory\/SKILL\.md"\)/);
-	assert.match(workflow, /paths\.includes\("dist\/skills\/state-flow-guide\/SKILL\.md"\)/);
+	assert.match(workflow, /paths\.includes\("dist\/skills\/state-flow\/SKILL\.md"\)/);
 	assert.doesNotMatch(workflow, /published\.pi\?\.extensions\?\.includes\("\.\/index\.ts"\)/);
 });
 

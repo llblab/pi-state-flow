@@ -6,7 +6,7 @@ Public API v1 is published through `@llblab/pi-state-flow/modules` since **0.27.
 
 Registration and codec/retention received bounded independent acceptance during development. Later activation implementation and final audit were performed inline under the owner's instruction; publication does not retroactively grant independent approval to those subphases. Scripted native-SDK and built-package consumer checks are deterministic integration evidence, not live-model quality or installed-client certification. See [compatibility](compatibility.md) for evidence limits and [BACKLOG](../BACKLOG.md) for outstanding work.
 
-Pi loads ordinary companion extensions. StateFlow provides a thin public registration membrane; it does not discover or load plugin code. The [internal evaluators](semantic-module-contract.md) remain separate from native/source admission and atomic publication.
+Pi loads ordinary companion extensions. StateFlow provides a thin public registration membrane; it does not discover or load plugin code. The [internal evaluators](semantic-layers.md#internal-semantic-modules) remain separate from native/source admission and atomic publication.
 
 ## Public entry and lifecycle
 

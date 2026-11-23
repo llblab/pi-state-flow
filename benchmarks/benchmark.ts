@@ -12,7 +12,8 @@ import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-age
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { realPiFixture, resolvedSnapshot, runGit, type RealPiFixture } from "../tests/pi-harness.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
-import { loadGlobalState, loadSessionState } from "../tests/temporal-fixture.ts";
+import { parseBaselineLifecycle } from "../lib/snapshot.ts";
+import { loadGlobalState, loadSessionState, sessionRuntimePaths } from "../tests/temporal-fixture.ts";
 import { distribution, measure, prompt, trajectoryPrompt, resourcesEnabled as resources, summarize, summarizeReads, type Metrics } from "./benchmark-session.ts";
 import type { ResumeProbeResult } from "./benchmark-resume.ts";
 
@@ -68,7 +69,7 @@ const report: Record<string, unknown> = {
 	runtimeSourceHash: sourceHash,
 	workloadSourceHash: workloadHash,
 	configuration: { patches, samples, rounds, transcriptBytes, sizes, resources, postResume, prefixWorkload },
-	limits: "Synthetic faux-model/native-SDK workload; no real inference latency or quality measurement. Timings include instrumentation. Concurrent publishers use the same TemporalRuntime but separate OS processes, not two live Pi UIs. No timing threshold establishes correctness.",
+	limits: "Synthetic faux-model/native-SDK workload; no real inference latency or quality measurement. Timings include instrumentation. Concurrent publishers use selected transactions and the Baseline writer in separate OS processes, not two live Pi UIs. No timing threshold establishes correctness.",
 	lifecycle: [],
 	trajectory: [],
 	publishers: [],
@@ -208,7 +209,8 @@ test("native Pi and State Flow long-session/resume workload", { timeout: 1_200_0
 	}
 });
 
-interface Reply { ready?: boolean; accepted?: boolean; ms: number; revision?: string; step: number; error?: string }
+type Attempt = { accepted: true; ms: number; step: number } | { accepted: false; ms: number; error: string };
+type Reply = { ready: true } | Attempt;
 function reply(child: ChildProcess): Promise<Reply> {
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => finish(new Error("Benchmark writer response timed out")), 30_000);
@@ -230,41 +232,47 @@ function reply(child: ChildProcess): Promise<Reply> {
 test("two-process publication interleavings", { timeout: 180_000 }, async (t) => {
 	for (const sameCwd of [true, false]) for (const scope of ["session", "global"] as const) {
 		const fixture = await realPiFixture(t, {});
-		const writers: Array<{ child: ChildProcess; cwd: string; id: string; revision?: string; accepted: number }> = [];
+		const writers: Array<{ child: ChildProcess; cwd: string; id: string; accepted: number; lastRound: number }> = [];
 		for (const id of ["writer-a", "writer-b"]) {
 			const cwd = sameCwd ? fixture.cwd : join(fixture.cwd, id);
 			const child = fork(new URL("./benchmark-writer.ts", import.meta.url), [fixture.repositoryRoot, cwd, id], { execArgv: ["--experimental-strip-types"], stdio: ["ignore", "ignore", "inherit", "ipc"] });
 			t.after(() => { if (child.exitCode === null) child.kill(); });
-			assert.equal((await reply(child)).ready, true);
-			writers.push({ child, cwd, id, accepted: 0 });
+			assert.deepEqual(await reply(child), { ready: true });
+			writers.push({ child, cwd, id, accepted: 0, lastRound: 0 });
 		}
-		const results: Reply[] = [];
+		const results: Attempt[] = [];
 		for (let round = 1; round <= rounds; round++) {
 			const waiting = writers.map(({ child }) => reply(child));
 			for (const { child } of writers) child.send({ scope, round });
 			const attempts = await Promise.all(waiting);
 			for (const [index, result] of attempts.entries()) {
+				assert.ok("accepted" in result);
 				results.push(result);
-				if (result.accepted) { writers[index]!.accepted += 1; writers[index]!.revision = result.revision; }
-				else assert.ok(result.error, "failed publication needs attributable evidence");
+				if (result.accepted) {
+					const writer = writers[index]!;
+					assert.equal(result.step, ++writer.accepted);
+					writer.lastRound = round;
+				} else assert.ok(result.error, "failed publication needs attributable evidence");
 			}
 		}
 		for (const writer of writers) {
 			const exited = once(writer.child, "exit");
 			writer.child.send("stop");
-			await exited;
+			assert.deepEqual(await exited, [0, null]);
+			const paths = sessionRuntimePaths(writer.cwd, writer.id, fixture.repositoryRoot);
+			const lifecycle = parseBaselineLifecycle(readFileSync(paths.config, "utf8"), readFileSync(paths.runtime, "utf8"), writer.cwd, writer.id);
+			assert.equal(lifecycle.meta.step, writer.accepted, "Baseline run counter must match accepted IPC receipts");
+			const privateState = loadSessionState(writer.cwd, writer.id, fixture.repositoryRoot);
+			assert.deepEqual(privateState?.tactics, scope === "session" && writer.accepted > 0 ? { writer: writer.id, round: writer.lastRound } : {});
 		}
-		const acceptedResults = results.filter((r) => r.accepted);
-		const accepted = acceptedResults.length;
+		const accepted = results.filter((r) => r.accepted).length;
 		assert.ok(accepted > 0, "no writer published usable evidence");
-		if (scope === "session") {
-			for (const writer of writers.filter(({ accepted }) => accepted > 0)) {
-				assert.equal(loadSessionState(writer.cwd, writer.id, fixture.repositoryRoot)?.tactics.writer, writer.id);
-			}
-		} else {
-			assert.ok(writers.some(({ id }) => loadGlobalState(fixture.repositoryRoot)?.tactics.writer === id));
-		}
-		const errors = results.flatMap((result) => result.error ? [result.error.replaceAll(fixture.root, "<fixture>")] : []);
+		const global = loadGlobalState(fixture.repositoryRoot);
+		if (scope === "global") {
+			assert.equal(global?.tactics.round, Math.max(...writers.map(({ lastRound }) => lastRound)));
+			assert.ok(writers.some(({ id, lastRound }) => global?.tactics.writer === id && global.tactics.round === lastRound));
+		} else assert.equal(global?.tactics.writer, undefined);
+		const errors = results.flatMap((result) => result.accepted ? [] : [result.error.replaceAll(fixture.root, "<fixture>")]);
 		const entry = { sameCwd, scope, attempts: results.length, accepted, failed: results.length - accepted, wallMs: distribution(results.map((r) => r.ms)), errors: Object.fromEntries([...new Set(errors)].map((error) => [error, errors.filter((value) => value === error).length])) };
 		(report.publishers as unknown[]).push(entry);
 		console.log(`BENCH_PHASE ${JSON.stringify(entry)}`);

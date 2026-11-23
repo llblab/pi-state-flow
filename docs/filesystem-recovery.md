@@ -1,66 +1,22 @@
 # Filesystem recovery contract
 
-State Flow classifies absence separately from partial or malformed evidence. Recovery may derive bytes only from an authoritative surviving cohort or from a semantic default that the owner explicitly permits. It never invents history, ownership, provenance, or external success.
-
-The "fails closed" rules below describe what a single operation does with partial or malformed evidence. They are not permanent: the next acquisition heals an unrecoverable owner visibly; see [self-healing](#self-healing).
+Recovery distinguishes absent, partial, malformed and unsupported evidence. It never invents history or ownership, restores from Git, or borrows another session’s memory. Ordinary admission refuses invalid evidence without writing. Only [self-healing](#self-healing) can quarantine and reset a corrupt owner.
 
 ## Resource rules
 
-### Global `checkpoint.json` + `patches.jsonl`
+### Shared scope files
 
-- **Authority:** State Flow; authoritative shared semantics.
-- **Wholly absent:** Authored patches use current empty reality; stale precomputed replay refuses it.
-- **Partial or malformed:** Either half missing, malformed replay, or invalid envelope fails closed.
-- **Allowed repair and writes:** Normal CAS publication may materialize the complete empty pair.
+Global and CWD each own a triple: `checkpoint.json`, `patches.jsonl` and `meta.json`. CWD also proves project identity. All three absent means current empty shared reality for authorized acceptance. Any surviving member, even metadata alone, means the scope is **not** wholly absent. A full valid triple may omit documented semantic fields and optional artifact provenance; missing `meta.json` is loss of replay authority, not missing provenance.
 
-### CWD `checkpoint.json` + `patches.jsonl`
+### Session scope and lifecycle files
 
-- **Authority:** State Flow; authoritative shared semantics with CWD identity.
-- **Wholly absent:** Same as global; selected values are not resurrected.
-- **Partial or malformed:** Same as global; owner mismatch also fails closed.
-- **Allowed repair and writes:** Normal CAS publication may materialize the complete empty pair.
+Session semantics use the same triple; `config.json` and `runtime.json` separately bind the physical session, run fields, lineage and acquisition state. An acquired Session requires the whole private triple, even when Session is excluded and only presence is checked. A valid `unacquired` or `deferred` lifecycle instead requires private absence; that alone grants no acquisition or parent lookup. Private files without their lifecycle, or one surviving lifecycle file, are not a new origin. See [origin and acquisition authority](scope-selection-contract.md#origins-acquisition-and-observation).
 
-### Session `checkpoint.json` + `patches.jsonl`
+### Unsupported layouts and native boundaries
 
-- **Authority:** State Flow; authoritative private semantics.
-- **Wholly absent:** Fresh lifecycle origin may initialize; an existing session with a checkpoint requires its current files.
-- **Partial or malformed:** Partial or malformed pair fails closed.
-- **Allowed repair and writes:** Fresh initialization or acceptance of validated current memory only.
+Legacy layouts and envelopes are not replay or conversion inputs. Normal admission does not rewrite them. A reserved `state.json` on an exact owned path may be captured as opaque bytes by a separately admitted quarantine, never decoded as a checkpoint. [Retired scope versions](compatibility.md#canonical-scope-format-admission) and [unsupported Session lifecycle formats](compatibility.md#mode-configuration-compatibility) are not healable.
 
-### Global/CWD `meta.json`
-
-- **Authority:** State Flow; temporal boundaries, CWD identity, and artifact provenance.
-- **Wholly absent:** Missing metadata removes temporal authority and fails closed; only an omitted `artifacts` leaf degrades provenance to `{}`.
-- **Partial or malformed:** Malformed metadata or semantic/boundary mismatch fails closed.
-- **Allowed repair and writes:** Normal CAS publication from a complete proven cohort.
-
-### Session `meta.json`
-
-- **Authority:** State Flow; session temporal boundaries and artifact provenance.
-- **Wholly absent:** Fresh origin may initialize; selected sessions recover only from exact scope authority.
-- **Partial or malformed:** Partial, malformed, or contradictory boundary evidence fails closed.
-- **Allowed repair and writes:** Canonical scope publication from the selected temporal state.
-
-### Session `config.json` + `runtime.json`
-
-- **Authority:** State Flow; behavior plus authoritative runtime identity, lineage, and counters.
-- **Wholly absent:** Fresh origin may initialize; selected sessions recover only from exact authority.
-- **Partial or malformed:** Partial, malformed, contradictory identity or lineage fails closed.
-- **Allowed repair and writes:** Canonical runtime publication from proven lifecycle/selected state; combined session metadata is unsupported.
-
-### Unsupported checkpoint envelopes, `state.json`, hashed layouts, or semantic Pi checkpoints
-
-- **Authority:** No current authority.
-- **Wholly absent:** Ignored.
-- **Partial or malformed:** Presence never becomes recovery or conversion input.
-- **Allowed repair and writes:** Preserve bytes; operator-managed removal or external conversion only.
-
-### Retained Pi boundary
-
-- **Authority:** State Flow/Pi entry; current canonical lineage.
-- **Wholly absent:** Expired or missing boundary is unavailable.
-- **Partial or malformed:** Identity, lifecycle, or lineage contradiction fails closed.
-- **Allowed repair and writes:** Select exact retained private history over live shared scopes; never consult Git.
+Pi entries supply session policy and run bookkeeping, not semantic revisions. A missing or expired native boundary never rewinds memory or authorizes empty, historical or foreign values. Attachment and fork use validated current authority; see [fork rules](fork-contract.md).
 
 ### Canonical writer lock
 
@@ -126,29 +82,18 @@ The "fails closed" rules below describe what a single operation does with partia
 
 ## Transaction rule
 
-Every semantic repair follows the ordinary transaction path:
+Ordinary writes follow [guarded publication](architecture.md#asynchronous-storage-transaction): capture and classify live files under exclusion, derive and validate an authorized successor, then recheck ownership and CAS before per-file replacement. Install only after acceptance. Rollback preserves detected foreign bytes; there is no kernel-atomic multi-file CAS.
 
-1. Capture the live canonical-file basis under the existing publication lock.
-2. Classify each cohort as present, absent, partial, or malformed.
-3. Derive only an authorized replacement.
-4. Stage the complete canonical cohort.
-5. Recheck CAS and ownership.
-6. Publish with per-file atomic replacement, conflict-preserving rollback, and then install the accepted runtime state; this is not kernel-atomic multi-file CAS.
-
-**A wholly absent shared scope is current empty reality**, not permission to restore cached cold values or leftover compilation evidence.
-
-- Authored `state_flow_patch` operations select this basis under the awaited store lock and publish only after complete validation. A rejected first patch never leaves separately published empty initialization.
-- Raw precomputed replay targeting a disappeared selected basis still fails closed.
-- Discarded history is unavailable and is never reconstructed or promoted back into current shared memory.
+A fresh authored patch can use a wholly absent selected shared scope as empty current reality and materialize its complete triple in the same acceptance. A rejected first patch leaves no separate initialization. Captured replay targeting a removed scope refuses; cached values, old provenance and discarded history are not recovery inputs.
 
 ## Self-healing
 
-`lib/healing.ts` is the single owner allowed to remove canonical bytes outside publication. It runs only after an acquisition (startup, reload, resume, tree navigation, Start, Passive, pre-runtime shared observation) has failed, so healthy stores pay nothing and keep their existing lock timing.
+Only `lib/healing.ts` can remove canonical bytes outside ordinary publication. Pi invokes it after failed acquisition (including pre-runtime shared observation), not as maintenance on healthy stores, in automatic Off handling, or during explicit read-only inspection.
 
-1. Take the store publication lock without waiting; a live writer means the store is in use, so healing defers to a later attempt.
-2. Decode each selected shared owner alone, then the session lifecycle, then the complete selected cohort.
-3. For an owner that fails with a semantic decode/validation error, write one private exact-byte record (`<parent-of-store>/<store-name>-quarantine/<time>-<scope>-<digest>.json`, directory 0700, file 0600, verified by reading back), then delete that owner's canonical files so it becomes wholly absent. A cohort-level lineage contradiction resets the session (the lineage anchor), never healthy shared owners.
-4. Retry the failed acquisition once. A session that is now absent, or a boundary whose session memory was missing, restarts from empty memory under the branch's captured mode and selection.
-5. Announce every reset to the operator (warning), the model (one projected notice until a run that saw it settles) and the local diagnostic log (always, independent of `logging`).
+1. Take store exclusion without waiting behind a live writer. Probe the Session lifecycle header and required private presence **before** resetting shared owners. Recognizable unsupported lifecycle evidence (including V1) stops the pass before any owner is touched, even if the accompanying config is missing or malformed.
+2. Probe each selected shared owner separately. If lifecycle is valid and the requested selection permits it, validate the complete current cohort. Reset only the owner with a healable failure; a cross-owner lineage contradiction belongs to the Session anchor, not healthy shared files.
+3. Copy surviving exact bytes to `<parent-of-store>/<store-name>-quarantine/<time>-<scope>-<digest>.json` (private directory, new file mode 0600). Verify the record by readback **before** removing that owner’s files. Quarantine is manual recovery evidence, not a fallback store.
+4. Retry acquisition once when healing made a reset or the lifecycle path admits a visible restart from missing Session memory. Preserve captured policy and independent acquisition/fork checks; a missing file is not permission to create an origin or copy a parent. If no bytes survived, the missing-memory restart can be announced without a quarantine file.
+5. Announce every reset to the operator, to the model until a run that saw the notice settles, and to the local diagnostic log independently of `logging`.
 
-Never healed: filesystem errors, lock or busy states, cancellation, and identity mismatches that indicate another owner's data. Those keep failing closed. Quarantine records are recovery evidence for manual restoration, not an automatic fallback.
+Filesystem, lock, cancellation, unavailable-revision and foreign-identity failures are not corruption. Neither are recognized retired semantic formats or unsupported lifecycle formats. Do not bypass these refusals by deleting files or by manufacturing an empty runtime. See [recovery witnesses](temporal-acceptance.md#storage-classification-and-healing).

@@ -2,12 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-	captureLifecycleSnapshot, createSessionRuntime, emptySnapshot, parseRetainedPiCheckpoint, parseSessionRuntime,
-	preRuntimeCheckpoint, readCheckpointMode, retainedBoundaryCheckpoint, serializeSessionRuntime,
-	prepareSessionPolicyMigration, prepareRetainedPolicyMigration, capturePrivateCausalBasis,
+	captureLifecycleSnapshot, parseRetainedPiCheckpoint, preRuntimeCheckpoint, readCheckpointMode, retainedBoundaryCheckpoint,
+	parseSelectedLifecycle, prepareRetainedPolicyMigration, capturePrivateCausalBasis, UnsupportedLifecycleFormatError,
+	parseBaselineLifecycle, serializeBaselineLifecycle,
 } from "../lib/snapshot.ts";
-import { createTemporalState } from "../lib/temporal.ts";
-import { emptyState } from "../lib/state.ts";
+import { advanceTemporalState, createTemporalState, restoreSelectedTemporalState, temporalCausalWitnesses } from "../lib/temporal.ts";
 import { captureScopeSelection } from "../lib/selection.ts";
 
 test("closed lifecycle capture accepts optional undefined in-memory fields but no forged authority or malformed counters", () => {
@@ -63,48 +62,20 @@ test("mode-only decoding preserves explicit policies and strict legacy compatibi
 	}
 });
 
-test("session config/runtime codec separates runtime provenance from semantic state", () => {
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const snapshot = { ...emptySnapshot("active"), meta: { step: 3, specification: "Continue" } };
-	const runtime = createSessionRuntime(snapshot, "/project", "session", view.lineage);
-	const sources = serializeSessionRuntime(runtime, "/project", "session");
-	const parsed = parseSessionRuntime(sources.config, sources.runtime, "/project", "session")!;
-	assert.deepEqual(parsed, runtime);
-});
-
-test("session config serializes only the selected mode and decodes legacy enabled read-only", () => {
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
+test("Baseline separates explicit mode and selection from run fields and never decodes an enabled alias", () => {
+	const { metadata } = policySources();
+	const scopes = captureScopeSelection(["session"]);
 	for (const mode of ["active", "passive", "off"] as const) {
-		const runtime = createSessionRuntime(emptySnapshot(mode), "/project", "session", view.lineage);
-		const sources = serializeSessionRuntime(runtime, "/project", "session");
-		assert.equal(sources.config, `${JSON.stringify({ mode })}\n`);
-		assert.deepEqual(parseSessionRuntime(sources.config, sources.runtime, "/project", "session")!.config, { mode });
+		const runtime = { config: { mode, scopes }, meta: { ...metadata, version: 2 as const, privateAcquisition: "acquired" as const } };
+		const wire = serializeBaselineLifecycle(runtime, "/project", "session");
+		assert.deepEqual(JSON.parse(wire.config), { mode, scopes });
+		const parsed = parseSelectedLifecycle(wire.config, wire.runtime, "/project", "session")!;
+		assert.equal(parsed.sourceVersion, "baseline");
+		assert.deepEqual(parsed.runtime, { ...runtime, meta: { ...runtime.meta, causalWitnesses: [] } });
+		for (const enabled of [true, false]) {
+			assert.throws(() => parseSelectedLifecycle(JSON.stringify({ enabled, scopes }), wire.runtime, "/project", "session"), /configuration/);
+		}
 	}
-	const runtime = serializeSessionRuntime(createSessionRuntime(emptySnapshot("active"), "/project", "session", view.lineage), "/project", "session").runtime;
-	assert.deepEqual(parseSessionRuntime(JSON.stringify({ enabled: true }), runtime, "/project", "session")!.config, { mode: "active" });
-	assert.notEqual(parseSessionRuntime(JSON.stringify({ enabled: false }), runtime, "/project", "session")!.config.mode, "active");
-	for (const invalid of [{}, { mode: "on" }, { mode: "active", enabled: true }, { enabled: "yes" }, { mode: null },
-		{ mode: "active", scopes: ["cwd"] }, { mode: "active", scopes: [] }]) {
-		assert.throws(() => parseSessionRuntime(JSON.stringify(invalid), runtime, "/project", "session"), /runtime configuration/);
-	}
-});
-
-test("runtime decoding rejects mismatched identity, malformed lineage, invalid config/counters, and semantic fields", () => {
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "origin");
-	const runtime = createSessionRuntime(emptySnapshot("active"), "/project", "session", view.lineage);
-	const sources = serializeSessionRuntime(runtime, "/project", "session");
-	assert.equal(parseSessionRuntime(undefined, undefined, "/project", "session"), undefined);
-	assert.throws(() => parseSessionRuntime(undefined, sources.runtime, "/project", "session"), /Incomplete/);
-	assert.throws(() => parseSessionRuntime("bad", sources.runtime, "/project", "session"), /invalid JSON/);
-	assert.throws(() => parseSessionRuntime(sources.config, sources.runtime, "/other", "session"), /identity mismatch/);
-	for (const candidate of [
-		{ ...runtime, config: { mode: "active", unexpected: true } },
-		{ ...runtime, config: { enabled: true, transitionWindow: 7 } },
-		{ ...runtime, meta: { ...runtime.meta, step: -1 } },
-		{ ...runtime, meta: { ...runtime.meta, tactics: { forged: true } } },
-		{ ...runtime, meta: { ...runtime.meta, version: 2 } },
-		{ ...runtime, meta: { ...runtime.meta, lineage: [runtime.meta.lineage[0], runtime.meta.lineage[0]] } },
-	]) assert.throws(() => parseSessionRuntime(JSON.stringify(candidate.config), JSON.stringify(candidate.meta), "/project", "session"));
 });
 
 test("retained-boundary checkpoints contain only temporal identity and branch lifecycle", () => {
@@ -139,9 +110,11 @@ test("retained-boundary checkpoints contain only temporal identity and branch li
 });
 
 function policySources() {
-	const view = createTemporalState({ global: emptyState(), cwd: emptyState(), session: emptyState() }, "policy-origin");
-	const runtime = createSessionRuntime({ config: { mode: "active" }, meta: { step: 4, bootstrap: false, specification: "Keep this run" } }, "/project", "session", view.lineage);
-	return { config: JSON.stringify(runtime.config), metadata: runtime.meta };
+	return {
+		config: '{"mode":"active"}',
+		metadata: { version: 1, identity: { cwd: "/project", sessionId: "session" }, lineage: [{ id: "policy-origin", position: 0, parent: null }],
+			step: 4, bootstrap: false, specification: "Keep this run" },
+	};
 }
 
 test("private causal basis is closed complete v2 acquired proof, never a legacy collision or caller lifecycle field", () => {
@@ -156,72 +129,123 @@ test("private causal basis is closed complete v2 acquired proof, never a legacy 
 		assert.throws(() => capturePrivateCausalBasis(bad));
 	}
 	for (const value of [null, basis, { opaque: "must not be overwritten" }]) {
-		assert.throws(() => prepareSessionPolicyMigration(fixture.config, JSON.stringify({ ...fixture.metadata, privateCausalBasis: value }), "/project", "session", ["cwd"]), /Target.*legacy/);
+		assert.throws(() => parseSelectedLifecycle(fixture.config, JSON.stringify({ ...fixture.metadata, privateCausalBasis: value }), "/project", "session"), UnsupportedLifecycleFormatError);
 	}
 	const config = JSON.stringify({ mode: "active", scopes: ["cwd"] });
 	for (const state of ["unacquired", "deferred"]) {
-		assert.throws(() => prepareSessionPolicyMigration(config, JSON.stringify({ ...fixture.metadata, version: 2, privateAcquisition: state, privateCausalBasis: basis }), "/project", "session", ["cwd"]), /private causal basis provenance/);
+		assert.throws(() => parseSelectedLifecycle(config, JSON.stringify({ ...fixture.metadata, version: 2, privateAcquisition: state, privateCausalBasis: basis }), "/project", "session"), /private causal basis provenance/);
 	}
 	const raw = { ...fixture.metadata, version: 2, privateAcquisition: "acquired", privateCausalBasis: basis, opaque: { keep: true } };
-	const admitted = prepareSessionPolicyMigration(config, JSON.stringify(raw), "/project", "session", ["cwd"])!;
+	const admitted = parseSelectedLifecycle(config, JSON.stringify(raw), "/project", "session")!;
 	assert.deepEqual(admitted.runtime.meta.privateCausalBasis, basis);
 	assert.deepEqual(admitted.runtime.meta.opaque, { keep: true });
 	assert.throws(() => captureLifecycleSnapshot({ config: { mode: "active" }, meta: { step: 0, privateCausalBasis: basis } } as any));
 });
 
-test("legacy lifecycle preflight preserves raw evidence, identity and lineage while capturing supplied defaults once", () => {
-	const fixture = policySources();
-	const metadata = { ...fixture.metadata, foreign: { path: "$session.working.opaque" }, temporal: { opaque: true }, artifacts: { "/legacy": { future: true } } };
-	const source = ` ${JSON.stringify(metadata)}\n`;
-	const defaults = captureScopeSelection(["cwd"]);
-	const candidate = prepareSessionPolicyMigration(fixture.config, source, "/project", "session", defaults)!;
-	assert.equal(candidate.sourceVersion, 1);
-	assert.equal(candidate.requiresConversion, true);
-	assert.deepEqual(candidate.source, { config: fixture.config, runtime: source });
-	assert.deepEqual(candidate.runtime.config, { mode: "active", scopes: ["cwd"] });
-	assert.deepEqual(candidate.runtime.meta, { ...metadata, version: 2, privateAcquisition: "acquired" });
-	assert.notEqual(candidate.runtime.config.scopes, defaults);
-	assert.equal(Object.isFrozen(candidate.runtime.config.scopes), true);
-	const repeated = prepareSessionPolicyMigration(candidate.target.config, candidate.target.runtime, "/project", "session", captureScopeSelection(["session"]))!;
-	assert.equal(repeated.requiresConversion, false);
-	assert.deepEqual(repeated.runtime, candidate.runtime);
-	assert.deepEqual(repeated.target, candidate.target);
-	candidate.runtime.meta.identity.cwd = "/mutated";
-	assert.equal(repeated.runtime.meta.identity.cwd, "/project");
-	assert.equal(source, candidate.source.runtime);
-	const inactive = prepareSessionPolicyMigration('{"enabled":false}', source, "/project", "session", defaults)!;
-	assert.equal(inactive.runtime.config.mode, "passive");
+function baselineFixture() {
+	const states = { global: {}, cwd: {}, session: {} };
+	const origin = createTemporalState(states, "origin");
+	const privateView = advanceTemporalState(origin, [{ scope: "session", patch: { tactics: { note: "retained privately" } } }], "private");
+	const shared = advanceTemporalState(origin, [{ scope: "cwd", patch: { strategy: { rule: "shared" } } }], "shared");
+	const config = JSON.stringify({ mode: "active", scopes: ["cwd"] });
+	const source = JSON.stringify({
+		...policySources().metadata, version: 2, privateAcquisition: "acquired", lineage: shared.lineage,
+		causalWitnesses: temporalCausalWitnesses(shared), opaque: { future: [false, "keep"] },
+		privateCausalBasis: { lineage: privateView.lineage, causalWitnesses: temporalCausalWitnesses(privateView) },
+	});
+	const v2 = parseSelectedLifecycle(config, source, "/project", "session")!.runtime;
+	return { v2, shared, privateView, wire: serializeBaselineLifecycle(v2, "/project", "session") };
+}
+
+test("Baseline stores each boundary once in both proofs and preserves V2 evidence and unknown metadata", () => {
+	const { v2, wire } = baselineFixture();
+	const raw = JSON.parse(wire.runtime);
+	assert.equal(raw.format, "baseline");
+	assert.equal(Object.hasOwn(raw, "version"), false);
+	assert.equal(Object.hasOwn(raw, "causalWitnesses"), false);
+	assert.deepEqual(raw.lineage, [v2.meta.lineage[0], { ...v2.meta.lineage[1], owners: ["cwd"] }]);
+	assert.deepEqual(raw.privateCausalBasis, [v2.meta.privateCausalBasis!.lineage[0], { ...v2.meta.privateCausalBasis!.lineage[1], owners: ["session"] }]);
+	const decoded = parseBaselineLifecycle(wire.config, wire.runtime, "/project", "session");
+	assert.deepEqual(decoded, v2);
+	assert.deepEqual(serializeBaselineLifecycle(decoded, "/project", "session"), wire);
+	assert.throws(() => serializeBaselineLifecycle({ ...v2, meta: { ...v2.meta, format: "opaque" } }, "/project", "session"), /collides/);
 });
 
-test("v2 lifecycle preflight admits all subsets and acquisition claims without widening current native readers or writers", () => {
+test("Baseline can omit optional metadata and claims but cannot invent selected or private history", () => {
+	const { wire, shared, privateView } = baselineFixture();
+	const raw = JSON.parse(wire.runtime);
+	delete raw.opaque;
+	delete raw.lineage[1].owners;
+	const parse = () => parseBaselineLifecycle(wire.config, JSON.stringify(raw), "/project", "session");
+	const admitted = parse();
+	assert.equal(admitted.meta.opaque, undefined);
+	assert.deepEqual(admitted.meta.causalWitnesses, []);
+	assert.deepEqual(restoreSelectedTemporalState({ cwd: shared.scopes.cwd }, ["cwd"], admitted.meta.lineage, admitted.meta.causalWitnesses).lineage, shared.lineage);
+	assert.throws(() => restoreSelectedTemporalState({ global: shared.scopes.global }, ["global"], admitted.meta.lineage, admitted.meta.causalWitnesses), /witness|proof/i);
+	const retained = admitted.meta.privateCausalBasis!;
+	assert.deepEqual(restoreSelectedTemporalState({ session: privateView.scopes.session }, ["session"], retained.lineage, retained.causalWitnesses).lineage, privateView.lineage);
+	delete raw.privateCausalBasis[1].owners;
+	assert.throws(parse, /Insufficient.*private causal basis/);
+});
+
+test("Baseline refuses mixed formats, anchor claims, malformed evidence and foreign identities", () => {
+	const { wire } = baselineFixture();
+	const parse = (raw: unknown, cwd = "/project") => parseBaselineLifecycle(wire.config, JSON.stringify(raw), cwd, "session");
+	for (const change of [
+		(raw: any) => { raw.version = 2; },
+		(raw: any) => { raw.format = "future"; },
+		(raw: any) => { raw.causalWitnesses = []; },
+		(raw: any) => { raw.lineage[0].owners = ["cwd"]; },
+		(raw: any) => { raw.lineage[1].owners = ["session", "cwd"]; },
+		(raw: any) => { raw.lineage[1].owners = []; },
+		(raw: any) => { raw.lineage[1].parent = "other"; },
+		(raw: any) => { raw.privateAcquisition = "deferred"; },
+	]) {
+		const raw = JSON.parse(wire.runtime);
+		change(raw);
+		assert.throws(() => parse(raw));
+	}
+	assert.throws(() => parse(JSON.parse(wire.runtime), "/other"), /identity mismatch/);
+});
+
+test("selected lifecycle refuses retired V1 even with no config or malformed config", () => {
+	const fixture = policySources();
+	const source = JSON.stringify(fixture.metadata);
+	for (const config of [undefined, fixture.config, "{broken"]) {
+		assert.throws(() => parseSelectedLifecycle(config, source, "/project", "session"), (error: unknown) =>
+			error instanceof UnsupportedLifecycleFormatError && /V1 is retired.*previous.*release/.test(error.message));
+	}
+});
+
+test("v2 lifecycle preflight admits all subsets and acquisition claims through the Baseline codec", () => {
 	const fixture = policySources();
 	const order = ["global", "cwd", "session"];
 	for (let mask = 1; mask < 8; mask++) for (const privateAcquisition of ["unacquired", "deferred", "acquired"]) for (const mode of ["off", "passive", "active"]) {
 		const scopes = order.filter((_, bit) => mask & (1 << bit));
 		const config = JSON.stringify({ mode, scopes: [...scopes].reverse() });
 		const runtime = JSON.stringify({ ...fixture.metadata, version: 2, privateAcquisition });
-		const candidate = prepareSessionPolicyMigration(config, runtime, "/project", "session", captureScopeSelection(["global"]))!;
+		const candidate = parseSelectedLifecycle(config, runtime, "/project", "session")!;
 		assert.equal(candidate.sourceVersion, 2);
-		assert.equal(candidate.requiresConversion, false);
 		assert.deepEqual(candidate.runtime.config, { mode, scopes });
 		assert.equal(candidate.runtime.meta.privateAcquisition, privateAcquisition);
-		assert.throws(() => parseSessionRuntime(candidate.target.config, candidate.target.runtime, "/project", "session"));
-		assert.throws(() => serializeSessionRuntime(candidate.runtime as any, "/project", "session"), /Unsupported/);
+		const baseline = serializeBaselineLifecycle(candidate.runtime, "/project", "session");
+		assert.deepEqual(parseBaselineLifecycle(baseline.config, baseline.runtime, "/project", "session"),
+			{ ...candidate.runtime, meta: { ...candidate.runtime.meta, causalWitnesses: [] } });
 	}
 });
 
 test("lifecycle preflight rejects partial, unknown, mixed and invalid authority before conversion", () => {
 	const fixture = policySources();
-	const defaults = captureScopeSelection(["cwd"]);
-	const prepare = (config: string | undefined, meta: string | undefined, cwd = "/project", id = "session") => prepareSessionPolicyMigration(config, meta, cwd, id, defaults);
-	const runtime = JSON.stringify(fixture.metadata);
+	const prepare = (config: string | undefined, meta: string | undefined, cwd = "/project", id = "session") => parseSelectedLifecycle(config, meta, cwd, id);
+	const runtime = JSON.stringify({ ...fixture.metadata, version: 2, privateAcquisition: "acquired" });
+	const config = JSON.stringify({ mode: "active", scopes: ["cwd"] });
 	assert.equal(prepare(undefined, undefined), undefined);
 	assert.throws(() => prepare(undefined, runtime), /Incomplete/);
-	assert.throws(() => prepare(fixture.config, undefined), /Incomplete/);
+	assert.throws(() => prepare(config, undefined), /Incomplete/);
 	assert.throws(() => prepare("{broken", runtime));
-	assert.throws(() => prepare(fixture.config, "{broken"));
-	for (const [config, meta] of [["private-secret-token", runtime], [fixture.config, "private-secret-token"]]) {
-		assert.throws(() => prepare(config, meta), (error: Error) => {
+	assert.throws(() => prepare(config, "{broken"));
+	for (const [settings, meta] of [["private-secret-token", runtime], [config, "private-secret-token"]]) {
+		assert.throws(() => prepare(settings, meta), (error: Error) => {
 			assert.match(error.message, /session policy contains invalid JSON/);
 			assert.doesNotMatch(error.message, /private-secret-token/);
 			assert.equal(error.cause, undefined);
@@ -231,14 +255,11 @@ test("lifecycle preflight rejects partial, unknown, mixed and invalid authority 
 	for (const version of [undefined, null, 0, 3, "2", true]) {
 		assert.throws(() => prepare("{broken", JSON.stringify({ ...fixture.metadata, version })), /Unsupported/);
 	}
-	assert.throws(() => prepare('{"mode":"active","scopes":["cwd"]}', runtime), /Target.*legacy/);
-	assert.throws(() => prepare(fixture.config, JSON.stringify({ ...fixture.metadata, privateAcquisition: "acquired" })), /Target.*legacy/);
-	assert.throws(() => prepare(fixture.config, JSON.stringify({ ...fixture.metadata, causalWitnesses: [] })), /Target.*legacy/);
-	assert.throws(() => prepare(fixture.config, runtime, "/other"), /identity/);
-	assert.throws(() => prepare(fixture.config, runtime, "/project", "other"), /identity/);
-	for (const fields of [{ step: -1 }, { lineage: [] }, { strategy: {} }, { foreign: Infinity }]) {
-		const source = JSON.stringify({ ...fixture.metadata, ...fields }).replace('"foreign":null', '"foreign":1e309');
-		assert.throws(() => prepare(fixture.config, source));
+	assert.throws(() => prepare(config, runtime, "/other"), /identity/);
+	assert.throws(() => prepare(config, runtime, "/project", "other"), /identity/);
+	for (const fields of [{ step: -1 }, { lineage: [] }, { lineage: [fixture.metadata.lineage[0], fixture.metadata.lineage[0]] }, { strategy: {} }, { tactics: { forged: true } }, { foreign: Infinity }]) {
+		const source = JSON.stringify({ ...JSON.parse(runtime), ...fields }).replace('"foreign":null', '"foreign":1e309');
+		assert.throws(() => prepare(config, source));
 	}
 	const meta2 = JSON.stringify({ ...fixture.metadata, version: 2, privateAcquisition: "acquired" });
 	for (const config of [{ mode: "active" }, { mode: "active", scopes: [] }, { mode: "active", scopes: null }, { mode: "active", scopes: ["CWD"] },

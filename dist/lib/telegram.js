@@ -93,32 +93,27 @@ const STATE_FLOW_SCOPE_LABELS = {
     session: "💬 Session",
     effective: "🧬 Effective",
 };
-// Budget the transport-serialized text, leaving room for six fields and notices
-// below Telegram's 32,768-character Rich message ceiling.
-const STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS = 3_000;
-function renderStateFlowTelegramField(value) {
-    const json = JSON.stringify(value, null, 2);
-    if (JSON.stringify(json).length <= STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS) {
-        return [{ type: "pre", language: "json", text: json }];
+// Conservatively bound the serialized single-message payload, not each field independently.
+const STATE_FLOW_TELEGRAM_RICH_MAX_CHARS = 32_768;
+function previewRichJson(block, budget) {
+    const notice = (line) => ({ type: "pre", text: `Truncated preview — omitted from line ${line}.` });
+    // Reserve the block wrappers and enough digits for any line number before counting escaped text.
+    let remaining = budget - JSON.stringify({ ...block, text: "" }).length - JSON.stringify(notice(block.text.length + 1)).length - 1;
+    let lines = 0, end = 0;
+    for (let start = 0; start < block.text.length; start = end + 1) {
+        const newline = block.text.indexOf("\n", start);
+        const nextEnd = newline === -1 ? block.text.length : newline;
+        const separator = lines === 0 ? 0 : 2; // A literal newline serializes as two characters.
+        if (nextEnd - start + separator > remaining)
+            break;
+        const cost = JSON.stringify(block.text.slice(start, nextEnd)).length - 2 + separator;
+        if (cost > remaining)
+            break;
+        remaining -= cost;
+        end = nextEnd;
+        lines++;
     }
-    let low = 0;
-    let high = Math.min(json.length, STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS);
-    while (low <= high) {
-        const length = Math.floor((low + high) / 2);
-        if (JSON.stringify(json.slice(0, length)).length <= STATE_FLOW_TELEGRAM_FIELD_MAX_CHARS) {
-            low = length + 1;
-        }
-        else {
-            high = length - 1;
-        }
-    }
-    // Do not split a Unicode surrogate pair at the preview boundary.
-    if (/[\uD800-\uDBFF]/.test(json.charAt(high - 1)))
-        high -= 1;
-    return [
-        { type: "pre", language: "json", text: json.slice(0, high) },
-        { type: "pre", text: `Truncated preview — ${json.length - high} characters omitted.` },
-    ];
+    return lines ? [{ ...block, text: block.text.slice(0, end) }, notice(lines + 1)] : [notice(1)];
 }
 export function renderStateFlowRichState(scope, revisions, state) {
     const fields = scope === "global" || scope === "cwd"
@@ -127,21 +122,29 @@ export function renderStateFlowRichState(scope, revisions, state) {
     const revision = scope === "effective"
         ? formatScopeRevisionVector(revisions, captureScopeSelection(Object.keys(revisions)))
         : `#${revisions[scope]}`;
-    return {
+    const sections = fields.filter(field => state[field] !== undefined && state[field] !== "").map(field => {
+        const json = { type: "pre", language: "json", text: JSON.stringify(state[field], null, 2) };
+        const details = {
+            type: "details", summary: { type: "code", text: field }, blocks: [],
+        };
+        return { details, json, size: JSON.stringify(json).length };
+    });
+    const message = {
         blocks: [
-            {
-                type: "heading",
-                text: [`${STATE_FLOW_SCOPE_LABELS[scope]}: `, { type: "code", text: revision }],
-                size: 3,
-            },
-            ...fields.filter((field) => state[field] !== undefined && state[field] !== "").map((field) => ({
-                type: "details",
-                summary: { type: "code", text: field },
-                blocks: renderStateFlowTelegramField(state[field]),
-            })),
+            { type: "heading", text: [`${STATE_FLOW_SCOPE_LABELS[scope]}: `, { type: "code", text: revision }], size: 3 },
+            ...sections.map(section => section.details),
         ],
         skip_entity_detection: true,
     };
+    let remaining = STATE_FLOW_TELEGRAM_RICH_MAX_CHARS - JSON.stringify(message).length;
+    // Allocate to smaller fields first, without changing the displayed field order. If the whole
+    // snapshot fits, each next field fits its share; otherwise a large field cannot hide its neighbors.
+    for (const [index, section] of sections.sort((a, b) => a.size - b.size).entries()) {
+        const budget = Math.floor(remaining / (sections.length - index));
+        section.details.blocks = section.size <= budget ? [section.json] : previewRichJson(section.json, budget);
+        remaining -= JSON.stringify(section.details.blocks).length - 2; // The empty brackets were already budgeted.
+    }
+    return message;
 }
 function isStateFlowTelegramScope(value) {
     return value === "global" || value === "cwd" || value === "session" || value === "effective";

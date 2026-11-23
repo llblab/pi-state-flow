@@ -121,7 +121,7 @@ import { createCodemodeExtension, SessionManager, type AgentSession, type AgentB
 import { hashArtifactSource, ORDINARY_ARTIFACT_COMPILER, type ArtifactProvenanceRegistry } from "../lib/artifact.ts";
 import { STATE_FLOW_COMPACTION_SUMMARY } from "../lib/compaction.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
-import { createSessionRuntime, emptySnapshot, prepareRetainedPolicyMigration } from "../lib/snapshot.ts";
+import { emptySnapshot, prepareRetainedPolicyMigration } from "../lib/snapshot.ts";
 import { stageAtomicScopePatches, stageSelectedScopePatches, commitSelectedTransition } from "../lib/transition.ts";
 import { captureScopeSelection, DEFAULT_SCOPE_SELECTION, type ScopeSelection } from "../lib/selection.ts";
 import { advanceTemporalState, constrainTemporalState, createSelectedTemporalState, createTemporalState, readTemporalScopes, selectTemporalState, temporalScopeRevisions } from "../lib/temporal.ts";
@@ -132,11 +132,12 @@ import { createAcceptedTransition, type AcceptedTransition } from "../lib/histor
 import { canonicalizeModelReferences, normalizeModelPatches, normalizeModelReadPath, projectModelReadPath, projectModelReferences } from "../lib/model-interface.ts";
 import { readProjectedState, readStatePath } from "../lib/query.ts";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
-import { assertSelectedFileCohortBasis, captureTemporalFileBase, initializeFileStore, loadSelectedFileCohort, publishTemporalStateToFiles, withStorageTransaction } from "../lib/storage.ts";
+import { assertSelectedFileCohortBasis, loadSelectedFileCohort, withStorageTransaction } from "../lib/storage.ts";
 import { stateFlowLogPath } from "../lib/logging.ts";
 import { hashSkillSource, registeredSkillResolver, SkillReadTracker, SKILL_ARTIFACT_COMPILER } from "../lib/skills.ts";
 import {
 	nativePolicyMarker,
+	rewriteBaselineLifecycleAsNumeric,
 	cwdScopePaths,
 	initializeCwdState,
 	loadCwdMaterialization,
@@ -299,15 +300,19 @@ import {
 }
 
 {
-	const order = ["global", "cwd", "session"] as const;
-
 	test("selected staging commits through the guarded publisher without a second semantic replay pipeline", async (t) => {
 		const parent = mkdtempSync(join(tmpdir(), "state-flow-selected-stage-"));
 		t.after(() => rmSync(parent, { recursive: true, force: true }));
 		const root = join(parent, "store"), cwd = join(parent, "workspace"), sessionId = "owner";
-		initializeFileStore(root);
-		const view = createTemporalState({ global: { strategy: { shared: "keep" } }, cwd: {}, session: { strategy: { private: "untouched" } } }, "stage-origin");
-		publishTemporalStateToFiles(cwd, sessionId, view, order, captureTemporalFileBase(cwd, sessionId, root), root, createSessionRuntime(emptySnapshot("active"), cwd, sessionId, view.lineage));
+		const runtime = new TemporalRuntime(cwd, sessionId, root);
+		await runtime.withSelectedFirstPatchTransaction(DEFAULT_SCOPE_SELECTION, emptySnapshot("active"), tx => tx.publish(
+			tx.snapshot,
+			{ id: "stage-seed", transitions: [
+				{ scope: "global", patch: { strategy: { shared: "keep" } } },
+				{ scope: "session", patch: { strategy: { private: "untouched" } } },
+			] },
+		), () => {}, undefined, true);
+		rewriteBaselineLifecycleAsNumeric(cwd, sessionId, root, 2);
 		const privatePaths = temporalScopePaths(cwd, sessionId, "session", root);
 		const privateBytes = [privatePaths.checkpoint, privatePaths.patches, privatePaths.meta].map((path) => [path, readFileSync(path)] as const);
 		let acceptedReceipt: Awaited<ReturnType<typeof loadSelectedFileCohort>>;
@@ -315,12 +320,13 @@ import {
 			const source = transaction.prepareSelected(cwd, sessionId, ["cwd"], root)!;
 			const current = { selection: source.view.selection, states: readTemporalScopes(source.view) };
 			const snapshot = emptySnapshot("active");
-			const stage = stageSelectedScopePatches(current, { cwd: { intents: { task: { $ref: "cwd.lazy.plan" } }, lazy: { plan: ["verify"] }, tactics: { outcome: "prepared" } } }, [], "stage-origin");
+			const causalBasis = source.view.lineage.at(-1)!.id;
+			const stage = stageSelectedScopePatches(current, { cwd: { intents: { task: { $ref: "cwd.lazy.plan" } }, lazy: { plan: ["verify"] }, tactics: { outcome: "prepared" } } }, [], causalBasis);
 			commitSelectedTransition(snapshot, current, stage, (accepted, lifecycle) => {
 				assert.ok(accepted);
 				const expected = advanceTemporalState(constrainTemporalState(source.view, 7), accepted.transitions, accepted.id, 7);
 				acceptedReceipt = transaction.publishSelected(cwd, sessionId, { view: expected, transition: accepted, lifecycle, historyLimit: 7 }, source, root).cohort;
-			}, "stage-origin");
+			}, causalBasis);
 			assert.equal(snapshot.meta.step, 1);
 			assert.equal(snapshot.meta.bootstrap, false);
 			assert.deepEqual(current.states, readTemporalScopes(acceptedReceipt!.view));
@@ -656,7 +662,7 @@ for (const active of [false, true]) for (const needHistory of [false, true]) tes
 		}]))), { stopReason: "toolUse" }),
 		fauxAssistantMessage(fauxToolCall("state_flow_read", { paths: scopes.map((scope) => `${scope}.lazy.releasePlan`) }, { id: "current-lazy" }), { stopReason: "toolUse" }),
 		(context) => {
-			assert.deepEqual(result(context, "current-lazy"), { value: values });
+			assert.deepEqual(result(context, "current-lazy"), { values });
 			currentChecked = true;
 			return fauxAssistantMessage(fauxToolCall("state_flow_patch", Object.fromEntries(scopes.map((scope) => [scope, { lazy: { releasePlan: null } }]))), { stopReason: "toolUse" });
 		},
@@ -689,7 +695,7 @@ for (const active of [false, true]) for (const needHistory of [false, true]) tes
 				: fauxAssistantMessage("Continue without the old detail");
 		},
 		...(needHistory ? [(context: Context) => {
-			assert.deepEqual(result(context, "historical-lazy"), { value: values }, "explicit offsets retain exact data despite automatic visibility filtering");
+			assert.deepEqual(result(context, "historical-lazy"), { values }, "explicit offsets retain exact data despite automatic visibility filtering");
 			assert.deepEqual(files(), before);
 			assert.equal(snapshots(session).length, checkpoints);
 			historyChecked = true;
@@ -739,7 +745,7 @@ for (const control of ["off", "active"] as const) test(`real Pi ${control} keeps
 		import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
 		import { temporalScopePaths } from ${JSON.stringify(new URL("../lib/durable.ts", import.meta.url).href)};
 		import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
-		import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+		import { stageSelectedScopePatches, commitSelectedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
 		const { root, cwd, ready, release } = JSON.parse(process.argv[1]);
 		const pauseAt = temporalScopePaths(cwd, "peer", "global", root).patches;
 		const rename = fs.renameSync;
@@ -754,14 +760,14 @@ for (const control of ["off", "active"] as const) test(`real Pi ${control} keeps
 			}
 		};
 		syncBuiltinESMExports();
-		await new TemporalRuntime(cwd, "peer", root).withPatchTransaction((tx) => {
-			const stage = stageAtomicScopePatches(tx.states, {
+		await new TemporalRuntime(cwd, "peer", root).withSelectedFirstPatchTransaction(["global", "cwd", "session"], emptySnapshot("active"), (tx) => {
+			const stage = stageSelectedScopePatches(tx, {
 				global: { tactics: { globalPeer: "FOREIGN-G" } },
 				cwd: { tactics: { cwdPeer: "FOREIGN-C" } },
 				session: { tactics: { private: "FOREIGN-PRIVATE-SECRET" } },
 			}, [], tx.causalBasis);
-			commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
-		});
+			commitSelectedTransition(tx.snapshot, tx, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+		}, () => {}, undefined, true);
 	`, JSON.stringify({ root: f.repositoryRoot, cwd: f.cwd, ready, release })], { stdio: ["ignore", "ignore", "inherit"] });
 	closed = once(child, "close");
 	// Process/SDK startup competes with the full suite; the separate 2.2-second held-owner witness is unchanged.
@@ -1103,7 +1109,9 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi context provi
 				contextSignal = ctx.signal;
 				waiting = true;
 				try {
-					await runtime.withLifecycleTransaction((publish) => publish({ ...snapshot, meta: { ...snapshot.meta, specification } }), contextSignal);
+					await runtime.withSelectedCurrentTransaction(DEFAULT_SCOPE_SELECTION, (current, publish) => publish({
+						...current, meta: { ...current.meta, specification },
+					}), () => {}, contextSignal);
 				} catch (error) {
 					failure = error;
 					if (!contextSignal?.aborted) throw error;
@@ -1114,8 +1122,8 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi context provi
 	});
 	const session = await f.createSession("new");
 	runtime = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
-	runtime.initialize(snapshot, true);
-	const cached = structuredClone(runtime.view);
+	await runtime.withSelectedFirstPatchTransaction(DEFAULT_SCOPE_SELECTION, snapshot, tx => tx.publish(tx.snapshot), () => {}, undefined, true);
+	const cached = runtime.selectedView();
 	const files = () => captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 	const before = files();
 	const paths = sessionRuntimePaths(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
@@ -1140,14 +1148,14 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi context provi
 	assert.equal(ended, false);
 	assert.equal(providerCalls, 0);
 	assert.deepEqual(files(), before);
-	assert.deepEqual(runtime.view, cached);
+	assert.deepEqual(runtime.selectedView(), cached);
 	if (outcome === "cancel") {
 		await session.abort();
 		await prompt;
 		assert.equal(contextSignal.aborted, true);
 		assert.equal((failure as Error)?.name, "AbortError");
 		assert.deepEqual(files(), before);
-		assert.deepEqual(runtime.view, cached);
+		assert.deepEqual(runtime.selectedView(), cached);
 		assert.equal(readFileSync(join(f.repositoryRoot, ".state-flow-publication.lock"), "utf8"), `${process.pid}\n`);
 	}
 	release();
@@ -1157,7 +1165,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi context provi
 	if (outcome === "accept") {
 		assert.equal(failure, undefined);
 		assert.deepEqual(files().filter(({ path }) => path !== paths.config && path !== paths.runtime), before.filter(({ path }) => path !== paths.config && path !== paths.runtime));
-		assert.deepEqual(runtime.view, cached);
+		assert.deepEqual(runtime.selectedView(), cached);
 	} else assert.deepEqual(files(), before, "releasing the owner cannot revive the canceled publication");
 });
 
@@ -1186,7 +1194,7 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi awaits foreig
 				import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
 				import { withStorageTransaction } from ${JSON.stringify(new URL("../lib/storage.ts", import.meta.url).href)};
 				import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
-				import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+				import { stageSelectedScopePatches, commitSelectedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
 				const { root, cwd, ready, release, outcome } = JSON.parse(process.argv[1]);
 				function wait() {
 					fs.writeFileSync(ready, "locked");
@@ -1197,14 +1205,14 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi awaits foreig
 					}
 				}
 				if (outcome === "cancel") await withStorageTransaction(root, wait);
-				else await new TemporalRuntime(cwd, "foreign", root).withPatchTransaction((tx) => {
+				else await new TemporalRuntime(cwd, "foreign", root).withSelectedFirstPatchTransaction(["global", "cwd", "session"], emptySnapshot("active"), (tx) => {
 					wait();
-					const stage = stageAtomicScopePatches(tx.states, {
+					const stage = stageSelectedScopePatches(tx, {
 						global: { tactics: { globalPeer: "FOREIGN-G" } }, cwd: { tactics: { cwdPeer: "FOREIGN-C" } },
 						session: { tactics: { peer: "FOREIGN-PRIVATE-SECRET" } },
 					}, [], tx.causalBasis);
-					commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted, stage.provenanceUpdates), tx.causalBasis);
-				});
+					commitSelectedTransition(tx.snapshot, tx, stage, (accepted, next) => tx.publish(next, accepted, stage.provenanceUpdates), tx.causalBasis);
+				}, () => {}, undefined, true);
 			`, JSON.stringify({ root: f.repositoryRoot, cwd: f.cwd, ready, release, outcome })], { stdio: ["ignore", "ignore", "inherit"] });
 			closed = once(child, "close");
 			const deadline = Date.now() + 5_000;
@@ -1219,8 +1227,8 @@ for (const outcome of ["accept", "cancel"] as const) test(`real Pi awaits foreig
 		async (context) => {
 			input = context;
 			const current = new TemporalRuntime(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
-			await current.refreshCurrentMemory();
-			assert.deepEqual(temporalScopeRevisions(current.view!), { global: 2, cwd: 2, session: 1 });
+			await current.refreshSelectedCurrent(DEFAULT_SCOPE_SELECTION, () => {});
+			assert.deepEqual(temporalScopeRevisions(current.observedSelectedView()!), { global: 2, cwd: 2, session: 1 });
 			return fauxAssistantMessage("Accepted memory is available.");
 		},
 	]);
@@ -2307,15 +2315,12 @@ test("real Pi maintains newly adopted registered artifacts before the first infe
 	await session.prompt("Seed the session");
 	const step = latestSnapshot(session).meta.step;
 	const b = new TemporalRuntime(f.cwd, "other-session", f.repositoryRoot);
-	const snapshot = emptySnapshot("active");
-	b.initialize(snapshot, true);
 	const source = join(f.cwd, "removed-source.txt");
 	writeFileSync(source, "Temporary source");
-	const before = b.states();
-	const next = structuredClone(before);
-	next.global.artifacts[source] = { description: "Foreign registration" };
-	snapshot.meta.step++;
-	b.publish(snapshot, true, createAcceptedTransition(before, next));
+	await b.withSelectedFirstPatchTransaction(["global"], emptySnapshot("active"), tx => {
+		const stage = stageSelectedScopePatches(tx, { global: { artifacts: { [source]: { description: "Foreign registration" } } } }, [], tx.causalBasis);
+		commitSelectedTransition(tx.snapshot, tx, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+	}, () => {}, undefined, true);
 	rmSync(source);
 	const observations: Array<{ step: number; artifacts: unknown }> = [];
 	f.faux.setResponses([() => {
@@ -3584,13 +3589,10 @@ test("real Pi visibly quarantines contradictory session files and continues from
 	await session.prompt("Remember session A");
 	const a = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
 	const b = new TemporalRuntime(f.cwd, "foreign-b", f.repositoryRoot);
-	const other = emptySnapshot("active");
-	b.initialize(other, true);
-	const before = b.states();
-	const next = structuredClone(before);
-	next.session.tactics.owner = "B";
-	other.meta.step++;
-	b.publish(other, true, createAcceptedTransition(before, next));
+	await b.withSelectedFirstPatchTransaction(["session"], emptySnapshot("active"), tx => tx.publish(
+		{ ...tx.snapshot, meta: { step: 1 } },
+		{ id: "foreign-private", transitions: [{ scope: "session", patch: { tactics: { owner: "B" } } }] },
+	), () => {}, undefined, true);
 	const bp = temporalScopePaths(f.cwd, "foreign-b", "session", f.repositoryRoot);
 	for (const key of ["checkpoint", "patches", "meta"] as const) writeFileSync(a[key], readFileSync(bp[key]));
 	const mixed = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session))
@@ -3973,19 +3975,16 @@ test("real Pi preserves unrelated Git history and accepts a shared write against
 
 	let observedWriter: unknown;
 	fixture.faux.setResponses([
-		(context) => {
+		async (context) => {
 			const text = context.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
 				.find((block: any) => block.type === "text" && block.text.startsWith("State Flow runtime context"))?.text;
 			observedWriter = text && JSON.parse(text.slice(text.indexOf("\n") + 1)).state.tactics.writer;
 			// Before-prompt drift is now adopted; a genuine race must happen after model input selection.
 			const competing = new TemporalRuntime(fixture.cwd, "racing-writer", fixture.repositoryRoot);
-			const snapshot = emptySnapshot("active");
-			competing.initialize(snapshot, true);
-			const before = competing.states();
-			const next = structuredClone(before);
-			next.cwd.tactics.writer = "racing";
-			snapshot.meta.step++;
-			competing.publish(snapshot, true, createAcceptedTransition(before, next));
+			await competing.withSelectedFirstPatchTransaction(["cwd"], emptySnapshot("active"), tx => {
+				const stage = stageSelectedScopePatches(tx, { cwd: { tactics: { writer: "racing" } } }, [], tx.causalBasis);
+				commitSelectedTransition(tx.snapshot, tx, stage, (accepted, next) => tx.publish(next, accepted), tx.causalBasis);
+			}, () => {}, undefined, true);
 			return fauxAssistantMessage(fauxToolCall("state_flow_patch", {
 				cwd: { tactics: { writer: "second" } },
 			}, { id: "stale-cwd-write" }), { stopReason: "toolUse" });
@@ -4073,10 +4072,7 @@ for (const owner of ["global", "cwd", "session"] as const) test(`real Pi compile
 test("real Pi ordinary artifact invalidations share the public fingerprint classifier", { timeout: 30_000 }, async (t) => {
 	const f = await realPiFixture(t, { mode: "active", initializeRepository: false });
 	const seed = new TemporalRuntime(f.cwd, "seed", f.repositoryRoot);
-	const snapshot = emptySnapshot("active");
-	seed.initialize(snapshot, true);
-	const before = seed.states();
-	const next = structuredClone(before);
+	const global = emptyState(), cwd = emptyState();
 	const provenance: ArtifactProvenanceRegistry = {};
 	const expected: Array<{ path: string; scope: string; reason: string }> = [];
 	for (const name of ["current", "pre-epoch", "size", "mtime", "missing", "malformed", "compiler", "compiler-malformed", "obsolete-hash"]) {
@@ -4085,7 +4081,7 @@ test("real Pi ordinary artifact invalidations share the public fingerprint class
 		if (name === "pre-epoch") utimesSync(path, new Date(-1000), new Date(-1000));
 		const stat = statSync(path, { bigint: true });
 		const fingerprint = { size: Number(stat.size), mtimeNs: stat.mtimeNs.toString() };
-		next.global.artifacts[path] = { description: `Retained ${name}` };
+		global.artifacts[path] = { description: `Retained ${name}` };
 		provenance[path] = { sourceFingerprint: fingerprint, compilerRevision: ORDINARY_ARTIFACT_COMPILER };
 		if (name === "size") provenance[path]!.sourceFingerprint = { ...fingerprint, size: fingerprint.size + 1 };
 		if (name === "mtime") provenance[path]!.sourceFingerprint = { ...fingerprint, mtimeNs: (stat.mtimeNs + 1n).toString() };
@@ -4099,12 +4095,24 @@ test("real Pi ordinary artifact invalidations share the public fingerprint class
 	}
 	const skill = join(f.cwd, "SKILL.md");
 	writeFileSync(skill, "Skill source");
-	next.global.artifacts[skill] = { description: "Shadowed ordinary entry" };
-	next.cwd.artifacts[skill] = { description: "Keep Skill identity separate", kind: "skill", compilation: { rule: "Use hashes" } };
-	snapshot.meta.step++;
-	seed.publish(snapshot, true, createAcceptedTransition(before, next), { provenance: {
-		global: provenance, cwd: { [skill]: { sourceHash: hashArtifactSource("Skill source"), compilerRevision: SKILL_ARTIFACT_COMPILER, sourceFingerprint: { size: -1, mtimeNs: "invalid" } } },
-	} });
+	global.artifacts[skill] = { description: "Shadowed ordinary entry" };
+	cwd.artifacts[skill] = { description: "Keep Skill identity separate", kind: "skill", compilation: { rule: "Use hashes" } };
+	await seed.withSelectedFirstPatchTransaction(["global", "cwd"], emptySnapshot("active"), tx => tx.publish(
+		{ ...tx.snapshot, meta: { step: 1 } },
+		{ id: "artifact-fingerprint-seed", transitions: [
+			{ scope: "global", patch: { artifacts: global.artifacts } },
+			{ scope: "cwd", patch: { artifacts: cwd.artifacts } },
+		] },
+	), () => {}, undefined, true);
+	// Malformed retained evidence is a fixture, not an accepted provenance update.
+	const retainedProvenance = { global: provenance, cwd: {
+		[skill]: { sourceHash: hashArtifactSource("Skill source"), compilerRevision: SKILL_ARTIFACT_COMPILER, sourceFingerprint: { size: -1, mtimeNs: "invalid" } },
+	} };
+	for (const scope of ["global", "cwd"] as const) {
+		const path = temporalScopePaths(f.cwd, seed.sessionId, scope, f.repositoryRoot).meta;
+		const metadata = JSON.parse(readFileSync(path, "utf8"));
+		writeFileSync(path, JSON.stringify({ ...metadata, artifacts: retainedProvenance[scope] }));
+	}
 	const session = await f.createSession("new");
 	t.after(() => session.dispose());
 	let projected: any;
@@ -4116,7 +4124,7 @@ test("real Pi ordinary artifact invalidations share the public fingerprint class
 	}]);
 	await session.prompt("Inspect freshness without reading source bodies");
 	assert.deepEqual(projected.artifact_invalidations, expected.sort((a, b) => a.path.localeCompare(b.path)));
-	for (const [path, entry] of Object.entries(next.global.artifacts)) {
+	for (const [path, entry] of Object.entries(global.artifacts)) {
 		if (path !== skill) {
 			assert.equal(projected.state.artifacts[path].description, entry.description);
 			assert.equal(typeof projected.state.artifacts[path].hint === "string", expected.some((item) => item.path === path && item.reason === "source-changed"));
@@ -4124,7 +4132,7 @@ test("real Pi ordinary artifact invalidations share the public fingerprint class
 		assert.deepEqual(loadGlobalState(f.repositoryRoot)!.artifacts[path], entry);
 	}
 	assert.doesNotMatch(JSON.stringify(projected), /sourceFingerprint|compilerRevision|sha256:/);
-	assert.deepEqual(projected.state.artifacts[skill], next.cwd.artifacts[skill]);
+	assert.deepEqual(projected.state.artifacts[skill], cwd.artifacts[skill]);
 });
 
 test("real Pi acquires only invalidated registered artifacts and attaches trusted compilation evidence", async (t) => {
@@ -4425,15 +4433,15 @@ for (const scope of ["global", "cwd"] as const) for (const variant of ["duplicat
 				import { TemporalRuntime } from ${JSON.stringify(new URL("../lib/runtime.ts", import.meta.url).href)};
 				import { emptySnapshot } from ${JSON.stringify(new URL("../lib/snapshot.ts", import.meta.url).href)};
 				import { hashSkillSource } from ${JSON.stringify(new URL("../lib/skills.ts", import.meta.url).href)};
-				import { stageAtomicScopePatches, commitScopedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
+				import { stageSelectedScopePatches, commitSelectedTransition } from ${JSON.stringify(new URL("../lib/transition.ts", import.meta.url).href)};
 				const { cwd, root, scope, skill, card } = JSON.parse(process.argv[1]);
-				await new TemporalRuntime(cwd, "skill-peer", root).withPatchTransaction((tx) => {
-					const stage = stageAtomicScopePatches(tx.states, {
+				await new TemporalRuntime(cwd, "skill-peer", root).withSelectedFirstPatchTransaction(["global", "cwd", "session"], emptySnapshot("active"), (tx) => {
+					const stage = stageSelectedScopePatches(tx, {
 						[scope]: { artifacts: { [skill]: card }, tactics: { independentPeer: "KEEP-PEER-FIELD" } },
 						session: { tactics: { private: "FOREIGN-PRIVATE-SECRET" } },
 					}, [{ path: skill, scope, hash: hashSkillSource(skill) }], tx.causalBasis);
-					commitScopedTransition(emptySnapshot(), tx.states, stage, (accepted, next) => tx.publish(next, accepted, stage.provenanceUpdates), tx.causalBasis, { finalizeRun: false });
-				});
+					commitSelectedTransition(tx.snapshot, tx, stage, (accepted, next) => tx.publish(next, accepted, stage.provenanceUpdates), tx.causalBasis, { finalizeRun: false });
+				}, () => {}, undefined, true);
 			`, JSON.stringify({ cwd: f.cwd, root: f.repositoryRoot, scope, skill, card: peerCard })], { timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
 			peerBefore = peerFiles();
 			localBefore = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
@@ -4965,7 +4973,7 @@ test("real Pi global mode defaults never override a resumed session's selected m
 		const bytes = f.files.map(([path]) => [path, readFileSync(path)] as const);
 		const open = fs.openSync, read = fs.readFileSync, stat = fs.lstatSync;
 		fs.openSync = () => assert.fail("policy/Off clear opened file"); fs.readFileSync = () => assert.fail("policy/Off clear read file"); fs.lstatSync = () => assert.fail("policy/Off clear observed path"); syncBuiltinESMExports();
-		try { f.lifetime.invalidate(); f.runtime.view = undefined; assert.equal(f.runtime.selectedView(), undefined); f.lifetime.end(); }
+		try { f.lifetime.invalidate(); f.runtime.clearCache(); assert.equal(f.runtime.selectedView(), undefined); f.lifetime.end(); }
 		finally { fs.openSync = open; fs.readFileSync = read; fs.lstatSync = stat; syncBuiltinESMExports(); }
 		for (const [path, value] of bytes) assert.deepEqual(readFileSync(path), value);
 	});
@@ -5113,7 +5121,7 @@ test("real Pi global mode defaults never override a resumed session's selected m
 		assert.deepEqual(f.observer.observedSelectedView(), previous);
 		writeFileSync(lock, `${process.pid}\n`);
 		const obsolete = assert.rejects(f.observer.refreshSelectedShared(["global"], () => {}), /selection or acceptance changed concurrently/);
-		f.observer.view = undefined; rmSync(lock);
+		f.observer.clearCache(); rmSync(lock);
 		await f.observer.refreshSelectedShared(["cwd"], () => {}); await obsolete;
 		assert.deepEqual(f.observer.observedSelectedView()!.selection, ["cwd"]);
 	});

@@ -42,7 +42,40 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 {
 	const text = (message: ToolResultMessage) => message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
 	const observe = (context: Context, results: Map<string, ToolResultMessage>) => { for (const message of context.messages) if (message.role === "toolResult") results.set(message.toolCallId, message); };
-	test("Passive distinguishes selected unavailable Session from excluded owners without acquiring on reads", { timeout: 30_000 }, async t => {
+	test("read path aliases use cardinality, not argument shape, in the native tool loop", async t => {
+		const f = await realPiFixture(t, { initializeRepository: false }), session = await f.createSession("new");
+		await session.prompt("/state-flow-passive cwd");
+		const results = new Map<string, ToolResultMessage>();
+		f.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("state_flow_patch", { lazy: { plan: ["one", "two"] } }, { id: "seed-read-shapes" }), { stopReason: "toolUse" }),
+			context => { observe(context, results); return fauxAssistantMessage("Seeded"); },
+		]);
+		await session.prompt("Seed an ordinary array value");
+		assert.notEqual(results.get("seed-read-shapes")?.isError, true);
+		const plan = "lazy.plan", missing = "lazy.typo", batch = [plan, "strategy", missing, plan];
+		const singletonInputs: JsonObject[] = [{ path: plan }, { path: [plan] }, { paths: plan }, { paths: [plan] }];
+		const readArgs: JsonObject[] = [...singletonInputs, { path: batch }, { paths: batch, projection: "value" },
+			{ paths: plan, projection: "keys" }, { path: ["lazy"], projection: "patch" },
+			{ path: [] }, { paths: [plan, { invalid: true }] }, { path: plan, paths: [plan] }, { paths: [missing] }];
+		f.faux.setResponses([
+			fauxAssistantMessage(readArgs.map((args, i) => fauxToolCall("state_flow_read", args, { id: `read-shape-${i}` })), { stopReason: "toolUse" }),
+			context => { observe(context, results); return fauxAssistantMessage("Observed shapes"); },
+		]);
+		await session.prompt("Exercise equivalent and invalid forms in one native request");
+		const expected = [
+			...singletonInputs.map(() => ({ value: ["one", "two"] })),
+			...Array.from({ length: 2 }, () => ({ values: [["one", "two"], null, [null, { code: "path_not_found" }], ["one", "two"]] })),
+			{ meta: { type: "array", length: 2 }, keys: [] }, { patch: { plan: ["one", "two"] } },
+		];
+		for (const [i, input] of readArgs.entries()) {
+			const result = results.get(`read-shape-${i}`); assert.ok(result, JSON.stringify(input));
+			assert.equal(Boolean(result.isError), i >= expected.length, `${JSON.stringify(input)}: ${text(result)}`);
+			if (i < expected.length) assert.deepEqual(JSON.parse(text(result)), expected[i]);
+			if (i < singletonInputs.length) assert.deepEqual(result.details, { path: plan, projection: "value" });
+		}
+	});
+
+	test("Passive keys discover present, absent and unacquired owners without acquiring on reads", { timeout: 30_000 }, async t => {
 		for (const wanted of [["global", "cwd", "session"], ["session"], ["global", "cwd"]] as const) {
 			const f = await realPiFixture(t, { initializeRepository: false }), seed = await f.createSession("new");
 			const results = new Map<string, ToolResultMessage>();
@@ -50,15 +83,67 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 				f.faux.setResponses([fauxAssistantMessage(fauxToolCall(name, args, { id }), { stopReason: "toolUse" }), context => { observe(context, results); return fauxAssistantMessage("Observed"); }]);
 				await session.prompt(id); const result = results.get(id)!; assert.ok(result); return result;
 			};
-			await seed.prompt("/state-flow-passive global cwd");
-			assert.notEqual((await run(seed, "state_flow_patch", { global: { strategy: { privateSentinel: "SHARED_VALUE_NOT_A_PARTIAL_RESULT" } }, cwd: { strategy: { seed: true } } }, "seed-shared")).isError, true);
+			if (wanted.length === 3) {
+				await seed.prompt("/state-flow-passive");
+				const before = captureTemporalFileBases(f.cwd, seed.sessionId, f.repositoryRoot, nativeSessionKey(seed));
+				const result = await run(seed, "state_flow_read", { paths: ["effective.strategy", "global", "cwd[0].strategy", "session"], projection: "keys" }, "empty-catalog");
+				assert.notEqual(result.isError, true, text(result));
+				assert.deepEqual(JSON.parse(text(result)), {
+					meta: [{ type: "absent" }, { type: "absent" }, { type: "absent" }, { type: "unavailable" }],
+					keys: [{}, {}, {}, {}],
+				});
+				const values = await run(seed, "state_flow_read", { paths: ["effective.strategy", "global", "cwd[0].strategy", "session"], projection: "value" }, "empty-value-catalog");
+				assert.notEqual(values.isError, true, text(values));
+				assert.deepEqual(JSON.parse(text(values)), { values: [null, null, null, [null, { code: "scope_unavailable" }]] });
+				assert.deepEqual(captureTemporalFileBases(f.cwd, seed.sessionId, f.repositoryRoot, nativeSessionKey(seed)), before);
+			}
+			await seed.prompt("/state-flow-passive global");
+			assert.notEqual((await run(seed, "state_flow_patch", { strategy: { privateSentinel: "SHARED_VALUE_NOT_A_PARTIAL_RESULT" } }, "seed-shared")).isError, true);
 			const session = await f.createSession("new");
 			await session.prompt(wanted.length === 3 ? "/state-flow-passive" : `/state-flow-passive ${wanted.join(" ")}`);
 			const before = captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session));
 			const hasSession = (wanted as readonly StateScope[]).includes("session");
 			const error = hasSession ? /State Flow session: selected, unavailable/ : /Model read scope is excluded/;
+			const keys: JsonObject = { paths: ["global.strategy", "cwd.strategy", "session.strategy"], projection: "keys" };
+			const catalog = await run(session, "state_flow_read", wanted.length === 1 ? { path: "strategy", projection: "keys" } : keys, "owner-catalog");
+			if (wanted.length === 3) {
+				assert.notEqual(catalog.isError, true, text(catalog));
+				assert.deepEqual(JSON.parse(text(catalog)), {
+					meta: [{ type: "object", size: 1 }, { type: "absent" }, { type: "unavailable" }],
+					keys: [{ privateSentinel: "string" }, {}, {}],
+				});
+				for (const missing of ["cwd[1].strategy", "cwd.strategy.nested", "session[1].strategy"]) {
+					const strict = await run(session, "state_flow_read", { paths: ["global.strategy", missing], projection: "keys" }, `strict-${missing}`);
+					assert.equal(strict.isError, true);
+					assert.doesNotMatch(text(strict), /privateSentinel/);
+				}
+			} else if (wanted.length === 1) {
+				assert.notEqual(catalog.isError, true, text(catalog));
+				assert.deepEqual(JSON.parse(text(catalog)), { meta: { type: "unavailable" }, keys: {} });
+			} else {
+				assert.equal(catalog.isError, true);
+				assert.match(text(catalog), /Model read scope is excluded/);
+			}
+			assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), before, "keys discovery must not publish memory");
 			const reads: JsonObject[] = [{ path: "session" }, { path: "session.strategy" }];
-			if (wanted.length === 3) reads.push({ paths: ["global.strategy", "session.strategy"] });
+			if (wanted.length === 3) {
+				const args = { paths: ["global.strategy", "global.tactics", "cwd.strategy", "session.strategy", "cwd[1].strategy", "global.strategy.missing", "global", "cwd.strategy"] };
+				const result = await run(session, "state_flow_read", args, "recoverable-value-batch");
+				assert.notEqual(result.isError, true, text(result));
+				const strategy = { privateSentinel: "SHARED_VALUE_NOT_A_PARTIAL_RESULT" };
+				assert.deepEqual(JSON.parse(text(result)), { values: [strategy, null, null,
+					[null, { code: "scope_unavailable" }], [null, { code: "history_unavailable" }],
+					[null, { code: "path_not_found" }], { strategy }, null] });
+			}
+			const absentOrUnavailable = await run(session, "state_flow_read", { paths: [wanted.length === 1 ? "strategy" : "cwd.strategy"], projection: "value" }, "single-slot-batch");
+			if (wanted.length === 1) {
+				assert.equal(absentOrUnavailable.isError, true);
+				assert.match(text(absentOrUnavailable), /State Flow session: selected, unavailable/);
+			} else {
+				assert.notEqual(absentOrUnavailable.isError, true, text(absentOrUnavailable));
+				assert.deepEqual(JSON.parse(text(absentOrUnavailable)), { value: null });
+			}
+			assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, nativeSessionKey(session)), before, "batch reads cannot publish memory");
 			for (const args of reads) {
 				const result = await run(session, "state_flow_read", args, `read-unavailable-${JSON.stringify(args)}`);
 				assert.equal(result.isError, true); assert.match(text(result), error);
@@ -258,11 +343,11 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			assert.equal(results.get("immutable-manual")!.isError, true); assert.notEqual(results.get("producer-read")!.isError, true, text(results.get("producer-read")!));
 			assert.equal(calls, selected.length, "tool-loop turns do not rerun automatic production");
 			const first = selected.map(scope => ({ note: `1:${scope}`, obsolete: true }));
-			assert.deepEqual(JSON.parse(text(results.get("producer-read")!)), { value: selected.length === 1 ? first[0] : first });
+			assert.deepEqual(JSON.parse(text(results.get("producer-read")!)), first.length === 1 ? { value: first[0] } : { values: first });
 			generation = 2;
 			f.faux.setResponses([fauxAssistantMessage(fauxToolCall("state_flow_read", { paths: selected.map(scope => `${scope}[1].x_public_notes`) }, { id: "producer-history" }), { stopReason: "toolUse" }), context => { observe(context, results); return fauxAssistantMessage("Replacement settled"); }]);
 			await session.prompt("Replace complete content without obsolete fields");
-			assert.deepEqual(JSON.parse(text(results.get("producer-history")!)), { value: selected.length === 1 ? first[0] : first });
+			assert.deepEqual(JSON.parse(text(results.get("producer-history")!)), first.length === 1 ? { value: first[0] } : { values: first });
 			const current = await loadSelectedFileCohort(f.cwd, session.sessionId, selected, f.repositoryRoot, nativeSessionKey(session)); assert.ok(current);
 			for (const scope of selected) assert.deepEqual(readTemporalView(current.view, 0, scope, 7).x_public_notes, { note: `2:${scope}` });
 			generation = 3; f.faux.setResponses([fauxAssistantMessage("Deletion settled")]); await session.prompt("Empty producer object clears only its content");
@@ -370,7 +455,7 @@ import { publicNotesCompanion } from "./public-module-fixture.ts";
 			assert.equal(results.get("module-invalid")!.isError, true);
 			assert.doesNotMatch(text(results.get("module-first")!), /"path":\["x_public_notes"\],"deleted":true/, "unprojected module content is not reported as deleted");
 			assert.deepEqual(afterInvalid, beforeInvalid, "complete-result validation refusal publishes no bytes");
-			assert.deepEqual(JSON.parse(text(results.get("module-read")!)), { value: [{ ...value, extra: true }, value] });
+			assert.deepEqual(JSON.parse(text(results.get("module-read")!)), { values: [{ ...value, extra: true }, value] });
 			const paths = temporalScopePaths(f.cwd, session.sessionId, target, f.repositoryRoot, nativeSessionKey(session));
 			const metadata = JSON.parse(readFileSync(paths.meta, "utf8"));
 			assert.equal(metadata.version, 4);
@@ -1030,7 +1115,7 @@ for (const scope of ["global", "cwd"] as const) test(`first passive state_flow_p
 	const winner = files();
 	await h.tools.get("state_flow_patch")!.execute("first-passive", { session: { tactics: { mine: "private update" } } }, undefined, undefined, h.ctx);
 	const read = await h.tools.get("state_flow_read")!.execute("accepted", { paths: [`${scope}.tactics`, "session.tactics"] }, undefined, undefined, h.ctx);
-	assert.deepEqual(JSON.parse(read.content[0].text).value, [{ neighbor: "shared update" }, { mine: "private update" }]);
+	assert.deepEqual(JSON.parse(read.content[0].text).values, [{ neighbor: "shared update" }, { mine: "private update" }]);
 	assert.notEqual(h.resolveSnapshot().config.mode, "active");
 	assert.equal(h.resolveSnapshot().meta.step, 1);
 	assert.equal(h.compactRequests.length, 0);
@@ -1343,12 +1428,19 @@ test("state_flow_read lazily projects all hot historical paths and scopes withou
 		const selectedKeys = JSON.parse((await read.execute("path-keys", { path: "effective.tactics", projection: "keys" }, undefined, undefined, h.ctx)).content[0].text);
 		assert.deepEqual(selectedKeys, { meta: { type: "object", size: 1 }, keys: { shared: "string" } });
 		const batch = JSON.parse((await read.execute("path-batch", { paths: ["global.tactics.shared", "cwd.tactics.shared"] }, undefined, undefined, h.ctx)).content[0].text);
-		assert.deepEqual(batch, { value: ["G6", "C7"] });
+		assert.deepEqual(batch, { values: ["G6", "C7"] });
 		const selectedPatch = JSON.parse((await read.execute("projected-patch", { path: "global[2].tactics.shared", projection: "patch" }, undefined, undefined, h.ctx)).content[0].text);
 		assert.deepEqual(selectedPatch, { patch: "G6" });
 		const previousGlobalPatch = JSON.parse((await read.execute("path-patch", { path: "global.patches[1]" }, undefined, undefined, h.ctx)).content[0].text);
 		assert.deepEqual(previousGlobalPatch, { patch: { tactics: { shared: "G1" } } });
+		const legacyPatchList = await read.execute("single-owner-patch-list", { paths: ["global.patches[1]"] }, undefined, undefined, h.ctx);
+		assert.deepEqual(JSON.parse(legacyPatchList.content[0].text), previousGlobalPatch);
 		await assert.rejects(read.execute("double-path", { path: "tactics", paths: ["cwd.tactics"] }, undefined, undefined, h.ctx), /not both/);
+		await assert.rejects(read.execute("empty-paths", { paths: [] }, undefined, undefined, h.ctx), /nonempty array/);
+		await assert.rejects(read.execute("aborted-paths", { paths: ["global.tactics", "malformed"] }, AbortSignal.abort(), undefined, h.ctx), /aborted/);
+		for (const projection of ["keys", "patch"] as const) {
+			await assert.rejects(read.execute("strict-" + projection, { paths: ["global.tactics", "malformed"], projection }, undefined, undefined, h.ctx), /read path/);
+		}
 		await assert.rejects(read.execute("projection-only", { projection: "keys" }, undefined, undefined, h.ctx), /requires path or paths/);
 		for (const path of ["effective[-1]", "effective[8]", "effective[0.5]", "other.tactics"]) {
 			await assert.rejects(read.execute("invalid", { path }, undefined, undefined, h.ctx));
@@ -3950,7 +4042,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		const lock = join(h.repositoryRoot, ".state-flow-publication.lock");
 		if (fault === "locked") mkdirSync(lock);
 		if (fault === "malformed") writeFileSync(paths.runtime, "malformed runtime");
-		if (fault === "cached-bookmark") t.mock.method(TemporalRuntime.prototype, "retainedCheckpoint", () => { throw new Error("Unusable cached counter"); });
+		if (fault === "cached-bookmark") t.mock.method(TemporalRuntime.prototype, "retainedSelectedCheckpoint", () => { throw new Error("Unusable cached counter"); });
 		if (fault === "peer-advanced") {
 			const peer = harness({ initializeRepository: false, cwd: h.ctx.cwd, repositoryRoot: h.repositoryRoot });
 			peer.entries.push(...structuredClone(h.entries));
@@ -5166,7 +5258,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	// These inspectors describe only the known JSON fixtures authored below.
 	const tactics = (s: ModelState) => s.tactics as Record<string, { marker: string; phase: number }>;
 	type ReadValue = { phase: number };
-	type ReadEnvelope = { value: ReadValue; keys: Record<string, object>; patch: { tactics: Record<string, { phase: number }> } };
+	type ReadEnvelope = { value: ReadValue; values: unknown[]; keys: Record<string, object>; patch: { tactics: Record<string, { phase: number }> } };
 	for (const selected of selections) for (const mode of ['active', 'passive'] as const) test(`native seven core selected=${selected.join('+')} mode=${mode}`, { timeout: 60000 }, async t => {
 	  const foreign = 'FOREIGN-CONTEXT-seven-core';
 	  const f = await realPiFixture(t, { stateFlow: true, mode: 'configured', initializeRepository: false,
@@ -5248,7 +5340,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	  result('phase2');
 	  assert.equal(value('current').phase, 2);
 	  assert.equal(value('history').phase, 1);
-	  assert.deepEqual(value('batch'), [...selected.map(() => marker), 2]);
+	  assert.deepEqual(envelope('batch').values, [...selected.map(() => marker), 2]);
 	  assert.ok(envelope('keys').keys[target]);
 	  assert.equal(envelope('patch').patch.tactics[target].phase, 2);
 	  result('noop');
@@ -6010,7 +6102,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await second.prompt("Read current shared values after native reload");
 		const read = results.get("peer-read"); assert.ok(read); assert.notEqual(read.isError, true);
 		const body = read.content.filter(part => part.type === "text").map(part => part.text).join("");
-		assert.deepEqual(JSON.parse(body).value, scopes.flatMap(() => ["first-initial", "second-accepted", "first-fresh"]));
+		assert.deepEqual(JSON.parse(body).values, scopes.flatMap(() => ["first-initial", "second-accepted", "first-fresh"]));
 		for (const session of [first, second]) {
 			assert.throws(() => f.readState(session, 0, "session"), /session scope is excluded/);
 			const paths = temporalScopePaths(f.cwd, session.sessionId, "session", f.repositoryRoot, nativeSessionKey(session));
@@ -6744,7 +6836,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	    assert.deepEqual(envelope('explicit-refs').value, refs(target, sole));
 	    assert.deepEqual(envelope('lazy-refs').value, refs(target, sole));
 	    assert.equal(envelope('history').value, 1, 'historical boundary differs from ordinary array index');
-	    assert.deepEqual(envelope('batch').value, [2, 20, refs(target, sole)]);
+	    assert.deepEqual(envelope('batch').values, [2, 20, refs(target, sole)]);
 	    assert.ok(envelope('keys').keys.items);
 	    const canonicalPatch = envelope('explicit-patch').patch;
 	    assert.deepEqual(canonicalPatch.intents.links, refs(target, sole));
@@ -6754,8 +6846,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	    assert.equal((result('explicit-refs').details as { path: string }).path, `${target}.intents.links`);
 	    assert.equal((result('explicit-patch').details as { path: string }).path, `${target}.patches[0]`);
 	    if (sole) assert.equal((result('alias-patch').details as { path: string }).path, 'patches[0]');
-	    result('bad-root', true); result('bad-batch', true);
-	    if (excluded.length) result('excluded', true);
+	    result('bad-root', true);
+	    assert.deepEqual(envelope('bad-batch'), { values: [2, [null, { code: 'invalid_path' }]] });
+	    if (excluded.length) assert.deepEqual(envelope('excluded'), { values: [2, [null, { code: 'scope_excluded' }]] });
 	    assert.deepEqual(excluded.map(semantic), excludedBefore);
 	    assert.deepEqual(readFileSync(config), defaults);
 	    for (const o of selected) assert.deepEqual(f.readState(session, 0, o).intents?.links, refs(o), 'canonical publication remains scoped');
@@ -6877,7 +6970,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await session.prompt("Read wanted multi-owner policy over sparse available view");
 		const read = results.get("wanted-multi"); assert.ok(read); assert.notEqual(read.isError, true, text(read));
 		assert.deepEqual(JSON.parse(text(read)), { value: { $ref: "cwd.lazy.plan" } }, "wanted multi-owner interface never flattens available-only CWD refs");
-		for (const id of ["no-single-alias", "unavailable-private-batch"]) { const result = results.get(id); assert.ok(result); assert.equal(result.isError, true); assert.doesNotMatch(text(result), /kept/); }
+		const noAlias = results.get("no-single-alias"); assert.ok(noAlias); assert.equal(noAlias.isError, true); assert.doesNotMatch(text(noAlias), /kept/);
+		const batch = results.get("unavailable-private-batch"); assert.ok(batch); assert.notEqual(batch.isError, true, text(batch));
+		assert.deepEqual(JSON.parse(text(batch)), { values: [{ $ref: "cwd.lazy.plan" }, [null, { code: "scope_unavailable" }]] });
 		assert.deepEqual(privatePresence(), [false, false, false]);
 		assert.deepEqual(captureTemporalFileBases(f.cwd, session.sessionId, f.repositoryRoot, key), before);
 	});
@@ -7793,27 +7888,46 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			writeFileSync(life.config, JSON.stringify({ mode: "passive", scopes: ["cwd"] })); writeFileSync(life.runtime, JSON.stringify(metadata));
 			const privatePaths = temporalScopePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), "session", h.repositoryRoot, key);
 			for (const name of ["checkpoint", "patches", "meta"] as const) rmSync(privatePaths[name]);
-			if (clearCache) owner.view = undefined;
+			if (clearCache) owner.clearCache();
 			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
 			await assert.rejects(h.tools.get("state_flow_patch")!.execute("cannot-reinitialize", { session: { tactics: { prohibited: true } } }, undefined, undefined, h.ctx), /private|authority|acquisition/i);
 			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
 		}
 	});
 
-	test("first mutation publication is final after native checkpoint failure and retry is a semantic no-op", async () => {
-		const { h, key } = await unacquiredNativeFixture(["cwd"], "passive");
-		const push = h.entries.push;
-		h.entries.push = ((...entries: any[]) => { if (entries.some(entry => entry.customType === SNAPSHOT_ENTRY_TYPE)) throw new Error("first mutation checkpoint failed"); return push.apply(h.entries, entries); }) as typeof h.entries.push;
-		const patch = { session: { tactics: { acceptedDespiteNativeFailure: true } } };
-		await assert.rejects(h.tools.get("state_flow_patch")!.execute("accepted-first", patch, undefined, undefined, h.ctx), /checkpoint failed/);
-		h.entries.push = push;
-		const accepted = await cohort(h);
-		assert.equal(accepted.lifecycle.runtime.meta.privateAcquisition, "acquired"); assert.equal(accepted.lifecycle.runtime.meta.step, 5);
-		assert.equal(h.readState(0, "session").tactics.acceptedDespiteNativeFailure, true);
-		const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
-		const retry = await h.tools.get("state_flow_patch")!.execute("retry-first", patch, undefined, undefined, h.ctx);
-		assert.equal(retry.details.changed, false); assert.equal(retry.details.step, 5);
-		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
+	test("accepted patches report native checkpoint failure as a warning without replaying publication", async () => {
+		for (const acquire of [true, false]) {
+			const { h, key } = await unacquiredNativeFixture(["cwd"], "passive");
+			const tool = h.tools.get("state_flow_patch")!;
+			if (!acquire) await tool.execute("acquire", { session: { tactics: { prior: true } } }, undefined, undefined, h.ctx);
+			const patch = { cwd: { tactics: { sharedAccepted: true } }, session: { tactics: { privateAccepted: true } } };
+			const accept = () => tool.execute("accepted-warning", patch, undefined, undefined, h.ctx);
+			const push = h.entries.push;
+			let attempts = 0;
+			h.entries.push = ((...entries: any[]) => {
+				if (entries.some(entry => entry.customType === SNAPSHOT_ENTRY_TYPE)) { attempts++; throw new Error("injected checkpoint failure"); }
+				return push.apply(h.entries, entries);
+			}) as typeof h.entries.push;
+			const result = await accept().finally(() => { h.entries.push = push; });
+			assert.equal(result.details.changed, true);
+			assert.equal(result.details.step, acquire ? 5 : 6);
+			assert.deepEqual(result.details.warnings?.map((warning: { code: string }) => warning.code), ["native_checkpoint_failed"]);
+			assert.match(result.content[0].text, /State materialized atomically at cwd\+session scopes\.\n\nWarning: .*injected checkpoint failure/);
+			assert.equal(attempts, 1);
+			const accepted = await cohort(h);
+			assert.equal(accepted.lifecycle.runtime.meta.privateAcquisition, "acquired");
+			assert.equal(accepted.lifecycle.runtime.meta.step, result.details.step);
+			assert.equal(readTemporalView(accepted.view, 0, "cwd").tactics?.sharedAccepted, true);
+			assert.equal(readTemporalView(accepted.view, 0, "session").tactics?.privateAccepted, true);
+			assert.equal(h.readState(0, "session").tactics.privateAccepted, true);
+			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
+			const entries = structuredClone([...h.entries]);
+			const retry = await tool.execute("retry-warning", patch, undefined, undefined, h.ctx);
+			assert.equal(retry.details.changed, false); assert.equal(retry.details.step, result.details.step);
+			assert.equal(retry.details.warnings, undefined);
+			assert.deepEqual([...h.entries], entries);
+			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
+		}
 	});
 
 	test("ordinary Active resume does not grant first private acquisition; only a subsequent explicit Start can accept truthful unacquired data", async () => {
@@ -7886,19 +8000,22 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		}
 	});
 
-	test("explicit Start cannot reinterpret deferred, lost acquired or malformed lifecycle as truthful unacquired authority", async () => {
-		for (const refusal of ["deferred", "lost-acquired", "future", "pending-fork"] as const) {
+	test("explicit Start cannot reinterpret deferred, lost acquired or incompatible lifecycle as truthful unacquired authority", async () => {
+		for (const refusal of ["deferred", "lost-acquired", "retired-v1", "future", "pending-fork"] as const) {
 			const { h, key } = await unacquiredNativeFixture();
 			const life = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
 			const metadata = JSON.parse(readFileSync(life.runtime, "utf8"));
-			if (refusal === "future") metadata.version = 999;
+			if (refusal === "future" || refusal === "retired-v1") {
+				delete metadata.format;
+				metadata.version = refusal === "future" ? 999 : 1;
+			}
 			else if (refusal === "pending-fork") h.entries.push({ type: "custom", customType: "state-flow-passive-stop", data: {
 				version: 2, owner: h.ctx.sessionManager.getSessionId(), mode: "off", scopes: [...DEFAULT_SCOPE_SELECTION], forkPending: true } });
 			else metadata.privateAcquisition = refusal === "deferred" ? "deferred" : "acquired";
 			writeFileSync(life.runtime, JSON.stringify(metadata));
 			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
 			await h.commands.get("state-flow-active")!.handler("", h.ctx);
-			if (refusal === "lost-acquired" || refusal === "future") {
+			if (refusal === "lost-acquired") {
 				// Unreadable lifecycle is quarantined visibly and Start continues from empty session memory.
 				assert.ok(h.notifications.some(message => /self-healed: session memory was unreadable/.test(message)), refusal);
 				assert.equal(policy(h).mode, "active");
@@ -7907,6 +8024,11 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), before);
 			assert.equal(policy(h).mode, "off");
 			assert.equal(h.entries.filter(entry => entry.customType === SNAPSHOT_ENTRY_TYPE).length, 0);
+			if (refusal === "future" || refusal === "retired-v1") {
+				assert.ok(h.notifications.some(message => (refusal === "future" ? /Unsupported State Flow lifecycle format/ : /lifecycle V1 is retired/).test(message)));
+				assert.equal(existsSync(`${h.repositoryRoot}-quarantine`), false);
+				assert.equal(existsSync(`${h.repositoryRoot}-migration-backups`), false);
+			}
 		}
 	});
 
@@ -7933,7 +8055,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			for (const name of ["checkpoint", "patches", "meta"] as const) writeFileSync(shared[name], readFileSync(foreignShared[name]));
 			const privatePaths = temporalScopePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), "session", h.repositoryRoot, key);
 			for (const name of ["checkpoint", "patches", "meta"] as const) rmSync(privatePaths[name]);
-			if (clearCache) owner.view = undefined;
+			if (clearCache) owner.clearCache();
 			const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key), entries = structuredClone(h.entries);
 			await h.commands.get("state-flow-active")!.handler("", h.ctx);
 			assert.equal(policy(h).mode, "passive");
@@ -8025,7 +8147,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			return push.apply(h.entries, entries);
 		}) as typeof h.entries.push;
 		try {
-			await assert.rejects(h.tools.get("state_flow_patch")!.execute("accepted-before-native-error", { session: { tactics: { survives: true } } }, undefined, undefined, h.ctx), /native checkpoint/);
+			const result = await h.tools.get("state_flow_patch")!.execute("accepted-before-native-error", { session: { tactics: { survives: true } } }, undefined, undefined, h.ctx);
+			assert.equal(result.details.changed, true);
+			assert.match(result.content[0].text, /Warning: .*native checkpoint unavailable/);
 		} finally { h.entries.push = push; }
 		assert.equal(h.readState(0, "session").tactics.survives, true, "ancillary error must retain accepted data");
 		await h.handlers.get("session_start")!({ reason: "resume" }, h.ctx);
@@ -8219,7 +8343,9 @@ test("accepted restoration survives a native checkpoint failure without rollback
 			}) as typeof parent.entries.push;
 			try {
 				await parent.handlers.get("session_start")!({ reason: "new" }, parent.ctx);
-				await assert.rejects(parent.tools.get("state_flow_patch")!.execute("parent-accepted", { session: { tactics: { parentCurrent: "inherit-current" } } }, undefined, undefined, parent.ctx), /parent native checkpoint failed/);
+				const result = await parent.tools.get("state_flow_patch")!.execute("parent-accepted", { session: { tactics: { parentCurrent: "inherit-current" } } }, undefined, undefined, parent.ctx);
+				assert.equal(result.details.changed, true);
+				assert.match(result.content[0].text, /Warning: .*parent native checkpoint failed/);
 			} finally { parent.entries.push = pushParent; }
 			assert.equal(parent.entries.some(entry => entry.customType === SNAPSHOT_ENTRY_TYPE), false);
 			const parentKey = resolveSessionAddress(parentFile, "parent", timestamp).key;
