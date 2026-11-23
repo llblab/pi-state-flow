@@ -6,7 +6,7 @@ import test from "node:test";
 import * as observationFixture from "./observation-fixture.ts";
 import { retainedMemoryScopes } from "../lib/memory.ts";
 import { emptySnapshot } from "../lib/snapshot.ts";
-import { compactStatus, detailedStatus, formatScopeRevisionVector, scopeMemoryLines, STATUS_KEY, type StatusDiagnostics } from "../lib/status.ts";
+import { compactStatus, deriveMemoryAvailability, detailedStatus, formatScopeRevisionVector, scopeMemoryLines, STATUS_KEY, type StatusDiagnostics } from "../lib/status.ts";
 import { emptyState } from "../lib/state.ts";
 import { harness, start } from "./harness.ts";
 import { nativePolicyMarker } from "./temporal-fixture.ts";
@@ -34,6 +34,26 @@ function diagnostics(overrides: Partial<StatusDiagnostics> = {}): StatusDiagnost
 		...overrides,
 	};
 }
+
+test("availability never equates excluded, deliberately unacquired, absent, unresolved and accepted", () => {
+	const passive = { ...snapshot, config: { mode: "passive" as const } };
+	const proof = { present: ["global"] as const, absentShared: ["cwd"] as const, privateDisposition: "unacquired" as const };
+	assert.deepEqual(deriveMemoryAvailability(passive, ["global", "cwd", "session"], proof), {
+		owners: { global: "available", cwd: "absent", session: "unacquired" }, effective: "available", inferenceBlocked: false,
+	});
+	assert.equal(deriveMemoryAvailability(passive, ["global", "session"], { ...proof, privateDisposition: "deferred" }).effective, "unavailable");
+	assert.equal(deriveMemoryAvailability(passive, ["global", "cwd"], proof).owners.session, "excluded");
+	assert.equal(deriveMemoryAvailability(passive, ["cwd"], proof).effective, "absent");
+	assert.equal(deriveMemoryAvailability(passive, ["global", "cwd", "session"], { present: ["global"], absentShared: ["cwd"] }).effective, "unavailable");
+	for (const fact of ["attempted", "incomplete", "reset"] as const) {
+		const availability = deriveMemoryAvailability(snapshot, ["session"], { recovery: [{ id: "incident", scopes: ["session"], fact }] });
+		assert.equal(availability.owners.session, fact === "reset" ? "reset, not accepted" : "unavailable");
+		assert.equal(availability.effective, "unavailable");
+		const text = detailedStatus(snapshot, diagnostics({ availability, selection: ["session"] }));
+		assert.match(text, /Effective memory: unavailable/);
+		assert.doesNotMatch(text, /Scope revisions:/, "even supplied cached state cannot fabricate an Effective view");
+	}
+});
 
 test("uses one stable status ownership key", () => {
 	assert.equal(STATUS_KEY, "state-flow");

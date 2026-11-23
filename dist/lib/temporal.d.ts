@@ -44,6 +44,7 @@ export interface SelectedTemporalState {
 }
 type TemporalCohort = TemporalState | SelectedTemporalState;
 export type ScopeRevisions = Record<StateScope, number>;
+export declare function validateHistoryLimit(limit: number): void;
 /** Replay validation is shared by disk codecs and active-lineage materialization. */
 export declare function validateScopeStream(value: unknown, scope: StateScope, historyLimit?: number): asserts value is ScopeStream;
 export declare function validateTemporalLineage(value: unknown, historyLimit?: number): asserts value is TransitionBoundary[];

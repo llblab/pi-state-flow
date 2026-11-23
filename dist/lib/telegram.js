@@ -11,7 +11,7 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
     return path;
 };
 import { conciseDiagnostic, diagnosticText } from "./protocol.js";
-import { formatScopeRevisionVector } from "./status.js";
+import { formatScopeRevisionVector, memoryAvailabilityLines } from "./status.js";
 import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "./selection.js";
 export const STATE_FLOW_TELEGRAM_ID = "@llblab/pi-state-flow";
 /** Resolve the package export or the compiled sibling-extension layout used in local development. */
@@ -23,7 +23,7 @@ export function stateFlowTelegramSectionSpecifiers(moduleUrl = import.meta.url) 
 }
 /** Main-menu section label shows only the current session mode. */
 export function formatStateFlowSectionLabel(snapshot) {
-    return `🌀 State Flow: ${snapshot.mode}${snapshot.mode === "active" && snapshot.inferenceBlocked ? " (blocked)" : ""}`;
+    return `🌀 State Flow: ${snapshot.mode}${snapshot.mode === "active" && (snapshot.availability?.inferenceBlocked ?? snapshot.inferenceBlocked) ? " (blocked)" : ""}`;
 }
 export const STATE_FLOW_MODES = ["off", "passive", "active"];
 const STATE_FLOW_MODE_LABELS = { off: "Off", passive: "Passive", active: "Active" };
@@ -64,7 +64,7 @@ export function buildStateFlowSectionView(snapshot, callbackData) {
     return {
         text: [
             `<b>🌀 State Flow:</b> <code>${snapshot.mode}</code>`,
-            ...(snapshot.mode === "active" && snapshot.inferenceBlocked ? [
+            ...(snapshot.mode === "active" && (snapshot.availability?.inferenceBlocked ?? snapshot.inferenceBlocked) ? [
                 "",
                 "<b>Inference blocked:</b> Active memory restoration failed. Select Active to accept current session memory, or Passive/Off to permit native context.",
             ] : []),
@@ -74,6 +74,7 @@ export function buildStateFlowSectionView(snapshot, callbackData) {
             `<code>-</code> <code>passive</code>: regular chat with memory tools; available memory from the selected ${scopes.length === 1 ? "scope" : "scopes"} enters the agent's context.`,
             "<code>-</code> <code>active</code>: same memory access; each completed answer closes a cycle, and the next request starts from saved state, not the full chat.",
             "",
+            ...(snapshot.availability && snapshot.mode !== "off" ? [...memoryAvailabilityLines(snapshot.availability), ""] : []),
             "<b>Inspect participating memory</b> — view available stored state even in Off:",
             ...scopes.map(scope => `<code>-</code> <code>${scope}</code>: ${STATE_FLOW_SCOPE_DESCRIPTIONS[scope]}`),
             ...(scopes.length > 1

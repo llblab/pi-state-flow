@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isJsonValue, isObject, sameJson, validatePatch } from "./json.js";
+import { InvalidStateFlowData, isJsonValue, isObject, sameJson, validatePatch } from "./json.js";
 export const DEFAULT_HISTORY_LIMIT = 7;
 export const MAX_HISTORY_LIMIT = 100;
 const SCOPES = new Set(["global", "cwd", "session"]);
@@ -22,7 +22,7 @@ function replayPatch(before, after) {
 }
 function validateScopedPatch(value) {
     if (!isObject(value) || Object.keys(value).sort().join(",") !== "patch,scope") {
-        throw new Error('Recent State Flow transition entries must contain exactly "scope" and "patch"');
+        throw new InvalidStateFlowData('Recent State Flow transition entries must contain exactly "scope" and "patch"');
     }
     if (typeof value.scope !== "string" || !SCOPES.has(value.scope)) {
         throw new Error(`Recent State Flow transition has an unknown scope: ${String(value.scope)}`);
@@ -35,7 +35,7 @@ function validateScopedPatch(value) {
             ? value.scope === "session" && (field === null || typeof field === "string")
             : !PATCH_KEYS.has(key) || field === null || isObject(field);
         if (!valid)
-            throw new Error("Recent State Flow patches require object planes or deletion, and a session response string or deletion");
+            throw new InvalidStateFlowData("Recent State Flow patches require object planes or deletion, and a session response string or deletion");
     }
 }
 export function validateRecentTransition(value) {

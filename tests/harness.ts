@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { RECOVERY_ENTRY_TYPE } from "../lib/session.ts";
 import stateFlowExtension from "../index.ts";
 import type { StateFlowTelegramLoader } from "../lib/telegram.ts";
 import { loadStateFlowConfig } from "../lib/config.ts";
@@ -40,6 +41,7 @@ export interface HarnessOptions {
 	initializeRepository?: boolean;
 	sessionId?: string;
 	sessionFile?: string;
+	persistRecoveryReceipts?: boolean;
 	sessionTimestamp?: string;
 	contextTokens?: number | null;
 	telegram?: { load?: StateFlowTelegramLoader };
@@ -61,7 +63,11 @@ export function harness(options: HarnessOptions = {}) {
 		},
 		registerCommand(name: string, definition: any) { commands.set(name, definition); },
 		on(name: string, handler: Handler) { handlers.set(name, (event, eventContext = ctx) => handler(event, eventContext)); },
-		appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
+		appendEntry(customType: string, data: unknown) {
+			const entry = { type: "custom", customType, data };
+			entries.push(entry);
+			if (customType === RECOVERY_ENTRY_TYPE && options.persistRecoveryReceipts) appendFileSync(sessionFile!, `${JSON.stringify(entry)}\n`);
+		},
 		sendMessage(message: unknown, options: unknown) { sentMessages.push({ message, options }); },
 		getActiveTools() { return [...activeTools]; },
 		setActiveTools(names: string[]) { activeTools = [...names]; },
@@ -87,17 +93,23 @@ export function harness(options: HarnessOptions = {}) {
 		},
 		sessionManager: {
 			getBranch: () => entries,
+			getEntries: () => [...entries],
 			buildContextEntries: () => entries.map((_entry, index) => branchEntry(index)),
 			getLeafEntry: (): any => branchEntry(ctx.sessionManager.getBranch().length - 1),
 			getEntry: (id: string): any => branchEntry(Number(id)),
 			getSessionId: () => options.sessionId ?? "harness-session",
-			getSessionFile: () => options.sessionFile,
+			getSessionFile: () => sessionFile,
 			getHeader: () => options.sessionTimestamp === undefined ? null : {
 				type: "session", version: 3, id: options.sessionId ?? "harness-session", timestamp: options.sessionTimestamp, cwd: options.cwd ?? "/tmp",
 			},
 		},
 	};
 	const fixtureRoot = options.repositoryRoot ?? trackFixtureRoot(mkdtempSync(join(tmpdir(), "state-flow-harness-")));
+	const sessionFile = options.sessionFile ?? (options.persistRecoveryReceipts ? join(fixtureRoot, "native", `${ctx.sessionManager.getSessionId()}.jsonl`) : undefined);
+	if (options.persistRecoveryReceipts) {
+		mkdirSync(dirname(sessionFile!), { recursive: true });
+		writeFileSync(sessionFile!, "", { flag: "a" });
+	}
 	const agentDir = options.agentDir ?? join(fixtureRoot, "agent");
 	const repositoryRoot = options.useConfiguredDirectory ? loadStateFlowConfig(agentDir).directory : fixtureRoot;
 	if (options.initializeRepository !== false) {
@@ -148,7 +160,7 @@ export function harness(options: HarnessOptions = {}) {
 		repositoryRoot,
 		agentDir,
 		resolveSnapshot: (data: unknown = entries.at(-1)?.data) => resolveCheckpoint(data, ctx.cwd, ctx.sessionManager.getSessionId(), repositoryRoot,
-			resolveSessionAddress(options.sessionFile, ctx.sessionManager.getSessionId(), options.sessionTimestamp).key),
+			resolveSessionAddress(sessionFile, ctx.sessionManager.getSessionId(), options.sessionTimestamp).key),
 		readState: (offset?: number, scope?: StateScope) => accessor.read(offset, scope),
 		registerSkill(path: string, scope: "user" | "project" | "temporary" = "project") {
 			const previous = skillCommands.findIndex((command) => command.sourceInfo.path === path);

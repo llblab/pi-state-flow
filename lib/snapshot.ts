@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { parseArtifactProvenanceRegistry } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
-import { canonicalJson, isJsonValue, isObject, type JsonObject } from "./json.ts";
+import { canonicalJson, decodeJson, InvalidStateFlowData, isJsonValue, isObject, type JsonObject } from "./json.ts";
 import { captureTemporalWitnesses, validateTemporalLineage, type ExcludedTransitionWitness, type TransitionBoundary } from "./temporal.ts";
 import { captureScopeSelection, type ScopeSelection } from "./selection.ts";
 const MAX_RESTORED_STEP = Number.MAX_SAFE_INTEGER - 1;
@@ -92,12 +92,12 @@ export interface PrivateCausalBasis {
 
 /** Retained private identity proof, never private values or acquisition permission. */
 export function capturePrivateCausalBasis(value: unknown): PrivateCausalBasis {
-	if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "causalWitnesses,lineage") throw new Error("Invalid State Flow private causal basis");
+	if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "causalWitnesses,lineage") throw new InvalidStateFlowData("Invalid State Flow private causal basis");
 	const lineage: unknown = value.lineage;
 	validateTemporalLineage(lineage, MAX_HISTORY_LIMIT);
 	const causalWitnesses = captureTemporalWitnesses(lineage, value.causalWitnesses, MAX_HISTORY_LIMIT);
 	const witnessed = new Set(causalWitnesses.map(witness => witness.transition.id));
-	if (lineage.slice(1).some(boundary => !witnessed.has(boundary.id))) throw new Error("Insufficient State Flow private causal basis witnesses");
+	if (lineage.slice(1).some(boundary => !witnessed.has(boundary.id))) throw new InvalidStateFlowData("Insufficient State Flow private causal basis witnesses");
 	return structuredClone({ lineage, causalWitnesses });
 }
 
@@ -109,7 +109,7 @@ export interface SelectedSessionRuntime {
 /** Validate normalized authority syntax; file presence and replay are checked by storage. */
 function validateSelectedSessionRuntime(value: unknown, cwd: string, sessionId: string): asserts value is SelectedSessionRuntime {
 	if (!isJsonValue(value) || !isObject(value) || Object.keys(value).sort().join(",") !== "config,meta"
-		|| !isObject(value.config) || !isObject(value.meta)) throw new Error("Invalid State Flow session runtime envelope");
+		|| !isObject(value.config) || !isObject(value.meta)) throw new InvalidStateFlowData("Invalid State Flow session runtime envelope");
 	const { version, identity, lineage, artifacts, temporal: _temporalScope, ...fields } = value.meta;
 	if (!Object.hasOwn(value.meta, "version") || version !== 2) throw new Error("Unsupported State Flow runtime provenance format");
 	if (artifacts !== undefined) parseArtifactProvenanceRegistry(artifacts, "State Flow session artifact provenance");
@@ -120,10 +120,7 @@ function validateSelectedSessionRuntime(value: unknown, cwd: string, sessionId: 
 		if (value.meta.privateAcquisition !== "acquired") throw new Error("Invalid State Flow private causal basis provenance");
 		capturePrivateCausalBasis(value.meta.privateCausalBasis);
 	}
-	if (!isObject(identity) || Object.keys(identity).sort().join(",") !== "cwd,sessionId"
-		|| identity.cwd !== resolve(cwd) || identity.sessionId !== sessionId || sessionId.trim().length === 0 || sessionId !== sessionId.trim()) {
-		throw new Error("State Flow runtime scope identity mismatch");
-	}
+	assertRuntimeIdentity(identity, cwd, sessionId);
 	validateTemporalLineage(lineage, MAX_HISTORY_LIMIT);
 	const known = new Set(["step", "specification", "validation", "bootstrap"]);
 	if (Object.keys(fields).some((key) => ["state", "strategy", "tactics", "contract", "working", "response"].includes(key))) {
@@ -136,12 +133,12 @@ function validateSelectedSessionRuntime(value: unknown, cwd: string, sessionId: 
 	};
 	if (runtimeFields.bootstrap === false) normalized.meta.bootstrap = false;
 	if (runtimeFields.step === Number.MAX_SAFE_INTEGER) normalized.meta.step = Number.MAX_SAFE_INTEGER;
-	if (!Object.hasOwn(value.config, "scopes")) throw new Error("State Flow lifecycle requires explicit scopes");
+	if (!Object.hasOwn(value.config, "scopes")) throw new InvalidStateFlowData("State Flow lifecycle requires explicit scopes");
 	const scopes = captureScopeSelection(value.config.scopes);
 	const normalizedConfig = { ...normalized.config, scopes };
 	const suppliedConfig = { ...value.config, scopes };
 	if (canonicalJson({ config: normalizedConfig, meta: normalized.meta }) !== canonicalJson({ config: suppliedConfig, meta: runtimeFields })) {
-		throw new Error("Invalid State Flow runtime configuration or counters");
+		throw new InvalidStateFlowData("Invalid State Flow runtime configuration or counters");
 	}
 }
 
@@ -155,6 +152,29 @@ export interface SelectedLifecycleDocument {
 /** Recognized incompatible evidence is not corrupt memory and must never trigger a reset. */
 export class UnsupportedLifecycleFormatError extends Error {}
 
+function assertRuntimeIdentity(identity: unknown, cwd: string, sessionId: string): void {
+	if (!isObject(identity) || Object.keys(identity).sort().join(",") !== "cwd,sessionId"
+		|| identity.cwd !== resolve(cwd) || identity.sessionId !== sessionId || sessionId.trim().length === 0 || sessionId !== sessionId.trim()) {
+		throw new Error("State Flow runtime scope identity mismatch");
+	}
+}
+
+/** Identify a supported, owned lifecycle without interpreting config, lineage or private authority. */
+export function parseSelectedLifecycleHeader(source: string, cwd: string, sessionId: string) {
+	const metadata = parsePolicyDocument(source);
+	if (isObject(metadata) && metadata.version === 1) {
+		throw new UnsupportedLifecycleFormatError("State Flow lifecycle V1 is retired; use a previous State Flow release to open this session or start a new session");
+	}
+	if (!isObject(metadata)) throw new InvalidStateFlowData("Invalid State Flow session runtime envelope");
+	const baseline = metadata.format === "baseline";
+	if (baseline && (Object.hasOwn(metadata, "version") || Object.hasOwn(metadata, "causalWitnesses"))) refuseMixedBaseline();
+	if (!baseline && (metadata.version !== 2 || Object.hasOwn(metadata, "format"))) {
+		throw new UnsupportedLifecycleFormatError("Unsupported State Flow lifecycle format; keep the files and use a release that supports it");
+	}
+	assertRuntimeIdentity(metadata.identity, cwd, sessionId);
+	return { baseline, metadata, source };
+}
+
 /** Decode Baseline or V2; classify a retired/unknown runtime before decoding captured config bytes. */
 export function parseSelectedLifecycle(
 	configSource: string | undefined | (() => string | undefined), runtimeSource: string | undefined, cwd: string, sessionId: string,
@@ -164,23 +184,19 @@ export function parseSelectedLifecycle(
 		if (readConfig() === undefined) return undefined;
 		throw new Error("Incomplete State Flow config/runtime pair");
 	}
-	const metadata = parsePolicyDocument(runtimeSource);
-	if (isObject(metadata) && metadata.version === 1) {
-		throw new UnsupportedLifecycleFormatError("State Flow lifecycle V1 is retired; use a previous State Flow release to open this session or start a new session");
+	const header = parseSelectedLifecycleHeader(runtimeSource, cwd, sessionId);
+	return decodeSelectedLifecycle(header, readConfig(), cwd, sessionId);
+}
+
+export function decodeSelectedLifecycle(
+	header: ReturnType<typeof parseSelectedLifecycleHeader>, config: string | undefined, cwd: string, sessionId: string,
+): SelectedLifecycleDocument {
+	if (config === undefined) throw new InvalidStateFlowData("Incomplete State Flow config/runtime pair");
+	if (header.baseline) {
+		const runtime = decodeBaselineLifecycle(config, header.metadata, cwd, sessionId);
+		return { sourceVersion: "baseline", runtime, target: { config: `${canonicalJson(runtime.config)}\n`, runtime: header.source } };
 	}
-	if (!isObject(metadata)) throw new Error("Invalid State Flow session runtime envelope");
-	const baseline = metadata.format === "baseline";
-	if (baseline && (Object.hasOwn(metadata, "version") || Object.hasOwn(metadata, "causalWitnesses"))) refuseMixedBaseline();
-	if (!baseline && metadata.version !== 2) {
-		throw new UnsupportedLifecycleFormatError("Unsupported State Flow lifecycle format; keep the files and use a release that supports it");
-	}
-	const config = readConfig();
-	if (config === undefined) throw new Error("Incomplete State Flow config/runtime pair");
-	if (baseline) {
-		const runtime = decodeBaselineLifecycle(config, metadata, cwd, sessionId);
-		return { sourceVersion: "baseline", runtime, target: { config: `${canonicalJson(runtime.config)}\n`, runtime: runtimeSource } };
-	}
-	const runtime: unknown = { config: parsePolicyDocument(config), meta: metadata };
+	const runtime: unknown = { config: parsePolicyDocument(config), meta: header.metadata };
 	validateSelectedSessionRuntime(runtime, cwd, sessionId);
 	runtime.config.scopes = captureScopeSelection(runtime.config.scopes);
 	return { sourceVersion: 2, runtime, target: { config: `${canonicalJson(runtime.config)}\n`, runtime: `${canonicalJson(runtime.meta)}\n` } };
@@ -196,15 +212,15 @@ function encodeBaselineLineage(lineage: TransitionBoundary[], evidence: unknown)
 }
 
 function decodeBaselineLineage(value: unknown): PrivateCausalBasis {
-	if (!Array.isArray(value)) throw new Error("Invalid State Flow Baseline lineage");
+	if (!Array.isArray(value)) throw new InvalidStateFlowData("Invalid State Flow Baseline lineage");
 	const causalWitnesses: unknown[] = [];
 	const lineage: unknown = value.map((row, index) => {
 		if (!isObject(row) || Object.keys(row).some(key => !["id", "position", "parent", "owners"].includes(key))) {
-			throw new Error("Invalid State Flow Baseline transition");
+			throw new InvalidStateFlowData("Invalid State Flow Baseline transition");
 		}
 		const { owners, ...transition } = row;
 		if (Object.hasOwn(row, "owners")) {
-			if (index === 0) throw new Error("State Flow Baseline anchor cannot claim transition owners");
+			if (index === 0) throw new InvalidStateFlowData("State Flow Baseline anchor cannot claim transition owners");
 			causalWitnesses.push({ transition, owners });
 		}
 		return transition;
@@ -258,8 +274,7 @@ function refuseMixedBaseline(): never {
 }
 
 function parsePolicyDocument(source: string): unknown {
-	try { return JSON.parse(source); }
-	catch { throw new Error("State Flow session policy contains invalid JSON"); }
+	return decodeJson(source, "State Flow session policy");
 }
 
 function restoredStep(value: unknown): number {

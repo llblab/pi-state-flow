@@ -1,4 +1,5 @@
 import type { StateFlowMode } from "./snapshot.ts";
+import { type MemoryAvailability } from "./status.ts";
 import type { ScopeRevisions } from "./temporal.ts";
 import { type ScopeSelection } from "./selection.ts";
 export declare const STATE_FLOW_TELEGRAM_ID = "@llblab/pi-state-flow";
@@ -11,6 +12,7 @@ export interface StateFlowTelegramSnapshot {
     scopes?: ScopeSelection;
     /** Failed Active restoration fences inference without silently selecting an inactive mode. */
     inferenceBlocked?: boolean;
+    availability?: MemoryAvailability;
     /** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
     step: number;
     revisions?: Partial<ScopeRevisions>;

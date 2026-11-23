@@ -6,15 +6,15 @@ import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFi
 import { basename, dirname, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-	assertOwnedFileUpdates, captureOwnedFileBases, captureOwnedFilePresence, classifyScopeStream, parseScopeProvenance, parseScopeStream, restoreDurableFileBases,
+	captureDirectoryBasis, captureOwnedFileBases, captureOwnedFilePresence, classifyScopeStream, decodeScopeStream, parseScopeProvenance, parseScopeStream,
 	serializeScopeMetadata, serializeScopeStream, sessionRuntimePaths, temporalScopePaths, writeOwnedFileUpdates,
 	type DurableFileBase, type OwnedFileUpdate, type OwnedFilePresence, type SessionAddress,
 } from "./durable.ts";
 import { isInterpretableArtifactProvenance, parseArtifactProvenanceRegistry, type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT, type AcceptedTransition } from "./history.ts";
-import { canonicalJson, isJsonValue, isObject, sameJson, type JsonObject } from "./json.ts";
-import { prepareSerializedScopeMigration } from "./migration.ts";
-import { RevisionUnavailableError, parseSelectedLifecycle, captureLifecycleSnapshot, capturePrivateCausalBasis, serializeBaselineLifecycle, type SelectedSessionRuntime, type SelectedLifecycleDocument, type Snapshot } from "./snapshot.ts";
+import { canonicalJson, decodeUtf8, InvalidStateFlowData, isJsonValue, isObject, sameJson, type JsonObject } from "./json.ts";
+import { parseScopeMetadataHeader, prepareSerializedScopeMigration } from "./migration.ts";
+import { RevisionUnavailableError, parseSelectedLifecycle, parseSelectedLifecycleHeader, decodeSelectedLifecycle, captureLifecycleSnapshot, capturePrivateCausalBasis, serializeBaselineLifecycle, type SelectedSessionRuntime, type SelectedLifecycleDocument, type Snapshot } from "./snapshot.ts";
 import type { SemanticState, StateScope } from "./state.ts";
 import { restoreSelectedTemporalState, temporalCausalWitnesses, constrainTemporalState, advanceTemporalState, createSelectedTemporalState, adoptSelectedTemporalStreams, validateScopeLineage, scopeLineageMatches, captureTemporalWitnesses, readTemporalView, type SelectedTemporalState, type ExcludedTransitionWitness, type ScopeStream } from "./temporal.ts";
 import { captureScopeSelection, type ScopeSelection } from "./selection.ts";
@@ -24,7 +24,7 @@ export interface TemporalFileBase { files: DurableFileBase[] }
 
 /** Opaque CAS capture stays byte-exact; semantic consumers alone require lossless text. */
 function fileText(file: DurableFileBase): string | undefined {
-	return file.bytes === undefined ? file.content : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(file.bytes);
+	return file.bytes === undefined ? file.content : decodeUtf8(file.bytes, `State Flow file ${JSON.stringify(file.path)}`);
 }
 
 export function temporalFileContents(base: TemporalFileBase): Map<string, string | undefined> {
@@ -71,7 +71,21 @@ function publicationLockOwner(path: string): "live" | "pending" | "absent" | "un
 	catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM" ? "live" : "unavailable"; }
 }
 
+interface RecoveryDamage {
+	readonly scope: StateScope;
+	readonly cause: InvalidStateFlowData;
+	readonly files: readonly DurableFileBase[];
+}
+
+interface SelectedRecoveryPlan {
+	readonly damage: readonly RecoveryDamage[];
+	readonly lifecycleAbsent: boolean;
+	/** Single-use, callback-scoped guarded removal of the proved cohort only. */
+	reset(revalidate?: () => void): void;
+}
+
 export interface StorageTransaction {
+	readonly prepareSelectedRecovery: (cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey: string) => SelectedRecoveryPlan;
 	readonly prepareSelected: (cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey?: string) => SelectedFileCohort | undefined;
 	readonly observeSelectedShared: (cwd: string, selection: ScopeSelection, root: string) => SelectedReadObservation;
 	readonly persistSelectedPassive: (cwd: string, sessionId: string, base: SelectedFileCohort, root: string, sessionKey?: string) => SelectedFilePublication;
@@ -90,6 +104,17 @@ export interface StorageTransaction {
 
 export class PublicationBusyError extends Error {
 	constructor(path: string) { super(`State Flow publication lock is busy at ${JSON.stringify(path)}`); }
+}
+
+/** A recognized temporary failure at the canonical lock admission boundary, not unavailable memory in general. */
+export class TransientStorageAcquisitionError extends RevisionUnavailableError {}
+
+function canonicalLockUnavailable(path: string, cause: unknown): Error {
+	const message = `State Flow publication lock is unavailable at ${JSON.stringify(path)}`;
+	if (cause instanceof Error && ["EAGAIN", "EBUSY"].includes((cause as NodeJS.ErrnoException).code ?? "")) {
+		return new TransientStorageAcquisitionError(`Temporary ${message}`, { cause });
+	}
+	return new RevisionUnavailableError(message, { cause });
 }
 
 const storageLockContext = new AsyncLocalStorage<readonly { path: string; active: boolean }[]>();
@@ -137,6 +162,7 @@ export async function withFilePublicationLock<T>(
 		throw error;
 	} finally {
 		held.active = false;
+		const cleanup: unknown[] = [];
 		try {
 			const current = lstatSync(path, { throwIfNoEntry: false });
 			if (!identity || !current?.isFile() || current.dev !== identity.dev || current.ino !== identity.ino
@@ -144,11 +170,11 @@ export async function withFilePublicationLock<T>(
 				throw new Error(`State Flow publication lock changed during transaction at ${JSON.stringify(path)}; current owner preserved`);
 			}
 			rmSync(path);
-		} catch (error) {
-			if (failed) throw new AggregateError([failed.error, error], "State Flow storage transaction and lock release failed");
-			throw error;
-		} finally {
-			closeSync(descriptor);
+		} catch (error) { cleanup.push(error); }
+		try { closeSync(descriptor); } catch (error) { cleanup.push(error); }
+		if (cleanup.length) {
+			if (failed || cleanup.length > 1) throw new AggregateError(failed ? [failed.error, ...cleanup] : cleanup, "State Flow storage lock release failed");
+			throw cleanup[0];
 		}
 	}
 }
@@ -157,8 +183,8 @@ export async function withFilePublicationLock<T>(
 export async function withStorageTransaction<T>(
 	repositoryRoot: string, action: (transaction: StorageTransaction) => T | Promise<T>, signal?: AbortSignal, waitForLock = true,
 ): Promise<T> {
-	const root = resolve(repositoryRoot);
-	return withFilePublicationLock(resolve(root, ".state-flow-publication.lock"), async () => {
+	const root = resolve(repositoryRoot), lock = resolve(root, ".state-flow-publication.lock");
+	return withFilePublicationLock(lock, async () => {
 		let active = true;
 		let selectedPublicationUsed = false;
 		const guard = (requestedRoot: string): void => {
@@ -167,6 +193,35 @@ export async function withStorageTransaction<T>(
 			signal?.throwIfAborted();
 		};
 		const transaction = Object.freeze<StorageTransaction>({
+			prepareSelectedRecovery: (cwd, sessionId, selection, requestedRoot, sessionKey) => {
+				guard(requestedRoot);
+				const plan = captureSelectedRecovery(cwd, sessionId, selection, root, sessionKey, signal);
+				return {
+					damage: plan.damage.map(({ scope, files, cause }) => ({ scope, files: structuredClone(files), cause })),
+					lifecycleAbsent: plan.lifecycleAbsent,
+					reset: (revalidate) => {
+						guard(requestedRoot);
+						if (selectedPublicationUsed) throw new Error("Selected State Flow publication capability was already used");
+						selectedPublicationUsed = true;
+						if (!plan.damage.length) return;
+						const updates = plan.damage.flatMap(({ files }) => files.filter(file => file.identity !== "missing").map(({ path }) => ({ path })));
+						const removed = new Set(updates.map(({ path }) => path));
+						writeOwnedFileUpdates(updates, plan.basis.files, root, phase => {
+							if (phase === "before") revalidate?.();
+							if (!sameJson(plan.directories, captureDirectoryBasis(plan.directoryPaths))) {
+								throw new Error("State Flow recovery directory identity changed concurrently");
+							}
+							const basis = phase === "before" ? plan.basis : { files: temporalFileReceipts(plan.basis, updates) };
+							assertTemporalFileBase(basis, { files: captureOwnedFileBases(basis.files.map(({ path }) => path), root) });
+							const presence = phase === "before" ? plan.presence : plan.presence.map(file => removed.has(file.path) ? { ...file, present: false } : file);
+							if (!sameJson(presence, captureOwnedFilePresence(presence.map(({ path }) => path), root))) {
+								throw new Error("State Flow recovery presence dependencies changed concurrently");
+							}
+							if (phase === "before") guard(requestedRoot);
+						});
+					},
+				};
+			},
 			prepareSelected: (cwd, sessionId, selection, requestedRoot, sessionKey = sessionId) => {
 				guard(requestedRoot);
 				return prepareSelectedFileCohort(cwd, sessionId, selection, root, sessionKey);
@@ -238,7 +293,7 @@ export async function withStorageTransaction<T>(
 		});
 		try { return await action(transaction); }
 		finally { active = false; }
-	}, signal, undefined, waitForLock);
+	}, signal, cause => canonicalLockUnavailable(lock, cause), waitForLock);
 }
 
 export function assertTemporalFileBase(expected: TemporalFileBase, current: TemporalFileBase): void {
@@ -369,7 +424,7 @@ function observeSelectedShared(cwd: string, selection: ScopeSelection, root: str
 	if (captureOwnedFilePresence(layouts.map(({ paths }) => resolve(paths.directory, "state.json")), root).some(file => file.present)) {
 		throw new Error("Unsupported State Flow selected semantic layout");
 	}
-	const basis = { files: captureOwnedFileBases(layouts.flatMap(({ paths }) => [paths.checkpoint, paths.patches, paths.meta]), root) };
+	const basis = { files: captureSelectedSemanticFiles(layouts, cwd, root) };
 	const sources = temporalFileContents(basis);
 	const streams: Partial<Record<StateScope, ScopeStream>> = {};
 	const provenance: SelectedProvenanceUpdates = {};
@@ -556,7 +611,7 @@ function publishSelectedSuccessor(
 	const migrationBackup = convertedScopes.length > 0 || lifecycleConversion !== undefined
 		? preserveMigrationBasis(current.basis, root, cwd, sessionId, sessionKey, { scopes: convertedScopes, lifecycle: lifecycleConversion, presence: current.presence }, updates) : undefined;
 	assertPresence();
-	publishFileUpdates(current.basis.files, updates, root);
+	writeOwnedFileUpdates(updates, current.basis.files, root);
 	return { cohort, changed: updates.length > 0, ...(migrationBackup ? { migrationBackup } : {}) };
 }
 
@@ -593,7 +648,7 @@ function acceptSelectedOrigin(
 	const layouts = captureOwnedFilePresence(scopePaths.filter(({ scope }) => scope !== "session").map(({ paths }) => resolve(paths.directory, "state.json")), root);
 	if (layouts.some((file) => file.present)) throw new Error("Unsupported State Flow selected semantic layout");
 	presence.push(...layouts);
-	const scopeFiles = captureOwnedFileBases(scopePaths.flatMap(({ paths }) => [paths.checkpoint, paths.patches, paths.meta]), root);
+	const scopeFiles = captureSelectedSemanticFiles(scopePaths, cwd, root);
 	const basis = { files: [...new Map([...lifecycleFiles, ...scopeFiles, ...(prior?.basis.files ?? []), ...(copy?.basis.files ?? [])].map((file) => [file.path, file])).values()] };
 	if (prior) {
 		const recaptured = new Map([...lifecycleFiles, ...scopeFiles].map((file) => [file.path, file.identity]));
@@ -664,7 +719,7 @@ function acceptSelectedOrigin(
 		const migrationBackup = convertedScopes.length > 0 || lifecycleConversion !== undefined
 			? preserveMigrationBasis(basis, root, cwd, sessionId, sessionKey, { scopes: convertedScopes, lifecycle: lifecycleConversion, presence }, updates) : undefined;
 		assertOriginBasis();
-		publishFileUpdates(basis.files, updates, root);
+		writeOwnedFileUpdates(updates, basis.files, root);
 		return { cohort, changed: true, ...(migrationBackup ? { migrationBackup } : {}) };
 	};
 	if (!request.author) return finish(snapshot);
@@ -697,7 +752,7 @@ function validateSelectedPrivateStream(lifecycle: SelectedLifecycleDocument, str
 		restoreSelectedTemporalState({ session: stream }, ["session"], retained.lineage, retained.causalWitnesses, MAX_HISTORY_LIMIT);
 	} else validateScopeLineage(stream, "session", metadata.lineage, MAX_HISTORY_LIMIT);
 	for (const witness of witnesses.filter(item => item.owners.includes("session"))) {
-		if (!stream.patches.some(record => sameJson(record.transition, witness.transition))) throw new Error("Accepted temporal witness is missing its selected owner patch");
+		if (!stream.patches.some(record => sameJson(record.transition, witness.transition))) throw new InvalidStateFlowData("Accepted temporal witness is missing its selected owner patch");
 	}
 }
 
@@ -709,7 +764,7 @@ function captureSelectedForkSource(cwd: string, childId: string, childKey: strin
 	const { lifecycle, lifecycleFiles, presence } = captureSelectedLifecycle(cwd, source.id, root, source.key);
 	if (!lifecycle || lifecycle.runtime.meta.privateAcquisition !== "acquired") throw new Error("Selected fork parent has no acquired current private memory");
 	const paths = temporalScopePaths(cwd, source.id, "session", root, source.key);
-	const scopeFiles = captureOwnedFileBases([paths.checkpoint, paths.patches, paths.meta], root);
+	const scopeFiles = captureSelectedSemanticFiles([{ scope: "session", paths }], cwd, root);
 	const basis = { files: [...lifecycleFiles, ...scopeFiles] };
 	const files = temporalFileContents(basis);
 	const stream = parseScopeStream(files.get(paths.checkpoint), files.get(paths.patches), "session", undefined, files.get(paths.meta));
@@ -742,6 +797,119 @@ export function assertSelectedFileCohortBasis(expected: SelectedFileCohort, curr
 	if (!sameJson(expected.view.selection, current.view.selection)) throw new Error("Selected State Flow policy changed concurrently");
 	assertTemporalFileBase(expected.basis, current.basis);
 	if (!sameJson(expected.presence, current.presence)) throw new Error("Selected State Flow presence dependencies changed concurrently");
+}
+
+const semanticPaths = (paths: ReturnType<typeof temporalScopePaths>): string[] => [paths.checkpoint, paths.patches, paths.meta];
+const predecessorPath = (paths: ReturnType<typeof temporalScopePaths>): string => resolve(paths.directory, "state.json");
+
+function captureSelectedSemanticFiles(layouts: readonly { scope: StateScope; paths: ReturnType<typeof temporalScopePaths> }[], cwd: string, root: string): DurableFileBase[] {
+	const headers = captureOwnedFileBases(layouts.map(({ paths }) => paths.meta), root);
+	layouts.forEach(({ scope }, i) => {
+		const text = fileText(headers[i]!);
+		if (text !== undefined) parseScopeMetadataHeader(text, scope, scope === "cwd" ? cwd : undefined);
+	});
+	return layouts.flatMap(({ paths }, i) => [...captureOwnedFileBases([paths.checkpoint, paths.patches], root), headers[i]!]);
+}
+
+/** A data validator refuses drafts too. Only this ingestion boundary binds its expected failure to a captured owner. */
+function diagnoseCapturedData<T>(read: () => T, signal?: AbortSignal): { value: T } | { cause: InvalidStateFlowData } {
+	try { return { value: read() }; }
+	catch (cause) {
+		signal?.throwIfAborted();
+		if (!(cause instanceof InvalidStateFlowData)) throw cause;
+		return { cause };
+	}
+}
+
+function captureSelectedRecovery(cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey: string, signal?: AbortSignal) {
+	const wanted = captureScopeSelection(selection);
+	const { config, runtime } = sessionRuntimePaths(cwd, sessionId, root, sessionKey);
+	const privatePaths = temporalScopePaths(cwd, sessionId, "session", root, sessionKey);
+	const layouts = wanted.map(scope => ({ scope, paths: temporalScopePaths(cwd, sessionId, scope, root, sessionKey) }));
+	const directoryPaths = [...new Set([root, privatePaths.directory, ...layouts.map(({ paths }) => paths.directory)])];
+	const directories = captureDirectoryBasis(directoryPaths);
+	const presence = captureOwnedFilePresence([...new Set([config, runtime, ...semanticPaths(privatePaths), predecessorPath(privatePaths),
+		...layouts.flatMap(({ paths }) => [...semanticPaths(paths), predecessorPath(paths)])])], root);
+	const present = new Set(presence.filter(file => file.present).map(file => file.path));
+	if (layouts.some(({ paths }) => present.has(predecessorPath(paths))) || present.has(predecessorPath(privatePaths))) {
+		throw new Error("Unsupported State Flow recovery layout; predecessor files were preserved");
+	}
+	const capture = (paths: readonly string[]) => {
+		signal?.throwIfAborted();
+		const files = captureOwnedFileBases(paths, root);
+		if (files.some(file => present.has(file.path) !== (file.identity !== "missing"))) throw new Error("State Flow recovery presence changed during capture");
+		return files;
+	};
+	const [runtimeFile, ...headers] = capture([runtime, ...layouts.map(({ paths }) => paths.meta)]);
+	const headerFiles = new Map(headers.map(file => [file.path, file]));
+	const privatePresent = semanticPaths(privatePaths).filter(path => present.has(path));
+	if (!present.has(runtime) && (present.has(config) || privatePresent.length > 0)) {
+		throw new Error("State Flow recovery cannot prove a supported private lifecycle; files were preserved");
+	}
+	// Header failures are never promoted to corruption. No semantic body or config is decoded yet.
+	const admittedHeader = <T>(owner: string, read: () => T): T => {
+		const result = diagnoseCapturedData(read, signal);
+		if ("cause" in result) throw new Error(`State Flow recovery cannot prove the ${owner} header; files were preserved`, { cause: result.cause });
+		return result.value;
+	};
+	const lifecycleHeader = runtimeFile!.identity === "missing" ? undefined
+		: admittedHeader("private lifecycle", () => parseSelectedLifecycleHeader(fileText(runtimeFile!)!, cwd, sessionId));
+	const acquisition = lifecycleHeader?.metadata.privateAcquisition;
+	if (lifecycleHeader && acquisition !== "acquired" && acquisition !== "unacquired" && acquisition !== "deferred") {
+		throw new Error("State Flow recovery cannot prove private acquisition authority; files were preserved");
+	}
+	if (acquisition !== "acquired" && privatePresent.length) throw new Error("Unacquired State Flow private target is occupied");
+	for (const { scope, paths } of layouts) {
+		if (present.has(paths.meta)) admittedHeader(scope, () => parseScopeMetadataHeader(fileText(headerFiles.get(paths.meta)!)!, scope, scope === "cwd" ? cwd : undefined));
+		else if (semanticPaths(paths).some(path => present.has(path))) {
+			throw new Error(`State Flow recovery cannot prove the ${scope} format and owner without metadata; files were preserved`);
+		}
+	}
+	if (acquisition === "acquired" && !wanted.includes("session") && privatePresent.length > 0 && privatePresent.length < 3) {
+		throw new Error("Acquired State Flow private semantics are incomplete; excluded files were preserved");
+	}
+	const [configFile, ...bodies] = capture([config, ...layouts.flatMap(({ paths }) => [paths.checkpoint, paths.patches])]);
+	const basis: TemporalFileBase = { files: [runtimeFile!, ...headers, configFile!, ...bodies] };
+	const byPath = new Map(basis.files.map(file => [file.path, file]));
+	const damage: RecoveryDamage[] = [];
+	const privateFiles = basis.files.filter(({ path }) => path === config || path === runtime || semanticPaths(privatePaths).includes(path));
+	const record = (scope: StateScope, cause: InvalidStateFlowData, files: readonly DurableFileBase[]) => {
+		if (!damage.some(entry => entry.scope === scope)) damage.push({ scope, cause, files });
+	};
+	let lifecycle: SelectedLifecycleDocument | undefined;
+	if (lifecycleHeader) {
+		const result = diagnoseCapturedData(() => decodeSelectedLifecycle(lifecycleHeader, fileText(configFile!), cwd, sessionId), signal);
+		if ("cause" in result) {
+			if (acquisition === "deferred" || (privatePresent.length > 0 && !wanted.includes("session"))) throw result.cause;
+			record("session", result.cause, privateFiles);
+		} else lifecycle = result.value;
+	}
+	if (acquisition === "acquired" && privatePresent.length === 0) {
+		// Existing disappeared-private restart, backed by the retained owned acquired lifecycle.
+		record("session", new InvalidStateFlowData("Acquired State Flow private semantics are missing"), privateFiles);
+	}
+	const streams: Partial<Record<StateScope, ScopeStream>> = {};
+	for (const { scope, paths } of layouts) {
+		if (!present.has(paths.meta)) continue;
+		const files = semanticPaths(paths).map(path => byPath.get(path)!);
+		const [checkpoint, patches, meta] = files.map(file => file.bytes);
+		const result = diagnoseCapturedData(() => decodeScopeStream({ checkpoint, patches, meta }, scope, cwd), signal);
+		if ("cause" in result) record(scope, result.cause, scope === "session" ? privateFiles : files);
+		else streams[scope] = result.value;
+	}
+	// The private stream and its own lifecycle suffice; shared damage proves nothing about this pair.
+	if (lifecycle && streams.session && !damage.some(item => item.scope === "session")) {
+		const document = lifecycle, stream = streams.session;
+		const result = diagnoseCapturedData(() => validateSelectedPrivateStream(document, stream), signal);
+		if ("cause" in result) record("session", result.cause, privateFiles);
+	}
+	// Ambiguous cross-owner disagreement is a refusal, not a reason to discard the private anchor.
+	if (!damage.length && lifecycle && !(wanted.includes("session") && acquisition !== "acquired")
+		&& !currentSharedNeedsOrigin(lifecycle, wanted, streams)) {
+		restoreSelectedTemporalState(streams, wanted, lifecycle.runtime.meta.lineage, lifecycleWitnesses(lifecycle), MAX_HISTORY_LIMIT);
+	}
+	signal?.throwIfAborted();
+	return { damage, basis, presence, directories, directoryPaths, lifecycleAbsent: !lifecycleHeader || damage.some(item => item.scope === "session") };
 }
 
 function captureSelectedLifecycle(cwd: string, sessionId: string, root: string, sessionKey: string, expectedLifecycle?: TemporalFileBase) {
@@ -777,7 +945,7 @@ function captureSelectedCohortSource(cwd: string, sessionId: string, wanted: Sco
 	const layouts = captureOwnedFilePresence(scopePaths.filter(({ scope }) => scope !== "session").map(({ paths }) => resolve(paths.directory, "state.json")), root);
 	if (layouts.some((file) => file.present)) throw new Error("Unsupported State Flow selected semantic layout");
 	presence.push(...layouts);
-	const scopeFiles = captureOwnedFileBases(scopePaths.flatMap(({ paths }) => [paths.checkpoint, paths.patches, paths.meta]), root);
+	const scopeFiles = captureSelectedSemanticFiles(scopePaths, cwd, root);
 	const basis = { files: [...lifecycleFiles, ...scopeFiles] };
 	return { lifecycle, basis, presence };
 }
@@ -788,14 +956,11 @@ function prepareSelectedCurrent(cwd: string, sessionId: string, selection: Scope
 	const source = captureSelectedCohortSource(cwd, sessionId, wanted, root, sessionKey, expectedLifecycle);
 	if (!source) throw new Error("Selected State Flow current session authority is unavailable");
 	const { lifecycle, basis, presence } = source;
-	const lineage = lifecycle.runtime.meta.lineage;
-	const witnesses = captureTemporalWitnesses(lineage, lifecycleWitnesses(lifecycle), MAX_HISTORY_LIMIT);
 	const files = temporalFileContents(basis);
 	const origin = `files:selected-current:${randomUUID()}`;
 	const empty = createSelectedTemporalState(Object.fromEntries(wanted.map((scope) => [scope, {}])), wanted, `${origin}:empty`, historyLimit);
 	const streams: Partial<Record<StateScope, ScopeStream>> = {};
 	const provenance: SelectedFileCohort["provenance"] = {};
-	let needsOrigin = false;
 	for (const scope of wanted) {
 		const paths = temporalScopePaths(cwd, sessionId, scope, root, sessionKey);
 		const values = [paths.checkpoint, paths.patches, paths.meta].map((path) => files.get(path));
@@ -804,22 +969,33 @@ function prepareSelectedCurrent(cwd: string, sessionId: string, selection: Scope
 		if (!stream && scope === "session") throw new Error(`Selected State Flow ${scope} stream is unavailable`);
 		const registry = parseScopeProvenance(values[2], paths.meta);
 		if (scope === "session") validateSelectedPrivateStream(lifecycle, stream!);
-		const aligned = stream !== undefined && scopeLineageMatches(stream, scope, lineage, MAX_HISTORY_LIMIT);
-		if (!aligned) needsOrigin = true;
-		// Unchanged owners must still substantiate every selected-owner claim; drift discards old shared history only.
-		if (aligned && scope !== "session") for (const witness of witnesses.filter((item) => item.owners.includes(scope))) {
-			if (!stream!.patches.some((record) => sameJson(record.transition, witness.transition))) throw new Error("Accepted temporal witness is missing its selected owner patch");
-		}
-		streams[scope] = stream ?? empty.scopes[scope]!;
+		streams[scope] = stream;
 		provenance[scope] = registry;
 	}
-	if (!needsOrigin) {
+	if (!currentSharedNeedsOrigin(lifecycle, wanted, streams)) {
 		const decoded = decodeSelectedFileCohort(cwd, sessionId, wanted, root, sessionKey, source);
 		const view = constrainTemporalState(decoded.view, historyLimit);
 		return { ...decoded, alignment: "retained", view, witnesses: temporalCausalWitnesses(view, historyLimit) };
 	}
+	for (const scope of wanted) streams[scope] ??= empty.scopes[scope]!;
 	const view = adoptSelectedTemporalStreams(streams, wanted, origin, historyLimit);
 	return { basis, presence, lifecycle, provenance, view, witnesses: temporalCausalWitnesses(view, historyLimit), alignment: "current-origin" };
+}
+
+function currentSharedNeedsOrigin(lifecycle: SelectedLifecycleDocument, wanted: ScopeSelection, streams: Partial<Record<StateScope, ScopeStream>>): boolean {
+	const lineage = lifecycle.runtime.meta.lineage;
+	const witnesses = captureTemporalWitnesses(lineage, lifecycleWitnesses(lifecycle), MAX_HISTORY_LIMIT);
+	let needsOrigin = false;
+	for (const scope of wanted) {
+		const stream = streams[scope];
+		const aligned = stream !== undefined && scopeLineageMatches(stream, scope, lineage, MAX_HISTORY_LIMIT);
+		if (!aligned) needsOrigin = true;
+		// Unchanged owners must substantiate selected-owner claims; shared drift discards old alignment only.
+		if (aligned && scope !== "session") for (const witness of witnesses.filter(item => item.owners.includes(scope))) {
+			if (!stream.patches.some(record => sameJson(record.transition, witness.transition))) throw new Error("Accepted temporal witness is missing its selected owner patch");
+		}
+	}
+	return needsOrigin;
 }
 
 /** Decode predicted receipts too; no canonical reread is needed to establish an accepted output basis. */
@@ -895,19 +1071,4 @@ function preserveMigrationBasis(base: TemporalFileBase, root: string, cwd: strin
 		throw new Error("State Flow migration backup is unavailable or changed; canonical files preserved");
 	}
 	return path;
-}
-
-function publishFileUpdates(bases: readonly DurableFileBase[], updates: readonly OwnedFileUpdate[], root: string): void {
-	writeOwnedFileUpdates(updates, bases, root);
-	try {
-		assertOwnedFileUpdates(updates, root);
-	} catch (error) {
-		try {
-			const touched = new Set(updates.map(({ path }) => path));
-			restoreDurableFileBases(bases.filter(({ path }) => touched.has(path)), root, updates);
-		} catch (rollbackError) {
-			throw new AggregateError([error, rollbackError], "State Flow file publication and rollback failed");
-		}
-		throw error;
-	}
 }

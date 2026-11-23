@@ -1,16 +1,18 @@
+// Domain: immutable scope-participation values and command tokens; excludes mode, I/O, lifecycle authority and cancellation.
+import { InvalidStateFlowData } from "./json.js";
 const SCOPE_ORDER = ["global", "cwd", "session"];
 /** Missing global configuration defaults to all owners; this is not a retained-session fallback. */
 export const DEFAULT_SCOPE_SELECTION = Object.freeze([...SCOPE_ORDER]);
 /** Validate an explicit value and detach it in canonical overlay order, without granting owner acquisition. */
 export function captureScopeSelection(value) {
     if (!Array.isArray(value) || value.length === 0 || value.length > SCOPE_ORDER.length) {
-        throw new Error("State Flow scopes must be a nonempty unique array of global, cwd, session");
+        throw new InvalidStateFlowData("State Flow scopes must be a nonempty unique array of global, cwd, session");
     }
     const requested = new Set();
     for (let index = 0; index < value.length; index++) {
         const scope = value[index];
         if (!Object.hasOwn(value, index) || !SCOPE_ORDER.some((allowed) => allowed === scope) || requested.has(scope)) {
-            throw new Error("State Flow scopes must be a nonempty unique array of global, cwd, session");
+            throw new InvalidStateFlowData("State Flow scopes must be a nonempty unique array of global, cwd, session");
         }
         requested.add(scope);
     }

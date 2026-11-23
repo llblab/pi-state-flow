@@ -1,7 +1,8 @@
 import { type DurableFileBase, type OwnedFileUpdate, type OwnedFilePresence, type SessionAddress } from "./durable.ts";
 import { type ArtifactProvenanceRegistry } from "./artifact.ts";
 import { type AcceptedTransition } from "./history.ts";
-import { type SelectedLifecycleDocument, type Snapshot } from "./snapshot.ts";
+import { InvalidStateFlowData } from "./json.ts";
+import { RevisionUnavailableError, type SelectedLifecycleDocument, type Snapshot } from "./snapshot.ts";
 import type { StateScope } from "./state.ts";
 import { type SelectedTemporalState, type ExcludedTransitionWitness } from "./temporal.ts";
 import { type ScopeSelection } from "./selection.ts";
@@ -14,7 +15,19 @@ export declare function decodeLifecycleFilePair(config: DurableFileBase, runtime
 export declare function assertStorageDirectory(path: string): void;
 /** Explicit creation only; existing bytes and unrelated files are never adopted or rewritten here. */
 export declare function initializeFileStore(root: string): void;
+interface RecoveryDamage {
+    readonly scope: StateScope;
+    readonly cause: InvalidStateFlowData;
+    readonly files: readonly DurableFileBase[];
+}
+interface SelectedRecoveryPlan {
+    readonly damage: readonly RecoveryDamage[];
+    readonly lifecycleAbsent: boolean;
+    /** Single-use, callback-scoped guarded removal of the proved cohort only. */
+    reset(revalidate?: () => void): void;
+}
 export interface StorageTransaction {
+    readonly prepareSelectedRecovery: (cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey: string) => SelectedRecoveryPlan;
     readonly prepareSelected: (cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey?: string) => SelectedFileCohort | undefined;
     readonly observeSelectedShared: (cwd: string, selection: ScopeSelection, root: string) => SelectedReadObservation;
     readonly persistSelectedPassive: (cwd: string, sessionId: string, base: SelectedFileCohort, root: string, sessionKey?: string) => SelectedFilePublication;
@@ -32,6 +45,9 @@ export interface StorageTransaction {
 }
 export declare class PublicationBusyError extends Error {
     constructor(path: string);
+}
+/** A recognized temporary failure at the canonical lock admission boundary, not unavailable memory in general. */
+export declare class TransientStorageAcquisitionError extends RevisionUnavailableError {
 }
 /** Await an exact file mutex; shared by canonical transactions and the independent Git backup owner. */
 export declare function withFilePublicationLock<T>(lockPath: string, action: () => T | Promise<T>, signal?: AbortSignal, unavailable?: (cause: unknown) => Error, waitForLock?: boolean): Promise<T>;
@@ -120,3 +136,4 @@ export declare function publishSelectedTemporalStateToFiles(cwd: string, session
 export declare function loadSelectedFileCohort(cwd: string, sessionId: string, selection: ScopeSelection, root: string, sessionKey?: string, signal?: AbortSignal): Promise<SelectedFileCohort | undefined>;
 /** Exact recapture comparison; future selected publishers must repeat both dependency checks under exclusion. */
 export declare function assertSelectedFileCohortBasis(expected: SelectedFileCohort, current: SelectedFileCohort): void;
+export {};

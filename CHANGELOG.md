@@ -2,6 +2,16 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 2.1.0: Safe Self-Healing and Progressive Recovery
+
+- `Refusal-first self-healing`: Recovery requires expected validation failure on captured, supported and owned bytes. Unsupported headers and unsafe paths refuse before reset; unknown errors do not authorize deletion. Reset uses one captured guarded removal set, and quarantine retains exact bytes without treating unreadable ownership or a quarantine record as recoverable memory.
+- `Guarded reset finality`: Recovery verifies the whole provisional removal set or restores exact bytes where its output is still owned. Foreign replacements survive and unresolved owners are reported. Completed reset facts survive lock-release and auxiliary delivery failures independently of whether current memory is subsequently acquired.
+- `Recovery attempt receipts`: Destructive reset requires a persisted attempt record in the originating Pi session. Independent incidents survive reload and tree navigation; a missing outcome remains unconfirmed and grants no new origin. The model receives recovery facts as data. Only the correlated successful native settlement acknowledges the exact versions it received, without clearing unresolved safety evidence.
+- `Degraded availability`: Terminal and Telegram distinguish wanted policy, admitted memory and unavailable Effective. A separately provable exact owner remains inspectable without installing a partial runtime, clearing an Active fence or bypassing private authority. Pre-runtime Passive retains its verified shared observation without treating missing required evidence as unacquired Session.
+- `Fresh Active retry`: A classified temporary current-memory failure can retry once on a new owned prompt while Active remains fenced. Inference proceeds only after coherent acceptance and preparation of that new input; obsolete work cannot publish and permission or unknown failures do not arm the retry.
+- `Current proof after an unresolved attempt`: Explicit Active/Passive or a fresh retained attachment can accept complete current evidence for affected scopes. Missing files cannot authorize a restart on this path. Historical attempt or incomplete-reset facts remain unchanged even when current read/write capabilities return.
+- `Memory model and extensions`: The README introduces all six built-in planes alongside modes and scopes, and points companion authors to the existing public API for adding their own planes.
+
 ## 2.0.0: One Baseline Lifecycle
 
 - `Breaking: one lifecycle`: Pi and the public `TemporalRuntime` now share Baseline. The former V1 methods, writer and codec are removed; library callers must switch to selected transactions. V1 sessions require a previous compatible release. V1 and unknown lifecycle formats refuse without repair, even beside malformed config bytes.

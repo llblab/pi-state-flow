@@ -10,6 +10,8 @@ import { type AtomicScopePatches, type SemanticState, type StateScope } from "./
 import { type EvaluatedModuleContext, type ModuleFrame, type SemanticModule } from "./semantic-module.ts";
 /** Refresh only our section; Pi owns system frames, tools and forced-prompt precedence. */
 export declare function projectSystemProtocol(messages: AgentMessage[], protocol: string | undefined): AgentMessage[];
+/** Recovery facts are separate user-level data; leave every native message and its ordering intact. */
+export declare function projectRecoveryData(messages: AgentMessage[], facts: readonly string[]): AgentMessage[];
 /** Compatibility facade; the lazy plane owns the unchanged navigation policy. */
 export declare function lazyNavigationHint(state: SemanticState): import("./planes.ts").LazyNavigation;
 /** Materialize module contributions only; native context selection/replacement authority stays with the host. */

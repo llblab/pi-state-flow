@@ -11,7 +11,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, parse, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	parseArtifactProvenanceRegistry,
@@ -19,8 +19,8 @@ import {
 	type ArtifactProvenanceRegistry,
 } from "./artifact.ts";
 import { MAX_HISTORY_LIMIT } from "./history.ts";
-import { prepareSerializedScopeMigration, refuseRetiredSemanticVersion } from "./migration.ts";
-import { canonicalJson, isJsonValue, isObject, type JsonObject } from "./json.ts";
+import { parseScopeMetadataHeader, prepareSerializedScopeMigration, type ScopeMigrationSources } from "./migration.ts";
+import { canonicalJson, decodeJson, decodeUtf8, InvalidStateFlowData, isJsonValue, isObject, sameJson, type JsonObject } from "./json.ts";
 import { validateScopeStream, validateTemporalState, type ScopeStream, type TemporalState } from "./temporal.ts";
 import { assertRetainedModules, validateRetainedModules } from "./semantic-module.ts";
 import { selectSemanticFields, type StateScope } from "./state.ts";
@@ -41,14 +41,7 @@ export interface ScopeStreamSources {
 
 /** Read-only activation eligibility for one canonical CWD scope. */
 export function hasCwdMaterialization(cwd: string, repositoryRoot: string): boolean {
-	const root = resolve(repositoryRoot);
-	const directory = cwdScopePaths(cwd, root).directory;
-	const [checkpoint, patches, meta] = captureOwnedFileBases([
-		join(directory, CHECKPOINT_FILE), join(directory, PATCHES_FILE), join(directory, META_FILE),
-	], root);
-	if (checkpoint!.content !== undefined) return parseScopeStream(checkpoint!.content, patches!.content, "cwd", cwd, meta!.content) !== undefined;
-	if (patches!.content !== undefined) throw new Error(`State Flow tail has no provable checkpoint: ${JSON.stringify(directory)}`);
-	return false;
+	return loadScopeStream(cwd, "", "cwd", repositoryRoot) !== undefined;
 }
 
 export interface ScopeTemporalMetadata {
@@ -95,37 +88,37 @@ export function classifyScopeStream(
 	metaSource?: string,
 ): ScopeStreamPresence {
 	if (scope !== "global" && scope !== "cwd" && scope !== "session") throw new Error("Unknown temporal scope");
-	if (checkpointSource === undefined && patchesSource === undefined) return { kind: "absent" };
+	if (metaSource !== undefined) parseScopeMetadataHeader(metaSource, scope, scope === "cwd" ? expectedCwd : undefined);
+	if (checkpointSource === undefined && patchesSource === undefined && metaSource === undefined) return { kind: "absent" };
 	if (checkpointSource === undefined || patchesSource === undefined) {
-		throw new Error(`State Flow ${scope} scope has an incomplete checkpoint/tail pair`);
+		throw new InvalidStateFlowData(`State Flow ${scope} scope has an incomplete checkpoint/tail pair`);
 	}
 	if (metaSource === undefined) {
-		try { JSON.parse(checkpointSource); }
-		catch { throw new Error(`State Flow ${scope} checkpoint contains invalid JSON`); }
+		decodeJson(checkpointSource, `State Flow ${scope} checkpoint`);
 		for (const [index, line] of patchesSource.split(/\r?\n/).entries()) {
-			if (line.trim().length === 0) continue;
-			try { JSON.parse(line); }
-			catch { throw new Error(`State Flow ${scope} tail contains invalid JSON at line ${index + 1}`); }
+			if (line.trim().length !== 0) decodeJson(line, `State Flow ${scope} tail at line ${index + 1}`);
 		}
 		throw new Error(`Unsupported State Flow ${scope} storage format`);
 	}
-	const metadata = parseMetadataDocument(metaSource, `State Flow ${scope} metadata`);
-	if (metadata.version === 1 || metadata.version === 2) refuseRetiredSemanticVersion(metadata.version);
-	if (!isSupportedScopeMetadataVersion(metadata.version)) throw new Error(`Unsupported State Flow ${scope} metadata version`);
 	// In Unicode mode this range matches lone UTF-16 surrogates, not valid pairs or JSON escapes.
 	if ([checkpointSource, patchesSource, metaSource].some((source) => /[\uD800-\uDFFF]/u.test(source))) {
-		throw new Error(`State Flow ${scope} source is not lossless UTF-8 text`);
+		throw new InvalidStateFlowData(`State Flow ${scope} source is not lossless UTF-8 text`);
 	}
-	const decoded = prepareSerializedScopeMigration({
+	return { kind: "present", stream: decodeScopeStream({
 		checkpoint: Buffer.from(checkpointSource), patches: Buffer.from(patchesSource), meta: Buffer.from(metaSource),
-	}, scope, scope === "cwd" ? expectedCwd : undefined);
+	}, scope, expectedCwd) };
+}
+
+/** Decode opaque sources through the same semantic admission path used for conversion. */
+export function decodeScopeStream(sources: ScopeMigrationSources, scope: StateScope, expectedCwd?: string): ScopeStream {
+	const decoded = prepareSerializedScopeMigration(sources, scope, scope === "cwd" ? expectedCwd : undefined);
 	const stream = {
 		...decoded.stream,
 		checkpoint: { ...decoded.stream.checkpoint, state: selectSemanticFields(decoded.stream.checkpoint.state, decoded.stream.modules) },
 		patches: decoded.stream.patches.map((record) => ({ ...record, patch: selectSemanticFields(record.patch as JsonObject, decoded.stream.modules) })),
 	};
 	validateScopeStream(stream, scope, MAX_HISTORY_LIMIT);
-	return { kind: "present", stream };
+	return stream;
 }
 
 /** Decode the entire bounded replay input before accepting any materialized state. */
@@ -165,10 +158,16 @@ export function sessionRuntimePaths(cwd: string, sessionId: string, repositoryRo
 /** Unsupported state.json presence never becomes an anchored checkpoint. */
 export function loadScopeStream(cwd: string, sessionId: string, scope: StateScope, repositoryRoot: string, sessionKey = sessionId): ScopeStream | undefined {
 	const paths = temporalScopePaths(cwd, sessionId, scope, repositoryRoot, sessionKey);
-	if (readRegularBytes(join(paths.directory, STATE_FILE), repositoryRoot) !== undefined) {
+	if (captureOwnedFilePresence([join(paths.directory, STATE_FILE)], repositoryRoot)[0]!.present) {
 		throw new Error(`Unsupported State Flow storage format: ${JSON.stringify(paths.directory)}`);
 	}
-	return parseScopeStream(readRegularFile(paths.checkpoint, repositoryRoot), readRegularFile(paths.patches, repositoryRoot), scope, scope === "cwd" ? cwd : undefined, readRegularFile(paths.meta, repositoryRoot));
+	const meta = readRegularBytes(paths.meta, repositoryRoot);
+	if (meta !== undefined) parseScopeMetadataHeader(decodeUtf8(meta, `State Flow ${scope} metadata`), scope, scope === "cwd" ? cwd : undefined);
+	const checkpoint = readRegularBytes(paths.checkpoint, repositoryRoot);
+	const patches = readRegularBytes(paths.patches, repositoryRoot);
+	if (meta !== undefined) return decodeScopeStream({ checkpoint, patches, meta }, scope, cwd);
+	return parseScopeStream(checkpoint && decodeUtf8(checkpoint, `State Flow ${scope} checkpoint`),
+		patches && decodeUtf8(patches, `State Flow ${scope} tail`), scope, scope === "cwd" ? cwd : undefined);
 }
 
 /** Include unsupported predecessor names in the CAS basis so they cannot race canonical publication. */
@@ -233,10 +232,8 @@ export function serializeScopeProvenance(registry: Readonly<ArtifactProvenanceRe
 
 function parseMetadataDocument(source: string | undefined, label: string): Record<string, unknown> {
 	if (source === undefined) return {};
-	let value: unknown;
-	try { value = JSON.parse(source); }
-	catch { throw new Error(`${label} contains invalid JSON`); }
-	if (!isObject(value) || !isJsonValue(value)) throw new Error(`Invalid ${label}`);
+	const value = decodeJson(source, label);
+	if (!isObject(value) || !isJsonValue(value)) throw new InvalidStateFlowData(`Invalid ${label}`);
 	return value;
 }
 
@@ -345,7 +342,7 @@ function assertWithinRepository(path: string, repositoryRoot: string): void {
 }
 
 /** Reject symlinked directory components instead of following them during reads or writes. */
-function assertDirectoryChain(repositoryRoot: string, directory: string, create: boolean): boolean {
+function assertDirectoryChain(repositoryRoot: string, directory: string, create: boolean, capture?: (path: string, identity: string) => void): boolean {
 	const root = resolve(repositoryRoot);
 	const target = resolve(directory);
 	if (target !== root) assertWithinRepository(target, root);
@@ -360,10 +357,11 @@ function assertDirectoryChain(repositoryRoot: string, directory: string, create:
 	}
 	for (const current of directories) {
 		try {
-			const metadata = lstatSync(current);
+			const metadata = capture ? lstatSync(current, { bigint: true }) : lstatSync(current);
 			if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
 				throw new Error(`Durable State Flow directory is not a regular directory: ${JSON.stringify(current)}`);
 			}
+			capture?.(current, `${metadata.dev}:${metadata.ino}`);
 		} catch (error) {
 			if (!missing(error)) throw error;
 			if (!create) return false;
@@ -373,11 +371,21 @@ function assertDirectoryChain(repositoryRoot: string, directory: string, create:
 	return true;
 }
 
+/** Capture physical ancestry without opening file bodies or creating directories. */
+export function captureDirectoryBasis(directories: readonly string[]): Record<string, string> {
+	const basis: Record<string, string> = {};
+	for (const directory of directories) {
+		const absolute = resolve(directory);
+		assertDirectoryChain(parse(absolute).root, absolute, false, (path, identity) => { basis[path] = identity; });
+	}
+	return basis;
+}
+
 function readRegularBytes(path: string, repositoryRoot: string): Buffer | undefined {
 	if (!assertDirectoryChain(repositoryRoot, dirname(path), false)) return undefined;
 	let descriptor: number | undefined;
 	try {
-		descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+		descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		if (!fstatSync(descriptor).isFile()) {
 			throw new Error(`Durable State Flow path is not a regular file: ${JSON.stringify(path)}`);
 		}
@@ -393,11 +401,6 @@ function readRegularBytes(path: string, repositoryRoot: string): Buffer | undefi
 	} finally {
 		if (descriptor !== undefined) closeSync(descriptor);
 	}
-}
-
-function readRegularFile(path: string, repositoryRoot: string): string | undefined {
-	const bytes = readRegularBytes(path, repositoryRoot);
-	return bytes === undefined ? undefined : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
 }
 
 function byteIdentity(bytes: Uint8Array | undefined): DurableFileBase["identity"] {
@@ -444,63 +447,60 @@ export function captureOwnedFileBases(paths: readonly string[], repositoryRoot: 
 interface PreparedFile {
 	path: string;
 	repositoryRoot: string;
-	temporary: string;
+	directories?: Record<string, string>;
+	temporary?: string;
 	original?: Uint8Array;
 	next?: Uint8Array;
 }
 
-function prepareFile(path: string, repositoryRoot: string, content: string | undefined, expected?: DurableFileBase): PreparedFile {
+function prepareFile(path: string, repositoryRoot: string, content: string | undefined, expected: DurableFileBase, physical: boolean): PreparedFile {
 	assertWithinRepository(path, repositoryRoot);
-	assertDirectoryChain(repositoryRoot, dirname(path), true);
+	const directory = dirname(path);
+	const next = content === undefined ? undefined : Buffer.from(content);
+	if (next !== undefined) assertDirectoryChain(repositoryRoot, directory, true);
+	const directories = physical ? captureDirectoryBasis([directory]) : undefined;
 	const original = readRegularBytes(path, repositoryRoot);
-	if (expected !== undefined && byteIdentity(original) !== expected.identity) {
+	if (byteIdentity(original) !== expected.identity) {
 		throw new Error(`State Flow file conflict during preparation: ${JSON.stringify(path)}`);
 	}
-	const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-	const next = content === undefined ? undefined : Buffer.from(content);
-	if (next !== undefined) writeFileSync(temporary, next, { flag: "wx", mode: 0o600 });
-	return { path, repositoryRoot, temporary, original, next };
+	const file: PreparedFile = { path, repositoryRoot, original, next, directories };
+	if (next !== undefined) {
+		const temporary = join(directory, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+		writeFileSync(temporary, next, { flag: "wx", mode: 0o600 });
+		file.temporary = temporary;
+	}
+	return file;
 }
 
-function restorePrepared(prepared: PreparedFile): void {
-	assertCurrentBytes(prepared.path, prepared.repositoryRoot, prepared.next);
-	if (prepared.original === undefined) {
-		rmSync(prepared.path, { force: true });
+function assertPreparedDirectory(file: PreparedFile): void {
+	if (file.directories && !sameJson(file.directories, captureDirectoryBasis([dirname(file.path)]))) {
+		throw new Error(`State Flow directory identity changed at ${JSON.stringify(file.path)}; concurrent files preserved`);
+	}
+}
+
+function assertPreparedBytes(file: PreparedFile, bytes: Uint8Array | undefined): void {
+	assertPreparedDirectory(file);
+	assertCurrentBytes(file.path, file.repositoryRoot, bytes);
+}
+
+function restorePrepared(file: PreparedFile, cleanup: unknown[]): void {
+	assertPreparedBytes(file, file.next);
+	if (file.original === undefined) {
+		rmSync(file.path);
 		return;
 	}
-	const rollback = join(dirname(prepared.path), `.${basename(prepared.path)}.${process.pid}.${randomUUID()}.rollback`);
+	const rollback = join(dirname(file.path), `.${basename(file.path)}.${process.pid}.${randomUUID()}.rollback`);
+	writeFileSync(rollback, file.original, { flag: "wx", mode: 0o600 });
+	let renamed = false;
 	try {
-		writeFileSync(rollback, prepared.original, { flag: "wx", mode: 0o600 });
-		renameSync(rollback, prepared.path);
+		assertPreparedBytes(file, file.next);
+		renameSync(rollback, file.path);
+		renamed = true;
 	} finally {
-		rmSync(rollback, { force: true });
-	}
-}
-
-function publishPrepared(prepared: PreparedFile[]): void {
-	let published = 0;
-	try {
-		for (const item of prepared) {
-			assertCurrentBytes(item.path, item.repositoryRoot, item.original);
-			if (item.next === undefined) rmSync(item.path, { force: true });
-			else renameSync(item.temporary, item.path);
-			published += 1;
-		}
-	} catch (error) {
-		let rollbackError: unknown;
-		for (let index = published - 1; index >= 0; index--) {
-			try {
-				restorePrepared(prepared[index]!);
-			} catch (failure) {
-				rollbackError ??= failure;
-			}
-		}
-		if (rollbackError !== undefined) {
-			throw new AggregateError([error, rollbackError], "Durable State Flow transition publication and rollback failed");
-		}
-		throw error;
-	} finally {
-		for (const item of prepared) rmSync(item.temporary, { force: true });
+		if (!renamed) try {
+			assertPreparedDirectory(file);
+			rmSync(rollback, { force: true });
+		} catch (error) { cleanup.push(error); }
 	}
 }
 
@@ -510,25 +510,32 @@ export interface OwnedFileUpdate {
 	content?: string;
 }
 
-/** Verify the publisher's exact output before commit or rollback, without trusting changed worktree bytes. */
-export function assertOwnedFileUpdates(updates: readonly OwnedFileUpdate[], repositoryRoot: string): void {
-	const root = resolve(repositoryRoot);
-	for (const update of updates) {
-		if (!isStateFlowOwnedPath(update.path, root)) throw new Error(`Cannot inspect a non-State Flow path: ${JSON.stringify(update.path)}`);
-		assertCurrentBytes(update.path, root, update.content === undefined ? undefined : Buffer.from(update.content));
+/** A caught publication failure, with evidence about its actual canonical effects. */
+export class OwnedFilePublicationError extends AggregateError {
+	readonly effect: "unchanged" | "restored" | "incomplete";
+	readonly unresolvedPaths: readonly string[];
+
+	constructor(causes: unknown[], effect: OwnedFilePublicationError["effect"], unresolvedPaths: readonly string[]) {
+		const first = causes[0];
+		const message = first instanceof Error ? first.message : "State Flow owned file publication failed";
+		super(causes, effect === "incomplete" ? `${message}; State Flow file rollback incomplete` : message);
+		this.effect = effect;
+		this.unresolvedPaths = [...unresolvedPaths];
 	}
 }
 
-/** Publish a prevalidated file cohort, preserving original bytes for failed preparation/publication. */
+/** Publish and verify one provisional cohort; restore every touched path still owned by this operation. */
 export function writeOwnedFileUpdates(
 	updates: readonly OwnedFileUpdate[],
 	bases: readonly DurableFileBase[],
 	repositoryRoot: string,
+	checkDependencies?: (phase: "before" | "after") => void,
 ): string[] {
 	const root = resolve(repositoryRoot);
 	const byPath = new Map(bases.map((base) => [resolve(base.path), base]));
 	const seen = new Set<string>();
-	const prepared: PreparedFile[] = [];
+	const prepared: PreparedFile[] = [], applied: PreparedFile[] = [];
+	let attempting: PreparedFile | undefined;
 	try {
 		for (const update of updates) {
 			const path = resolve(update.path);
@@ -537,47 +544,45 @@ export function writeOwnedFileUpdates(
 			seen.add(path);
 			const base = byPath.get(path);
 			if (base === undefined) throw new Error(`State Flow file update has no captured base: ${JSON.stringify(path)}`);
-			prepared.push(prepareFile(path, root, update.content, base));
+			prepared.push(prepareFile(path, root, update.content, base, checkDependencies !== undefined));
 		}
+		checkDependencies?.("before");
+		for (const file of prepared) {
+			assertPreparedBytes(file, file.original);
+			if (file.temporary === undefined && file.original === undefined) continue;
+			attempting = file;
+			if (file.temporary === undefined) rmSync(file.path);
+			else {
+				renameSync(file.temporary, file.path);
+				delete file.temporary;
+			}
+			applied.push(file);
+			attempting = undefined;
+		}
+		for (const file of prepared) assertPreparedBytes(file, file.next);
+		checkDependencies?.("after");
+		return prepared.map(({ path }) => path);
 	} catch (error) {
-		for (const item of prepared) rmSync(item.temporary, { force: true });
-		throw error;
-	}
-	publishPrepared(prepared);
-	return prepared.map(({ path }) => path);
-}
-
-/** Restore exact pre-transition bytes only while files still match this publisher's output. */
-export function restoreDurableFileBases(
-	bases: readonly DurableFileBase[],
-	repositoryRoot: string,
-	expectedCurrent: readonly OwnedFileUpdate[],
-): void {
-	const root = resolve(repositoryRoot);
-	const expected = new Map(expectedCurrent.map((update) => [resolve(update.path), update]));
-	for (const base of bases) {
-		assertWithinRepository(base.path, root);
-		if (!isStateFlowOwnedPath(base.path, root)) {
-			throw new Error(`Cannot restore a non-State Flow path: ${JSON.stringify(base.path)}`);
+		const causes: unknown[] = [error];
+		const unresolved: string[] = [];
+		// A syscall that threw without retaining its original bytes cannot certify ownership of its output.
+		const verifyRestored = (file: PreparedFile): void => {
+			try { assertPreparedBytes(file, file.original); }
+			catch (failure) { causes.push(failure); unresolved.push(file.path); }
+		};
+		for (const file of applied.reverse()) {
+			try { restorePrepared(file, causes); }
+			catch (failure) { causes.push(failure); }
 		}
-	}
-	for (const base of bases) {
-		const update = expected.get(resolve(base.path));
-		if (update === undefined) throw new Error(`Rollback has no published basis: ${JSON.stringify(base.path)}`);
-		assertCurrentBytes(base.path, root, update.content === undefined ? undefined : Buffer.from(update.content));
-		if (base.identity === "missing") {
-			rmSync(base.path, { force: true });
-			continue;
+		for (const file of prepared) if (file.temporary !== undefined) {
+			try {
+				assertPreparedDirectory(file);
+				rmSync(file.temporary, { force: true });
+			} catch (failure) { causes.push(failure); }
 		}
-		const original = base.bytes ?? (base.content === undefined ? undefined : Buffer.from(base.content));
-		if (original === undefined) throw new Error(`Durable State Flow base content is missing: ${JSON.stringify(base.path)}`);
-		assertDirectoryChain(root, dirname(base.path), true);
-		const temporary = join(dirname(base.path), `.${basename(base.path)}.${process.pid}.${randomUUID()}.restore`);
-		try {
-			writeFileSync(temporary, original, { flag: "wx", mode: 0o600 });
-			renameSync(temporary, base.path);
-		} finally {
-			rmSync(temporary, { force: true });
-		}
+		if (attempting) verifyRestored(attempting);
+		for (const file of applied) verifyRestored(file);
+		if (!applied.length && causes.length === 1) throw error;
+		throw new OwnedFilePublicationError(causes, unresolved.length ? "incomplete" : applied.length ? "restored" : "unchanged", unresolved);
 	}
 }

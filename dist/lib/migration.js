@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { parseArtifactProvenanceRegistry } from "./artifact.js";
 import { MAX_HISTORY_LIMIT } from "./history.js";
-import { canonicalJson, isJsonValue, isObject, validatePatch } from "./json.js";
+import { canonicalJson, decodeJson, decodeUtf8, InvalidStateFlowData, isJsonValue, isObject, validatePatch } from "./json.js";
 import { assertRetainedModules, validateRetainedModules } from "./semantic-module.js";
 import { assertNoRetiredSemanticPlanes } from "./state.js";
 import { validateScopeStream } from "./temporal.js";
@@ -21,7 +21,7 @@ export function prepareSemanticMigration(value, scope, sourceVersion, historyLim
         throw new Error("Unsupported State Flow migration source version");
     validatePatch(value);
     if (!isObject(value.checkpoint) || !Array.isArray(value.patches))
-        throw new Error("Invalid temporal checkpoint/tail envelope");
+        throw new InvalidStateFlowData("Invalid temporal checkpoint/tail envelope");
     if (targetModules !== undefined)
         validateRetainedModules(targetModules);
     if (sourceVersion === 4) {
@@ -46,7 +46,7 @@ export function prepareSemanticMigration(value, scope, sourceVersion, historyLim
         checkpoint: { ...structuredClone(value.checkpoint), state: translate(value.checkpoint.state) },
         patches: value.patches.map((record) => {
             if (!isObject(record))
-                throw new Error("Invalid temporal patch envelope");
+                throw new InvalidStateFlowData("Invalid temporal patch envelope");
             return { ...structuredClone(record), patch: translate(record.patch) };
         }),
     };
@@ -56,50 +56,27 @@ export function prepareSemanticMigration(value, scope, sourceVersion, historyLim
 }
 function captureMigrationBytes(value, label) {
     if (!(value instanceof Uint8Array))
-        throw new Error(`Incomplete State Flow migration cohort: ${label} bytes are required`);
+        throw new InvalidStateFlowData(`Incomplete State Flow migration cohort: ${label} bytes are required`);
     const bytes = new Uint8Array(value);
     return { bytes, identity: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
 }
-function decodeMigrationText(bytes, label) {
-    try {
-        // Do not silently repair invalid UTF-8 or strip a BOM that ordinary JSON decoding would reject.
-        return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    }
-    catch {
-        throw new Error(`State Flow migration ${label} is not valid UTF-8`);
-    }
-}
 function parseMigrationJson(source, label) {
-    let value;
-    try {
-        value = JSON.parse(source);
-    }
-    catch {
-        throw new Error(`State Flow migration ${label} contains invalid JSON`);
-    }
+    const value = decodeJson(source, `State Flow migration ${label}`);
     if (!isJsonValue(value))
-        throw new Error(`State Flow migration ${label} must contain finite JSON data`);
+        throw new InvalidStateFlowData(`State Flow migration ${label} must contain finite JSON data`);
     return value;
 }
-/** Decode a complete raw owner cohort before filtering; never load files, normalize authority or publish. */
-export function prepareSerializedScopeMigration(sources, scope, expectedCwd, targetModules) {
-    const basis = {
-        checkpoint: captureMigrationBytes(sources.checkpoint, "checkpoint"),
-        patches: captureMigrationBytes(sources.patches, "patches"),
-        meta: captureMigrationBytes(sources.meta, "metadata"),
-    };
-    const metaText = decodeMigrationText(basis.meta.bytes, "metadata");
-    const metadata = parseMigrationJson(metaText, "metadata");
+/** Format and identity only, before any body decoding. This is not a source receipt. */
+export function parseScopeMetadataHeader(source, scope, expectedCwd) {
+    const metadata = decodeJson(source, `State Flow ${scope} metadata`);
     if (!isObject(metadata))
-        throw new Error("Invalid State Flow migration metadata");
+        throw new Error(`Invalid State Flow ${scope} metadata`);
     const version = metadata.version;
     if (version === 1 || version === 2)
         refuseRetiredSemanticVersion(version);
     if (version !== 3 && version !== 4)
-        throw new Error("Unsupported State Flow migration source version");
-    if (version === 4)
-        validateRetainedModules(metadata.modules);
-    else if (targetModules !== undefined && Object.hasOwn(metadata, "modules"))
+        throw new Error(`Unsupported State Flow ${scope} metadata version`);
+    if (version === 3 && Object.hasOwn(metadata, "modules"))
         throw new Error("Legacy State Flow modules metadata collision");
     if (scope === "cwd") {
         if (expectedCwd === undefined)
@@ -112,22 +89,37 @@ export function prepareSerializedScopeMigration(sources, scope, expectedCwd, tar
     }
     else if (expectedCwd !== undefined)
         throw new Error("Only State Flow CWD migration accepts a CWD identity");
+    return { metadata, version };
+}
+/** Decode a complete raw owner cohort before filtering; never load files, normalize authority or publish. */
+export function prepareSerializedScopeMigration(sources, scope, expectedCwd, targetModules) {
+    const meta = captureMigrationBytes(sources.meta, "metadata");
+    const metaText = decodeUtf8(meta.bytes, "State Flow migration metadata");
+    const { metadata, version } = parseScopeMetadataHeader(metaText, scope, expectedCwd);
+    if (!isJsonValue(metadata))
+        throw new InvalidStateFlowData("Invalid State Flow migration metadata");
+    const basis = { meta, checkpoint: captureMigrationBytes(sources.checkpoint, "checkpoint"),
+        patches: captureMigrationBytes(sources.patches, "patches") };
+    if (version === 4)
+        validateRetainedModules(metadata.modules);
     if (Object.hasOwn(metadata, "artifacts"))
         parseArtifactProvenanceRegistry(metadata.artifacts, "State Flow migration provenance");
     const temporal = metadata.temporal;
     if (!isObject(temporal) || !Object.hasOwn(temporal, "checkpoint") || !Array.isArray(temporal.patches)) {
-        throw new Error("Invalid State Flow migration temporal metadata");
+        throw new InvalidStateFlowData("Invalid State Flow migration temporal metadata");
     }
     if (!Object.hasOwn(temporal, "revision"))
-        throw new Error("State Flow target migration metadata requires a revision");
-    const checkpointText = decodeMigrationText(basis.checkpoint.bytes, "checkpoint");
-    const patchesText = decodeMigrationText(basis.patches.bytes, "tail");
+        throw new InvalidStateFlowData("State Flow target migration metadata requires a revision");
+    const checkpointText = decodeUtf8(basis.checkpoint.bytes, "State Flow migration checkpoint");
+    const patchesText = decodeUtf8(basis.patches.bytes, "State Flow migration tail");
     const checkpoint = parseMigrationJson(checkpointText, "checkpoint");
     const patches = patchesText.split(/\r?\n/).flatMap((line, index) => line.trim().length === 0 ? []
         : [parseMigrationJson(line, `tail line ${index + 1}`)]);
+    if (patches.length > MAX_HISTORY_LIMIT)
+        throw new InvalidStateFlowData(`Temporal scope tail exceeds the supported stored limit ${MAX_HISTORY_LIMIT}`);
     const boundaries = temporal.patches;
     if (boundaries.length !== patches.length)
-        throw new Error("State Flow migration metadata does not match its semantic tail");
+        throw new InvalidStateFlowData("State Flow migration metadata does not match its semantic tail");
     const candidate = prepareSemanticMigration({
         ...(version === 4 ? { modules: metadata.modules } : {}),
         revision: temporal.revision,

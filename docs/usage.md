@@ -48,6 +48,7 @@ Active, Passive and Off select the session's workflow and model-facing access, n
 - Until acceptance, the existing inactive mode and any write fence stay in effect.
 - Cancelling a pending Active from Off preserves later acquisition choices; ordinary cancellation creates no write fence.
 - Passive, Off or a branch selection can withdraw an obsolete activation. An error after acceptance does not undo accepted memory.
+- After a classified temporary current-memory acquisition failure on an already Active attachment, the next owned user prompt may attempt current acceptance once before inference. The fence stays in place until that acceptance succeeds; only the new prompt is prepared. Unknown, unsupported, unsafe, foreign or permission failures require a new explicit operation or independently valid attachment. Off makes no automatic attempt.
 
 All three mode commands accept optional exact owner tokens, in any order: `/state-flow-active session`, `/state-flow-passive cwd global`, `/state-flow-off cwd session`. Any nonempty unique subset of `global cwd session` is valid; autocomplete offers only unused matching tokens and replaces the full argument prefix. Blank/whitespace-only arguments preserve the captured choice. Unknown/duplicate names, flags and comma-separated forms fail before policy or mode changes. Commands never edit global defaults. Off scope changes record native policy only, without reading or initializing canonical memory. Active explicitly owns acquisition where independently permitted; Passive observation alone cannot acquire missing Session or borrow pending fork permission.
 
@@ -56,8 +57,11 @@ All seven nonempty owner sets are supported: `global`, `cwd`, `session`, `global
 Selection is not materialization:
 
 - **Wanted:** The owner is selected by captured policy; wanted arity chooses flat versus explicit-owner grammar.
-- **Available:** A validated read view exists for that owner. A pre-runtime Passive session can observe shared owners while wanted Session remains unacquired.
+- **Available:** A validated read view exists for that owner. Pre-runtime Passive can observe shared owners while wanted Session is verified as deliberately unacquired; this is not a substitute for required private memory.
+- **Absent:** A selected shared owner has been observed wholly absent. Deferred, unreadable, and reset-but-not-accepted owners are distinct; they do not count as absent.
 - **Excluded:** The owner is outside the wanted policy. Model reads/writes reject it rather than widening selection.
+
+If the selected cohort cannot be admitted, Passive keeps native conversation available and Active keeps its inference fence. A read directed at one independently provable owner can still succeed under the same wanted grammar. That disposable inspection installs no runtime, establishes no Effective overlay, and clears no fence. A refused mixed-owner read does not become a batch of partial values. Exact current evidence may be readable after an unconfirmed attempt; missing files do not confirm the attempt’s outcome. Detailed terminal status and Telegram distinguish unavailable Effective from available exact inspection actions.
 
 To discover current owner structure, use `projection: "keys"`, for example `{"paths":["global.strategy","cwd.strategy","session.strategy"],"projection":"keys"}` when all three owners participate. A confirmed absent shared owner or absent plane reports `meta.type: "absent"`; an unacquired Passive Session reports `meta.type: "unavailable"`. Both use empty `keys` and keep their positions in the result. With the default `value` projection, a single path returns `value`; multiple paths return ordered `values` with any path error represented as `[null, {"code":"…"}]` in its slot. Both `path` and `paths` accept a string or a nonempty list, but cannot be combined. See the [read contract](architecture.md#model-tools) for the exact boundary. Reads never initialize storage. A legitimate first Session patch on an eligible non-fork branch can acquire private memory through normal atomic acceptance; do not send an empty patch to initialize it.
 

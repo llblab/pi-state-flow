@@ -1,5 +1,7 @@
 import { type InactiveMode, type StateFlowMode, type RetainedPolicyMigrationCandidate } from "./snapshot.ts";
 import { type ScopeSelection } from "./selection.ts";
+import { type RecoveryIncident } from "./healing.ts";
+import type { StateScope } from "./state.ts";
 export declare const SNAPSHOT_ENTRY_TYPE = "state-flow-snapshot";
 /** Requested native policy, not proof of accepted memory or acquisition permission. */
 export interface SelectedNativeRequestPolicy {
@@ -37,6 +39,8 @@ export declare class NativeToolRequestCorrelation {
     begin(request: SelectedPolicyRequest | undefined, signal: AbortSignal | undefined, currentIdentity: () => boolean, controlSignal?: AbortSignal): void;
     /** Stable lease from turn_start through provider preparation, before assistant finalization. */
     preparing(): NativeContextRequest;
+    /** Capture the exact same enabled request later returned for its finalized batch. */
+    projectedRequest(): SelectedPolicyRequest | undefined;
     /** Provider-only revalidation of captured context data; callbacks must neither acquire nor recurse into this request. */
     bindPreparedContext(check: () => void): void;
     finalize(calls: readonly {
@@ -61,6 +65,65 @@ interface BranchEntry {
     message?: {
         role?: unknown;
     };
+}
+export declare const RECOVERY_ENTRY_TYPE = "state-flow-recovery";
+/** Binding to one native session and configured store, never a semantic authority receipt. */
+export interface NativeRecoveryOwner {
+    readonly sessionId: string;
+    readonly sessionKey: string;
+    readonly file: string | null;
+    readonly timestamp: string | null;
+    readonly cwd: string;
+    readonly root: string;
+}
+export declare function nativeRecoveryReceipt(owner: NativeRecoveryOwner, incidents: readonly RecoveryIncident[]): {
+    version: number;
+    owner: {
+        sessionId: string;
+        sessionKey: string;
+        file: string | null;
+        timestamp: string | null;
+        cwd: string;
+        root: string;
+    };
+    incidents: readonly RecoveryIncident[];
+};
+/** Consult the physical session's append-only entries, not its navigable branch. */
+export declare function readNativeRecoveryReceipt(entries: readonly BranchEntry[], owner: NativeRecoveryOwner): readonly RecoveryIncident[];
+type RecoveryAppend = (data: ReturnType<typeof nativeRecoveryReceipt>) => void;
+/** The compact current receipt of one native attachment. Quarantine, writes and run delivery stay outside it. */
+export declare class NativeRecoveryBinding {
+    #private;
+    readonly owner: NativeRecoveryOwner;
+    constructor(owner: NativeRecoveryOwner, entries: readonly BranchEntry[]);
+    incidents(): readonly RecoveryIncident[];
+    /** A present-day acceptance does not change the historical fact or its delivery state. */
+    proveCurrent(runtime: object, scopes: ScopeSelection, facts: readonly RecoveryIncident[]): void;
+    provesCurrent(runtime: object | undefined, incident: RecoveryIncident, required: readonly StateScope[]): boolean;
+    record(incident: RecoveryIncident, append: RecoveryAppend): void;
+    /** Acknowledge the exact displayed versions. Never replace an unconfirmed durable fact with a local assumption. */
+    acknowledge(displayed: readonly RecoveryIncident[], append: RecoveryAppend): void;
+    /** A live effect may be known even if it could not be added to the native file. */
+    remember(incident: RecoveryIncident): void;
+}
+/** Evidence for delivery, not a native lease and never proof of recovery success. */
+export declare class RecoveryNoticeDelivery {
+    #private;
+    get hasAnswer(): boolean;
+    reset(): void;
+    offer(binding: NativeRecoveryBinding, facts: readonly RecoveryIncident[], operation: AbortSignal, request: SelectedPolicyRequest): void;
+    answer(operation: AbortSignal, request: SelectedPolicyRequest, entryId: string): void;
+    end(operation: AbortSignal | undefined, successful: boolean): void;
+    settling(binding: NativeRecoveryBinding, entryId: string, operation?: AbortSignal): void;
+    settled(binding: NativeRecoveryBinding, entryId: string, operation?: AbortSignal): readonly RecoveryIncident[];
+}
+/** Use Pi's append-only lookup once per exact physical attachment, not at every use or tree step. */
+export declare class NativeRecoveryReceipts {
+    #private;
+    readonly delivery: RecoveryNoticeDelivery;
+    bind(reader: {
+        getEntries(): readonly BranchEntry[];
+    }, owner: NativeRecoveryOwner): NativeRecoveryBinding;
 }
 export interface SessionEntryLookup {
     getLeafEntry(): (BranchEntry & {

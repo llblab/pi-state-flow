@@ -22,7 +22,7 @@ import {
 	type StateFlowTelegramSnapshot,
 	type StateFlowTelegramView,
 } from "../lib/telegram.ts";
-import { captureTemporalFileBases, sessionRuntimePaths } from "../lib/durable.ts";
+import { captureTemporalFileBases, sessionRuntimePaths, temporalScopePaths } from "../lib/durable.ts";
 import { emptyState } from "../lib/state.ts";
 import { harness, user } from "./harness.ts";
 import { writeGlobalState } from "./storage-fixture.ts";
@@ -706,7 +706,53 @@ for (const fault of ["missing", "malformed", "pending-fork"] as const) test(`Off
 	assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, id, h.repositoryRoot), files);
 });
 
-test("Telegram absent or malformed memory is unavailable, never an invented empty Rich state", async () => {
+test("Telegram can inspect independently proved private memory under an Active fence without showing partial Effective", async () => {
+	const { modules, sections } = fakeModules();
+	const h = harness({ initializeRepository: false, mode: "active", telegram: { load: async () => modules } });
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await h.tools.get("state_flow_patch")!.execute("private", { session: { tactics: { proof: "LEGITIMATE-PRIVATE" } } }, undefined, undefined, h.ctx);
+	const { cwd, sessionManager } = h.ctx, id = sessionManager.getSessionId();
+	const shared = temporalScopePaths(cwd, id, "global", h.repositoryRoot);
+	writeFileSync(shared.meta, JSON.stringify({ ...JSON.parse(readFileSync(shared.meta, "utf8")), version: 99 }));
+	const before = captureTemporalFileBases(cwd, id, h.repositoryRoot);
+	await h.handlers.get("session_tree")!({}, h.ctx);
+	await new Promise(resolve => setImmediate(resolve));
+	const effective = sectionContext("inspect", "effective");
+	await sections[0].handleCallback!(effective.context);
+	assert.equal(effective.richMessages.length, 0);
+	assert.match(effective.edits[0]!.text, /Effective availability: unavailable/);
+	assert.match(effective.edits[0]!.text, /Inference blocked/);
+	const privateOwner = sectionContext("inspect", "session");
+	await sections[0].handleCallback!(privateOwner.context);
+	assert.match(JSON.stringify(privateOwner.richMessages), /LEGITIMATE-PRIVATE/);
+	assert.throws(() => h.readState(0, "session"), /unavailable/);
+	assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/);
+	assert.deepEqual(captureTemporalFileBases(cwd, id, h.repositoryRoot), before);
+});
+
+test("Telegram Passive Effective rechecks that Session is still deliberately unacquired", async () => {
+	const { modules, sections } = fakeModules();
+	const h = harness({ initializeRepository: false, mode: "passive", telegram: { load: async () => modules } });
+	writeGlobalState({ strategy: { proof: "SHARED-ONLY" } }, h.repositoryRoot);
+	await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
+	await new Promise(resolve => setImmediate(resolve));
+	const shown = sectionContext("inspect", "effective");
+	await sections[0].handleCallback!(shown.context);
+	assert.match(JSON.stringify(shown.richMessages), /SHARED-ONLY/);
+	const { cwd, sessionManager } = h.ctx, id = sessionManager.getSessionId();
+	const peer = new TemporalRuntime(cwd, id, h.repositoryRoot);
+	await peer.withSelectedFirstPatchTransaction(["global", "cwd", "session"], emptySnapshot("passive"), tx => tx.publish(tx.snapshot), () => {}, undefined, true);
+	const privatePaths = temporalScopePaths(cwd, id, "session", h.repositoryRoot);
+	writeFileSync(privatePaths.checkpoint, "{malformed now-required private proof");
+	const before = captureTemporalFileBases(cwd, id, h.repositoryRoot);
+	const refused = sectionContext("inspect", "effective");
+	await sections[0].handleCallback!(refused.context);
+	assert.equal(refused.richMessages.length, 0);
+	assert.match(refused.edits[0]!.text, /requires current acquired or deferred Session proof/);
+	assert.deepEqual(captureTemporalFileBases(cwd, id, h.repositoryRoot), before);
+});
+
+test("Telegram distinguishes proven absence from malformed memory without inventing a Rich state", async () => {
 	const { modules, sections } = fakeModules();
 	const h = harness({ initializeRepository: false, telegram: { load: async () => modules } });
 	rmSync(h.repositoryRoot, { recursive: true });
@@ -716,7 +762,7 @@ test("Telegram absent or malformed memory is unavailable, never an invented empt
 	await sections[0].handleCallback!(missing.context);
 	assert.equal(existsSync(h.repositoryRoot), false);
 	assert.equal(missing.richMessages.length, 0);
-	assert.match(missing.edits[0]!.text, /temporal runtime is unavailable/);
+	assert.match(missing.edits[0]!.text, /global memory is absent/);
 	writeGlobalState(emptyState(), h.repositoryRoot);
 	writeFileSync(join(h.repositoryRoot, "patches.jsonl"), "invalid\n");
 	const before = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);

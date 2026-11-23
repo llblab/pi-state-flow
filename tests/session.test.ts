@@ -8,8 +8,98 @@ import { prepareRetainedPolicyMigration } from "../lib/snapshot.ts";
 import { OwnedOperationSlot, type OwnedOperation } from "../lib/operation.ts";
 import { loadSessionState, writeCwdState, writeGlobalState, nativePolicyMarker } from "./temporal-fixture.ts";
 import { emptyState } from "../lib/state.ts";
-import { discoverSnapshotData, findBranchPolicy, findPassiveStopBoundary, hasPendingFork, hasPriorConversation, hasUncheckpointedConversation, latestSnapshotData, isNewSession, snapshotDataNewestFirst, SNAPSHOT_ENTRY_TYPE, prepareBranchCheckpointPolicy, captureSelectedNativeMarker, prepareSelectedBranchPolicy, NativeToolRequestCorrelation, SelectedPolicyLifetime, type SelectedBranchPolicyOptions, type SelectedNativeRequestPolicy } from "../lib/session.ts";
+import { discoverSnapshotData, findBranchPolicy, findPassiveStopBoundary, hasPendingFork, hasPriorConversation, hasUncheckpointedConversation, latestSnapshotData, isNewSession, snapshotDataNewestFirst, SNAPSHOT_ENTRY_TYPE, prepareBranchCheckpointPolicy, captureSelectedNativeMarker, prepareSelectedBranchPolicy, NativeToolRequestCorrelation, SelectedPolicyLifetime, nativeRecoveryReceipt, readNativeRecoveryReceipt, NativeRecoveryBinding, RecoveryNoticeDelivery, RECOVERY_ENTRY_TYPE, type NativeRecoveryOwner, type SelectedBranchPolicyOptions, type SelectedNativeRequestPolicy } from "../lib/session.ts";
 import { commitTerminal, harness, start, user } from "./harness.ts";
+
+test("recovery receipts select the latest exact native session and configured store, not a branch pointer", () => {
+	const owner: NativeRecoveryOwner = { sessionId: "owner", sessionKey: "owner-key", file: resolve("/sessions/owner-key.jsonl"),
+		cwd: resolve("/project"), root: resolve("/store"), timestamp: "2026-01-02T00:00:00Z" };
+	const first = { id: "00000000-0000-4000-a000-000000000001", scopes: ["session"] as ScopeSelection, fact: "attempted" as const };
+	const second = { id: "00000000-0000-4000-a000-000000000002", scopes: ["global"] as ScopeSelection, fact: "reset" as const };
+	const complete = { ...first, fact: "restored" as const };
+	const entry = (data: unknown) => ({ type: "custom", customType: RECOVERY_ENTRY_TYPE, data });
+	const original = entry(nativeRecoveryReceipt(owner, [first]));
+	const latest = entry(nativeRecoveryReceipt(owner, [complete, second]));
+	const foreign = entry(nativeRecoveryReceipt({ ...owner, file: resolve("/elsewhere/owner-key.jsonl") }, [first]));
+	const anotherStore = entry(nativeRecoveryReceipt({ ...owner, root: resolve("/other-store") }, [first]));
+	assert.deepEqual(readNativeRecoveryReceipt([original, latest, foreign, anotherStore], owner), [complete, second]);
+	assert.deepEqual(readNativeRecoveryReceipt([original, latest], { ...owner, timestamp: null }), []);
+	for (const invalid of [{ ...nativeRecoveryReceipt(owner, [complete, second]), version: 2 }, nativeRecoveryReceipt(owner, [first, first])]) {
+		assert.throws(() => readNativeRecoveryReceipt([original, entry(invalid)], owner), /invalid State Flow recovery receipt|Invalid State Flow recovery receipt/i);
+	}
+});
+
+test("recovery acknowledgement records only displayed fact versions and never removes an unresolved footprint", () => {
+	const owner: NativeRecoveryOwner = { sessionId: "owner", sessionKey: "owner", file: resolve("/sessions/owner.jsonl"),
+		cwd: resolve("/project"), root: resolve("/store"), timestamp: "2026-01-02T00:00:00Z" };
+	const fact = (id: number, scopes: ScopeSelection, outcome: "attempted" | "incomplete" | "reset") => ({
+		id: `00000000-0000-4000-a000-00000000000${id}`, scopes, fact: outcome,
+	});
+	const reset = fact(1, ["global"], "reset"), attempted = fact(2, ["session"], "attempted"), later = fact(3, ["cwd"], "reset");
+	const unresolved = fact(2, ["session"], "incomplete"), local = fact(2, ["session"], "reset");
+	const entries: { type: "custom"; customType: string; data: unknown }[] = [];
+	const append = (data: unknown) => { entries.push({ type: "custom", customType: RECOVERY_ENTRY_TYPE, data }); };
+	const binding = new NativeRecoveryBinding(owner, entries);
+	binding.record(reset, append); binding.record(attempted, append);
+	const offered = binding.incidents();
+	binding.record(later, append); binding.record(unresolved, append);
+	assert.throws(() => binding.acknowledge(offered, () => { throw new Error("ack append failed"); }), /ack append failed/);
+	assert.deepEqual(binding.incidents(), [reset, unresolved, later]);
+	binding.acknowledge(offered, append);
+	assert.deepEqual(binding.incidents(), [unresolved, later]);
+	binding.remember(local);
+	binding.acknowledge([local], () => assert.fail("an unrecorded live result cannot be promoted"));
+	binding.acknowledge([unresolved], () => assert.fail("the old durable result no longer matches the live report"));
+	assert.deepEqual(readNativeRecoveryReceipt(entries, owner), [unresolved, later]);
+	binding.remember(later);
+	binding.acknowledge([later], append);
+	assert.deepEqual(binding.incidents(), [local], "an equal live overlay does not obstruct delivery; the acknowledged overlay is dropped");
+	const reopened = new NativeRecoveryBinding(owner, entries);
+	reopened.acknowledge([unresolved], append);
+	assert.deepEqual(readNativeRecoveryReceipt(entries, owner), [{ ...unresolved, acknowledged: true }]);
+});
+
+test("present-day proof applies to the exact runtime, affected owners and fact version without changing the receipt", () => {
+	const owner = { sessionId: "owner", sessionKey: "owner", file: null, cwd: resolve("/project"), root: resolve("/store"), timestamp: null };
+	const binding = new NativeRecoveryBinding(owner, []), runtime = {};
+	const fact = { id: "fact", scopes: ["global", "session"] as ScopeSelection, fact: "attempted" as const };
+	binding.record(fact, () => {});
+	binding.proveCurrent(runtime, ["global"], [fact]);
+	assert.equal(binding.provesCurrent(runtime, fact, ["global"]), true);
+	assert.equal(binding.provesCurrent(runtime, fact, ["session"]), false);
+	assert.equal(binding.provesCurrent({}, fact, ["global"]), false);
+	assert.equal(binding.provesCurrent(runtime, { ...fact, fact: "incomplete" }, ["global"]), false);
+	binding.acknowledge([fact], () => {});
+	const acknowledged = binding.incidents()[0]!;
+	assert.deepEqual(acknowledged, { ...fact, acknowledged: true });
+	assert.equal(binding.provesCurrent(runtime, acknowledged, ["global"]), true, "delivery is separate from current proof");
+});
+
+test("only a projected request with its exact live answer and native settlement can acknowledge recovery", () => {
+	const owner = { sessionId: "session", sessionKey: "owner", file: null, cwd: resolve("/project"), root: resolve("/store"), timestamp: null };
+	const binding = new NativeRecoveryBinding(owner, []), foreign = new NativeRecoveryBinding({ ...owner, sessionKey: "other" }, []);
+	const facts = [{ id: "an-incident", scopes: ["session"] as ScopeSelection, fact: "reset" as const }];
+	const policy = new SelectedPolicyLifetime();
+	policy.select({ owner: owner.sessionId, cwd: owner.cwd, mode: "passive", scopes: ["session"] });
+	const delivery = new RecoveryNoticeDelivery(), operation = new AbortController(), other = new AbortController();
+	const request = policy.capture(), newer = policy.capture();
+	const offer = () => delivery.offer(binding, facts, operation.signal, request);
+	const successfulAnswer = () => { offer(); delivery.answer(operation.signal, request, "native-answer"); delivery.end(operation.signal, true); };
+	offer(); delivery.answer(operation.signal, newer, "native-answer"); delivery.end(operation.signal, true);
+	delivery.settling(binding, "native-answer"); assert.deepEqual(delivery.settled(binding, "native-answer"), []);
+	successfulAnswer(); delivery.settling(foreign, "native-answer"); delivery.settling(binding, "old-answer");
+	assert.deepEqual(delivery.settled(binding, "native-answer"), []);
+	delivery.settling(binding, "native-answer"); assert.deepEqual(delivery.settled(binding, "native-answer", other.signal), []);
+	assert.deepEqual(delivery.settled(binding, "native-answer"), facts);
+	assert.deepEqual(delivery.settled(binding, "native-answer"), [], "settlement proof is single-use");
+	successfulAnswer(); delivery.settling(binding, "native-answer"); policy.invalidate();
+	assert.throws(() => delivery.settled(binding, "native-answer"), /no longer current/);
+	const current = policy.capture();
+	delivery.offer(binding, facts, operation.signal, current);
+	delivery.answer(operation.signal, current, "native-answer"); delivery.end(operation.signal, true);
+	delivery.settling(binding, "native-answer"); operation.abort();
+	assert.deepEqual(delivery.settled(binding, "native-answer"), []);
+});
 
 test("prepared module source guards bind to the original native provider context without revoking accepted tool batches", () => {
 	const policy = new SelectedPolicyLifetime(); policy.select({ cwd: resolve("/provider-cwd"), owner: "owner", mode: "active", scopes: ["cwd"] });

@@ -3,11 +3,11 @@ import childProcess, { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { awaitInFlightBackupPushes } from "../lib/git.ts";
-import { NativeToolRequestCorrelation, prepareSelectedBranchPolicy, SelectedPolicyLifetime, SNAPSHOT_ENTRY_TYPE, type SelectedPolicyRequest } from "../lib/session.ts";
+import { NativeToolRequestCorrelation, prepareSelectedBranchPolicy, SelectedPolicyLifetime, SNAPSHOT_ENTRY_TYPE, RECOVERY_ENTRY_TYPE, nativeRecoveryReceipt, type SelectedPolicyRequest } from "../lib/session.ts";
 import { commitSelectedTransition, stageSelectedScopePatches } from "../lib/transition.ts";
 import { syncBuiltinESMExports } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
-import { withStorageTransaction, loadSelectedFileCohort } from "../lib/storage.ts";
+import { withStorageTransaction, loadSelectedFileCohort, PublicationBusyError } from "../lib/storage.ts";
 import { StateFlowDiagnosticWriter, stateFlowLogPath } from "../lib/logging.ts";
 import { TemporalRuntime } from "../lib/runtime.ts";
 import test, { type TestContext } from "node:test";
@@ -1166,7 +1166,7 @@ for (const activate of ["start", "passive-patch"] as const) {
 
 for (const invalid of ["malformed-global", "incomplete-global"] as const) {
 	test(`pre-runtime Passive visibly heals ${invalid} storage and continues from empty global memory`, async () => {
-		const h = harness({ initializeRepository: false, mode: "passive" });
+		const h = harness({ initializeRepository: false, mode: "passive", persistRecoveryReceipts: true });
 		const checkpoint = writeGlobalState({ ...emptyState(), tactics: { lost: true } }, h.repositoryRoot);
 		const global = temporalScopePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), "global", h.repositoryRoot);
 		if (invalid === "malformed-global") writeFileSync(checkpoint, "{broken\n");
@@ -1286,23 +1286,403 @@ test("old Pi steps never block memory: tree navigation keeps current memory in e
 	}
 });
 
-test("unreadable current session memory is quarantined visibly and every mode continues from empty session memory", async () => {
+test("an unavailable native pending receipt prevents all canonical removal", async () => {
+	for (const failure of ["unflushed", "append"] as const) {
+		const h = harness({ initializeRepository: false, mode: "active", persistRecoveryReceipts: failure === "append" });
+		await start(h);
+		const { cwd, sessionManager } = h.ctx;
+		const id = sessionManager.getSessionId();
+		const path = temporalScopePaths(cwd, id, "session", h.repositoryRoot).checkpoint;
+		writeFileSync(path, Buffer.from([0xff, 0xfe]));
+		const before = captureTemporalFileBases(cwd, id, h.repositoryRoot);
+		const push = h.entries.push;
+		if (failure === "append") h.entries.push = (...entries) => {
+			if (entries.some(entry => entry.customType === RECOVERY_ENTRY_TYPE)) throw new Error("injected pending receipt failure");
+			return push.apply(h.entries, entries);
+		};
+		try { await h.handlers.get("session_tree")!({}, h.ctx); }
+		finally { h.entries.push = push; }
+		assert.deepEqual(captureTemporalFileBases(cwd, id, h.repositoryRoot), before);
+		assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/);
+		assert.equal(h.notifications.some(message => /was reset to empty/.test(message)), false);
+		assert.match(h.notifications.join("\n"), failure === "unflushed" ? /native session file/ : /pending receipt failure/);
+	}
+});
+
+test("a failed cohort keeps independently proved exact reads without a partial Effective view or a repaired cache", async () => {
+	for (const mode of ["active", "passive"] as const) {
+		const h = harness({ initializeRepository: false, mode: "active", persistRecoveryReceipts: true });
+		await start(h);
+		await h.tools.get("state_flow_patch")!.execute("seed", { global: { strategy: { keep: "GLOBAL-KEPT" } }, cwd: { strategy: { lost: "BAD-CWD" } },
+			session: { tactics: { keep: "SESSION-KEPT" } } }, undefined, undefined, h.ctx);
+		if (mode === "passive") await h.commands.get("state-flow-passive")!.handler("", h.ctx);
+		const { cwd, sessionManager } = h.ctx, id = sessionManager.getSessionId();
+		const paths = temporalScopePaths(cwd, id, "cwd", h.repositoryRoot);
+		const meta = JSON.parse(readFileSync(paths.meta, "utf8"));
+		writeFileSync(paths.meta, JSON.stringify({ ...meta, version: 99 }));
+		const canonical = () => captureTemporalFileBases(cwd, id, h.repositoryRoot);
+		const before = canonical();
+		await h.handlers.get("session_tree")!({}, h.ctx);
+		await h.commands.get("state-flow-status")!.handler("", h.ctx);
+		assert.match(h.notifications.at(-1)!, new RegExp(`Mode: ${mode}\\nSelected scopes: global, cwd, session`));
+		assert.match(h.notifications.at(-1)!, /Effective availability: unavailable/);
+		assert.doesNotMatch(h.notifications.at(-1)!, /GLOBAL-KEPT|SESSION-KEPT/);
+		const read = (args: object) => h.tools.get("state_flow_read")!.execute("inspect", args, undefined, undefined, h.ctx);
+		assert.match(JSON.stringify(await read({ path: "global.strategy.keep" })), /GLOBAL-KEPT/);
+		assert.match(JSON.stringify(await read({ path: "session.tactics.keep" })), /SESSION-KEPT/);
+		const batch = await read({ paths: ["session.tactics.keep", "session.tactics.missing"] });
+		assert.deepEqual(JSON.parse(batch.content[0].text), { values: ["SESSION-KEPT", [null, { code: "path_not_found" }]] });
+		for (const args of [{ path: "effective" }, { path: "strategy.keep" }, { paths: ["global.strategy", "session.tactics"] }]) await assert.rejects(read(args), /unavailable/);
+		await assert.rejects(read({ path: "cwd.strategy" }), /Unsupported State Flow cwd metadata version/);
+		assert.throws(() => h.readState(0, "session"), /unavailable/, "observation never installs a runtime");
+		await assert.rejects(h.tools.get("state_flow_patch")!.execute("no-origin", { session: { tactics: { nope: true } } }, undefined, undefined, h.ctx), /unavailable/);
+		const run = new AbortController();
+		const context = await h.inferenceContext([user("Native context", 1)], run);
+		assert.equal(run.signal.aborted, mode === "active");
+		if (mode === "passive") assert.equal(context, undefined, "Passive keeps conversation but contributes no incomplete overlay");
+		else assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/);
+		assert.deepEqual(canonical(), before);
+		assert.equal(existsSync(`${h.repositoryRoot}-quarantine`), false);
+	}
+});
+
+test("an unconfirmed attempt permits exact current evidence but never proves absence or reset completion", async () => {
+	const h = harness({ initializeRepository: false, mode: "active", persistRecoveryReceipts: true });
+	await start(h);
+	await h.tools.get("state_flow_patch")!.execute("seed", { global: { strategy: { keep: "EXACT-CURRENT" } } }, undefined, undefined, h.ctx);
+	const { cwd, sessionManager } = h.ctx, id = sessionManager.getSessionId();
+	const unrelated = temporalScopePaths(cwd, id, "cwd", h.repositoryRoot);
+	writeFileSync(unrelated.meta, JSON.stringify({ ...JSON.parse(readFileSync(unrelated.meta, "utf8")), version: 99 }));
+	const data = nativeRecoveryReceipt({ sessionId: id, sessionKey: id, cwd: resolve(cwd), root: resolve(h.repositoryRoot),
+		file: sessionManager.getSessionFile()!, timestamp: null }, [{ id: "00000000-0000-4000-a000-000000000001", scopes: ["global"], fact: "attempted" }]);
+	// A new physical attachment sees durable native facts, without any old in-process acceptance authority.
+	const cold = harness({ initializeRepository: false, repositoryRoot: h.repositoryRoot, cwd, sessionId: id, mode: "active",
+		sessionFile: sessionManager.getSessionFile(), persistRecoveryReceipts: true });
+	cold.entries.push(...structuredClone(h.entries), { type: "custom", customType: RECOVERY_ENTRY_TYPE, data });
+	await cold.handlers.get("session_start")!({ reason: "resume" }, cold.ctx);
+	const read = (path: string) => cold.tools.get("state_flow_read")!.execute("read", { path }, undefined, undefined, cold.ctx);
+	assert.match(JSON.stringify(await read("global.strategy.keep")), /EXACT-CURRENT/);
+	await assert.rejects(read("effective.strategy"), /unconfirmed/);
+	assert.match(cold.statuses.at(-1) ?? "", /active \(blocked\)/);
+	const paths = temporalScopePaths(cwd, id, "global", h.repositoryRoot);
+	for (const path of [paths.checkpoint, paths.patches, paths.meta]) rmSync(path);
+	await assert.rejects(read("global.strategy"), /result is unconfirmed/);
+	assert.equal(cold.entries.filter(entry => entry.customType === RECOVERY_ENTRY_TYPE).length, 1);
+	assert.doesNotMatch(cold.notifications.join("\n"), /was reset to empty/);
+});
+
+test("degraded sole-owner reads still use captured flat grammar", async () => {
+	const h = harness({ initializeRepository: false, mode: "active" });
+	await start(h);
+	await h.tools.get("state_flow_patch")!.execute("seed", { global: { strategy: { keep: "SOLE-GLOBAL" } } }, undefined, undefined, h.ctx);
+	await h.commands.get("state-flow-active")!.handler("global", h.ctx);
+	const { cwd, sessionManager } = h.ctx, id = sessionManager.getSessionId();
+	writeFileSync(sessionRuntimePaths(cwd, id, h.repositoryRoot).runtime, "{unknown header");
+	await h.handlers.get("session_tree")!({}, h.ctx);
+	assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/);
+	const read = h.tools.get("state_flow_read")!;
+	for (const path of ["strategy.keep", "effective.strategy.keep", "global.strategy.keep"]) {
+		assert.match(JSON.stringify(await read.execute("read", { path }, undefined, undefined, h.ctx)), /SOLE-GLOBAL/);
+	}
+	await assert.rejects(read.execute("excluded", { path: "session.tactics" }, undefined, undefined, h.ctx), /excluded/);
+});
+
+test("blocked Active retries temporary acquisition once per fresh native prompt and then admits only the new request", { timeout: 25_000 }, async t => {
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active" });
+	const session = await f.createSession("new");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("state_flow_patch", { session: { tactics: { retryBasis: "RETAINED" } } }, { id: "seed-retry" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("Accepted existing memory"),
+	]);
+	await session.prompt("Establish accepted memory");
+	const id = session.sessionId, key = nativeSessionKey(session), lock = join(f.repositoryRoot, ".state-flow-publication.lock");
+	const before = captureTemporalFileBases(f.cwd, id, f.repositoryRoot, key);
+	const open = fs.openSync;
+	let fail: string | undefined = "EAGAIN", rejected = 0;
+	const spy = t.mock.method(fs, "openSync", (...args: Parameters<typeof open>) => {
+		if (fail && args[0] === lock && args[1] === "wx") { rejected++; throw Object.assign(new Error(`fixture lock ${fail}`), { code: fail }); }
+		return open(...args);
+	});
+	syncBuiltinESMExports();
+	try {
+		await session.reload();
+		assert.equal(rejected, 1, "a transient failure does not trigger an immediate healing probe");
+		assert.ok(f.statuses.at(-1)?.includes("active (blocked)"));
+		const calls = f.faux.state.callCount;
+		f.faux.setResponses([fauxAssistantMessage("must not infer")]);
+		await session.prompt("BLOCKED_RETRY_ONE");
+		await session.prompt("BLOCKED_RETRY_TWO");
+		assert.equal(rejected, 3, "each fresh owned prompt can attempt only once");
+		assert.equal(f.faux.state.callCount, calls);
+		assert.equal(f.notifications.filter(message => /Active memory is still unavailable/.test(message)).length, 1);
+		assert.deepEqual(captureTemporalFileBases(f.cwd, id, f.repositoryRoot, key), before);
+		assert.equal(existsSync(`${f.repositoryRoot}-quarantine`), false);
+		fail = undefined;
+		let retriedInput = "";
+		f.faux.setResponses([context => { retriedInput = JSON.stringify(context); return fauxAssistantMessage("Recovered from current memory"); }]);
+		await session.prompt("FRESH_RETRY_PROMPT");
+		assert.equal(f.faux.state.callCount, calls + 1);
+		assert.match(retriedInput, /FRESH_RETRY_PROMPT/);
+		assert.match(retriedInput, /RETAINED/);
+		assert.equal(f.readState(session, 0, "session").tactics.retryBasis, "RETAINED");
+		assert.equal(f.readState(session, 0, "session").response, "Recovered from current memory");
+		assert.ok(f.notifications.some(message => /available again/.test(message)));
+		assert.doesNotMatch(f.statuses.at(-1) ?? "", /blocked/);
+	} finally { spy.mock.restore(); syncBuiltinESMExports(); }
+});
+
+test("a changed nontransient retry cause stays blocked until a new explicit acceptance", { timeout: 25_000 }, async t => {
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active" });
+	const s = await f.createSession("new");
+	f.faux.setResponses([fauxAssistantMessage("Source accepted")]); await s.prompt("Establish current authority");
+	const files = () => captureTemporalFileBases(f.cwd, s.sessionId, f.repositoryRoot, nativeSessionKey(s));
+	const before = files(), lock = join(f.repositoryRoot, ".state-flow-publication.lock");
+	const open = fs.openSync;
+	let code: string | undefined = "EAGAIN", attempts = 0;
+	const spy = t.mock.method(fs, "openSync", (...args: Parameters<typeof open>) => {
+		if (args[0] === lock && args[1] === "wx") { attempts++; if (code) throw Object.assign(new Error(`fixture ${code}`), { code }); }
+		return open(...args);
+	});
+	syncBuiltinESMExports();
+	try {
+		await s.reload();
+		const calls = f.faux.state.callCount;
+		code = "EACCES";
+		await s.prompt("New cause should stop automatic retries");
+		assert.equal(attempts, 2);
+		assert.ok(f.notifications.some(message => /still unavailable.*EACCES/.test(message)));
+		code = undefined;
+		await s.prompt("Operator action is still required");
+		assert.equal(attempts, 2, "permission failures are never an automatic retry grant");
+		assert.equal(f.faux.state.callCount, calls);
+		assert.deepEqual(files(), before);
+		await s.prompt("/state-flow-active");
+		assert.ok(attempts > 2);
+		assert.doesNotMatch(f.statuses.at(-1) ?? "", /blocked/);
+	} finally { spy.mock.restore(); syncBuiltinESMExports(); }
+});
+
+test("an old blocked Active retry cannot publish after an Off to Active reselection", async t => {
+	const h = harness({ initializeRepository: false, mode: "active" });
+	await start(h);
+	await h.tools.get("state_flow_patch")!.execute("seed", { session: { tactics: { keep: true } } }, undefined, undefined, h.ctx);
+	const method = TemporalRuntime.prototype.withSelectedCurrentTransaction;
+	const busy = t.mock.method(TemporalRuntime.prototype, "withSelectedCurrentTransaction", async () => { throw new PublicationBusyError("fixture-lock"); });
+	try { await h.handlers.get("session_tree")!({}, h.ctx); } finally { busy.mock.restore(); }
+	assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/);
+	const operation = new AbortController();
+	const operationContext = { ...h.ctx, signal: operation.signal, abort: () => operation.abort() };
+	h.beforeAgentStart("SUPERSEDED_PROMPT");
+	h.handlers.get("turn_start")!({}, operationContext);
+	let enter!: () => void, release!: () => void;
+	const entered = new Promise<void>(resolve => { enter = resolve; }), wait = new Promise<void>(resolve => { release = resolve; });
+	let queued = false;
+	const gate = t.mock.method(TemporalRuntime.prototype, "withSelectedCurrentTransaction", async function(this: TemporalRuntime, ...args: Parameters<typeof method>) {
+		if (!queued) { queued = true; enter(); await wait; }
+		return Reflect.apply(method, this, args);
+	});
+	const request = h.inferenceContext([user("SUPERSEDED_PROMPT", 4)], operation);
+	try {
+		await entered;
+		await h.commands.get("state-flow-off")!.handler("", h.ctx);
+		await h.commands.get("state-flow-active")!.handler("cwd", h.ctx);
+		const accepted = captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+		release(); await request;
+		assert.equal(operation.signal.aborted, true);
+		assert.deepEqual(captureTemporalFileBases(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot), accepted);
+		assert.doesNotMatch(JSON.stringify(accepted), /SUPERSEDED_PROMPT/);
+		assert.equal(h.notifications.some(message => /available again/.test(message)), false);
+	} finally { release(); gate.mock.restore(); }
+});
+
+test("a pending native receipt exists before the first canonical removal", async t => {
+	const h = harness({ initializeRepository: false, mode: "active", persistRecoveryReceipts: true });
+	await start(h);
+	const { cwd, sessionManager } = h.ctx;
+	const id = sessionManager.getSessionId();
+	const life = sessionRuntimePaths(cwd, id, h.repositoryRoot);
+	const checkpoint = temporalScopePaths(cwd, id, "session", h.repositoryRoot).checkpoint;
+	writeFileSync(checkpoint, Buffer.from([0xff]));
+	const before = captureTemporalFileBases(cwd, id, h.repositoryRoot);
+	const nativeFile = sessionManager.getSessionFile()!;
+	const remove = fs.rmSync;
+	let sawAttempt = false;
+	const spy = t.mock.method(fs, "rmSync", (...args: Parameters<typeof remove>) => {
+		if (args[0] === life.runtime) {
+			assert.deepEqual(captureTemporalFileBases(cwd, id, h.repositoryRoot), before);
+			assert.match(readFileSync(nativeFile, "utf8"), /\"fact\":\"attempted\"/);
+			sawAttempt = true;
+		}
+		return remove(...args);
+	});
+	syncBuiltinESMExports();
+	try { await h.handlers.get("session_tree")!({}, h.ctx); }
+	finally { spy.mock.restore(); syncBuiltinESMExports(); }
+	assert.equal(sawAttempt, true);
+	assert.match(readFileSync(nativeFile, "utf8"), /\"fact\":\"reset\"/);
+	assert.match(h.statuses.at(-1) ?? "", /<dim>active<\/dim>/);
+});
+
+test("normal cold resume retains multiple exact-owner recovery facts outside the selected branch", { timeout: 30_000 }, async t => {
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active" });
+	const session = await f.createSession("new");
+	f.faux.setResponses([fauxAssistantMessage("Native memory owner established")]);
+	await session.prompt("Persist the native owner");
+	const savedLeaf = session.sessionManager.getLeafId()!;
+	const key = nativeSessionKey(session), file = session.sessionFile!;
+	for (const scope of ["global", "cwd"] as const) {
+		writeFileSync(temporalScopePaths(f.cwd, session.sessionId, scope, f.repositoryRoot, key).checkpoint, "{bad JSON");
+		await session.reload();
+	}
+	const originalNotices = f.notifications.filter(message => /was reset to empty/.test(message)).length;
+	assert.equal(originalNotices, 2);
+	assert.equal(session.sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === RECOVERY_ENTRY_TYPE).length, 4);
+	const manager = SessionManager.open(file);
+	manager.branch(savedLeaf);
+	assert.equal(manager.getBranch().some(entry => entry.type === "custom" && entry.customType === RECOVERY_ENTRY_TYPE), false);
+	const cold = await f.createSession("resume", manager);
+	let model = "";
+	f.faux.setResponses([context => { model = JSON.stringify(context); return fauxAssistantMessage("I saw the recovery results"); }]);
+	await cold.prompt("Report the pending recovery facts");
+	assert.match(model, /global memory was unreadable and was reset/);
+	assert.match(model, /cwd memory was unreadable and was reset/);
+	assert.doesNotMatch(model, /quarantined at|bad JSON/);
+	assert.equal(f.notifications.filter(message => /was reset to empty/.test(message)).length, originalNotices);
+	const reopened = SessionManager.open(file);
+	const receipts = reopened.getEntries().filter(entry => entry.type === "custom" && entry.customType === RECOVERY_ENTRY_TYPE);
+	assert.equal(receipts.length, 5, "the successful native run persists one acknowledgement");
+	assert.match(JSON.stringify(receipts.at(-1)), /"incidents":\[\]/);
+	reopened.branch(savedLeaf);
+	const acknowledged = await f.createSession("resume", reopened);
+	f.faux.setResponses([context => { model = JSON.stringify(context); return fauxAssistantMessage("There are no pending recovery notices"); }]);
+	await acknowledged.prompt("Use the acknowledged memory");
+	assert.doesNotMatch(model, /State Flow recovery \(user-level data/);
+});
+
+test("Off, aborted and unsuccessful native requests do not acknowledge projected recovery facts", { timeout: 25_000 }, async t => {
+	let rejectContext = false;
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active", compaction: { enabled: false, keepRecentTokens: 20_000 }, extensions: [{ name: "reject-recovery-context", factory: pi => {
+		pi.on("context_with_system", (event, ctx) => {
+			if (rejectContext && JSON.stringify(event.messages).includes("State Flow recovery (user-level data")) ctx.abort();
+		});
+	} }] });
+	const s = await f.createSession("new");
+	s.settingsManager.applyOverrides({ retry: { enabled: false } });
+	f.faux.setResponses([fauxAssistantMessage("Establish native ownership")]); await s.prompt("Establish the session");
+	writeFileSync(temporalScopePaths(f.cwd, s.sessionId, "cwd", f.repositoryRoot, nativeSessionKey(s)).checkpoint, "{broken");
+	await s.reload();
+	const receipts = () => SessionManager.open(s.sessionFile!).getEntries().filter(entry => entry.type === "custom" && entry.customType === RECOVERY_ENTRY_TYPE);
+	assert.equal(receipts().length, 2);
+	const seen: boolean[] = [];
+	const observe = (context: Context) => { seen.push(JSON.stringify(context).includes("cwd memory was unreadable and was reset")); };
+	await s.prompt("/state-flow-off");
+	f.faux.setResponses([context => { observe(context); return fauxAssistantMessage("Ordinary Off answer"); }]);
+	await s.prompt("Use native-only context");
+	assert.deepEqual(seen, [false]);
+	assert.equal(receipts().length, 2);
+	await s.prompt("/state-flow-passive");
+	rejectContext = true;
+	const calls = f.faux.state.callCount;
+	f.faux.setResponses([fauxAssistantMessage("must not infer")]);
+	await s.prompt("Reject the context after notice projection");
+	assert.equal(f.faux.state.callCount, calls);
+	assert.equal(receipts().length, 2);
+	rejectContext = false;
+	for (const stopReason of ["aborted", "error", "length"] as const) {
+		f.faux.setResponses(Array.from({ length: 8 }, () => (context: Context) => {
+			observe(context);
+			return fauxAssistantMessage("No successful answer", { stopReason, errorMessage: "non-retryable fixture error" });
+		}));
+		await s.prompt(`Attempt with ${stopReason}`);
+		assert.equal(seen.at(-1), true, `the ${stopReason} attempt saw the fact`);
+		assert.equal(receipts().length, 2, `${stopReason} must not acknowledge`);
+	}
+	const append = SessionManager.prototype.appendCustomEntry;
+	const failAck = t.mock.method(SessionManager.prototype, "appendCustomEntry", function(this: SessionManager, kind: string, data?: unknown) {
+		if (kind === RECOVERY_ENTRY_TYPE) throw new Error("injected acknowledgement write failure");
+		return append.call(this, kind, data);
+	});
+	const successful = (context: Context) => { observe(context); return fauxAssistantMessage("I can explain that recovery now"); };
+	try { f.faux.setResponses([successful]); await s.prompt("Acknowledge with an unavailable receipt writer"); }
+	finally { failAck.mock.restore(); }
+	assert.equal(seen.at(-1), true);
+	assert.equal(receipts().length, 2, "rejected acknowledgement remains pending");
+	f.faux.setResponses([successful]); await s.prompt("Acknowledge with a fresh successful run");
+	assert.equal(seen.at(-1), true);
+	assert.equal(receipts().length, 3);
+	f.faux.setResponses([successful]); await s.prompt("No notice once acknowledged");
+	assert.equal(seen.at(-1), false);
+});
+
+test("cold resume refuses missing unconfirmed memory, then explicit current acceptance restores access without certifying a past reset", { timeout: 30_000 }, async t => {
+	const f = await realPiFixture(t, { initializeRepository: false, mode: "active" });
+	const session = await f.createSession("new");
+	f.faux.setResponses([fauxAssistantMessage("Native owner ready")]); await session.prompt("Establish the physical session");
+	const file = session.sessionFile!, id = session.sessionId, key = nativeSessionKey(session);
+	const paths = temporalScopePaths(f.cwd, id, "session", f.repositoryRoot, key);
+	writeFileSync(paths.checkpoint, "{unreadable private checkpoint");
+	const append = SessionManager.prototype.appendCustomEntry;
+	const spy = t.mock.method(SessionManager.prototype, "appendCustomEntry", function(this: SessionManager, kind: string, data?: unknown) {
+		if (kind === RECOVERY_ENTRY_TYPE && JSON.stringify(data).includes('"fact":"reset"')) throw new Error("injected outcome append failure");
+		return append.call(this, kind, data);
+	});
+	try { await session.reload(); } finally { spy.mock.restore(); }
+	assert.ok(f.notifications.some(message => /was reset.*native outcome recording failed/.test(message)));
+	assert.notEqual(readFileSync(paths.checkpoint, "utf8"), "{unreadable private checkpoint");
+	const privateTail = readFileSync(paths.patches);
+	rmSync(paths.patches);
+	const prior = captureTemporalFileBases(f.cwd, id, f.repositoryRoot, key);
+	const manager = SessionManager.open(file);
+	const latest = manager.getEntries().filter(entry => entry.type === "custom" && entry.customType === RECOVERY_ENTRY_TYPE).at(-1);
+	assert.match(JSON.stringify(latest), /"fact":"attempted"/);
+	assert.doesNotMatch(JSON.stringify(latest), /"fact":"reset"/);
+	const cold = await f.createSession("resume", manager);
+	const calls = f.faux.state.callCount;
+	await cold.prompt("Do not treat unconfirmed recovery as an empty origin");
+	assert.equal(f.faux.state.callCount, calls);
+	assert.ok(f.statuses.at(-1)?.includes("active (blocked)"));
+	assert.ok(f.notifications.some(message => /result is unconfirmed/.test(message)));
+	await cold.prompt("/state-flow-active");
+	assert.ok(f.statuses.at(-1)?.includes("active (blocked)"));
+	assert.deepEqual(captureTemporalFileBases(f.cwd, id, f.repositoryRoot, key), prior);
+	writeFileSync(paths.patches, privateTail);
+	await cold.prompt("/state-flow-active");
+	assert.equal(f.statuses.at(-1), "state-flow active");
+	let input = "";
+	f.faux.setResponses([context => { input = JSON.stringify(context); return fauxAssistantMessage("Current memory was verified separately"); }]);
+	await cold.prompt("Continue with the accepted current memory");
+	assert.equal(f.faux.state.callCount, calls + 1);
+	assert.match(input, /recovery was attempted.*result is unconfirmed/);
+	assert.doesNotMatch(input, /memory was unreadable and was reset/);
+	const after = SessionManager.open(file).getEntries().filter(entry => entry.type === "custom" && entry.customType === RECOVERY_ENTRY_TYPE);
+	assert.equal(after.length, 2, "only delivery acknowledgement follows the old attempt receipt");
+	assert.match(JSON.stringify(after.at(-1)), /"fact":"attempted","acknowledged":true/);
+	assert.doesNotMatch(JSON.stringify(after), /"fact":"reset"/);
+	const resumed = await f.createSession("resume", SessionManager.open(file));
+	f.faux.setResponses([context => { input = JSON.stringify(context); return fauxAssistantMessage("Reattached to complete current memory"); }]);
+	await resumed.prompt("Prove independent current continuity after reload");
+	assert.equal(f.faux.state.callCount, calls + 2);
+	assert.doesNotMatch(input, /recovery was attempted/);
+});
+
+test("unreadable config with an owned supported runtime header is quarantined visibly", async () => {
 	for (const recovery of ["active", "passive"] as const) {
-		const h = harness({ initializeRepository: false, mode: "active" });
+		const h = harness({ initializeRepository: false, persistRecoveryReceipts: true, mode: "active" });
 		await start(h);
 		await h.tools.get("state_flow_patch")!.execute("seed", { global: { tactics: { shared: "retained" } }, session: { tactics: { private: 1 } } }, undefined, undefined, h.ctx);
 		if (recovery === "passive") await h.commands.get("state-flow-passive").handler("", h.ctx);
-		const runtimePath = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).runtime;
-		writeFileSync(runtimePath, "malformed runtime");
+		const configPath = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot).config;
+		writeFileSync(configPath, "malformed config");
 		await h.handlers.get("session_tree")!({}, h.ctx);
 		const notice = h.notifications.find(message => /self-healed: session memory was unreadable/.test(message));
 		assert.ok(notice, "a reset is never silent");
 		const quarantine = /quarantined at (\S+\.json)/.exec(notice)![1]!;
 		const record = JSON.parse(readFileSync(quarantine, "utf8"));
-		assert.ok(record.files.some((file: { bytes: string }) => Buffer.from(file.bytes, "base64").toString() === "malformed runtime"), "original bytes stay recoverable");
+		assert.ok(record.files.some((file: { bytes: string }) => Buffer.from(file.bytes, "base64").toString() === "malformed config"), "original bytes stay recoverable");
 		assert.equal(h.statuses.at(-1), `<accent>state-flow</accent> <dim>${recovery}</dim>`, "healed memory is not blocked");
 		const system = JSON.stringify(h.handlers.get("context_with_system")!({ messages: [{ role: "system", content: "", sections: {} }, user("Next", 100)] }, h.ctx));
-		assert.match(system, /self-healed: session memory was unreadable.*Tell the user/, "the model is told about the reset");
+		assert.match(system, /self-healed: session memory was unreadable/, "the model is told about the reset");
+		assert.match(system, /Tell the user about the State Flow recovery outcome/);
 		const permitted = new AbortController();
 		await h.inferenceContext([user("Continue after healing", 101)], permitted);
 		assert.equal(permitted.signal.aborted, false);
@@ -1310,6 +1690,135 @@ test("unreadable current session memory is quarantined visibly and every mode co
 		await h.tools.get("state_flow_patch")!.execute("after-heal", { session: { tactics: { repaired: true } } }, undefined, undefined, h.ctx);
 		assert.deepEqual(h.readState(0, "session").tactics, { repaired: true });
 	}
+});
+
+test("optional recovery UI and diagnostic failures do not consume the reset or prevent reacquisition", async t => {
+	const h = harness({ initializeRepository: false, persistRecoveryReceipts: true, mode: "active" });
+	await start(h);
+	await h.tools.get("state_flow_patch")!.execute("seed", { global: { tactics: { shared: "kept" } }, session: { tactics: { lost: true } } }, undefined, undefined, h.ctx);
+	const { cwd, sessionManager } = h.ctx;
+	const id = sessionManager.getSessionId();
+	const path = temporalScopePaths(cwd, id, "session", h.repositoryRoot).checkpoint;
+	const corrupt = Buffer.from([0xff, 0xfe, 0x00]);
+	writeFileSync(path, corrupt);
+	const notify = h.ctx.ui.notify;
+	const ui = t.mock.method(h.ctx.ui, "notify", (message: string) => {
+		if (message.startsWith("State Flow self-healed:")) throw new Error("optional reset UI delivery failed");
+		return notify(message);
+	});
+	const log = t.mock.method(StateFlowDiagnosticWriter.prototype, "recordSelfHeal", () => { throw new Error("optional reset diagnostic failed"); });
+	await h.handlers.get("session_tree")!({}, h.ctx);
+	assert.ok(ui.mock.calls.some(call => String(call.arguments[0]).startsWith("State Flow self-healed:")));
+	assert.equal(log.mock.callCount(), 1);
+	assert.match(h.statuses.at(-1) ?? "", /<dim>active<\/dim>/);
+	const context = JSON.stringify(h.handlers.get("context_with_system")!({ messages: [{ role: "system", content: "", sections: {} }, user("Next", 102)] }, h.ctx));
+	assert.match(context, /session memory was unreadable and was reset/);
+	assert.doesNotMatch(context, /quarantined at|optional reset/);
+	assert.notDeepEqual(readFileSync(path), corrupt);
+	assert.equal(h.readState(0, "session").tactics?.lost, undefined);
+	assert.equal(h.readState(0, "global").tactics.shared, "kept");
+});
+
+test("completed reset remains distinct from a failed reacquisition or a later failed native checkpoint", async t => {
+	for (const fault of ["acquisition", "checkpoint"] as const) {
+		const h = harness({ initializeRepository: false, persistRecoveryReceipts: true, mode: "active" });
+		await start(h);
+		await h.tools.get("state_flow_patch")!.execute("seed", { session: { tactics: { lost: true } } }, undefined, undefined, h.ctx);
+		const paths = sessionRuntimePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot);
+		const original = '"corrupt-session-config"';
+		writeFileSync(paths.config, original);
+		const failure = `injected recovery ${fault} failure`;
+		const originalPush = h.entries.push;
+		const injected = fault === "acquisition"
+			? t.mock.method(TemporalRuntime.prototype, "withSelectedFirstPatchTransaction", async () => { throw new Error(failure); })
+			: undefined;
+		if (fault === "checkpoint") h.entries.push = (...entries) => {
+			if (entries.some(entry => entry.customType === SNAPSHOT_ENTRY_TYPE)) throw new Error(failure);
+			return originalPush.apply(h.entries, entries);
+		};
+		try { await h.handlers.get("session_tree")!({}, h.ctx); }
+		finally { injected?.mock.restore(); h.entries.push = originalPush; }
+		const reset = h.notifications.find(message => /self-healed: session memory was unreadable/.test(message));
+		assert.ok(reset);
+		const quarantine = /quarantined at (\S+\.json)/.exec(reset)![1]!;
+		const record = JSON.parse(readFileSync(quarantine, "utf8"));
+		assert.ok(record.files.some((file: { bytes: string }) => Buffer.from(file.bytes, "base64").toString() === original));
+		assert.equal(h.notifications.filter(message => /self-healed:/.test(message)).length, 1, "failed retry does not initiate a second reset");
+		assert.ok(h.notifications.some(message => message.includes(failure)), h.notifications.join("\n"));
+		if (fault === "acquisition") {
+			assert.equal(existsSync(paths.config), false);
+			assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/);
+			const operation = new AbortController();
+			await h.inferenceContext([user("Do not infer without reacquisition", 104)], operation);
+			assert.equal(operation.signal.aborted, true);
+		} else {
+			assert.equal(JSON.parse(readFileSync(paths.config, "utf8")).mode, "active");
+			assert.match(h.statuses.at(-1) ?? "", /<dim>active<\/dim>/);
+			assert.equal(h.readState(0, "session").tactics?.lost, undefined);
+		}
+	}
+});
+
+test("incomplete Session rollback blocks Active until complete current proof independently restores Passive access", async t => {
+	const h = harness({ initializeRepository: false, persistRecoveryReceipts: true, mode: "active" });
+	await start(h);
+	await h.tools.get("state_flow_patch")!.execute("seed", { global: { tactics: { shared: "kept" } }, session: { tactics: { lost: true } } }, undefined, undefined, h.ctx);
+	const { cwd, sessionManager } = h.ctx;
+	const id = sessionManager.getSessionId();
+	const paths = temporalScopePaths(cwd, id, "session", h.repositoryRoot);
+	const runtime = sessionRuntimePaths(cwd, id, h.repositoryRoot);
+	const original = new Map([paths.checkpoint, runtime.runtime].map(path => [path, readFileSync(path)]));
+	const corrupt = Buffer.from([0xfe, 0xff]);
+	writeFileSync(paths.checkpoint, corrupt);
+	const captured = captureTemporalFileBases(cwd, id, h.repositoryRoot);
+	const remove = fs.rmSync;
+	const foreign = Buffer.from("peer replacement");
+	const failure = t.mock.method(fs, "rmSync", (...args: Parameters<typeof remove>) => {
+		if (args[0] === runtime.config) {
+			writeFileSync(runtime.runtime, foreign);
+			throw new Error("injected canonical removal failure");
+		}
+		return remove(...args);
+	});
+	syncBuiltinESMExports();
+	try { await h.handlers.get("session_tree")!({}, h.ctx); }
+	finally { failure.mock.restore(); syncBuiltinESMExports(); }
+	assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/);
+	const notice = h.notifications.find(message => /recovery incomplete \(session\)/.test(message));
+	assert.ok(notice && notice.includes(runtime.runtime) && notice.includes("quarantine:"));
+	assert.equal(h.notifications.some(message => /was reset to empty/.test(message)), false);
+	for (const file of captured) assert.deepEqual(readFileSync(file.path), file.path === runtime.runtime ? foreign : file.bytes, file.path);
+	const operation = new AbortController();
+	await h.inferenceContext([user("Do not infer on an incomplete reset", 106)], operation);
+	assert.equal(operation.signal.aborted, true);
+	const facts = () => h.entries.filter(entry => entry.customType === RECOVERY_ENTRY_TYPE).map(entry => structuredClone(entry.data));
+	const incident = facts();
+	assert.match(JSON.stringify(incident.at(-1)), /"fact":"incomplete"/);
+	for (const [path, bytes] of original) writeFileSync(path, bytes); // deterministic restoration in this isolated fixture
+	await h.commands.get("state-flow-passive")!.handler("", h.ctx);
+	assert.match(h.statuses.at(-1) ?? "", /<dim>passive<\/dim>/);
+	assert.equal(h.readState(0, "session").tactics.lost, true);
+	await h.tools.get("state_flow_patch")!.execute("new-passive-work", { session: { tactics: { regained: true } } }, undefined, undefined, h.ctx);
+	assert.equal(h.readState(0, "session").tactics.regained, true);
+	assert.deepEqual(facts(), incident, "new acceptance never revises the unresolved past outcome");
+});
+
+test("an unreadable current runtime header cannot authorize a reset or Active inference", async () => {
+	const h = harness({ initializeRepository: false, mode: "active" });
+	await start(h);
+	await h.tools.get("state_flow_patch")!.execute("private", { session: { tactics: { keep: true } } }, undefined, undefined, h.ctx);
+	const { cwd, sessionManager } = h.ctx;
+	const id = sessionManager.getSessionId();
+	writeFileSync(sessionRuntimePaths(cwd, id, h.repositoryRoot).runtime, "malformed runtime");
+	const before = captureTemporalFileBases(cwd, id, h.repositoryRoot);
+	await h.handlers.get("session_tree")!({}, h.ctx);
+	assert.match(h.statuses.at(-1) ?? "", /active \(blocked\)/);
+	const operation = new AbortController();
+	await h.inferenceContext([user("Do not infer on missing proof", 101)], operation);
+	assert.equal(operation.signal.aborted, true);
+	assert.deepEqual(captureTemporalFileBases(cwd, id, h.repositoryRoot), before);
+	assert.equal(existsSync(`${h.repositoryRoot}-quarantine`), false);
+	assert.equal(h.notifications.some(message => /self-healed/.test(message)), false);
 });
 
 test("repeated Start during an active run is inert and cannot cancel accepted-response reconciliation", async () => {
@@ -2679,7 +3188,7 @@ test("post-acceptance Stop checkpoint failure neither rolls back accepted mode n
 });
 
 test("Passive persistence failures retain context and memory and fence writes through reload without touching canonical bytes", async () => {
-	// Unreadable canonical memory is no longer a persistence fence; it heals visibly (see the quarantine test).
+	// Transient persistence failures do not prove stored corruption.
 	for (const fault of ["concurrent", "locked"] as const) {
 		for (const mode of ["passive"] as const) {
 			const passiveBootstrap = mode === "passive", passiveTools = mode === "passive";
@@ -3013,7 +3522,7 @@ for (const kind of ["passive", "current"] as const) test(`late ${kind} recovery 
 	const shared = TemporalRuntime.prototype.refreshSelectedShared;
 	const current = TemporalRuntime.prototype.refreshSelectedCurrent;
 	t.mock.method(TemporalRuntime.prototype, kind === "passive" ? "refreshSelectedShared" : "refreshSelectedCurrent", async function(this: TemporalRuntime, ...args: Parameters<TemporalRuntime["refreshSelectedShared"]>) {
-		const result = await (kind === "passive" ? shared.call(this, ...args) : current.call(this, ...args));
+		const result = await (kind === "passive" ? shared.call(this, ...args) : current.call(this, args[0], args[1], args[2]));
 		controller.abort(new Error("late recovery cancellation"));
 		return result;
 	});
@@ -3573,7 +4082,8 @@ test("accepted restoration survives a native checkpoint failure without rollback
 		await session.prompt("/state-flow-passive");
 		assert.ok(f.notifications.some(message => /self-healed: session memory was unreadable/.test(message)), "the operator sees the reset");
 		let input: Input | undefined; f.faux.setResponses([context => { input = capture(context); return fauxAssistantMessage("Healed Passive context"); }]); await session.prompt("REQUIRED_PRIVATE_CORRUPTION");
-		assert.ok(input); assert.match(JSON.stringify(input), /self-healed: session memory was unreadable.*Tell the user/, "the model sees the reset");
+		assert.ok(input); assert.match(JSON.stringify(input), /self-healed: session memory was unreadable/, "the model sees the reset");
+		assert.match(JSON.stringify(input), /Tell the user about the State Flow recovery outcome/);
 		assert.notEqual(existsSync(checkpoint) ? readFileSync(checkpoint, "utf8") : undefined, "null\n", "the corrupt body was quarantined");
 	});
 
@@ -7697,7 +8207,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	});
 
 	async function unacquiredNativeFixture(selection: ScopeSelection = ["cwd"], mode: "off" | "passive" = "off") {
-		const h = harness({ initializeRepository: false, mode });
+		const h = harness({ initializeRepository: false, persistRecoveryReceipts: true, mode });
 		await h.handlers.get("session_start")!({ reason: "new" }, h.ctx);
 		const key = resolveSessionAddress(h.ctx.sessionManager.getSessionFile(), h.ctx.sessionManager.getSessionId()).key;
 		const source = new TemporalRuntime(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), h.repositoryRoot, key);
@@ -8376,7 +8886,7 @@ test("accepted restoration survives a native checkpoint failure without rollback
 	});
 
 	test("required private loss heals visibly before shared projection and excluded native selection never widens", async () => {
-		const h = harness({ initializeRepository: false }); await start(h);
+		const h = harness({ initializeRepository: false, persistRecoveryReceipts: true }); await start(h);
 		await h.tools.get("state_flow_patch")!.execute("private", { session: { tactics: { lost: true } } }, undefined, undefined, h.ctx);
 		const paths = temporalScopePaths(h.ctx.cwd, h.ctx.sessionManager.getSessionId(), "session", h.repositoryRoot);
 		writeFileSync(paths.checkpoint, "not-json");

@@ -1,7 +1,32 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectedBoundaryFailure, selectRetainedCheckpoint, waitForRecovery } from "../lib/recovery.ts";
+import { ActiveAcquisitionRetry, isTransientCurrentAcquisition, selectedBoundaryFailure, selectRetainedCheckpoint, waitForRecovery } from "../lib/recovery.ts";
+import { PublicationBusyError, TransientStorageAcquisitionError } from "../lib/storage.ts";
+import { RevisionUnavailableError } from "../lib/snapshot.ts";
 import { emptyState } from "../lib/state.ts";
+
+test("only a current typed temporary acquisition can arm a blocked retry", () => {
+	const blocked = selectedBoundaryFailure("fixture blocked", "active");
+	const transient = new TransientStorageAcquisitionError("temporary lock unavailable");
+	const retry = new ActiveAcquisitionRetry();
+	let current = true;
+	const source = { checkpoint: { mode: "active" as const, boundary: "stored", step: 1 }, preserveUncompiledHistory: false, current: () => current };
+	for (const fault of [new Error("temporary lock unavailable"), new RevisionUnavailableError("unavailable"),
+		new AggregateError([transient]), Object.assign(new TypeError("temporary"), { code: "EAGAIN" })]) {
+		assert.equal(isTransientCurrentAcquisition(fault), false);
+		retry.retain(blocked, fault, source);
+		assert.equal(retry.get(blocked), undefined);
+	}
+	assert.equal(isTransientCurrentAcquisition(new PublicationBusyError("fixture")), true);
+	retry.retain(blocked, transient, source);
+	assert.equal(retry.get(blocked), source);
+	assert.equal(retry.get(structuredClone(blocked)), undefined);
+	current = false; assert.equal(retry.get(blocked), undefined);
+	assert.equal(retry.shouldReport("temporary"), true);
+	assert.equal(retry.shouldReport("temporary"), false);
+	assert.equal(retry.shouldReport("permission"), true);
+	retry.clear(); assert.equal(retry.shouldReport("permission"), true);
+});
 
 test("a cancelled recovery join withdraws independently while another caller receives the eventual result", async () => {
 	let finish!: (value: string) => void;

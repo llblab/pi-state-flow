@@ -1,27 +1,45 @@
 // Domain: visible self-healing of unrecoverable canonical scope cohorts by quarantine and reset to absence.
 // Excludes: semantic repair, Git restoration, foreign-owner data, transient I/O failures and Pi lifecycle policy.
 import { createHash } from "node:crypto";
-import { constants, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { canonicalJson } from "./json.ts";
-import { RetiredSemanticFormatError } from "./migration.ts";
-import { sessionRuntimePaths, temporalScopePaths } from "./durable.ts";
+import { OwnedFilePublicationError, type DurableFileBase } from "./durable.ts";
 import { captureScopeSelection, type ScopeSelection } from "./selection.ts";
-import { RevisionUnavailableError, UnsupportedLifecycleFormatError } from "./snapshot.ts";
+import { validateHistoryLimit } from "./temporal.ts";
 import type { StateScope } from "./state.ts";
-import { assertStorageDirectory, PublicationBusyError, withStorageTransaction, type StorageTransaction } from "./storage.ts";
+import { assertStorageDirectory, withStorageTransaction } from "./storage.ts";
 
-/** One visible reset: the scope became wholly absent after its exact bytes were quarantined. */
-export interface HealedScope {
+/** Quarantine evidence of an attempt; only an accepted reset makes the scope wholly absent. */
+export interface RecoveryEvidence {
 	scope: StateScope;
 	reason: string;
+	cause: Error;
 	quarantine: string;
 }
 
 /** Healing outcome; `lifecycleAbsent` means this session owns no lifecycle after healing. */
 export interface HealResult {
-	healed: HealedScope[];
+	healed: RecoveryEvidence[];
 	lifecycleAbsent: boolean;
+}
+
+type HealAttemptOutcome =
+	| { effect: "none" | "restored"; evidence: readonly RecoveryEvidence[] }
+	| { effect: "incomplete"; evidence: readonly RecoveryEvidence[]; unresolved: readonly { scope: StateScope; paths: readonly string[] }[] }
+	| { effect: "reset"; result: HealResult };
+
+/** A later failure cannot erase the captured outcome or authorize another reset. */
+export class HealExecutionError extends Error {
+	readonly outcome: HealAttemptOutcome;
+
+	constructor(outcome: HealAttemptOutcome, cause: unknown) {
+		const status = outcome.effect === "reset" ? "State Flow reset completed; later failure"
+			: outcome.effect === "incomplete" ? `State Flow recovery incomplete (${outcome.unresolved.map(item => item.scope).join(", ")})`
+				: outcome.effect === "restored" ? "State Flow reset rolled back; original bytes restored" : "State Flow reset made no canonical change";
+		super(cause instanceof Error ? `${status}: ${cause.message}` : status, { cause });
+		this.outcome = outcome;
+	}
 }
 
 export interface HealRequest {
@@ -31,49 +49,23 @@ export interface HealRequest {
 	selection: ScopeSelection;
 	historyLimit: number;
 	root: string;
+	/** Current native operation, if the request has a native owner. */
+	assertCurrent?: () => void;
+	/** Native owner's required pending receipt, after evidence verification and before mutation. */
+	recordAttempt?: (evidence: readonly RecoveryEvidence[]) => void;
 	/** Wall-clock source for deterministic tests. */
 	now?: () => Date;
 }
 
-/**
- * Only semantic decoding/validation failures are healable. Filesystem, lock, cancellation and
- * foreign-owner identity failures keep failing closed because resetting cannot fix them safely.
- */
-export function isHealableCorruption(error: unknown): boolean {
-	if (!(error instanceof Error)) return false;
-	if (error instanceof RevisionUnavailableError || error instanceof PublicationBusyError
-		|| error instanceof RetiredSemanticFormatError || error instanceof UnsupportedLifecycleFormatError) return false;
-	if (error.name === "AbortError") return false;
-	if (typeof (error as NodeJS.ErrnoException).code === "string") return false;
-	if (/identity mismatch/i.test(error.message)) return false;
-	if (error instanceof AggregateError) return error.errors.every(isHealableCorruption);
-	return true;
-}
-
-function scopeFiles(request: HealRequest, scope: StateScope): string[] {
-	const paths = temporalScopePaths(request.cwd, request.sessionId, scope, request.root, request.sessionKey);
-	const semantic = [paths.checkpoint, paths.patches, paths.meta, resolve(paths.directory, "state.json")];
-	if (scope !== "session") return semantic;
-	const runtime = sessionRuntimePaths(request.cwd, request.sessionId, request.root, request.sessionKey);
-	return [...semantic, runtime.config, runtime.runtime];
-}
-
-function readPresent(path: string): Buffer | undefined {
-	const stat = lstatSync(path, { throwIfNoEntry: false });
-	if (!stat) return undefined;
-	if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`State Flow quarantine refuses a non-regular file: ${JSON.stringify(path)}`);
-	return readFileSync(path, { flag: constants.O_RDONLY | constants.O_NOFOLLOW });
-}
-
-/** Exact-byte private record first; canonical files are removed only after the record verifies. */
-function quarantineScope(request: HealRequest, scope: StateScope, reason: string): HealedScope | undefined {
+/** Exact-byte private record first; storage retains the captured CAS basis and owns removal. */
+function quarantineScope(
+	request: HealRequest, scope: StateScope, cause: Error, files: readonly DurableFileBase[], at: string,
+): { evidence: RecoveryEvidence; verify: () => void } {
+	const reason = cause.message;
 	const root = resolve(request.root);
-	const files = scopeFiles(request, scope).map(path => ({ path, bytes: readPresent(path) })).filter(file => file.bytes !== undefined);
-	if (files.length === 0) return undefined;
-	const at = (request.now?.() ?? new Date()).toISOString();
 	const content = `${canonicalJson({ version: 1, kind: "state-flow-quarantine", at, root, cwd: resolve(request.cwd),
 		sessionId: request.sessionId, sessionKey: request.sessionKey, scope, reason,
-		files: files.map(file => ({ path: relative(root, file.path), bytes: file.bytes!.toString("base64") })) })}\n`;
+		files: files.filter(file => file.bytes !== undefined).map(file => ({ path: relative(root, file.path), bytes: Buffer.from(file.bytes!).toString("base64") })) })}\n`;
 	const directory = resolve(dirname(root), `${basename(root)}-quarantine`);
 	assertStorageDirectory(directory);
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -85,87 +77,98 @@ function quarantineScope(request: HealRequest, scope: StateScope, reason: string
 	const path = resolve(directory, `${at.replace(/[:.]/g, "-")}-${scope}-${digest}.json`);
 	try { writeFileSync(path, content, { flag: "wx", mode: 0o600 }); }
 	catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-	if (readFileSync(path, { encoding: "utf8", flag: constants.O_RDONLY | constants.O_NOFOLLOW }) !== content) {
-		throw new Error("State Flow quarantine record changed; canonical files preserved");
-	}
-	for (const file of files) rmSync(file.path);
-	return { scope, reason, quarantine: path };
-}
-
-function probe(action: () => unknown, signal?: AbortSignal): Error | undefined {
-	try { action(); return undefined; }
-	catch (error) {
-		// Cancellation reasons are arbitrary values; they never prove corruption.
-		signal?.throwIfAborted();
-		if (!isHealableCorruption(error)) throw error;
-		return error as Error;
-	}
-}
-
-/**
- * Converge the selected owners to a loadable store: decode each owner independently, then the
- * complete selected cohort. A broken owner is quarantined and becomes wholly absent, which the
- * normal lifecycle treats as empty memory. Healthy stores are never written.
- */
-export function healSelectedStoreLocked(storage: StorageTransaction, request: HealRequest, signal?: AbortSignal): HealResult {
-	const wanted = captureScopeSelection(request.selection);
-	const { cwd, sessionId, sessionKey, root, historyLimit } = request;
-	const healed: HealedScope[] = [];
-	const reset = (scope: StateScope, error: Error) => {
-		const result = quarantineScope(request, scope, error.message);
-		if (result) healed.push(result);
-	};
-	// An incompatible lifecycle must refuse before any selected shared owner can be reset.
-	let lifecycle: ReturnType<StorageTransaction["inspectSelectedLifecycle"]>;
-	const lifecycleFailure = probe(() => { lifecycle = storage.inspectSelectedLifecycle(cwd, sessionId, wanted, root, sessionKey); }, signal);
-	for (const scope of wanted.filter(owner => owner !== "session")) {
-		const failure = probe(() => storage.observeSelectedShared(cwd, captureScopeSelection([scope]), root), signal);
-		if (failure) reset(scope, failure);
-	}
-	if (lifecycleFailure) {
-		reset("session", lifecycleFailure);
-		return { healed, lifecycleAbsent: true };
-	}
-	if (!lifecycle) return { healed, lifecycleAbsent: true };
-	if (wanted.includes("session") && lifecycle.runtime.meta.privateAcquisition !== "acquired") return { healed, lifecycleAbsent: false };
-	// The session lifecycle anchors cross-owner lineage, so a contradictory cohort resets that private anchor.
-	const cohortFailure = probe(() => storage.prepareSelectedCurrent(cwd, sessionId, wanted, historyLimit, root, sessionKey), signal);
-	if (cohortFailure) reset("session", cohortFailure);
-	return { healed, lifecycleAbsent: cohortFailure !== undefined };
+	return { evidence: { scope, reason, cause, quarantine: path }, verify: () => {
+		assertStorageDirectory(directory);
+		const current = lstatSync(directory);
+		if (current.dev !== directoryStat.dev || current.ino !== directoryStat.ino || (current.mode & 0o077) !== 0) {
+			throw new Error("State Flow quarantine directory changed; canonical files preserved");
+		}
+		const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		try {
+			const stat = fstatSync(descriptor);
+			if (!stat.isFile() || (stat.mode & 0o077) !== 0 || !readFileSync(descriptor).equals(Buffer.from(content))) {
+				throw new Error("State Flow quarantine record is unsafe or changed; canonical files preserved");
+			}
+		} finally { closeSync(descriptor); }
+	} };
 }
 
 /** Never waits behind a live writer: a busy store is being used, so healing defers to a later attempt. */
 export async function healSelectedStore(request: HealRequest, signal?: AbortSignal): Promise<HealResult> {
+	signal?.throwIfAborted();
+	const selection = captureScopeSelection(request.selection);
+	validateHistoryLimit(request.historyLimit);
 	const root = resolve(request.root);
+	assertStorageDirectory(root);
 	if (!lstatSync(root, { throwIfNoEntry: false })) return { healed: [], lifecycleAbsent: true };
-	return withStorageTransaction(root, storage => healSelectedStoreLocked(storage, { ...request, root }, signal), signal, false);
+	const evidence: RecoveryEvidence[] = [];
+	let outcome: HealAttemptOutcome | undefined;
+	try {
+		return await withStorageTransaction(root, storage => {
+			request.assertCurrent?.();
+			const plan = storage.prepareSelectedRecovery(request.cwd, request.sessionId, selection, root, request.sessionKey);
+			if (!plan.damage.length) return { healed: [], lifecycleAbsent: plan.lifecycleAbsent };
+			outcome = { effect: "none", evidence };
+			const at = (request.now?.() ?? new Date()).toISOString();
+			const records = plan.damage.map(({ scope, cause, files }) => {
+				signal?.throwIfAborted();
+				const record = quarantineScope({ ...request, root }, scope, cause, files, at);
+				evidence.push(record.evidence);
+				return record;
+			});
+			try { plan.reset(() => {
+				request.assertCurrent?.();
+				for (const record of records) record.verify();
+				request.recordAttempt?.(evidence);
+				request.assertCurrent?.();
+			}); }
+			catch (error) {
+				if (error instanceof OwnedFilePublicationError) {
+					if (error.effect === "incomplete") {
+						const paths = new Set(error.unresolvedPaths);
+						outcome = { effect: "incomplete", evidence, unresolved: plan.damage.flatMap(({ scope, files }) => {
+							const affected = files.filter(file => paths.has(file.path)).map(file => file.path);
+							return affected.length ? [{ scope, paths: affected }] : [];
+						}) };
+					} else if (error.effect === "restored") outcome = { effect: "restored", evidence };
+				}
+				throw error;
+			}
+			const result = { healed: evidence, lifecycleAbsent: plan.lifecycleAbsent };
+			outcome = { effect: "reset", result };
+			return result;
+		}, signal, false);
+	} catch (error) {
+		// The lock wrapper may fail after its callback; the callback's recorded effect is authoritative.
+		if (outcome) throw new HealExecutionError(outcome, error);
+		throw error;
+	}
 }
 
-/** One pending reset notice: projected to the model until an agent run settles after seeing it. */
-export class HealNotice {
-	#message: string | undefined;
-	#projected = false;
+export interface RecoveryIncident {
+	id: string;
+	scopes: ScopeSelection;
+	fact: "attempted" | "none" | "restored" | "incomplete" | "reset" | "missing";
+	/** Delivery can end without resolving the filesystem safety evidence. */
+	acknowledged?: true;
+}
 
-	announce(message: string): void {
-		this.#message = message;
-		this.#projected = false;
-	}
+export function unresolvedRecovery(incident: RecoveryIncident): boolean {
+	return incident.fact === "attempted" || incident.fact === "incomplete";
+}
 
-	/** Model-facing text for the current request, marking it as seen. */
-	project(): string | undefined {
-		if (this.#message === undefined) return undefined;
-		this.#projected = true;
-		return `${this.#message}. Tell the user about this State Flow memory reset in your next answer.`;
-	}
-
-	/** A settled run that saw the notice consumes it; an unseen notice survives. */
-	settle(): void {
-		if (!this.#projected) return;
-		this.#message = undefined;
-		this.#projected = false;
+export function recoveryIncidentText({ scopes, fact }: RecoveryIncident): string {
+	const names = scopes.join(", ");
+	switch (fact) {
+		case "attempted": return `State Flow recovery was attempted for ${names} memory; the result is unconfirmed`;
+		case "none": return `State Flow recovery made no canonical changes to ${names} memory`;
+		case "restored": return `State Flow recovery could not complete for ${names} memory; its changes were rolled back`;
+		case "incomplete": return `State Flow recovery is incomplete for ${names} memory; dependent memory is unavailable`;
+		case "reset": return `State Flow self-healed: ${names} memory was unreadable and was reset`;
+		case "missing": return "State Flow self-healed: session memory files were missing and session memory restarts empty";
 	}
 }
 
-export function describeHealedScopes(healed: readonly HealedScope[]): string {
+export function describeHealedScopes(healed: readonly RecoveryEvidence[]): string {
 	return healed.map(item => `${item.scope} memory was unreadable (${item.reason}) and was reset to empty; original bytes quarantined at ${item.quarantine}`).join("; ");
 }

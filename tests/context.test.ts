@@ -8,7 +8,7 @@ import test from "node:test";
 import * as observationFixture from "./observation-fixture.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemMessage } from "@earendil-works/pi-ai";
-import { acceptedStateUpdates, ContextProjection, contextView, createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, passiveContextHead, projectSystemProtocol, runtimeContextHead, runtimeContextMessage, semanticModuleMessages, syntheticUser, moduleConversationSource, projectModuleContext, type ContextView } from "../lib/context.ts";
+import { acceptedStateUpdates, ContextProjection, contextView, createPassiveContinuation, currentRunTrajectory, lazyNavigationHint, passiveContinuationMessages, passiveContextHead, projectRecoveryData, projectSystemProtocol, runtimeContextHead, runtimeContextMessage, semanticModuleMessages, syntheticUser, moduleConversationSource, projectModuleContext, type ContextView } from "../lib/context.ts";
 import { loadSessionState } from "./temporal-fixture.ts";
 import { completeRun, startEpisode } from "../lib/episode.ts";
 import { emptyState, overlayStates, projectStateForModel, type MaterializedState, type ScopedSemanticStates, type SemanticState, type StateScope } from "../lib/state.ts";
@@ -25,6 +25,18 @@ const message = (role: string, text: string, timestamp: number, customType?: str
 	timestamp,
 	...(customType ? { customType } : {}),
 }) as any;
+
+test("recovery data leaves system and native messages intact and stays at user authority", () => {
+	const system = { role: "system", content: "foreign instructions", sections: { foreign: "keep" }, timestamp: 1 } as AgentMessage;
+	const original = [system, user("first", 2), fauxAssistantMessage("answer"), user("next", 3)];
+	const result = projectRecoveryData(original, ["reset fact", "later unconfirmed fact"]);
+	assert.equal(result[0], system);
+	assert.equal(result[1]!.role, "user");
+	assert.match(JSON.stringify(result[1]), /user-level data.*reset fact.*later unconfirmed fact/);
+	assert.doesNotMatch(JSON.stringify(result[0]), /reset fact/);
+	for (let index = 1; index < original.length; index++) assert.equal(result[index + 1], original[index]);
+	assert.equal(projectRecoveryData(original, []), original);
+});
 
 test("public module context replaces only admitted completed whole tool units and preserves current foreign identities", () => {
 	const oldUser = user("old", 1), call = fauxAssistantMessage(fauxToolCall("read", { path: "/old" }, { id: "old-unit" }));

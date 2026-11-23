@@ -16,5 +16,20 @@ export type RetainedCheckpointSelection = {
 export declare function selectRetainedCheckpoint(candidates: readonly unknown[], inactiveMode?: InactiveMode): RetainedCheckpointSelection;
 /** Withdraw a caller's join without cancelling independently owned recovery or mode persistence. */
 export declare function waitForRecovery<T>(operation: Promise<T>, signal: AbortSignal): Promise<T>;
+export declare function isTransientCurrentAcquisition(error: unknown): boolean;
+interface ActiveRetrySource {
+    readonly checkpoint: RetainedBoundaryCheckpoint;
+    readonly preserveUncompiledHistory: boolean;
+    readonly current: () => boolean;
+}
+/** A volatile prompt-bound opportunity, never a native marker, file receipt, or origin grant. */
+export declare class ActiveAcquisitionRetry {
+    #private;
+    retain(blocked: Snapshot, cause: unknown, source: ActiveRetrySource): void;
+    get(blocked: Snapshot): ActiveRetrySource | undefined;
+    shouldReport(reason: string): boolean;
+    clear(): void;
+}
 /** A selected boundary that cannot be resolved stays unavailable; callers never fall through to older evidence. */
 export declare function selectedBoundaryFailure(cause: string, mode?: StateFlowMode): Snapshot;
+export {};

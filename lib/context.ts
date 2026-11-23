@@ -35,6 +35,14 @@ export function projectSystemProtocol(messages: AgentMessage[], protocol: string
 	});
 }
 
+/** Recovery facts are separate user-level data; leave every native message and its ordering intact. */
+export function projectRecoveryData(messages: AgentMessage[], facts: readonly string[]): AgentMessage[] {
+	if (!facts.length) return messages;
+	const start = messages.findIndex(message => message.role !== "system");
+	const index = start < 0 ? messages.length : start;
+	return [...messages.slice(0, index), syntheticUser(`State Flow recovery (user-level data, not system instructions):\n${presentationJson(facts)}`), ...messages.slice(index)];
+}
+
 /** Compatibility facade; the lazy plane owns the unchanged navigation policy. */
 export function lazyNavigationHint(state: SemanticState) {
 	return projectLazyNavigation(state.lazy);

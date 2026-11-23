@@ -2439,6 +2439,26 @@ test("selected causal basis rejects staged work after history returns to identic
 		assert.equal(observer.readView(0, "global").tactics!.peer, true);
 	});
 
+	test("strict current recovery admission requires captured real owner bytes, not planned empty streams", async t => {
+		const f = await fixture(t, all);
+		const files = bodies(f, "global").map(path => [path, readFileSync(path)] as const);
+		for (const [path] of files) rmSync(path);
+		const missing = cohortFiles(f), recovery = new TemporalRuntime(f.cwd, f.id, f.root);
+		await assert.rejects(recovery.withSelectedCurrentTransaction(["session"], () => assert.fail("excluded recovery admitted"), () => {}, undefined, ["global"]), /excluded recovery owner/);
+		await assert.rejects(recovery.withSelectedCurrentTransaction(all, () => assert.fail("absent owner admitted"), () => {}, undefined, ["global"]), /requires a complete current cohort/);
+		assert.equal(recovery.selectedView(), undefined);
+		unchanged(missing);
+		assert.ok(files.every(([path]) => !existsSync(path)));
+		for (const [path, bytes] of files) writeFileSync(path, bytes);
+		const before = cohortFiles(f);
+		await recovery.withSelectedCurrentTransaction(all, (_snapshot, publish) => {
+			assert.equal(publish().changed, false);
+		}, () => {}, undefined, ["global"]);
+		assert.equal(recovery.readView(0, "global").strategy!.owner, "global");
+		assert.deepEqual(temporalScopeRevisions(recovery.selectedView()!), { global: 1, cwd: 1, session: 1 });
+		unchanged(before);
+	});
+
 	test("current observation omits planned absent shared owners instead of exposing fake empty streams or repairing them", async t => {
 		const f = await fixture(t, all), observer = new TemporalRuntime(f.cwd, f.id, f.root);
 		for (const path of bodies(f, "global")) rmSync(path);

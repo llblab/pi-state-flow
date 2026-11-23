@@ -4,7 +4,7 @@ import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./history.js";
 import { isObject, sameJson } from "./json.js";
 import { captureScopeSelection } from "./selection.js";
 import { RevisionUnavailableError, retainedBoundaryCheckpoint, captureLifecycleSnapshot } from "./snapshot.js";
-import { assertTemporalFileBase, captureSelectedModuleAdditions, captureSelectedProvenanceUpdates, temporalFileContents, initializeFileStore, withStorageTransaction } from "./storage.js";
+import { assertTemporalFileBase, captureSelectedModuleAdditions, captureSelectedProvenanceUpdates, temporalFileContents, assertStorageDirectory, initializeFileStore, withStorageTransaction } from "./storage.js";
 import { readTemporalScopes, readTemporalState, readTemporalView, selectTemporalState } from "./temporal.js";
 function selectedModules(view) {
     return Object.fromEntries(view.selection.filter(scope => view.scopes[scope]?.modules !== undefined)
@@ -55,7 +55,7 @@ export class TemporalRuntime {
     memory;
     acceptedCurrentMemory = false;
     observedSessionAuthority = false;
-    observedPrivateSemantics = false;
+    privateAcquisitionEvidence;
     cwd;
     session;
     root;
@@ -81,13 +81,14 @@ export class TemporalRuntime {
         for (const file of base.files)
             if (file.identity !== "missing") {
                 if (privateFiles.has(file.path))
-                    this.observedPrivateSemantics = true;
+                    this.privateAcquisitionEvidence = "acquired";
                 if (privateFiles.has(file.path) || file.path === paths.config || file.path === paths.runtime)
                     this.observedSessionAuthority = true;
             }
     }
     /** Only owned durable acceptance calls this; returned receipts and read-only candidates are not installers. */
     installSelected(cohort) {
+        this.privateAcquisitionEvidence = cohort.lifecycle.runtime.meta.privateAcquisition;
         this.memory = { kind: "selected", cohort: structuredClone(cohort) };
         this.acceptedCurrentMemory = true;
     }
@@ -114,6 +115,8 @@ export class TemporalRuntime {
             return this.memory.observation;
         return undefined;
     }
+    /** Last admitted lifecycle evidence for presentation only; future operations still check current files. */
+    observedPrivateAcquisition() { return this.privateAcquisitionEvidence; }
     /** Detached read-only selected values; never accepted run fields or a publication/acquisition basis. */
     observedSelectedView() {
         return this.memory?.kind === "observed" ? structuredClone(this.memory.observation.view) : undefined;
@@ -126,7 +129,7 @@ export class TemporalRuntime {
         return selection.filter(scope => scope !== "session" && !view?.selection.includes(scope));
     }
     /** Explicit shared inspection before acquisition; missing owners stay unavailable rather than becoming empty streams. */
-    async refreshSelectedShared(selection, revalidateNativePolicy, signal) {
+    async refreshSelectedShared(selection, revalidateNativePolicy, signal, requireUnacquiredPrivate = false) {
         const wanted = captureScopeSelection(selection);
         if (wanted.includes("session"))
             throw new Error("Shared State Flow observation cannot select Session");
@@ -137,11 +140,23 @@ export class TemporalRuntime {
             return observation.view !== undefined;
         };
         assertAuthority();
-        if (!lstatSync(this.root, { throwIfNoEntry: false }))
-            return install({ selection: wanted, provenance: {} });
+        assertStorageDirectory(this.root);
+        if (!lstatSync(this.root, { throwIfNoEntry: false })) {
+            const present = install({ selection: wanted, provenance: {} });
+            if (requireUnacquiredPrivate)
+                this.privateAcquisitionEvidence = "absent";
+            return present;
+        }
         return withStorageTransaction(this.root, storage => {
             assertAuthority();
-            return install(storage.observeSelectedShared(this.cwd, wanted, this.root));
+            const lifecycle = requireUnacquiredPrivate ? storage.inspectSelectedLifecycle(this.cwd, this.sessionId, wanted, this.root, this.sessionKey) : undefined;
+            if (lifecycle && lifecycle.runtime.meta.privateAcquisition !== "unacquired") {
+                throw new RevisionUnavailableError("State Flow Effective memory requires current acquired or deferred Session proof");
+            }
+            const present = install(storage.observeSelectedShared(this.cwd, wanted, this.root));
+            if (requireUnacquiredPrivate)
+                this.privateAcquisitionEvidence = lifecycle?.runtime.meta.privateAcquisition ?? "absent";
+            return present;
         }, signal);
     }
     /** Header-only disposition data; never semantic observation, acceptance, or acquisition permission. */
@@ -155,9 +170,11 @@ export class TemporalRuntime {
             revalidateNativePolicy();
         };
         check();
+        assertStorageDirectory(this.root);
         if (!lstatSync(this.root, { throwIfNoEntry: false })) {
             if (this.observedSessionAuthority)
                 throw new RevisionUnavailableError("Known selected session authority is unavailable");
+            this.privateAcquisitionEvidence = "absent";
             return undefined;
         }
         return withStorageTransaction(this.root, storage => {
@@ -167,13 +184,13 @@ export class TemporalRuntime {
             if (!lifecycle) {
                 if (this.observedSessionAuthority)
                     throw new RevisionUnavailableError("Known selected session authority is unavailable");
+                this.privateAcquisitionEvidence = "absent";
                 return undefined;
             }
-            if (this.observedPrivateSemantics && lifecycle.runtime.meta.privateAcquisition !== "acquired")
+            if (this.privateAcquisitionEvidence === "acquired" && lifecycle.runtime.meta.privateAcquisition !== "acquired")
                 throw new Error("Known acquired State Flow private authority cannot be downgraded");
             this.observedSessionAuthority = true;
-            if (lifecycle.runtime.meta.privateAcquisition === "acquired")
-                this.observedPrivateSemantics = true;
+            this.privateAcquisitionEvidence = lifecycle.runtime.meta.privateAcquisition;
             return { selection: captureScopeSelection(lifecycle.runtime.config.scopes), privateAcquisition: lifecycle.runtime.meta.privateAcquisition,
                 snapshot: selectedRunSnapshot({ lifecycle }) };
         }, signal);
@@ -192,7 +209,7 @@ export class TemporalRuntime {
         return withStorageTransaction(this.root, storage => {
             assertAuthority();
             const current = storage.prepareSelectedCurrent(this.cwd, this.sessionId, wanted, this.historyLimit, this.root, this.sessionKey);
-            if (this.observedPrivateSemantics && current.lifecycle.runtime.meta.privateAcquisition !== "acquired")
+            if (this.privateAcquisitionEvidence === "acquired" && current.lifecycle.runtime.meta.privateAcquisition !== "acquired")
                 throw new Error("Known acquired State Flow private authority cannot be downgraded");
             // Current acceptance can plan absent shared owners; observation must not expose those planned empty streams.
             const present = wanted.filter(scope => {
@@ -205,8 +222,7 @@ export class TemporalRuntime {
             const snapshot = selectedRunSnapshot(current);
             assertAuthority();
             this.rememberSessionAuthority(current.basis);
-            if (current.lifecycle.runtime.meta.privateAcquisition === "acquired")
-                this.observedPrivateSemantics = true;
+            this.privateAcquisitionEvidence = current.lifecycle.runtime.meta.privateAcquisition;
             this.installObserved(observation);
             return snapshot;
         }, signal);
@@ -451,8 +467,11 @@ export class TemporalRuntime {
         return result;
     }
     /** Same-session current acceptance/authoring; native policy checks are synchronous under exclusion. */
-    async withSelectedCurrentTransaction(selection, action, revalidateNativePolicy, signal) {
+    async withSelectedCurrentTransaction(selection, action, revalidateNativePolicy, signal, requiredPresent) {
         const wanted = captureScopeSelection(selection);
+        const required = requiredPresent === undefined ? [] : captureScopeSelection(requiredPresent);
+        if (required.some(scope => !wanted.includes(scope)))
+            throw new Error("Current acceptance cannot prove an excluded recovery owner");
         const historyLimit = this.historyLimit;
         const assertAuthority = () => {
             signal?.throwIfAborted();
@@ -468,12 +487,17 @@ export class TemporalRuntime {
         return withStorageTransaction(this.root, (storage) => {
             assertAuthority();
             const base = storage.prepareSelectedCurrent(this.cwd, this.sessionId, wanted, historyLimit, this.root, this.sessionKey);
+            for (const scope of required) {
+                const paths = temporalScopePaths(this.cwd, this.sessionId, scope, this.root, this.sessionKey);
+                if ([paths.checkpoint, paths.patches, paths.meta].some(path => !base.basis.files.some(file => file.path === path && file.identity !== "missing"))) {
+                    throw new RevisionUnavailableError(`State Flow ${scope} recovery requires a complete current cohort; missing files do not prove an accepted reset`);
+                }
+            }
             this.rememberSessionAuthority(base.basis);
-            if (this.observedPrivateSemantics && base.lifecycle.runtime.meta.privateAcquisition !== "acquired")
+            if (this.privateAcquisitionEvidence === "acquired" && base.lifecycle.runtime.meta.privateAcquisition !== "acquired")
                 throw new Error("Known acquired State Flow private authority cannot be downgraded");
             this.observedSessionAuthority = true;
-            if (base.lifecycle.runtime.meta.privateAcquisition === "acquired")
-                this.observedPrivateSemantics = true;
+            this.privateAcquisitionEvidence = base.lifecycle.runtime.meta.privateAcquisition;
             const current = selectedRunSnapshot(base);
             let consumed = false, published = false, authorActive = true;
             const publish = (snapshot, accepted, requestedProvenance, requestedModules) => {
@@ -524,8 +548,6 @@ export class TemporalRuntime {
         const acquiring = kind === "new" || kind === "unacquired" || copying;
         const install = (accepted) => {
             this.observedSessionAuthority = true;
-            if (acquiring)
-                this.observedPrivateSemantics = true;
             this.installSelected(accepted.cohort);
         };
         const author = requestedAuthor ? (basis, publish) => requestedAuthor(basis, (snapshot, transition, provenance, moduleAdditions) => {
@@ -551,7 +573,7 @@ export class TemporalRuntime {
                 revalidateDirectParent(source, phase);
             }
             if (kind === "unacquired" || kind === "fork-deferred") {
-                if (this.observedPrivateSemantics)
+                if (this.privateAcquisitionEvidence === "acquired")
                     throw new Error("Known acquired State Flow private memory cannot become an empty origin");
             }
             else if (this.observedSessionAuthority) {

@@ -5,6 +5,40 @@ import { assertScopeStateValues, overlayStates, projectSemanticState } from "./s
 import { applyPatch, isObject } from "./json.js";
 import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "./selection.js";
 export const STATUS_KEY = "state-flow";
+/** Interpret admitted evidence only. This result is not an admission check or a freshness lease. */
+export function deriveMemoryAvailability(snapshot, wanted, evidence = {}) {
+    const selected = captureScopeSelection(wanted);
+    const classify = (scope) => {
+        if (!selected.includes(scope))
+            return "excluded";
+        if (snapshot.config.mode === "off")
+            return "not inspected";
+        if (snapshot.meta.validation?.attempt !== 0 && evidence.present?.includes(scope))
+            return "available";
+        const recovery = evidence.recovery?.findLast(incident => incident.scopes.includes(scope)
+            && ["attempted", "incomplete", "reset", "missing"].includes(incident.fact));
+        if (recovery?.fact === "incomplete" || recovery?.fact === "attempted")
+            return "unavailable";
+        if (snapshot.meta.validation?.attempt !== 0) {
+            if (scope === "session" && evidence.privateDisposition)
+                return evidence.privateDisposition;
+            if (scope !== "session" && evidence.absentShared?.includes(scope))
+                return "absent";
+        }
+        return recovery?.fact === "reset" || recovery?.fact === "missing" ? "reset, not accepted" : "unavailable";
+    };
+    const owners = { global: classify("global"), cwd: classify("cwd"), session: classify("session") };
+    const observed = selected.filter(scope => scope !== "session" || owners.session !== "unacquired" || snapshot.config.mode !== "passive");
+    const effective = snapshot.config.mode === "off" ? "not inspected"
+        : !observed.length || observed.some(scope => owners[scope] !== "available" && owners[scope] !== "absent") ? "unavailable"
+            : observed.some(scope => owners[scope] === "available") ? "available" : "absent";
+    return { owners, effective, inferenceBlocked: isActiveRestorationBlocked(snapshot) };
+}
+/** Safe static labels shared by operator surfaces; no source paths or raw error text. */
+export function memoryAvailabilityLines(availability) {
+    const owners = Object.entries(availability.owners).map(([scope, value]) => `${scope}: ${value}`).join("; ");
+    return [`Memory owners: ${owners}`, `Effective availability: ${availability.effective}`];
+}
 function assertScopeNumbers(values, selection, label) {
     if (!isObject(values) || Object.keys(values).length !== selection.length
         || Object.keys(values).some(scope => !selection.includes(scope))
@@ -62,7 +96,8 @@ export function detailedStatus(snapshot, diagnostics) {
     const explicit = selection !== undefined;
     const selected = captureScopeSelection(explicit ? selection : DEFAULT_SCOPE_SELECTION);
     const requested = diagnostics.requestedSelection === undefined ? selected : captureScopeSelection(diagnostics.requestedSelection);
-    const available = diagnostics.temporal !== undefined && diagnostics.durableStateError === undefined;
+    const available = diagnostics.temporal !== undefined && diagnostics.durableStateError === undefined
+        && (diagnostics.availability === undefined || diagnostics.availability.effective === "available");
     if (available) {
         if (selected.some(scope => !requested.includes(scope)))
             throw new Error("State Flow materialization exceeds requested scopes");
@@ -101,7 +136,8 @@ export function detailedStatus(snapshot, diagnostics) {
         `Mode: ${snapshot.config.mode}`,
         ...(explicit ? [`Selected scopes: ${requested.join(", ")}`] : []),
         ...(available && selected.length !== requested.length ? [`Materialized scopes: ${selected.join(", ")}`] : []),
-        ...(isActiveRestorationBlocked(snapshot) ? ["Inference blocked: Active memory restoration failed. Use /state-flow-active for current memory or select Passive/Off for native context."] : []),
+        ...(diagnostics.availability === undefined ? [] : memoryAvailabilityLines(diagnostics.availability)),
+        ...((diagnostics.availability?.inferenceBlocked ?? isActiveRestorationBlocked(snapshot)) ? ["Inference blocked: Active memory restoration failed. Use /state-flow-active for current memory or select Passive/Off for native context."] : []),
         `Repository: ${diagnostics.repositoryRoot}`,
         ...(scopeKeys.length ? [`Scope keys: ${scopeKeys.join("; ")}`] : []),
         ...temporalLines,
@@ -110,7 +146,7 @@ export function detailedStatus(snapshot, diagnostics) {
         ...invalidationLines,
         ...(available ? scopeMemoryLines(diagnostics.scopeStates, selected) : []),
         ...(stateJson === undefined
-            ? ["Effective memory: unavailable"]
+            ? [`Effective memory: ${diagnostics.availability?.effective === "absent" ? "absent" : "unavailable"}`]
             : ["Effective memory:", "", stateJson]),
     ].join("\n");
 }

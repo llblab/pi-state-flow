@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { containsNull, isJsonValue, isObject } from "./json.js";
+import { InvalidStateFlowData, containsNull, isJsonValue, isObject } from "./json.js";
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const MODEL_FORBIDDEN_PROVENANCE_FIELDS = ["hash", "compiler", "sourceHash", "sourceFingerprint", "compilerRevision", "compiledAt", "source_hash_verified"];
 export function parseArtifactSourceFingerprint(value) {
@@ -159,11 +159,11 @@ export function parseArtifactProvenanceRegistry(value, context = "Artifact prove
     if (value === undefined)
         return {};
     if (!isObject(value))
-        throw new Error(`${context} must be a path-keyed JSON object`);
+        throw new InvalidStateFlowData(`${context} must be a path-keyed JSON object`);
     const known = new Set(["sourceHash", "sourceFingerprint", "compilerRevision", "compiledAt"]);
     return Object.fromEntries(Object.entries(value).map(([path, entry]) => {
         if (path.trim().length === 0)
-            throw new Error(`${context} path keys must be non-empty`);
+            throw new InvalidStateFlowData(`${context} path keys must be non-empty`);
         if (!isObject(entry) || !isJsonValue(entry) || Object.keys(entry).some(key => !known.has(key)))
             return [path, { malformed: true }];
         return [path, {

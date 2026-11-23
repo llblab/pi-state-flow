@@ -1,6 +1,6 @@
 import { captureScopeSelection } from "./selection.js";
 import { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT, validateRecentTransition } from "./history.js";
-import { applyPatch, containsNull, isJsonValue, isObject, sameJson } from "./json.js";
+import { InvalidStateFlowData, applyPatch, containsNull, isJsonValue, isObject, sameJson } from "./json.js";
 import { validateRetainedModules } from "./semantic-module.js";
 import { validateExternalPlanes, emptyState, isSemanticState, overlayStates, projectSemanticState } from "./state.js";
 const SCOPES = ["global", "cwd", "session"];
@@ -39,7 +39,7 @@ function trimCausalBasis(view) {
     for (const witness of view.causalBasis)
         witness.owners = captureScopeSelection(witness.owners);
 }
-function validateHistoryLimit(limit) {
+export function validateHistoryLimit(limit) {
     if (!Number.isSafeInteger(limit) || limit < 0 || limit > MAX_HISTORY_LIMIT) {
         throw new Error(`State Flow history limit must be an integer from 0 to ${MAX_HISTORY_LIMIT}`);
     }
@@ -50,7 +50,7 @@ function validateBoundary(boundary) {
         || !Number.isSafeInteger(boundary.position) || boundary.position < 0
         || (boundary.parent !== null && (typeof boundary.parent !== "string" || boundary.parent.trim().length === 0))
         || boundary.parent === boundary.id || (boundary.position === 0 && boundary.parent !== null)) {
-        throw new Error("Invalid State Flow temporal boundary");
+        throw new InvalidStateFlowData("Invalid State Flow temporal boundary");
     }
 }
 function validateState(state, location, modules) {
@@ -64,7 +64,7 @@ function validateState(state, location, modules) {
         : !isObject(state) ? "expected a semantic object"
             : hasNull ? "null is not allowed"
                 : "invalid semantic fields or artifact metadata";
-    throw new Error(`Invalid temporal materialized semantic state${location ? ` in ${location}` : ""}: ${reason}`);
+    throw new InvalidStateFlowData(`Invalid temporal materialized semantic state${location ? ` in ${location}` : ""}: ${reason}`);
 }
 function apply(state, patch, location, modules) {
     if (modules !== undefined)
@@ -85,7 +85,7 @@ export function validateScopeStream(value, scope, historyLimit = DEFAULT_HISTORY
         || !Number.isSafeInteger(value.revision) || value.revision < 0
         || !isObject(value.checkpoint) || Object.keys(value.checkpoint).sort().join(",") !== "state,through"
         || !Array.isArray(value.patches)) {
-        throw new Error("Invalid temporal checkpoint/tail envelope");
+        throw new InvalidStateFlowData("Invalid temporal checkpoint/tail envelope");
     }
     const stream = value;
     validateBoundary(stream.checkpoint.through);
@@ -95,20 +95,20 @@ export function validateScopeStream(value, scope, historyLimit = DEFAULT_HISTORY
     if (stream.patches.length > historyLimit)
         throw new Error(`Temporal scope tail exceeds configured history limit ${historyLimit}`);
     if (stream.revision < stream.patches.length)
-        throw new Error("Temporal scope revision predates its retained patch tail");
+        throw new InvalidStateFlowData("Temporal scope revision predates its retained patch tail");
     let previous = stream.checkpoint.through;
     let state = stream.checkpoint.state;
     const identities = new Set([previous.id]);
     for (const record of stream.patches) {
         if (!isObject(record) || Object.keys(record).sort().join(",") !== "patch,transition") {
-            throw new Error("Invalid temporal patch envelope");
+            throw new InvalidStateFlowData("Invalid temporal patch envelope");
         }
         validateBoundary(record.transition);
         if (record.transition.position <= previous.position || identities.has(record.transition.id)) {
-            throw new Error("Temporal scope tail is not ordered after its checkpoint");
+            throw new InvalidStateFlowData("Temporal scope tail is not ordered after its checkpoint");
         }
         if (record.transition.position === previous.position + 1 && record.transition.parent !== previous.id) {
-            throw new Error("Disconnected State Flow temporal ancestry");
+            throw new InvalidStateFlowData("Disconnected State Flow temporal ancestry");
         }
         validateRecentTransition({ id: record.transition.id, at: 0, transitions: [{ scope, patch: record.patch }] });
         const next = apply(state, record.patch, `${scope} tail`, stream.modules);
@@ -120,18 +120,18 @@ export function validateScopeStream(value, scope, historyLimit = DEFAULT_HISTORY
 export function validateTemporalLineage(value, historyLimit = DEFAULT_HISTORY_LIMIT) {
     validateHistoryLimit(historyLimit);
     if (!isJsonValue(value) || !Array.isArray(value) || value.length === 0 || value.length > historyLimit + 1) {
-        throw new Error(`Temporal lineage must contain between one and ${historyLimit + 1} boundaries`);
+        throw new InvalidStateFlowData(`Temporal lineage must contain between one and ${historyLimit + 1} boundaries`);
     }
     const seen = new Set();
     for (let index = 0; index < value.length; index++) {
         const boundary = value[index];
         validateBoundary(boundary);
         if (seen.has(boundary.id))
-            throw new Error("Duplicate State Flow temporal boundary");
+            throw new InvalidStateFlowData("Duplicate State Flow temporal boundary");
         seen.add(boundary.id);
         const previous = value[index - 1];
         if (previous && (boundary.position !== previous.position + 1 || boundary.parent !== previous.id)) {
-            throw new Error("Disconnected State Flow temporal lineage");
+            throw new InvalidStateFlowData("Disconnected State Flow temporal lineage");
         }
     }
 }
@@ -141,7 +141,7 @@ export function validateScopeLineage(stream, scope, lineage, historyLimit = DEFA
     validateScopeStream(stream, scope, historyLimit);
     const mismatch = scopeLineageMismatch(stream, lineage);
     if (mismatch)
-        throw new Error(mismatch);
+        throw new InvalidStateFlowData(mismatch);
 }
 /** Classify live shared drift only after both stream and lineage have passed their own validators. */
 export function scopeLineageMatches(stream, scope, lineage, historyLimit = DEFAULT_HISTORY_LIMIT) {
@@ -239,7 +239,7 @@ function validateTemporalCohort(view, activeOwners, historyLimit, witnessed = ne
     for (const boundary of identities.values()) {
         const previous = positions.get(boundary.position - 1);
         if (previous && boundary.parent !== previous.id)
-            throw new Error("Disconnected State Flow temporal ancestry");
+            throw new InvalidStateFlowData("Disconnected State Flow temporal ancestry");
     }
     for (const boundary of view.lineage.slice(1)) {
         if (!activeOwners.some((scope) => streamFor(view, scope).patches.some((record) => record.transition.id === boundary.id)) && !witnessed.has(boundary.id)) {
@@ -301,19 +301,19 @@ export function temporalCausalWitnesses(view, historyLimit = DEFAULT_HISTORY_LIM
 export function captureTemporalWitnesses(lineage, witnesses, historyLimit = DEFAULT_HISTORY_LIMIT) {
     validateTemporalLineage(lineage, historyLimit);
     if (!Array.isArray(witnesses))
-        throw new Error("Invalid accepted temporal witness array");
+        throw new InvalidStateFlowData("Invalid accepted temporal witness array");
     const boundaries = new Map(lineage.slice(1).map((boundary) => [boundary.id, boundary]));
     const admitted = [];
     let position = lineage[0].position;
     for (const witness of witnesses) {
         if (!isObject(witness) || Object.keys(witness).sort().join(",") !== "owners,transition")
-            throw new Error("Invalid accepted temporal witness");
+            throw new InvalidStateFlowData("Invalid accepted temporal witness");
         const transition = witness.transition;
         validateBoundary(transition);
         const identity = boundaries.get(transition.id);
         const sourceOwners = captureScopeSelection(witness.owners);
         if (!identity || !sameBoundary(identity, transition) || transition.position <= position || !sameJson(sourceOwners, witness.owners)) {
-            throw new Error("Accepted temporal witness does not match its lineage");
+            throw new InvalidStateFlowData("Accepted temporal witness does not match its lineage");
         }
         admitted.push({ transition: structuredClone(transition), owners: sourceOwners });
         position = transition.position;
@@ -333,7 +333,7 @@ export function restoreSelectedTemporalState(scopes, selection, lineage, witness
     for (const witness of skeleton)
         for (const scope of witness.owners.filter((owner) => wanted.includes(owner))) {
             if (!scopes[scope].patches.some((record) => sameBoundary(record.transition, witness.transition)))
-                throw new Error("Accepted temporal witness is missing its selected owner patch");
+                throw new InvalidStateFlowData("Accepted temporal witness is missing its selected owner patch");
         }
     const causalBasis = [];
     for (const transition of lineage.slice(1)) {
@@ -341,7 +341,7 @@ export function restoreSelectedTemporalState(scopes, selection, lineage, witness
             continue;
         const witness = admitted.get(transition.id);
         if (!witness)
-            throw new Error("Temporal boundary has no accepted owner witness");
+            throw new InvalidStateFlowData("Temporal boundary has no accepted owner witness");
         causalBasis.push(witness);
     }
     const view = { selection: wanted, lineage: structuredClone([...lineage]), scopes: structuredClone(scopes), causalBasis };

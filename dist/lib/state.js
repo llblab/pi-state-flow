@@ -1,5 +1,5 @@
 import { isArtifactRegistry, updateArtifactRegistry, } from "./artifact.js";
-import { applyPatch, isJsonValue, isObject, pruneEmptyObjects } from "./json.js";
+import { InvalidStateFlowData, applyPatch, isJsonValue, isObject, pruneEmptyObjects } from "./json.js";
 import { projectPlaneContext, SEMANTIC_PLANES } from "./planes.js";
 import { validateModuleObject, validateRetainedModules } from "./semantic-module.js";
 /** Value admission only: owners must already be a captured policy, never inferred from missing data. */
@@ -64,7 +64,7 @@ export function validateExternalPlanes(value, modules, patch = false) {
         if (Object.hasOwn(core, key))
             continue;
         if (!Object.hasOwn(modules, key) || !(patch && field === null || isObject(field))) {
-            throw new Error(`Undeclared or invalid State Flow external plane: ${key}`);
+            throw new InvalidStateFlowData(`Undeclared or invalid State Flow external plane: ${key}`);
         }
         if (field !== null)
             validateModuleObject(field);

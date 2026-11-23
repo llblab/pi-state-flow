@@ -76,8 +76,15 @@ export interface SelectedLifecycleDocument {
 /** Recognized incompatible evidence is not corrupt memory and must never trigger a reset. */
 export declare class UnsupportedLifecycleFormatError extends Error {
 }
+/** Identify a supported, owned lifecycle without interpreting config, lineage or private authority. */
+export declare function parseSelectedLifecycleHeader(source: string, cwd: string, sessionId: string): {
+    baseline: boolean;
+    metadata: JsonObject;
+    source: string;
+};
 /** Decode Baseline or V2; classify a retired/unknown runtime before decoding captured config bytes. */
 export declare function parseSelectedLifecycle(configSource: string | undefined | (() => string | undefined), runtimeSource: string | undefined, cwd: string, sessionId: string): SelectedLifecycleDocument | undefined;
+export declare function decodeSelectedLifecycle(header: ReturnType<typeof parseSelectedLifecycleHeader>, config: string | undefined, cwd: string, sessionId: string): SelectedLifecycleDocument;
 /** Pure wire codec. Missing owner claims stay missing; only the storage owner can admit their replay. */
 export declare function parseBaselineLifecycle(config: string, source: string, cwd: string, sessionId: string): SelectedSessionRuntime;
 /** Serialize selected lifecycle proof without repeating transition identities. No file authority. */

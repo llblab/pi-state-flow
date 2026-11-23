@@ -9,7 +9,7 @@ State Flow requires matching `pi-coding-agent`, `pi-agent-core`, `pi-ai` and `pi
 **0.27.2 local candidate checks:** Linux/x64, Node 22.19.0 and 24.21.0, Git 2.56.0 and matching Pi SDK 1.0.0 packages; see the [0.27.2 release record](../CHANGELOG.md). These are local deterministic checks, not new exact-tag release CI or installed-client certification.
 
 - Repository validation covers tests, typecheck, build, compiled imports and package dry-run. Results apply to the exact source and dependency identities validated.
-- The release workflow validates Node **22.19.0** and **24**, then publishes on Node 24. The recorded v0.27.1 release passed 1,696 tests per supported Node; this is baseline evidence, not a validation result for later edits.
+- The [release workflow](../.github/workflows/release.yml) validates the minimum Node **22.19.0** and the current **26.x** release, then uses Node **26.x** for publishing. The recorded v0.27.1 release passed 1,696 tests per matrix entry at the time; this is historical evidence, not a validation result for later edits.
 - Tests use isolated stores and scripted providers through the real Pi SDK. They do not certify installed Telegram/TUI reachability, live provider behavior, other operating systems, mixed SDK versions or untested newer SDK releases.
 
 Detailed behavioral witnesses live in [temporal acceptance](temporal-acceptance.md); benchmark methodology and source-bound results live in [performance](performance.md).
@@ -28,9 +28,9 @@ Since 0.27.6 the advertised tools are `state_flow_read` and `state_flow_patch`. 
 
 Core-only canonical scope metadata remains **version 3**, with `strategy` and `tactics` fields. The implemented **version 4** codec additionally retains external object-plane descriptors and opaque values independently of loaded definitions; absent internal `modules` metadata keeps existing v3 output. Since **1.0.0**, retired versions **1/2** are refused explicitly instead of translated, and target-format `contract`/`working` roots stay reserved; nested domain keys remain ordinary JSON. Unsupported versions fail closed. These scope versions are distinct from Session lifecycle and public module API v1. External-root tools, captured Active/Passive context and Active producers shipped in 0.27.0; see the [public module boundary](public-module-contract.md).
 
-Existing exported names use Strategy/Tactics fields, callbacks, schemas and paths, not old-field aliases. Quiesce unsupported writers: current version checks cannot retrofit already-deployed unsafe low-level callers. See [operator recovery](usage.md#moving-a-store-and-supported-formats) for the supported 0.x conversion route and exact-byte backup rules.
+Existing exported names use Strategy/Tactics fields, callbacks, schemas and paths, not old-field aliases. Quiesce unsupported writers: current version checks cannot retrofit already-deployed unsafe low-level callers. See [operator recovery](usage.md#moving-a-store-and-supported-formats) for preparation with a prior 0.x release and exact-byte backup rules.
 
-Current descriptor and supported lifecycle upgrades require owned semantic acceptance; inspection and runtime-only mode persistence cannot publish them. The serialized scope preflight rejects invalid UTF-8 and preserves exact bytes of an already-target cohort when no descriptor change is requested. A detached preflight result is not filesystem, private-session, or publication authority. Opaque backup and rollback preserve original bytes without admitting them as semantic state.
+Current descriptor and supported lifecycle upgrades require owned semantic acceptance; inspection and runtime-only mode persistence cannot publish them. The serialized scope preflight rejects invalid UTF-8 and preserves exact bytes of an already-target cohort when no descriptor change is requested. A detached preflight result is not filesystem, private-session, or publication authority. Opaque backup and rollback preserve original bytes without admitting them as semantic state. [Filesystem recovery](filesystem-recovery.md#self-healing) does not widen admission or provide another conversion route.
 
 ## Public host seams
 

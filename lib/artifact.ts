@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { containsNull, isJsonValue, isObject, type JsonObject, type JsonValue } from "./json.ts";
+import { InvalidStateFlowData, containsNull, isJsonValue, isObject, type JsonObject, type JsonValue } from "./json.ts";
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const MODEL_FORBIDDEN_PROVENANCE_FIELDS = ["hash", "compiler", "sourceHash", "sourceFingerprint", "compilerRevision", "compiledAt", "source_hash_verified"] as const;
@@ -269,10 +269,10 @@ function isProvenanceEntry(value: unknown): value is ArtifactProvenance {
 /** Parse one scope `meta.json` provenance registry; missing input means no recorded evidence. */
 export function parseArtifactProvenanceRegistry(value: unknown, context = "Artifact provenance"): ArtifactProvenanceRegistry {
 	if (value === undefined) return {};
-	if (!isObject(value)) throw new Error(`${context} must be a path-keyed JSON object`);
+	if (!isObject(value)) throw new InvalidStateFlowData(`${context} must be a path-keyed JSON object`);
 	const known = new Set(["sourceHash", "sourceFingerprint", "compilerRevision", "compiledAt"]);
 	return Object.fromEntries(Object.entries(value).map(([path, entry]) => {
-		if (path.trim().length === 0) throw new Error(`${context} path keys must be non-empty`);
+		if (path.trim().length === 0) throw new InvalidStateFlowData(`${context} path keys must be non-empty`);
 		if (!isObject(entry) || !isJsonValue(entry) || Object.keys(entry).some(key => !known.has(key))) return [path, { malformed: true }];
 		return [path, {
 			...(Object.hasOwn(entry, "sourceHash") ? { sourceHash: entry.sourceHash } : {}),

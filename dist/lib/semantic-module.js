@@ -1,13 +1,13 @@
-import { isJsonValue, isObject } from "./json.js";
+import { InvalidStateFlowData, isJsonValue, isObject } from "./json.js";
 export function validateRetainedModules(value) {
     if (!isObject(value) || !isJsonValue(value) || !losslessStoredJson(value))
-        throw new Error("Invalid State Flow retained modules");
+        throw new InvalidStateFlowData("Invalid State Flow retained modules");
     for (const [id, descriptor] of Object.entries(value)) {
         if (!/^x_[a-z][a-z0-9_]*$/.test(id) || !isObject(descriptor)
             || Object.keys(descriptor).sort().join(",") !== "immutable,schemaVersion"
             || !Number.isSafeInteger(descriptor.schemaVersion) || descriptor.schemaVersion <= 0
             || typeof descriptor.immutable !== "boolean")
-            throw new Error(`Invalid State Flow retained module descriptor: ${id}`);
+            throw new InvalidStateFlowData(`Invalid State Flow retained module descriptor: ${id}`);
     }
 }
 /** Descriptors cannot be removed, recycled or implicitly change schema/policy. */

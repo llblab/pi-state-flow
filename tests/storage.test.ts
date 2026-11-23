@@ -376,7 +376,10 @@ test("metadata4 owned conversion uses exact-byte backup/CAS/rollback and selecte
 		assert.equal(reads.includes(f.privatePaths.checkpoint), false);
 		assert.equal(reads.includes(f.privatePaths.meta), false);
 		const before = captureTestBasis(f.cwd, f.sessionId, f.root);
-		await assert.rejects(f.load(["session"]), /encoded data|UTF-8/i);
+		const refused = await observeReads(async () => {
+			await assert.rejects(f.load(["session"]), /session metadata contains invalid JSON/);
+		});
+		assert.equal(refused.reads.includes(f.privatePaths.checkpoint), false, "malformed selected header refuses before body I/O");
 		assert.deepEqual(captureTestBasis(f.cwd, f.sessionId, f.root), before);
 		rmSync(f.privatePaths.patches);
 		await assert.rejects(f.load(["cwd"]), /Acquired.*incomplete/);

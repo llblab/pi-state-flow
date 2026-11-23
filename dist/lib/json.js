@@ -1,4 +1,39 @@
 import { createHash } from "node:crypto";
+/** Expected rejection of input data. This is not evidence about any stored owner. */
+export class InvalidStateFlowData extends Error {
+}
+// Native decoder messages can echo private input. They are evidence for internal diagnosis,
+// not a public Error.cause chain (which the transport deliberately flattens).
+const nativeDecoderCauses = new WeakMap();
+export function nativeDecoderCause(error) {
+    return error instanceof InvalidStateFlowData ? nativeDecoderCauses.get(error) : undefined;
+}
+function rejectedDecode(message, cause) {
+    const error = new InvalidStateFlowData(message);
+    nativeDecoderCauses.set(error, cause);
+    return error;
+}
+export function decodeUtf8(bytes, label) {
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    try {
+        return decoder.decode(bytes);
+    }
+    catch (cause) {
+        if (!(cause instanceof TypeError) || cause.code !== "ERR_ENCODING_INVALID_ENCODED_DATA")
+            throw cause;
+        throw rejectedDecode(`${label} is not valid UTF-8`, cause);
+    }
+}
+export function decodeJson(source, label) {
+    try {
+        return JSON.parse(source);
+    }
+    catch (cause) {
+        if (!(cause instanceof SyntaxError))
+            throw cause;
+        throw rejectedDecode(`${label} contains invalid JSON`, cause);
+    }
+}
 const ARRAY_INDEX_SELECTOR = /^\[(0|[1-9]\d*)\]$/;
 function isIndexedArrayPatch(value) {
     const keys = Object.keys(value);
@@ -19,10 +54,10 @@ function applyOwnedArrayPatch(state, patch, missingDeletions, path, unavailableP
     for (const [selector, value] of Object.entries(patch)) {
         const index = Number(ARRAY_INDEX_SELECTOR.exec(selector)[1]);
         if (!Number.isSafeInteger(index) || index >= next.length) {
-            throw new Error(`State patch array index ${selector} is out of bounds for length ${next.length}`);
+            throw new InvalidStateFlowData(`State patch array index ${selector} is out of bounds for length ${next.length}`);
         }
         if (value === null)
-            throw new Error(`State patch array index ${selector} cannot be deleted; replace the whole array instead`);
+            throw new InvalidStateFlowData(`State patch array index ${selector} cannot be deleted; replace the whole array instead`);
         const owns = Object.hasOwn(next, index);
         const current = next[index];
         const materialized = applyOwnedValue(current, value, owns, missingDeletions, `${path}/${index}`, unavailablePath);
@@ -107,9 +142,9 @@ export function isObject(value) {
 }
 export function validatePatch(value) {
     if (!isObject(value))
-        throw new Error("State patch must be a JSON object");
+        throw new InvalidStateFlowData("State patch must be a JSON object");
     if (!isJsonValue(value))
-        throw new Error("State patch must contain finite, acyclic JSON data");
+        throw new InvalidStateFlowData("State patch must contain finite, acyclic JSON data");
 }
 export function canonicalJson(value) {
     if (!isJsonValue(value))

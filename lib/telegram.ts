@@ -5,7 +5,7 @@
 
 import { conciseDiagnostic, diagnosticText } from "./protocol.ts";
 import type { StateFlowMode } from "./snapshot.ts";
-import { formatScopeRevisionVector } from "./status.ts";
+import { formatScopeRevisionVector, memoryAvailabilityLines, type MemoryAvailability } from "./status.ts";
 import type { ScopeRevisions } from "./temporal.ts";
 import { captureScopeSelection, DEFAULT_SCOPE_SELECTION, type ScopeSelection } from "./selection.ts";
 
@@ -26,6 +26,7 @@ export interface StateFlowTelegramSnapshot {
 	scopes?: ScopeSelection;
 	/** Failed Active restoration fences inference without silently selecting an inactive mode. */
 	inferenceBlocked?: boolean;
+	availability?: MemoryAvailability;
 	/** Legacy branch step retained for existing adapter ports; current runtime ports also supply owner revisions. */
 	step: number;
 	revisions?: Partial<ScopeRevisions>;
@@ -137,7 +138,7 @@ export interface StateFlowTelegramAdapter {
 
 /** Main-menu section label shows only the current session mode. */
 export function formatStateFlowSectionLabel(snapshot: StateFlowTelegramSnapshot): string {
-	return `🌀 State Flow: ${snapshot.mode}${snapshot.mode === "active" && snapshot.inferenceBlocked ? " (blocked)" : ""}`;
+	return `🌀 State Flow: ${snapshot.mode}${snapshot.mode === "active" && (snapshot.availability?.inferenceBlocked ?? snapshot.inferenceBlocked) ? " (blocked)" : ""}`;
 }
 
 export const STATE_FLOW_MODES = ["off", "passive", "active"] as const satisfies readonly StateFlowMode[];
@@ -186,7 +187,7 @@ export function buildStateFlowSectionView(
 	return {
 		text: [
 			`<b>🌀 State Flow:</b> <code>${snapshot.mode}</code>`,
-			...(snapshot.mode === "active" && snapshot.inferenceBlocked ? [
+			...(snapshot.mode === "active" && (snapshot.availability?.inferenceBlocked ?? snapshot.inferenceBlocked) ? [
 				"",
 				"<b>Inference blocked:</b> Active memory restoration failed. Select Active to accept current session memory, or Passive/Off to permit native context.",
 			] : []),
@@ -196,6 +197,7 @@ export function buildStateFlowSectionView(
 			`<code>-</code> <code>passive</code>: regular chat with memory tools; available memory from the selected ${scopes.length === 1 ? "scope" : "scopes"} enters the agent's context.`,
 			"<code>-</code> <code>active</code>: same memory access; each completed answer closes a cycle, and the next request starts from saved state, not the full chat.",
 			"",
+			...(snapshot.availability && snapshot.mode !== "off" ? [...memoryAvailabilityLines(snapshot.availability), ""] : []),
 			"<b>Inspect participating memory</b> — view available stored state even in Off:",
 			...scopes.map(scope => `<code>-</code> <code>${scope}</code>: ${STATE_FLOW_SCOPE_DESCRIPTIONS[scope]}`),
 			...(scopes.length > 1

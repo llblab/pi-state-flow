@@ -1,6 +1,7 @@
 import { parseRetainedPiCheckpoint, prepareRetainedPolicyMigration, readCheckpointMode, isStateFlowMode } from "./snapshot.js";
 import { captureScopeSelection, DEFAULT_SCOPE_SELECTION } from "./selection.js";
-import { isJsonValue, isObject } from "./json.js";
+import { isJsonValue, isObject, sameJson } from "./json.js";
+import { unresolvedRecovery } from "./healing.js";
 import { isAbsolute, resolve } from "node:path";
 import { RenewableLifetime } from "./operation.js";
 export const SNAPSHOT_ENTRY_TYPE = "state-flow-snapshot";
@@ -94,6 +95,11 @@ export class NativeToolRequestCorrelation {
             revalidate,
         });
     }
+    /** Capture the exact same enabled request later returned for its finalized batch. */
+    projectedRequest() {
+        this.preparing().revalidate();
+        return this.#turn?.request;
+    }
     /** Provider-only revalidation of captured context data; callbacks must neither acquire nor recurse into this request. */
     bindPreparedContext(check) {
         this.preparing().revalidate();
@@ -166,6 +172,155 @@ export class NativeToolRequestCorrelation {
         this.#context = undefined;
         this.#calls.clear();
         previous?.controller.abort();
+    }
+}
+export const RECOVERY_ENTRY_TYPE = "state-flow-recovery";
+export function nativeRecoveryReceipt(owner, incidents) {
+    return { version: 1, owner: { ...owner }, incidents: structuredClone(incidents) };
+}
+/** Consult the physical session's append-only entries, not its navigable branch. */
+export function readNativeRecoveryReceipt(entries, owner) {
+    for (let index = entries.length - 1; index >= 0; index--) {
+        const entry = entries[index];
+        if (entry.type !== "custom" || entry.customType !== RECOVERY_ENTRY_TYPE || !isObject(entry.data))
+            continue;
+        const data = entry.data;
+        if (!isJsonValue(data.owner) || !sameJson(data.owner, owner))
+            continue;
+        const seen = new Set();
+        if (data.version !== 1 || !Array.isArray(data.incidents) || !isJsonValue(data)
+            || Object.keys(data).sort().join(",") !== "incidents,owner,version")
+            throw new Error("Unsupported or invalid State Flow recovery receipt");
+        return data.incidents.map(incident => {
+            if (!isObject(incident) || !["fact,id,scopes", "acknowledged,fact,id,scopes"].includes(Object.keys(incident).sort().join(","))
+                || typeof incident.id !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(incident.id)
+                || seen.has(incident.id) || !["attempted", "none", "restored", "incomplete", "reset", "missing"].includes(incident.fact)) {
+                throw new Error("Invalid State Flow recovery receipt incident");
+            }
+            const scopes = captureScopeSelection(incident.scopes);
+            if (!sameJson(scopes, incident.scopes) || (incident.fact === "missing" && (scopes.length !== 1 || scopes[0] !== "session"))) {
+                throw new Error("Invalid State Flow recovery receipt ownership footprint");
+            }
+            seen.add(incident.id);
+            const fact = { id: incident.id, scopes, fact: incident.fact };
+            if (!Object.hasOwn(incident, "acknowledged"))
+                return fact;
+            if (incident.acknowledged !== true || !unresolvedRecovery(fact))
+                throw new Error("Invalid State Flow recovery acknowledgement");
+            return { ...fact, acknowledged: true };
+        });
+    }
+    return [];
+}
+/** The compact current receipt of one native attachment. Quarantine, writes and run delivery stay outside it. */
+export class NativeRecoveryBinding {
+    owner;
+    #persisted;
+    #local = new Map();
+    #currentProof;
+    constructor(owner, entries) {
+        this.owner = Object.freeze({ ...owner });
+        this.#persisted = readNativeRecoveryReceipt(entries, owner);
+    }
+    incidents() {
+        const incidents = new Map(this.#persisted.map(incident => [incident.id, incident]));
+        for (const [id, incident] of this.#local)
+            incidents.set(id, incident);
+        return [...incidents.values()];
+    }
+    /** A present-day acceptance does not change the historical fact or its delivery state. */
+    proveCurrent(runtime, scopes, facts) {
+        this.#currentProof = { runtime, scopes: captureScopeSelection(scopes), facts: new Map(facts.map(fact => [fact.id, structuredClone(fact)])) };
+    }
+    provesCurrent(runtime, incident, required) {
+        const proof = this.#currentProof;
+        if (!proof || proof.runtime !== runtime || required.some(scope => !proof.scopes.includes(scope)))
+            return false;
+        const proven = proof.facts.get(incident.id);
+        return proven?.fact === incident.fact && sameJson(proven.scopes, incident.scopes);
+    }
+    record(incident, append) {
+        const next = new Map(this.#persisted.map(item => [item.id, item]));
+        next.set(incident.id, structuredClone(incident));
+        const incidents = [...next.values()];
+        append(nativeRecoveryReceipt(this.owner, incidents));
+        this.#persisted = incidents;
+        this.#local.delete(incident.id);
+    }
+    /** Acknowledge the exact displayed versions. Never replace an unconfirmed durable fact with a local assumption. */
+    acknowledge(displayed, append) {
+        const seen = new Map(displayed.map(item => [item.id, item]));
+        const acknowledged = [];
+        const next = this.#persisted.flatMap(item => {
+            const fact = seen.get(item.id), live = this.#local.get(item.id);
+            if (!fact || item.acknowledged || (live && !sameJson(fact, live)) || !sameJson(fact, item))
+                return [item];
+            acknowledged.push(item.id);
+            return unresolvedRecovery(item) ? [{ ...item, acknowledged: true }] : [];
+        });
+        if (acknowledged.length === 0)
+            return;
+        append(nativeRecoveryReceipt(this.owner, next));
+        this.#persisted = next;
+        for (const id of acknowledged)
+            this.#local.delete(id);
+    }
+    /** A live effect may be known even if it could not be added to the native file. */
+    remember(incident) { this.#local.set(incident.id, structuredClone(incident)); }
+}
+/** Evidence for delivery, not a native lease and never proof of recovery success. */
+export class RecoveryNoticeDelivery {
+    #offer;
+    #answer;
+    get hasAnswer() { return this.#answer !== undefined; }
+    reset() { this.#offer = this.#answer = undefined; }
+    offer(binding, facts, operation, request) {
+        this.#offer = facts.length ? { binding, facts: structuredClone(facts), operation, request } : undefined;
+    }
+    answer(operation, request, entryId) {
+        const offer = this.#offer;
+        if (offer?.operation !== operation || offer.request !== request || operation.aborted)
+            return;
+        this.#offer = undefined;
+        this.#answer = { ...offer, entryId, ended: false, settling: false };
+    }
+    end(operation, successful) {
+        const answer = this.#answer;
+        if (!answer || answer.operation !== operation)
+            return;
+        if (!successful || operation.aborted) {
+            this.reset();
+            return;
+        }
+        answer.ended = true;
+    }
+    settling(binding, entryId, operation) {
+        const answer = this.#answer;
+        if (answer?.ended && answer.binding === binding && answer.entryId === entryId && (!operation || operation === answer.operation))
+            answer.settling = true;
+    }
+    settled(binding, entryId, operation) {
+        const answer = this.#answer;
+        if (!answer?.settling || answer.binding !== binding || answer.entryId !== entryId || (operation && operation !== answer.operation))
+            return [];
+        this.reset();
+        if (answer.operation.aborted)
+            return [];
+        answer.request.revalidate();
+        return answer.facts;
+    }
+}
+/** Use Pi's append-only lookup once per exact physical attachment, not at every use or tree step. */
+export class NativeRecoveryReceipts {
+    delivery = new RecoveryNoticeDelivery();
+    #current;
+    #reader;
+    bind(reader, owner) {
+        if (!this.#current || this.#reader !== reader || !sameJson(this.#current.owner, owner)) {
+            this.#current = new NativeRecoveryBinding(owner, reader.getEntries());
+            this.#reader = reader;
+        }
+        return this.#current;
     }
 }
 /** Enumerate active-branch snapshots newest-first while containing hostile entries. */

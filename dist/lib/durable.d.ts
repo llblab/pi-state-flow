@@ -1,4 +1,5 @@
 import { type ArtifactProvenanceRegistry } from "./artifact.ts";
+import { type ScopeMigrationSources } from "./migration.ts";
 import { type ScopeStream, type TemporalState } from "./temporal.ts";
 import { type StateScope } from "./state.ts";
 /** Canonical semantic sources plus runtime-owned temporal metadata. */
@@ -28,6 +29,8 @@ export type ScopeStreamPresence = {
 };
 /** Distinguish a wholly absent semantic cohort from partial or malformed surviving authority. */
 export declare function classifyScopeStream(checkpointSource: string | undefined, patchesSource: string | undefined, scope: StateScope, expectedCwd?: string, metaSource?: string): ScopeStreamPresence;
+/** Decode opaque sources through the same semantic admission path used for conversion. */
+export declare function decodeScopeStream(sources: ScopeMigrationSources, scope: StateScope, expectedCwd?: string): ScopeStream;
 /** Decode the entire bounded replay input before accepting any materialized state. */
 export declare function parseScopeStream(checkpointSource: string | undefined, patchesSource: string | undefined, scope: StateScope, expectedCwd?: string, metaSource?: string): ScopeStream | undefined;
 export interface TemporalScopePaths {
@@ -78,6 +81,8 @@ export declare function cwdScopePaths(cwd: string, repositoryRoot?: string): Sco
 export declare function sessionScopePaths(cwd: string, sessionId: string, repositoryRoot?: string, sessionKey?: string): ScopePaths;
 /** Exact canonical semantic and runtime file shapes. */
 export declare function isStateFlowOwnedPath(candidate: string, repositoryRoot?: string): boolean;
+/** Capture physical ancestry without opening file bodies or creating directories. */
+export declare function captureDirectoryBasis(directories: readonly string[]): Record<string, string>;
 export interface OwnedFilePresence {
     path: string;
     present: boolean;
@@ -91,9 +96,11 @@ export interface OwnedFileUpdate {
     /** Omission means removal of this exact owned file, not a semantic null patch. */
     content?: string;
 }
-/** Verify the publisher's exact output before commit or rollback, without trusting changed worktree bytes. */
-export declare function assertOwnedFileUpdates(updates: readonly OwnedFileUpdate[], repositoryRoot: string): void;
-/** Publish a prevalidated file cohort, preserving original bytes for failed preparation/publication. */
-export declare function writeOwnedFileUpdates(updates: readonly OwnedFileUpdate[], bases: readonly DurableFileBase[], repositoryRoot: string): string[];
-/** Restore exact pre-transition bytes only while files still match this publisher's output. */
-export declare function restoreDurableFileBases(bases: readonly DurableFileBase[], repositoryRoot: string, expectedCurrent: readonly OwnedFileUpdate[]): void;
+/** A caught publication failure, with evidence about its actual canonical effects. */
+export declare class OwnedFilePublicationError extends AggregateError {
+    readonly effect: "unchanged" | "restored" | "incomplete";
+    readonly unresolvedPaths: readonly string[];
+    constructor(causes: unknown[], effect: OwnedFilePublicationError["effect"], unresolvedPaths: readonly string[]);
+}
+/** Publish and verify one provisional cohort; restore every touched path still owned by this operation. */
+export declare function writeOwnedFileUpdates(updates: readonly OwnedFileUpdate[], bases: readonly DurableFileBase[], repositoryRoot: string, checkDependencies?: (phase: "before" | "after") => void): string[];

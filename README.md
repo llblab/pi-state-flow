@@ -4,7 +4,9 @@
 
 **Keep the decisions. Keep Pi’s tool loop.**
 
-State Flow gives Pi durable memory across requests and sessions. Active mode carries accepted memory forward instead of completed conversation. Pi still runs the tools and keeps the inspectable session trace.
+State Flow gives Pi durable, structured memory across requests and sessions. Choose **when** to use memory (mode), **where** it belongs (scope), and **what** it records (semantic plane). Six planes come built in; companion extensions can add their own.
+
+In Active mode, accepted memory carries continuity between runs instead of the completed conversation. Pi still runs the tools and keeps the inspectable session trace.
 
 ## Installation and activation
 
@@ -16,6 +18,12 @@ Install from npm in your shell:
 pi install npm:@llblab/pi-state-flow
 ```
 
+Or from Git:
+
+```bash
+pi install git:github.com/llblab/pi-state-flow
+```
+
 New sessions default to **Off**. To enable Active for this session, run this in Pi:
 
 ```text
@@ -23,14 +31,6 @@ New sessions default to **Off**. To enable Active for this session, run this in 
 ```
 
 Starting Active in an existing conversation keeps its available context for one run so the agent can record what matters. Inspect memory with `/state-flow-status`.
-
-### Active, passive, off
-
-- **Active — `/state-flow-active`:** Carry accepted memory into the next run. The current request, tool results and steering stay in Pi’s ordinary working context while the run is underway.
-- **Passive — `/state-flow-passive`:** Keep ordinary conversation continuity. Read or update memory as needed; validated memory can also appear in context.
-- **Off — `/state-flow-off`:** Remove State Flow tools and context without deleting stored memory or Pi history.
-
-Mode changes are local to the session. See [new-session defaults](docs/usage.md#configuration), [mode behavior](docs/usage.md#active-passive-and-configured-off) and [Telegram controls](docs/usage.md#telegram-controls).
 
 ## How it works
 
@@ -42,6 +42,14 @@ The explicit-state idea comes from [SKILL.state](https://arxiv.org/html/2608.262
 This can reduce repeated transcript processing without guaranteeing lower latency or cost. See [what enters model context](docs/architecture.md#model-context-presentation) and [performance evidence](docs/performance.md).
 
 ## State model
+
+### Active, passive, off
+
+- **Active** — `/state-flow-active` carries accepted memory between runs while Pi keeps the current request, tool results and steering in context.
+- **Passive** — `/state-flow-passive` keeps ordinary conversation continuity. Memory tools remain available, and validated memory can appear in context.
+- **Off** — `/state-flow-off` removes State Flow tools and context without deleting stored memory or Pi history.
+
+Mode changes are local to the session. See [mode behavior and defaults](docs/usage.md#active-passive-and-configured-off) and [Telegram controls](docs/usage.md#telegram-controls).
 
 ### Scopes and effective memory
 
@@ -55,11 +63,22 @@ All three scopes participate by default. To choose only project memory, use `/st
 
 ### Semantic planes
 
-- **Working memory:** `strategy` for decisions and constraints, `intents` for chosen actions, `tactics` for progress and blockers, `artifacts` for source-addressed knowledge.
-- **On demand:** `lazy` holds supporting detail outside automatic context. Read it when needed.
-- **Runtime-owned:** `response` holds the latest accepted answer captured in Active when Session participates.
+A scope tells you **who owns a value**; a plane tells you **what the value is for**. State Flow has six built-in planes:
 
-See [Semantic Layers and worked examples](docs/semantic-layers.md) and [progressive lazy reads](docs/lazy-state.md).
+- **`intents` — Commitments.** Chosen actions or outcomes still to pursue, not ideas merely discussed.
+- **`strategy` — Decisions and constraints.** What governs the work, which approach was chosen, and why.
+- **`tactics` — Execution state.** Verified progress, blockers, and the next useful check or action.
+- **`artifacts` — Source-linked knowledge.** Exact source paths, descriptions, and compiled findings.
+- **`response` — Last accepted answer.** The runtime records it in Active when Session participates; the agent does not patch it.
+- **`lazy` — Detail on demand.** Notes, procedures, and evidence the agent reads explicitly instead of carrying in automatic context.
+
+See [worked examples](docs/semantic-layers.md) and [progressive lazy reads](docs/lazy-state.md).
+
+### Custom semantic planes
+
+State Flow is also a **platform for domain-specific memory**. A regular Pi companion extension can register a typed plane through the public `@llblab/pi-state-flow/modules` API. For example, a code-review companion could keep structured findings in `x_acme_reviews` and surface the relevant ones in context. The companion defines and validates its data; State Flow handles scoped storage, history, and read access. Compatible mutable planes can also use the existing patch tool.
+
+[Build a companion module](docs/public-module-contract.md#public-entry-and-lifecycle) with the minimal TypeScript example. No fork of State Flow is needed.
 
 ## Incremental updates and history
 
@@ -103,7 +122,5 @@ State Flow adds memory, not a scheduler, background inference or automatic refer
 - [SDK compatibility](docs/compatibility.md) — Supported hosts, library APIs and verification limits.
 - [Public modules](docs/public-module-contract.md) — Trusted companion-extension callbacks, not sandboxed plugins.
 - [Acceptance map](docs/temporal-acceptance.md) — Guarantees tied to deterministic tests, not live-model or installed-client claims.
-
-To install from Git instead of npm, use `pi install git:github.com/llblab/pi-state-flow`.
 
 From a source checkout, run `npm install` and `npm run validate`. See `benchmarks/README.md` for opt-in measurements. Project context: [AGENTS.md](AGENTS.md), [BACKLOG.md](BACKLOG.md), [CHANGELOG.md](CHANGELOG.md).

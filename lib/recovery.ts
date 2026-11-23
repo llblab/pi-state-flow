@@ -1,4 +1,5 @@
 import { DEFAULT_SCOPE_SELECTION } from "./selection.ts";
+import { PublicationBusyError, TransientStorageAcquisitionError } from "./storage.ts";
 import { prepareRetainedPolicyMigration, parseRetainedPiCheckpoint, migrationFailure, type InactiveMode, type RetainedBoundaryCheckpoint, type RetainedPiCheckpoint, type Snapshot, type StateFlowMode } from "./snapshot.ts";
 
 export type RetainedCheckpointSelection =
@@ -45,6 +46,39 @@ export function waitForRecovery<T>(operation: Promise<T>, signal: AbortSignal): 
 		if (signal.aborted) aborted();
 		else signal.addEventListener("abort", aborted, { once: true });
 	});
+}
+
+export function isTransientCurrentAcquisition(error: unknown): boolean {
+	return error instanceof PublicationBusyError || error instanceof TransientStorageAcquisitionError;
+}
+
+interface ActiveRetrySource {
+	readonly checkpoint: RetainedBoundaryCheckpoint;
+	readonly preserveUncompiledHistory: boolean;
+	readonly current: () => boolean;
+}
+
+/** A volatile prompt-bound opportunity, never a native marker, file receipt, or origin grant. */
+export class ActiveAcquisitionRetry {
+	#eligible?: { blocked: Snapshot; source: ActiveRetrySource };
+	#reported?: string;
+
+	retain(blocked: Snapshot, cause: unknown, source: ActiveRetrySource): void {
+		this.#eligible = isTransientCurrentAcquisition(cause) ? { blocked, source } : undefined;
+	}
+
+	get(blocked: Snapshot): ActiveRetrySource | undefined {
+		const candidate = this.#eligible;
+		return candidate?.blocked === blocked && candidate.source.current() ? candidate.source : undefined;
+	}
+
+	shouldReport(reason: string): boolean {
+		if (this.#reported === reason) return false;
+		this.#reported = reason;
+		return true;
+	}
+
+	clear(): void { this.#eligible = this.#reported = undefined; }
 }
 
 /** A selected boundary that cannot be resolved stays unavailable; callers never fall through to older evidence. */

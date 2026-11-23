@@ -5,7 +5,7 @@ import {
 	type ArtifactModelHints,
 	type ArtifactRegistry,
 } from "./artifact.ts";
-import { applyPatch, isJsonValue, isObject, pruneEmptyObjects, type JsonObject } from "./json.ts";
+import { InvalidStateFlowData, applyPatch, isJsonValue, isObject, pruneEmptyObjects, type JsonObject } from "./json.ts";
 import { projectPlaneContext, SEMANTIC_PLANES } from "./planes.ts";
 import { validateModuleObject, validateRetainedModules, type RetainedModules } from "./semantic-module.ts";
 
@@ -160,7 +160,7 @@ export function validateExternalPlanes(value: JsonObject, modules: RetainedModul
 	for (const [key, field] of Object.entries(value)) {
 		if (Object.hasOwn(core, key)) continue;
 		if (!Object.hasOwn(modules, key) || !(patch && field === null || isObject(field))) {
-			throw new Error(`Undeclared or invalid State Flow external plane: ${key}`);
+			throw new InvalidStateFlowData(`Undeclared or invalid State Flow external plane: ${key}`);
 		}
 		if (field !== null) validateModuleObject(field);
 	}

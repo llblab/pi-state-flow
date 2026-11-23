@@ -2,6 +2,12 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObj
 export interface JsonObject {
     [key: string]: JsonValue;
 }
+/** Expected rejection of input data. This is not evidence about any stored owner. */
+export declare class InvalidStateFlowData extends Error {
+}
+export declare function nativeDecoderCause(error: unknown): Error | undefined;
+export declare function decodeUtf8(bytes: Uint8Array, label: string): string;
+export declare function decodeJson(source: string, label: string): unknown;
 export interface MissingDeletion {
     /** JSON Pointer paths relative to the patched object. */
     path: string;

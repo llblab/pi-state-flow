@@ -1,7 +1,7 @@
 // Domain: semantic-module contracts and isolated context/producer evaluation.
 // Excludes: storage, native admission, scheduling, inference clients and publication.
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { isJsonValue, isObject, type JsonObject, type JsonValue } from "./json.ts";
+import { InvalidStateFlowData, isJsonValue, isObject, type JsonObject, type JsonValue } from "./json.ts";
 
 export type ModuleContextContribution =
 	| { kind: "data"; value: JsonValue }
@@ -60,12 +60,12 @@ export interface RetainedModuleDescriptor {
 export type RetainedModules = Record<string, RetainedModuleDescriptor>;
 
 export function validateRetainedModules(value: unknown): asserts value is RetainedModules {
-	if (!isObject(value) || !isJsonValue(value) || !losslessStoredJson(value)) throw new Error("Invalid State Flow retained modules");
+	if (!isObject(value) || !isJsonValue(value) || !losslessStoredJson(value)) throw new InvalidStateFlowData("Invalid State Flow retained modules");
 	for (const [id, descriptor] of Object.entries(value)) {
 		if (!/^x_[a-z][a-z0-9_]*$/.test(id) || !isObject(descriptor)
 			|| Object.keys(descriptor).sort().join(",") !== "immutable,schemaVersion"
 			|| !Number.isSafeInteger(descriptor.schemaVersion) || (descriptor.schemaVersion as number) <= 0
-			|| typeof descriptor.immutable !== "boolean") throw new Error(`Invalid State Flow retained module descriptor: ${id}`);
+			|| typeof descriptor.immutable !== "boolean") throw new InvalidStateFlowData(`Invalid State Flow retained module descriptor: ${id}`);
 	}
 }
 

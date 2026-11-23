@@ -1,3 +1,4 @@
+import { type JsonObject } from "./json.ts";
 import { type RetainedModules } from "./semantic-module.ts";
 import { type StateScope } from "./state.ts";
 import { type ScopeStream } from "./temporal.ts";
@@ -27,5 +28,10 @@ export declare class RetiredSemanticFormatError extends Error {
 export declare function refuseRetiredSemanticVersion(version: unknown): never;
 /** Build a detached target candidate; publication still belongs to the guarded storage transaction. */
 export declare function prepareSemanticMigration(value: unknown, scope: StateScope, sourceVersion: number, historyLimit?: number, targetModules?: RetainedModules): SemanticMigrationCandidate;
+/** Format and identity only, before any body decoding. This is not a source receipt. */
+export declare function parseScopeMetadataHeader(source: string, scope: StateScope, expectedCwd?: string): {
+    metadata: JsonObject;
+    version: number;
+};
 /** Decode a complete raw owner cohort before filtering; never load files, normalize authority or publish. */
 export declare function prepareSerializedScopeMigration(sources: ScopeMigrationSources, scope: StateScope, expectedCwd?: string, targetModules?: RetainedModules): SerializedSemanticMigrationCandidate;

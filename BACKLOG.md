@@ -11,6 +11,6 @@ Deterministic acceptance does not establish live model quality or installed-clie
 
 ## Scope and authorization limits
 
-- Preserve explicit unsupported-version refusal and retired-root reservations; see the [format admission policy](docs/compatibility.md#canonical-scope-format-admission). The scoped Baseline transition does not authorize a semantic-store converter, downgrade or live-store repair.
+- Preserve explicit unsupported-version refusal and retired-root reservations; see the [format admission policy](docs/compatibility.md#canonical-scope-format-admission). Neither the Baseline transition nor recovery hardening authorizes a semantic-store converter, downgrade or live-store repair.
 - New planes/scopes, changed public module semantics, dynamic loading/sandboxing, background inference, unrelated storage formats, speculative performance work and broad redesign remain outside scope.
 - Live-store conversion and all other release/rollout actions require their normal explicit authorization. Temporary evidence belongs under ignored `temp/`, not a parallel task queue.

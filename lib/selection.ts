@@ -1,4 +1,5 @@
 // Domain: immutable scope-participation values and command tokens; excludes mode, I/O, lifecycle authority and cancellation.
+import { InvalidStateFlowData } from "./json.ts";
 import type { StateScope } from "./state.ts";
 
 export type ScopeSelection = readonly [StateScope, ...StateScope[]];
@@ -10,13 +11,13 @@ export const DEFAULT_SCOPE_SELECTION: ScopeSelection = Object.freeze([...SCOPE_O
 /** Validate an explicit value and detach it in canonical overlay order, without granting owner acquisition. */
 export function captureScopeSelection(value: unknown): ScopeSelection {
 	if (!Array.isArray(value) || value.length === 0 || value.length > SCOPE_ORDER.length) {
-		throw new Error("State Flow scopes must be a nonempty unique array of global, cwd, session");
+		throw new InvalidStateFlowData("State Flow scopes must be a nonempty unique array of global, cwd, session");
 	}
 	const requested = new Set<unknown>();
 	for (let index = 0; index < value.length; index++) {
 		const scope: unknown = value[index];
 		if (!Object.hasOwn(value, index) || !SCOPE_ORDER.some((allowed) => allowed === scope) || requested.has(scope)) {
-			throw new Error("State Flow scopes must be a nonempty unique array of global, cwd, session");
+			throw new InvalidStateFlowData("State Flow scopes must be a nonempty unique array of global, cwd, session");
 		}
 		requested.add(scope);
 	}

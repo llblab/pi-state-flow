@@ -1,5 +1,6 @@
 import type { ArtifactInvalidationReason } from "./artifact.ts";
 import type { RecentTransitionWindow } from "./history.ts";
+import type { RecoveryIncident } from "./healing.ts";
 import { type Snapshot } from "./snapshot.ts";
 import { type SemanticState, type ScopeStateValues, type StateScope } from "./state.ts";
 import { type ScopeSelection } from "./selection.ts";
@@ -12,6 +13,21 @@ export interface StaleArtifactDiagnostic {
     path: string;
     reason: StaleArtifactReason;
 }
+export type OwnerAvailability = "excluded" | "not inspected" | "available" | "absent" | "unacquired" | "deferred" | "unavailable" | "reset, not accepted";
+export interface MemoryAvailability {
+    readonly owners: Readonly<Record<StateScope, OwnerAvailability>>;
+    readonly effective: "available" | "absent" | "unavailable" | "not inspected";
+    readonly inferenceBlocked: boolean;
+}
+/** Interpret admitted evidence only. This result is not an admission check or a freshness lease. */
+export declare function deriveMemoryAvailability(snapshot: Snapshot, wanted: ScopeSelection, evidence?: {
+    present?: readonly StateScope[];
+    absentShared?: readonly StateScope[];
+    privateDisposition?: "unacquired" | "deferred";
+    recovery?: readonly RecoveryIncident[];
+}): MemoryAvailability;
+/** Safe static labels shared by operator surfaces; no source paths or raw error text. */
+export declare function memoryAvailabilityLines(availability: MemoryAvailability): string[];
 export interface StatusDiagnostics {
     repositoryRoot: string;
     cwdScopeKey: string;
@@ -34,6 +50,7 @@ export interface StatusDiagnostics {
     staleArtifacts: readonly StaleArtifactDiagnostic[];
     durableStateError?: string;
     publicationError?: string;
+    availability?: MemoryAvailability;
 }
 export declare function formatScopeRevisionVector(revisions: Partial<ScopeRevisions>, selection?: ScopeSelection): string;
 export declare function compactStatus(snapshot: Snapshot, _revisions: Partial<ScopeRevisions>, colorize: Colorize): string | undefined;

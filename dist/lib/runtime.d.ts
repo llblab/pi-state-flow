@@ -35,7 +35,7 @@ export declare class TemporalRuntime {
     private memory;
     private acceptedCurrentMemory;
     private observedSessionAuthority;
-    private observedPrivateSemantics;
+    private privateAcquisitionEvidence?;
     readonly cwd: string;
     private readonly session;
     readonly root: string;
@@ -51,12 +51,14 @@ export declare class TemporalRuntime {
     private installObserved;
     private observationGuard;
     private selectedReadCache;
+    /** Last admitted lifecycle evidence for presentation only; future operations still check current files. */
+    observedPrivateAcquisition(): PrivateAcquisition | "absent" | undefined;
     /** Detached read-only selected values; never accepted run fields or a publication/acquisition basis. */
     observedSelectedView(): SelectedTemporalState | undefined;
     /** Shared owners proven absent by a completed read-only observation; no empty streams are synthesized. */
     observedAbsentSharedScopes(): StateScope[];
     /** Explicit shared inspection before acquisition; missing owners stay unavailable rather than becoming empty streams. */
-    refreshSelectedShared(selection: ScopeSelection, revalidateNativePolicy: () => void, signal?: AbortSignal): Promise<boolean>;
+    refreshSelectedShared(selection: ScopeSelection, revalidateNativePolicy: () => void, signal?: AbortSignal, requireUnacquiredPrivate?: boolean): Promise<boolean>;
     /** Header-only disposition data; never semantic observation, acceptance, or acquisition permission. */
     inspectSelectedLifecycle(selection: ScopeSelection, revalidateNativePolicy: () => void, signal?: AbortSignal): Promise<SelectedLifecycleInspection | undefined>;
     /** Native bookmarks never decide whether current canonical authority exists. */
@@ -103,7 +105,7 @@ export declare class TemporalRuntime {
     /** Stage first lifecycle/semantic authoring into one origin acceptance, never an empty publication followed by a patch. */
     withSelectedFirstPatchTransaction<T>(selection: ScopeSelection, snapshot: Snapshot, action: (transaction: SelectedRuntimePatchTransaction) => T, revalidateNativePolicy: () => void, signal?: AbortSignal, allowCreateOrigin?: boolean): Promise<T>;
     /** Same-session current acceptance/authoring; native policy checks are synchronous under exclusion. */
-    withSelectedCurrentTransaction<T>(selection: ScopeSelection, action: (current: Snapshot, publish: (snapshot?: Snapshot) => SelectedFilePublication, transaction: SelectedRuntimePatchTransaction) => T, revalidateNativePolicy: () => void, signal?: AbortSignal): Promise<T>;
+    withSelectedCurrentTransaction<T>(selection: ScopeSelection, action: (current: Snapshot, publish: (snapshot?: Snapshot) => SelectedFilePublication, transaction: SelectedRuntimePatchTransaction) => T, revalidateNativePolicy: () => void, signal?: AbortSignal, requiredPresent?: ScopeSelection): Promise<T>;
     /** Prepare may read persisted native identity outside exclusion; recheck must use in-memory native policy only. */
     withSelectedForkCopyTransaction<T>(request: SelectedForkCopyRequest, action: (publish: () => SelectedFilePublication) => T, revalidateDirectParent: (source: Readonly<SessionAddress>, phase: "prepare" | "recheck") => void, signal?: AbortSignal): Promise<T>;
     private withSelectedOriginAcceptance;
